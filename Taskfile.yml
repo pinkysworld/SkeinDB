@@ -1,0 +1,71 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Show tasks
+    cmds:
+      - task -l
+
+  fmt:
+    desc: Rust fmt
+    cmds:
+      - cargo fmt
+
+  clippy:
+    desc: Rust clippy (deny warnings)
+    cmds:
+      - cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    desc: Run Rust tests
+    cmds:
+      - cargo test --all --all-features
+
+  build:
+    desc: Build skeindb binary
+    cmds:
+      - cargo build --release
+
+  run:
+    desc: Run skeindb server (dev defaults)
+    cmds:
+      - cargo run -p skeindb -- serve --data ./data --mysql 3306 --http 8080
+
+  web:install:
+    desc: Install web console deps
+    dir: web/console
+    cmds:
+      - npm install
+
+  web:dev:
+    desc: Run web console dev server
+    dir: web/console
+    cmds:
+      - npm run dev
+
+  web:build:
+    desc: Build web console
+    dir: web/console
+    cmds:
+      - npm run build
+
+  mysql:up:
+    desc: Start local MySQL 8 container for compat tests
+    cmds:
+      - docker rm -f skein-mysql || true
+      - docker run --name skein-mysql -e MYSQL_ROOT_PASSWORD=root -p 3307:3306 -d mysql:8
+
+  mysql:down:
+    desc: Stop local MySQL container
+    cmds:
+      - docker rm -f skein-mysql || true
+
+  compat:mysql:
+    desc: Run corpus.sql against MySQL container
+    cmds:
+      - mysql -h 127.0.0.1 -P 3307 -u root -proot < tests/compat/corpus.sql
+
+  compat:skein:
+    desc: Run corpus.sql against SkeinDB
+    cmds:
+      - mysql -h 127.0.0.1 -P 3306 -u root -proot < tests/compat/corpus.sql

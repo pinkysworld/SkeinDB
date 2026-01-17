@@ -1,0 +1,464 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SkeinDB Console</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+      :root {
+        --bg-0: #f6f1e8;
+        --bg-1: #e7f2ee;
+        --bg-2: #f9e5d6;
+        --ink: #1e1e18;
+        --muted: #59554c;
+        --accent: #ff6b2c;
+        --accent-2: #1aa39d;
+        --card: #fefbf6;
+        --border: rgba(31, 31, 26, 0.12);
+        --shadow: 0 20px 50px rgba(31, 31, 26, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at 12% 10%, var(--bg-2), transparent 55%),
+          radial-gradient(circle at 90% 0%, #dfefff, transparent 40%),
+          linear-gradient(130deg, var(--bg-0), var(--bg-1));
+        min-height: 100vh;
+      }
+
+      .ambient {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image: radial-gradient(rgba(31, 31, 26, 0.06) 1px, transparent 1px);
+        background-size: 24px 24px;
+        mix-blend-mode: multiply;
+        opacity: 0.35;
+      }
+
+      .shell {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 48px 24px 96px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr;
+        gap: 24px;
+        align-items: stretch;
+      }
+
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.24em;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      h1 {
+        font-size: clamp(28px, 4vw, 44px);
+        margin: 12px 0 12px;
+        line-height: 1.1;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 20px;
+      }
+
+      p {
+        margin: 0 0 12px;
+        color: var(--muted);
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 20px 22px;
+        box-shadow: var(--shadow);
+      }
+
+      .status-lines {
+        display: grid;
+        gap: 8px;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        padding: 6px 12px;
+        background: rgba(255, 107, 44, 0.12);
+        color: var(--accent);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 18px;
+        margin-top: 24px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+
+      label {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      input[type="text"],
+      input[type="number"],
+      select {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 14px;
+        font-family: inherit;
+        background: #fffaf3;
+        color: var(--ink);
+      }
+
+      input[type="checkbox"] {
+        accent-color: var(--accent);
+        width: 16px;
+        height: 16px;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: #fffaf3;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      button,
+      .link-button {
+        border: none;
+        border-radius: 999px;
+        padding: 10px 18px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: #fffaf3;
+        box-shadow: 0 12px 30px rgba(255, 107, 44, 0.35);
+      }
+
+      .ghost {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--ink);
+      }
+
+      button:hover,
+      .link-button:hover {
+        transform: translateY(-1px);
+      }
+
+      .note {
+        font-size: 12px;
+        color: var(--accent-2);
+        font-weight: 600;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .toast {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        background: #1f1f1a;
+        color: #fefbf6;
+        padding: 12px 16px;
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        font-size: 13px;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .stagger {
+        animation: rise 0.7s ease both;
+      }
+
+      .delay-1 {
+        animation-delay: 0.08s;
+      }
+
+      .delay-2 {
+        animation-delay: 0.16s;
+      }
+
+      @media (max-width: 960px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <main class="shell">
+      <section class="hero">
+        <div class="stagger delay-1">
+          <div class="eyebrow">SkeinDB Console</div>
+          <h1>Configure the runtime, then jump into SQL Studio.</h1>
+          <p>
+            This console manages server settings. Use the separate SQL Studio to browse
+            data, run queries, and import sample datasets.
+          </p>
+          <div class="actions" style="margin-top: 12px;">
+            <a class="link-button primary" href="/studio">Open SQL Studio</a>
+            <span class="pill" id="server-status">Booting</span>
+          </div>
+        </div>
+        <div class="card stagger delay-2">
+          <strong>Runtime status</strong>
+          <div class="status-lines" id="status-lines">
+            <div>Loading status...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card stagger delay-2" style="margin-top: 26px;">
+        <h2>Server configuration</h2>
+        <form id="config-form">
+          <div class="grid">
+            <div>
+              <strong>Identity</strong>
+              <div class="field">
+                <label for="server_name">Server name</label>
+                <input type="text" id="server_name" name="server_name" />
+              </div>
+              <div class="field">
+                <label for="data_dir">Data directory</label>
+                <input type="text" id="data_dir" name="data_dir" />
+              </div>
+              <div class="field">
+                <label for="log_level">Log level</label>
+                <select id="log_level" name="log_level">
+                  <option value="trace">trace</option>
+                  <option value="debug">debug</option>
+                  <option value="info">info</option>
+                  <option value="warn">warn</option>
+                  <option value="error">error</option>
+                </select>
+              </div>
+            </div>
+            <div>
+              <strong>Networking</strong>
+              <div class="field">
+                <label for="mysql_port">MySQL port</label>
+                <input type="number" id="mysql_port" name="mysql_port" min="1" max="65535" />
+              </div>
+              <div class="field">
+                <label for="http_port">HTTP port</label>
+                <input type="number" id="http_port" name="http_port" min="1" max="65535" />
+              </div>
+              <div class="toggle">
+                <input type="checkbox" id="allow_remote_console" name="allow_remote_console" />
+                <label for="allow_remote_console">Allow remote console access</label>
+              </div>
+            </div>
+            <div>
+              <strong>Engine defaults</strong>
+              <div class="field">
+                <label for="max_connections">Max connections</label>
+                <input type="number" id="max_connections" name="max_connections" min="1" max="50000" />
+              </div>
+              <div class="toggle">
+                <input type="checkbox" id="feature_dedup" name="feature_dedup" />
+                <label for="feature_dedup">Deduplicated value store</label>
+              </div>
+              <div class="toggle">
+                <input type="checkbox" id="feature_compaction" name="feature_compaction" />
+                <label for="feature_compaction">Background compaction</label>
+              </div>
+              <div class="toggle">
+                <input type="checkbox" id="feature_value_cache" name="feature_value_cache" />
+                <label for="feature_value_cache">Value cache</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="primary" type="submit">Save config</button>
+            <button class="ghost" type="button" id="reload-btn">Reload from server</button>
+            <span class="note hidden" id="restart-note">Restart required to apply changes.</span>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <div class="toast hidden" id="toast"></div>
+
+    <script>
+      const form = document.getElementById("config-form");
+      const toast = document.getElementById("toast");
+      const statusLines = document.getElementById("status-lines");
+      const restartNote = document.getElementById("restart-note");
+      const serverStatus = document.getElementById("server-status");
+      const reloadBtn = document.getElementById("reload-btn");
+
+      function showToast(message, isError) {
+        toast.textContent = message;
+        toast.style.background = isError ? "#a13b2c" : "#1f1f1a";
+        toast.classList.remove("hidden");
+        setTimeout(() => toast.classList.add("hidden"), 2400);
+      }
+
+      function setStatusLines(status) {
+        statusLines.innerHTML = "";
+        const lines = [
+          `version: ${status.version}`,
+          `build: ${status.build_os}-${status.build_arch}`,
+          `http: ${status.http_addr}`,
+          `mysql: ${status.mysql_addr}`,
+          `config: ${status.config_path}`,
+          `uptime: ${status.uptime_secs}s`,
+        ];
+        lines.forEach((line) => {
+          const div = document.createElement("div");
+          div.textContent = line;
+          statusLines.appendChild(div);
+        });
+      }
+
+      function fillForm(config) {
+        form.server_name.value = config.server_name;
+        form.data_dir.value = config.data_dir;
+        form.mysql_port.value = config.mysql_port;
+        form.http_port.value = config.http_port;
+        form.max_connections.value = config.max_connections;
+        form.allow_remote_console.checked = config.allow_remote_console;
+        form.log_level.value = config.log_level;
+        form.feature_dedup.checked = config.features.dedup;
+        form.feature_compaction.checked = config.features.compaction;
+        form.feature_value_cache.checked = config.features.value_cache;
+      }
+
+      function readForm() {
+        return {
+          server_name: form.server_name.value.trim(),
+          data_dir: form.data_dir.value.trim(),
+          mysql_port: Number(form.mysql_port.value),
+          http_port: Number(form.http_port.value),
+          max_connections: Number(form.max_connections.value),
+          allow_remote_console: form.allow_remote_console.checked,
+          log_level: form.log_level.value,
+          features: {
+            dedup: form.feature_dedup.checked,
+            compaction: form.feature_compaction.checked,
+            value_cache: form.feature_value_cache.checked,
+          },
+        };
+      }
+
+      async function loadStatus() {
+        try {
+          const response = await fetch("/api/v1/status");
+          if (!response.ok) {
+            serverStatus.textContent = "Status unavailable";
+            return;
+          }
+          const status = await response.json();
+          serverStatus.textContent = "Online";
+          setStatusLines(status);
+        } catch (err) {
+          serverStatus.textContent = "Status unavailable";
+        }
+      }
+
+      async function loadConfig() {
+        try {
+          const response = await fetch("/api/v1/config");
+          if (!response.ok) {
+            showToast("Failed to load config", true);
+            return;
+          }
+          const data = await response.json();
+          fillForm(data.config);
+          restartNote.classList.toggle("hidden", true);
+        } catch (err) {
+          showToast("Failed to load config", true);
+        }
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = readForm();
+        const response = await fetch("/api/v1/config", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: "unknown error" }));
+          showToast(`Save failed: ${error.error}`, true);
+          return;
+        }
+        const data = await response.json();
+        restartNote.classList.toggle("hidden", !data.requires_restart);
+        showToast("Config saved", false);
+      });
+
+      reloadBtn.addEventListener("click", async () => {
+        await loadStatus();
+        await loadConfig();
+      });
+
+      window.addEventListener("load", async () => {
+        await loadStatus();
+        await loadConfig();
+      });
+    </script>
+  </body>
+</html>

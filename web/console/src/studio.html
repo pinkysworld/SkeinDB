@@ -1,0 +1,654 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SkeinDB SQL Studio</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap");
+
+      :root {
+        --bg-0: #f8f3e6;
+        --bg-1: #eef4f1;
+        --bg-2: #e5edf7;
+        --ink: #1b1e1c;
+        --muted: #5a5a50;
+        --accent: #0a8f78;
+        --accent-2: #f05f24;
+        --card: #fffdf7;
+        --border: rgba(27, 30, 28, 0.12);
+        --shadow: 0 20px 45px rgba(27, 30, 28, 0.15);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Archivo", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at 10% 15%, #fbe0c8, transparent 48%),
+          radial-gradient(circle at 80% 0%, #d7f2f0, transparent 40%),
+          linear-gradient(140deg, var(--bg-0), var(--bg-1));
+        min-height: 100vh;
+      }
+
+      .ambient {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image: radial-gradient(rgba(27, 30, 28, 0.06) 1px, transparent 1px);
+        background-size: 22px 22px;
+        mix-blend-mode: multiply;
+        opacity: 0.3;
+      }
+
+      .shell {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 44px 24px 96px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 24px;
+        align-items: stretch;
+      }
+
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.22em;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      h1 {
+        font-size: clamp(28px, 4vw, 46px);
+        margin: 12px 0 10px;
+        line-height: 1.1;
+      }
+
+      h2 {
+        margin: 0 0 10px;
+        font-size: 20px;
+      }
+
+      p {
+        margin: 0 0 12px;
+        color: var(--muted);
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 20px 22px;
+        box-shadow: var(--shadow);
+      }
+
+      .status-lines {
+        display: grid;
+        gap: 8px;
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        padding: 6px 12px;
+        background: rgba(10, 143, 120, 0.14);
+        color: var(--accent);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .manager {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        gap: 20px;
+        margin-top: 26px;
+      }
+
+      .sidebar {
+        display: grid;
+        gap: 16px;
+        align-content: start;
+      }
+
+      .table-list {
+        display: grid;
+        gap: 8px;
+        max-height: 360px;
+        overflow: auto;
+        padding-right: 4px;
+      }
+
+      .table-item {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: #fff9ef;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      .table-item:hover {
+        transform: translateY(-1px);
+      }
+
+      .table-item.active {
+        border-color: rgba(10, 143, 120, 0.5);
+        box-shadow: 0 12px 30px rgba(10, 143, 120, 0.18);
+      }
+
+      .table-name {
+        font-weight: 600;
+        font-size: 14px;
+      }
+
+      .table-count {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .workspace {
+        display: grid;
+        gap: 20px;
+      }
+
+      .editor {
+        display: grid;
+        gap: 12px;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        resize: vertical;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        padding: 14px;
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: 13px;
+        background: #fff9ef;
+        color: var(--ink);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      button,
+      .link-button {
+        border: none;
+        border-radius: 999px;
+        padding: 10px 18px;
+        font-weight: 600;
+        font-family: inherit;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: #fffdf7;
+        box-shadow: 0 12px 30px rgba(10, 143, 120, 0.35);
+      }
+
+      .ghost {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--ink);
+      }
+
+      .accent {
+        background: rgba(240, 95, 36, 0.18);
+        color: #9a3a16;
+        border: 1px solid rgba(240, 95, 36, 0.4);
+      }
+
+      button:hover,
+      .link-button:hover {
+        transform: translateY(-1px);
+      }
+
+      .results {
+        display: grid;
+        gap: 12px;
+      }
+
+      .results-meta {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .results-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        background: #fff9ef;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .results-table th,
+      .results-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        white-space: nowrap;
+      }
+
+      .results-table th {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+      }
+
+      .results-empty {
+        font-size: 13px;
+        color: var(--muted);
+        background: #fff9ef;
+        border-radius: 12px;
+        padding: 16px;
+        border: 1px dashed var(--border);
+      }
+
+      .muted {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .toast {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        background: #1b1e1c;
+        color: #fffdf7;
+        padding: 12px 16px;
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        font-size: 13px;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .stagger {
+        animation: rise 0.7s ease both;
+      }
+
+      .delay-1 {
+        animation-delay: 0.08s;
+      }
+
+      .delay-2 {
+        animation-delay: 0.16s;
+      }
+
+      @media (max-width: 960px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+
+        .manager {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <main class="shell">
+      <section class="hero">
+        <div class="stagger delay-1">
+          <div class="eyebrow">SkeinDB SQL Studio</div>
+          <h1>Run queries, browse tables, and import SQL quickly.</h1>
+          <p>
+            This tool focuses purely on data inspection and editing. It runs against the
+            in-memory console database and resets on restart.
+          </p>
+          <div class="actions" style="margin-top: 10px;">
+            <a class="link-button primary" href="/console">Open Server Console</a>
+            <span class="pill" id="server-status">Booting</span>
+          </div>
+        </div>
+        <div class="card stagger delay-2">
+          <strong>Runtime status</strong>
+          <div class="status-lines" id="status-lines">
+            <div>Loading status...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="manager">
+        <aside class="sidebar card stagger delay-2">
+          <div>
+            <h2>Tables</h2>
+            <div class="muted" id="schema-note">Loading schema...</div>
+          </div>
+          <div class="table-list" id="table-list"></div>
+          <div class="actions">
+            <button class="primary" type="button" id="load-sample-btn">Load sample data</button>
+            <button class="ghost" type="button" id="sample-sql-btn">Insert sample SQL</button>
+          </div>
+        </aside>
+
+        <section class="workspace">
+          <div class="card editor stagger delay-2">
+            <h2>SQL editor</h2>
+            <textarea id="sql-editor" placeholder="SELECT * FROM users;"></textarea>
+            <div class="actions">
+              <button class="primary" type="button" id="run-sql-btn">Run SQL</button>
+              <button class="ghost" type="button" id="clear-sql-btn">Clear</button>
+              <label class="ghost" for="sql-file" style="padding: 10px 18px; border-radius: 999px; cursor: pointer;">
+                Import SQL file
+              </label>
+              <input type="file" id="sql-file" accept=".sql,text/sql" class="hidden" />
+            </div>
+          </div>
+
+          <div class="card results stagger delay-2">
+            <h2>Results</h2>
+            <div class="results-meta" id="results-meta"></div>
+            <div id="results-message" class="muted"></div>
+            <div id="results-empty" class="results-empty">Run a query or pick a table to preview data.</div>
+            <table class="results-table hidden" id="results-table">
+              <thead id="results-head"></thead>
+              <tbody id="results-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div class="toast hidden" id="toast"></div>
+
+    <script>
+      const toast = document.getElementById("toast");
+      const statusLines = document.getElementById("status-lines");
+      const serverStatus = document.getElementById("server-status");
+      const tableList = document.getElementById("table-list");
+      const schemaNote = document.getElementById("schema-note");
+      const sqlEditor = document.getElementById("sql-editor");
+      const runSqlBtn = document.getElementById("run-sql-btn");
+      const clearSqlBtn = document.getElementById("clear-sql-btn");
+      const loadSampleBtn = document.getElementById("load-sample-btn");
+      const sampleSqlBtn = document.getElementById("sample-sql-btn");
+      const sqlFileInput = document.getElementById("sql-file");
+      const resultsMeta = document.getElementById("results-meta");
+      const resultsMessage = document.getElementById("results-message");
+      const resultsEmpty = document.getElementById("results-empty");
+      const resultsTable = document.getElementById("results-table");
+      const resultsHead = document.getElementById("results-head");
+      const resultsBody = document.getElementById("results-body");
+      let activeTable = null;
+      let currentTables = [];
+
+      function showToast(message, isError) {
+        toast.textContent = message;
+        toast.style.background = isError ? "#9a3a16" : "#1b1e1c";
+        toast.classList.remove("hidden");
+        setTimeout(() => toast.classList.add("hidden"), 2400);
+      }
+
+      function setStatusLines(status) {
+        statusLines.innerHTML = "";
+        const lines = [
+          `version: ${status.version}`,
+          `build: ${status.build_os}-${status.build_arch}`,
+          `http: ${status.http_addr}`,
+          `mysql: ${status.mysql_addr}`,
+          `config: ${status.config_path}`,
+          `uptime: ${status.uptime_secs}s`,
+        ];
+        lines.forEach((line) => {
+          const div = document.createElement("div");
+          div.textContent = line;
+          statusLines.appendChild(div);
+        });
+      }
+
+      function renderTableList(tables) {
+        tableList.innerHTML = "";
+        if (!tables.length) {
+          schemaNote.textContent = "No tables yet. Run SQL or load the sample.";
+          return;
+        }
+        schemaNote.textContent = `${tables.length} table(s)`;
+        tables.forEach((table) => {
+          const item = document.createElement("div");
+          item.className = "table-item";
+          if (activeTable === table.name) {
+            item.classList.add("active");
+          }
+          const name = document.createElement("div");
+          name.className = "table-name";
+          name.textContent = table.name;
+          const count = document.createElement("div");
+          count.className = "table-count";
+          count.textContent = `${table.row_count} rows`;
+          item.appendChild(name);
+          item.appendChild(count);
+          item.addEventListener("click", () => {
+            activeTable = table.name;
+            loadTable(table.name);
+          });
+          tableList.appendChild(item);
+        });
+      }
+
+      function renderResults(result, info) {
+        resultsMeta.innerHTML = "";
+        resultsMessage.textContent = result && result.message ? result.message : "";
+        const metaParts = [];
+        if (info) {
+          metaParts.push(info);
+        }
+        if (result) {
+          metaParts.push(`affected: ${result.affected_rows}`);
+          metaParts.push(`columns: ${result.columns.length}`);
+          metaParts.push(`rows: ${result.rows.length}`);
+        }
+        metaParts.forEach((part) => {
+          const span = document.createElement("span");
+          span.textContent = part;
+          resultsMeta.appendChild(span);
+        });
+
+        if (!result || !result.rows.length) {
+          resultsTable.classList.add("hidden");
+          resultsEmpty.classList.remove("hidden");
+          resultsHead.innerHTML = "";
+          resultsBody.innerHTML = "";
+          return;
+        }
+
+        resultsEmpty.classList.add("hidden");
+        resultsTable.classList.remove("hidden");
+        resultsHead.innerHTML = "";
+        resultsBody.innerHTML = "";
+
+        const headerRow = document.createElement("tr");
+        result.columns.forEach((col) => {
+          const th = document.createElement("th");
+          th.textContent = col.name;
+          headerRow.appendChild(th);
+        });
+        resultsHead.appendChild(headerRow);
+
+        result.rows.forEach((row) => {
+          const tr = document.createElement("tr");
+          row.forEach((cell) => {
+            const td = document.createElement("td");
+            td.textContent = cell === null ? "null" : String(cell);
+            tr.appendChild(td);
+          });
+          resultsBody.appendChild(tr);
+        });
+      }
+
+      async function loadStatus() {
+        try {
+          const response = await fetch("/api/v1/status");
+          if (!response.ok) {
+            serverStatus.textContent = "Status unavailable";
+            return;
+          }
+          const status = await response.json();
+          serverStatus.textContent = "Online";
+          setStatusLines(status);
+        } catch (err) {
+          serverStatus.textContent = "Status unavailable";
+        }
+      }
+
+      async function loadSchema() {
+        try {
+          const response = await fetch("/api/v1/schema");
+          if (!response.ok) {
+            schemaNote.textContent = "Schema unavailable";
+            return;
+          }
+          const data = await response.json();
+          currentTables = data.tables || [];
+          if (activeTable && !currentTables.find((table) => table.name === activeTable)) {
+            activeTable = null;
+          }
+          renderTableList(currentTables);
+        } catch (err) {
+          schemaNote.textContent = "Schema unavailable";
+        }
+      }
+
+      async function loadTable(name) {
+        try {
+          const response = await fetch(`/api/v1/table/${encodeURIComponent(name)}?limit=100`);
+          if (!response.ok) {
+            showToast("Failed to load table data", true);
+            return;
+          }
+          const data = await response.json();
+          renderResults(data, `table: ${name}`);
+          renderTableList(currentTables);
+        } catch (err) {
+          showToast("Failed to load table data", true);
+        }
+      }
+
+      async function runSql(sql) {
+        if (!sql.trim()) {
+          showToast("SQL is empty", true);
+          return;
+        }
+        const response = await fetch("/api/v1/sql/exec", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sql }),
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: "unknown error" }));
+          showToast(`SQL failed: ${error.error}`, true);
+          return;
+        }
+        const data = await response.json();
+        const result = data.results && data.results.length ? data.results[data.results.length - 1] : null;
+        const info = data.results && data.results.length > 1 ? `statements: ${data.results.length}` : null;
+        renderResults(result, info);
+        await loadSchema();
+      }
+
+      async function loadSample() {
+        const response = await fetch("/api/v1/sample/load", { method: "POST" });
+        if (!response.ok) {
+          showToast("Sample load failed", true);
+          return;
+        }
+        const data = await response.json();
+        const result = data.results && data.results.length ? data.results[data.results.length - 1] : null;
+        renderResults(result, `statements: ${data.results.length}`);
+        showToast("Sample data loaded", false);
+        await loadSchema();
+      }
+
+      async function insertSampleSql() {
+        try {
+          const response = await fetch("/api/v1/sample/sql");
+          if (!response.ok) {
+            showToast("Sample SQL unavailable", true);
+            return;
+          }
+          const text = await response.text();
+          sqlEditor.value = text.trim();
+        } catch (err) {
+          showToast("Sample SQL unavailable", true);
+        }
+      }
+
+      runSqlBtn.addEventListener("click", async () => {
+        await runSql(sqlEditor.value);
+      });
+
+      clearSqlBtn.addEventListener("click", () => {
+        sqlEditor.value = "";
+      });
+
+      loadSampleBtn.addEventListener("click", async () => {
+        await loadSample();
+      });
+
+      sampleSqlBtn.addEventListener("click", async () => {
+        await insertSampleSql();
+      });
+
+      sqlFileInput.addEventListener("change", () => {
+        const file = sqlFileInput.files[0];
+        if (!file) {
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          sqlEditor.value = String(reader.result || "").trim();
+        };
+        reader.readAsText(file);
+        sqlFileInput.value = "";
+      });
+
+      window.addEventListener("load", async () => {
+        await loadStatus();
+        await loadSchema();
+      });
+    </script>
+  </body>
+</html>

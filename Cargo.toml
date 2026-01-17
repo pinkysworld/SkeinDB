@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/skeindb-ir",
+  "crates/skeindb-core",
+  "crates/skeindb",
+]
