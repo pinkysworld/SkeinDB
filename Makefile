@@ -1,5 +1,7 @@
 .PHONY: help fmt clippy test build run web-install web-dev web-build mysql-up mysql-down compat-mysql compat-skein
 
+.PHONY: skeinadmin-serve
+
 help:
 	@echo "Targets:"
 	@echo "  fmt            - cargo fmt"
@@ -14,6 +16,7 @@ help:
 	@echo "  mysql-down     - stop MySQL container"
 	@echo "  compat-mysql   - run tests/compat/corpus.sql on MySQL container"
 	@echo "  compat-skein   - run tests/compat/corpus.sql on SkeinDB"
+	@echo "  skeinadmin-serve - serve SkeinAdmin placeholder on port 5175"
 
 fmt:
 	cargo fmt
@@ -51,3 +54,6 @@ compat-mysql:
 
 compat-skein:
 	mysql -h 127.0.0.1 -P 3306 -u root -proot < tests/compat/corpus.sql
+
+skeinadmin-serve:
+	cd web/skeinadmin && python3 -m http.server 5175

@@ -49,6 +49,15 @@ tasks:
     cmds:
       - npm run build
 
+  # -------------------------
+  # SkeinAdmin (standalone console)
+  # -------------------------
+  skeinadmin:serve:
+    desc: Serve SkeinAdmin placeholder (static)
+    dir: web/skeinadmin
+    cmds:
+      - python3 -m http.server 5175
+
   mysql:up:
     desc: Start local MySQL 8 container for compat tests
     cmds:

@@ -1,23 +1,30 @@
 [package]
 name = "skeindb"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["json"] }
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlparser = "0.43"
-thiserror = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# HTTP server + SkeinQL RPC
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+sysinfo = "0.30"
+quinn = "0.10"
+rustls = "0.21"
+rustls-pemfile = "1"
+
 skeindb-core = { path = "../skeindb-core" }
 skeindb-ir = { path = "../skeindb-ir" }
+skeindb-skeinql = { path = "../skeindb-skeinql" }
 
 [dev-dependencies]
 http-body-util = "0.1"
-tempfile = "3"
-tower = { version = "0.5", features = ["util"] }
+rcgen = "0.11"

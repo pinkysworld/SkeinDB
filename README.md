@@ -1,85 +1,100 @@
-# SkeinDB (scaffold)
+# SkeinDB
 
-SkeinDB is a **single-executable**, portable database engine concept.
+Last updated: 2026-01-31
 
-Key goals:
-- **MySQL wire-protocol compatibility** (drop-in for existing apps)
-- A **custom storage engine** (cell-interned MVCC + optional dedup)
-- Built-in **web management console** (phpMyAdmin-like)
+SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
-This repository is a **starter scaffold**:
-- Includes the on-disk format + IR + compatibility docs
-- Includes a compatibility SQL corpus (`tests/compat/corpus.sql`)
-- Includes Rust workspace skeleton crates
-- Includes a web console placeholder
+1) **Adoption:** drop-in **MySQL compatibility** so existing applications can connect with minimal change.
+2) **Research extensibility:** a clean, web-native control plane (**SkeinQL**) and a set of novel primitives (ETag-driven cache coherency, query-scoped patches, delta-chained MVCC, hash-chained WAL, sandboxed Wasm extensions) intended to make systems research easier to prototype and evaluate.
 
-It is intentionally minimal so you can iterate quickly (manually or using Codex).
+The repository is written so you can:
+- run SkeinDB as a portable binary (HTTP + admin console)
+- use MySQL tools as soon as the compatibility layer is implemented/expanded
+- extend the engine via well-scoped crates and specs
 
-## Quick start (local)
+> Implementation note
+> The current execution engine is a small in-memory/JSON-backed prototype meant to make the APIs usable today.
+> The paper-aligned ValueID/MVCC/LSM engine is represented as specs + backlog tasks and can be incrementally implemented.
+
+---
+
+## Highlights
+
+- **Single-binary deployment:** copy one executable; pick ports; run.
+- **MySQL adoption layer:** MySQL protocol surface + migration/telemetry tooling.
+- **SkeinQL (native API):** JSON-RPC control plane for modern apps.
+- **Web-native consistency:** ETags + If-None-Match as first-class query validators.
+- **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
+- **MVCC extensions:** delta-chained value versions.
+- **Security extensions:** hash-chained WAL for tamper evidence.
+- **Sandboxed compute:** Wasm UDFs with capability-based access.
+- **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
+- **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
+
+---
+
+## Quick start
 
 ### Build
-```bash
-cargo build
-```
 
-### Release build (standalone executable)
 ```bash
 cargo build --release
 ```
 
-Run the release binary:
+### Run
+
 ```bash
-./target/release/skeindb serve --data ./data --mysql 3306 --http 8080 --config ./skeindb-config.json
+./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
 ```
 
-Windows:
-```bat
-target\\release\\skeindb.exe serve --data .\\data --mysql 3306 --http 8080 --config .\\skeindb-config.json
-```
+Open:
+- SkeinAdmin: `http://127.0.0.1:8080/admin`
+- SkeinQL JSON-RPC: `http://127.0.0.1:8080/api/v1/rpc`
 
-### Run (HTTP console + MySQL placeholder)
-```bash
-cargo run -p skeindb -- serve --data ./data --mysql 3306 --http 8080 --config ./skeindb-config.json
-```
+See `docs/GETTING_STARTED.md` for a fuller walkthrough.
 
-Then open the server console at:
-```
-http://127.0.0.1:8080/console
-```
-
-SQL Studio runs separately at:
-```
-http://127.0.0.1:8080/studio
-```
-
-Optional: load the bundled sample SQL into the console database on startup:
-```bash
-cargo run -p skeindb -- serve --load-sample
-```
-
-Note: the MySQL listener currently accepts connections but does not implement the wire protocol yet. The console database is in-memory and resets on restart.
-
-### End-user run (after download)
-macOS/Linux:
-```bash
-./skeindb serve --data ./data --mysql 3306 --http 8080 --config ./skeindb-config.json
-```
-
-Windows:
-```bat
-skeindb.exe serve --data .\\data --mysql 3306 --http 8080 --config .\\skeindb-config.json
-```
-
-### Compatibility corpus (once MySQL protocol is implemented)
-```bash
-mysql -h 127.0.0.1 -P 3306 -u root -proot < tests/compat/corpus.sql
-```
+---
 
 ## Docs
-- `docs/SKEINIR.md` — canonical IR definition
-- `docs/ON_DISK_FORMAT.md` — storage formats (WAL/segments/.run)
-- `docs/COMPATIBILITY.md` — MySQL compatibility profile + testing policy
-- `docs/PROJECT_BACKLOG.md` — Codex-friendly phased build plan
+
+Start here:
+- `docs/README.md` (documentation index)
+
+Frequently used:
+- `docs/SKEINQL.md`
+- `docs/QUERY_PATCH.md`
+- `docs/ETAG_VALIDATORS.md`
+- `docs/TRAFFIC_REDUCTION.md`
+- `docs/MYSQL_COMPAT.md`
+
+---
+
+## Repo layout
+
+```text
+crates/
+  skeindb/          # server + prototype execution engine
+  skeindb-core/     # stable primitives (ValueIDs, hashes, canonicalization)
+  skeindb-skeinql/  # SkeinQL types + JSON-RPC method schemas
+web/
+  admin/            # embedded management UI (static)
+openapi/
+  skeinql.yaml      # minimal API sketch
+docs/               # specs, research notes, and operator docs
+```
+
+---
+
+## Status
+
+This repo contains both:
+- working prototype code (HTTP, SkeinQL, admin console)
+- research-grade specifications and an implementation backlog
+
+For what is implemented vs planned, see the docs and the backlog:
+- `docs/PROJECT_BACKLOG.md`
+
+---
 
 ## License
 

@@ -1,7 +1,7 @@
-# SkeinDB On-Disk Format v0.1
+# SkeinDB On-Disk Format v0.2 (v0.1 compatible)
 
-Status: Draft v0.1 (implementable)
-Last updated: 2026-01-17
+Status: Draft v0.2 (v0.1 compatible)
+Last updated: 2026-01-19
 
 This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.
@@ -20,6 +20,18 @@ Design goals:
 data/
   MANIFEST.log
   MANIFEST.snapshot            (optional)
+  snapshots.json              (prototype snapshot metadata, format v1)
+  dp_budgets.json             (prototype DP budgets, format v1)
+  dp_audit.json               (prototype DP audit log, format v1)
+  oblivious_policies.json     (prototype oblivious policy store, format v1)
+  forensic_chain.json         (prototype forensic hash chain, format v1)
+  merge_policies.json         (prototype merge policies, format v1)
+  merge_wasm_registry.json    (prototype merge wasm registry, format v1)
+  views.json                  (prototype materialized views, format v1)
+  schema_versions.json        (prototype schema versions, format v1)
+  schema_changes.json         (prototype schema change log, format v1)
+  advisor_patterns.json       (prototype index advisor patterns, format v1)
+  advisor_history.json        (prototype index advisor history, format v1)
   wal/
     wal-000001.log
   rows/
@@ -123,7 +135,7 @@ VE1 record payload:
 VE1
   rec_type     u8  = 0x20
   rec_ver      u8  = 1
-  val_kind     u8  (1=CELL, 2=GROUP, 3=BLOB_CHUNK, 4=BLOB_MANIFEST)
+  val_kind     u8  (1=CELL, 2=GROUP, 3=BLOB_CHUNK, 4=BLOB_MANIFEST, 5=DELTA, 6=EMBEDDING)
   codec        u8  (0=RAW, 1=ZSTD)
   value_id[16]
   raw_len      VarU
@@ -186,3 +198,130 @@ Commit rule:
 - Compute safe_ts = oldest_active_snapshot_ts.
 - Row compaction discards versions with end_ts < safe_ts.
 - Value GC is mark-and-sweep driven by live row versions.
+
+---
+
+## 11) Prototype metadata JSON (format v1)
+
+These JSON files are optional and may be ignored by older binaries.
+Each file includes a `format_version` field; unknown versions should be ignored.
+
+### 11.1 merge_wasm_registry.json
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "modules": [
+    {
+      "module_id": "merge_sum",
+      "value_id": "deadbeef...",
+      "size_bytes": 1234,
+      "capabilities": {
+        "values_only": true,
+        "deterministic": true,
+        "max_fuel": 1000,
+        "max_memory_bytes": 65536,
+        "max_output_bytes": 4096
+      },
+      "name": "sum merge",
+      "wasm_b64": "AA==",
+      "created_at_ms": 1730000000000
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Added in v0.2 as an optional metadata file.
+- If the file is missing or has an unknown `format_version`, it is ignored.
+
+---
+
+# Appendix A) v0.2 extensions
+
+This appendix specifies optional extensions that can be implemented without invalidating v0.1 data.
+The FileHeader format_ver remains 1; extensions use new record types and/or higher rec_ver values.
+
+## A.1 Delta ValueEntries
+
+Value segments (.vseg) add a new value kind:
+- val_kind = 5 (DELTA)
+
+DELTA entries store a patch against a base ValueID. See docs/DELTA_VALUES.md.
+
+Suggested DELTA payload (VE1-compatible by treating raw_bytes as a DELTA1 container):
+
+DELTA1 (stored inside VE1 raw_bytes):
+- base_vid[16]
+- delta_codec u8
+- full_len VarU
+- patch_bytes Bytes
+
+Readers that do not understand DELTA should treat it as unsupported.
+
+## A.2 Hash-chained WAL records
+
+WALHeader v1 (rec_ver=1) has:
+- rec_type u8
+- rec_ver u8
+- flags u16
+- lsn u64
+- txn_id u64
+
+WALHeader v2 (rec_ver=2) extends v1 by appending:
+- prev_hash[32]
+- rec_hash[32]
+
+Hash rules are defined in docs/AUDIT_WAL.md.
+
+This approach does not require changing the WAL FileHeader.
+
+## A.3 Column snapshots
+
+Add a new directory:
+
+  snapshots/
+
+Snapshot files are independent from WAL/rows/vals and can be deleted/rebuilt.
+
+Suggested snapshot file kind:
+- file_kind = 6 (snapshot)
+
+Prototype metadata (scaffold):
+- `snapshots.json` stores column snapshot metadata + row values.
+- JSON includes `format_version` (current: 1) and a per-snapshot `table_version`.
+- On startup, snapshots are loaded only when `table_version` matches the catalog.
+
+Within snapshots/, column segments may use their own header format.
+See docs/COLUMN_SNAPSHOTS.md for cseg v0.1.
+
+## A.4 Index advisor telemetry (prototype)
+
+- `advisor_patterns.json` stores aggregated query dependency patterns (format v1).
+- `advisor_history.json` stores apply/dismiss actions (format v1).
+
+Files are optional and written only when `SKEINDB_ADVISOR_PERSIST=1`.
+
+## A.5 Embedding ValueEntries
+
+Value segments (.vseg) add a new value kind:
+- val_kind = 6 (EMBEDDING)
+
+Embedding entries store vector values plus an optional model identifier.
+
+ValueID semantics (embedding-only):
+- ValueID[0..8] = LSH bucket (u64 LE)
+- ValueID[8..16] = first 8 bytes of BLAKE3-128 over EMB1 bytes
+
+Suggested EMB1 payload (VE1 raw_bytes):
+
+EMB1:
+- magic[4] = "EMB1"
+- dims u32 (LE)
+- model_len VarU
+- model_bytes Bytes (UTF-8, length = model_len; may be 0)
+- values f32[dims] (LE)
+
+Readers that do not understand EMBEDDING should treat it as unsupported.

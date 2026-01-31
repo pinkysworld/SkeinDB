@@ -266,6 +266,15 @@ struct Query {
 ## 7. Plan IR (v1)
 
 See docs for the full PlanGraph shape.
+### 7.1 AccessPath
+
+Scan nodes may specify an access_path hint. v1 supports:
+- SeqScan
+- PkLookup
+- IndexRange { index_id }
+- IndexFull { index_id }
+- ColumnSnapshot { snapshot_id }  (optional, for hybrid row+column snapshots)
+
 
 ---
 

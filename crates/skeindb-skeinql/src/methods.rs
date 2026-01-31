@@ -1,0 +1,1714 @@
+//! SkeinQL v1.0 method parameter/result types.
+//!
+//! Note: SkeinDB is designed to implement SkeinQL as a stable API contract.
+//! Implementations may not support every method initially; unsupported methods
+//! should return `not_supported`.
+
+use serde::{Deserialize, Serialize};
+
+use crate::types::{
+    BaseTableRef, CausalityToken, Expr, Lit, Query, QueryCache, ResultFormat, TypeDesc, WireHints,
+};
+
+// --------------------------------
+// system.*
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemPingResult {
+    pub pong: bool,
+    pub time_unix_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemVersionResult {
+    pub name: String,
+    pub version: String,
+    pub skeinql: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCapabilitiesResult {
+    pub mysql_compat: bool,
+    pub skeinql: bool,
+
+    #[serde(default)]
+    pub etag_queries: bool,
+    #[serde(default)]
+    pub causal_etags: bool,
+    #[serde(default)]
+    pub wasm_udf: bool,
+    #[serde(default)]
+    pub wasm_operators: bool,
+    #[serde(default)]
+    pub column_snapshots: bool,
+    #[serde(default)]
+    pub audit_wal: bool,
+    #[serde(default)]
+    pub cluster: bool,
+
+    /// Optional: list of methods supported in this build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<String>>,
+
+    /// Optional hashing configuration (canonicalization + algorithm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<serde_json::Value>,
+}
+
+// --------------------------------
+// settings.*
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsGetParams {
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsSetParams {
+    /// Arbitrary settings object; keys are setting names.
+    #[serde(flatten)]
+    pub values: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsSetResult {
+    pub ok: bool,
+}
+
+// --------------------------------
+// schema.* (selected)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaListDatabasesResult {
+    pub databases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaListTablesParams {
+    pub db: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaListTablesResult {
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaDescribeTableParams {
+    pub db: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaColumnInfo {
+    pub name: String,
+    pub r#type: TypeDesc,
+    pub nullable: bool,
+    #[serde(default)]
+    pub auto_increment: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaDescribeTableResult {
+    pub db: String,
+    pub table: String,
+    pub columns: Vec<SchemaColumnInfo>,
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+    #[serde(default)]
+    pub indexes: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_mysql: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaCreateDatabaseParams {
+    pub db: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaCreateTableParams {
+    pub db: String,
+    pub table: String,
+    pub columns: Vec<SchemaColumnInfo>,
+
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+
+    #[serde(default)]
+    pub if_not_exists: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_mysql: Option<serde_json::Value>,
+}
+
+// --------------------------------
+// schema.* (experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SchemaChangeOp {
+    AddColumn {
+        name: String,
+        r#type: TypeDesc,
+        nullable: bool,
+        #[serde(default)]
+        auto_increment: bool,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Lit>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaProposeChangeParams {
+    pub table: BaseTableRef,
+    pub base_version: u64,
+    pub changes: Vec<SchemaChangeOp>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaProposeChangeResult {
+    pub change_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaChangeSummary {
+    pub change_id: String,
+    pub base_version: u64,
+    pub changes: Vec<SchemaChangeOp>,
+    pub status: String,
+    pub created_at_ms: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaChangeConflict {
+    pub change_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaMergeStatusParams {
+    pub table: BaseTableRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaMergeStatusResult {
+    pub table: BaseTableRef,
+    pub current_version: u64,
+    pub pending: Vec<SchemaChangeSummary>,
+    pub conflicts: Vec<SchemaChangeConflict>,
+    pub merge_plan: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaApplyMergeParams {
+    pub table: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaApplyMergeResult {
+    pub applied: Vec<String>,
+    pub conflicts: Vec<SchemaChangeConflict>,
+    pub new_version: u64,
+}
+
+// --------------------------------
+// tx.*
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxBeginParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxBeginResult {
+    pub tx: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxCommitParams {
+    pub tx: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxRollbackParams {
+    pub tx: String,
+}
+
+// --------------------------------
+// data.*
+// --------------------------------
+
+/// Row object mapping column name to typed literal.
+pub type RowObject = std::collections::BTreeMap<String, Lit>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataGetParams {
+    pub table: BaseTableRef,
+    pub pk: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataInsertParams {
+    pub into: BaseTableRef,
+    pub rows: Vec<RowObject>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returning: Option<Vec<String>>,
+
+    /// Engine-specific hints (dedup, delta policies, chunking, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hints: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataUpdateParams {
+    pub table: BaseTableRef,
+    pub r#where: Expr,
+    pub set: RowObject,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    /// Optional ETag for optimistic concurrency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_match: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataDeleteParams {
+    pub table: BaseTableRef,
+    pub r#where: Expr,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataUpsertParams {
+    pub into: BaseTableRef,
+    pub rows: Vec<RowObject>,
+
+    /// Conflict target (e.g., ["id"]). If omitted, defaults to primary key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_conflict: Option<Vec<String>>,
+
+    /// Column assignments to apply on conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_set: Option<RowObject>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returning: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hints: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteResult {
+    pub affected: u64,
+    #[serde(default)]
+    pub last_insert_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returning: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+}
+
+// --------------------------------
+// query.*
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecParams {
+    pub query: Query,
+
+    /// Positional parameter bindings for `expr.param`.
+    ///
+    /// Example: param 0 reads args[0].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<QueryCache>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<WireHints>,
+
+    /// Optional transaction id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+
+    /// Optional time-travel read timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<Lit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default)]
+    pub not_modified: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causality: Option<CausalityToken>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<serde_json::Value>,
+}
+
+// --------------------------------
+// query.patch client-state summaries
+// --------------------------------
+
+/// Client-provided summary of a row in the *current client view* of a query result.
+///
+/// This is used as a fallback when the server cannot find the `base_etag` snapshot
+/// in its cache (e.g., restart/eviction) but still wants to compute an exact patch
+/// without forcing a full refetch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRowState {
+    /// Primary key values.
+    pub pk: Vec<Lit>,
+
+    /// Optional row fingerprint (hex) computed over the projected row.
+    ///
+    /// If provided, the server can detect which rows changed and send only
+    /// the updated rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fp: Option<String>,
+}
+
+/// Optional client summary for patch fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientStateSummary {
+    /// Exact list of rows in the client's current view (window) of the query result.
+    ///
+    /// Recommended for correctness: includes `pk` and (optionally) `fp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<ClientRowState>>,
+
+    /// Optional Bloom filter summary of client-known row keys.
+    ///
+    /// This is an **optimization-only** hint intended for very large result windows.
+    /// Implementations may treat this as best-effort and return a partial patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys_bloom: Option<serde_json::Value>,
+
+    /// Patch strictness mode.
+    ///
+    /// - "strict" (default): requires exact base (etag cache or client rows+fp)
+    /// - "add_only": server may return only additions (and mark removals/updates unknown)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+/// Compute a delta patch between a previously seen query result (identified by `base_etag`)
+/// and the current query result.
+///
+/// The response envelope is the same as `query.select` (`QueryExecResult`).
+/// The patch payload is returned in `data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryPatchParams {
+    pub query: Query,
+
+    /// Positional parameter bindings for `expr.param`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    /// The ETag of the query result the client currently has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_etag: Option<String>,
+
+    /// Optional client-provided summary of its current view.
+    ///
+    /// This enables exact patches even if the server lost the cached base snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_state: Option<ClientStateSummary>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<WireHints>,
+
+    /// If true (default), the server may include a full result under `data.full`
+    /// when it cannot compute a patch and needs the client to reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_full: Option<bool>,
+
+    /// Optional transaction id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<String>,
+
+    /// Optional time-travel read timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<Lit>,
+}
+
+/// Result type for `query.patch`.
+///
+/// The patch is returned inside `QueryExecResult.data`.
+pub type QueryPatchResult = QueryExecResult;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryPrepareParams {
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryPrepareResult {
+    pub query_id: String,
+    pub canonical: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExecutePreparedParams {
+    pub query_id: String,
+
+    /// Positional parameter bindings for `expr.param`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    /// Optional ETag validator (If-None-Match semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_none_match: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_causality: Option<CausalityToken>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<WireHints>,
+}
+
+/// Result type for `query.execute_prepared`.
+pub type QueryExecutePreparedResult = QueryExecResult;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryExplainParams {
+    pub query: Query,
+}
+
+// --------------------------------
+// vector.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorInsertRow {
+    pub pk: Vec<Lit>,
+    pub embedding: Lit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorInsertParams {
+    pub table: BaseTableRef,
+    pub column: String,
+    pub rows: Vec<VectorInsertRow>,
+
+    #[serde(default)]
+    pub upsert: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorInsertResult {
+    pub inserted: u64,
+    pub updated: u64,
+    pub embedding_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorSearchParams {
+    pub table: BaseTableRef,
+    pub column: String,
+    pub query: Lit,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Expr>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_row: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_lsh: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorSearchMatch {
+    pub pk: Vec<Lit>,
+    pub score: f64,
+    pub embedding_id: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<RowObject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorSearchResult {
+    pub matches: Vec<VectorSearchMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIndexStatusParams {
+    pub table: BaseTableRef,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIndexStatusResult {
+    pub table: BaseTableRef,
+    pub column: String,
+    pub vectors: u64,
+    pub buckets: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_bucket: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bucket: Option<u64>,
+}
+
+// --------------------------------
+// ai.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamLiteral {
+    pub value: Lit,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamRules {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_constant_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameterize_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifyParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+
+    pub literals: Vec<AiAutoparamLiteral>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<AiAutoparamRules>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamLabel {
+    pub idx: u64,
+    pub decision: String,
+    pub confidence: f64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifyResult {
+    pub labels: Vec<AiAutoparamLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamAnalyzeParams {
+    pub sql: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<AiAutoparamRules>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamAnalyzeResult {
+    pub normalized_sql: String,
+    pub fingerprint: String,
+    pub literals: Vec<AiAutoparamLiteral>,
+    pub labels: Vec<AiAutoparamLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlTranslateParams {
+    pub db: String,
+    pub request: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_schema: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlPromptTable {
+    pub table: String,
+    pub columns: Vec<SchemaColumnInfo>,
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlPromptPackage {
+    pub version: String,
+    pub db: String,
+    pub request: String,
+    pub read_only: bool,
+    pub tables: Vec<AiNlPromptTable>,
+    pub prompt: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlTranslateResult {
+    pub package: AiNlPromptPackage,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<Query>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlExplainParams {
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<Lit>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_format: Option<ResultFormat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlExplainResult {
+    pub summary: String,
+    pub tables: Vec<String>,
+    pub projection: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    pub deps: serde_json::Value,
+
+    pub approval_token: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_format: Option<ResultFormat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlExecuteParams {
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<Lit>>,
+
+    pub approval_token: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub want_etag: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_none_match: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_causality: Option<CausalityToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiNlExecuteResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default)]
+    pub not_modified: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causality: Option<CausalityToken>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<serde_json::Value>,
+}
+
+// --------------------------------
+// dp.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpBounds {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpAggregateSpec {
+    pub op: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<DpBounds>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#as: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpAggregateParams {
+    pub table: BaseTableRef,
+    pub aggregates: Vec<DpAggregateSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<Expr>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+
+    pub epsilon: f64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpAggregateResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpBudgetSetParams {
+    pub principal: String,
+    pub total_epsilon: f64,
+    pub total_delta: f64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_window_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpBudgetGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpBudgetGetResult {
+    pub budgets: Vec<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpAuditLogParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_id: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpAuditLogResult {
+    pub events: Vec<serde_json::Value>,
+    pub next_id: u64,
+}
+
+// --------------------------------
+// advisor.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexSynthesizeParams {
+    pub table: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_queries: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_rows: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexSuggestion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    pub score: f64,
+    pub count: u64,
+    pub rows_scanned: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexSynthesizeResult {
+    pub table: BaseTableRef,
+    pub suggestions: Vec<AdvisorIndexSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexApplyParams {
+    pub table: BaseTableRef,
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexApplyResult {
+    pub accepted: bool,
+    pub action_id: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexDismissParams {
+    pub table: BaseTableRef,
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexDismissResult {
+    pub dismissed: bool,
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorHistoryParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorHistoryEntry {
+    pub id: String,
+    pub suggestion_id: String,
+    pub table: BaseTableRef,
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    pub action: String,
+    pub created_at_ms: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorHistoryResult {
+    pub entries: Vec<AdvisorHistoryEntry>,
+}
+
+// --------------------------------
+// migration.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationIntentSample {
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationIntentReportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<MigrationIntentSample>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationIntentEvidence {
+    pub query_index: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationIntentSuggestion {
+    pub intent: String,
+    pub confidence: f64,
+    pub title: String,
+    pub recommendation: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skeinql_snippet: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<MigrationIntentEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationIntentReportResult {
+    pub suggestions: Vec<MigrationIntentSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRewritePreviewParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<MigrationIntentSample>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRewritePreview {
+    pub intent: String,
+    pub confidence: f64,
+    pub title: String,
+    pub before: String,
+    pub after: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<MigrationIntentEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationRewritePreviewResult {
+    pub rewrites: Vec<MigrationRewritePreview>,
+}
+
+// --------------------------------
+// oblivious.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousPolicy {
+    pub level: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad_to_multiple: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_rows: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dummy_value_lookups: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shuffle: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousPolicySetParams {
+    pub table: BaseTableRef,
+    pub policy: ObliviousPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousPolicyGetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousPolicyGetResult {
+    pub policies: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousExplainParams {
+    pub table: BaseTableRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousExplainResult {
+    pub plan: serde_json::Value,
+}
+
+// --------------------------------
+// forensic.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicQueryParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_id: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_id: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicQueryResult {
+    pub records: Vec<serde_json::Value>,
+    pub proof: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicVerifyParams {
+    pub records: Vec<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicVerifyResult {
+    pub ok: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bad_index: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicExportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_id: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_id: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicExportResult {
+    pub bundle: serde_json::Value,
+}
+
+// --------------------------------
+// edge.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleRedaction {
+    /// Redaction mode: "none", "hash_pk", "drop_pk".
+    pub mode: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleWindow {
+    pub table: BaseTableRef,
+
+    /// Exclusive lower bound (only records with seq > from_seq are included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_seq: Option<u64>,
+
+    /// Inclusive upper bound (defaults to latest known seq for the table).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_seq: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_events: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleRecord {
+    pub seq: u64,
+    pub db: String,
+    pub table: String,
+    pub op: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<Vec<Lit>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleCoverage {
+    pub table: BaseTableRef,
+    pub start_seq: u64,
+    pub end_seq: u64,
+    pub updated_at_ms: u64,
+    pub bundle_id: String,
+    pub redaction_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundle {
+    pub bundle_id: String,
+    pub generated_at_ms: u64,
+    pub redaction: EdgeBundleRedaction,
+    pub coverage: Vec<EdgeBundleCoverage>,
+    pub records: Vec<EdgeBundleRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleRequestParams {
+    pub windows: Vec<EdgeBundleWindow>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<EdgeBundleRedaction>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleRequestResult {
+    pub bundle: EdgeBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleApplyParams {
+    pub bundle: EdgeBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleApplyResult {
+    pub applied: bool,
+    pub coverage: Vec<EdgeBundleCoverage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleRoute {
+    pub eligible: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    pub max_lag: u64,
+    pub observed_lag: u64,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleStatusParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<Query>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lag: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeBundleStatusResult {
+    pub coverage: Vec<EdgeBundleCoverage>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<EdgeBundleRoute>,
+}
+
+// --------------------------------
+// merge.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeFunctionRef {
+    pub kind: String,
+    pub name: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePolicySpec {
+    pub default: MergeFunctionRef,
+
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub per_column: std::collections::HashMap<String, MergeFunctionRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeRegisterParams {
+    pub table: BaseTableRef,
+    pub policy: MergePolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeRegisterResult {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeApplyParams {
+    pub table: BaseTableRef,
+    pub pk: Vec<Lit>,
+    pub incoming: RowObject,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_etag: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_causality: Option<CausalityToken>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<MergePolicySpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeApplyResult {
+    pub applied: bool,
+    pub conflict: bool,
+    pub merged: RowObject,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeSimulateParams {
+    pub current: RowObject,
+    pub incoming: RowObject,
+    pub policy: MergePolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeSimulateResult {
+    pub merged: RowObject,
+}
+
+// --------------------------------
+// merge.wasm.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmCapabilities {
+    pub values_only: bool,
+
+    #[serde(default)]
+    pub deterministic: bool,
+
+    #[serde(default)]
+    pub max_fuel: u64,
+
+    #[serde(default)]
+    pub max_memory_bytes: u64,
+
+    #[serde(default)]
+    pub max_output_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmRegisterParams {
+    pub module_id: String,
+    pub wasm_b64: String,
+    pub capabilities: MergeWasmCapabilities,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmRegisterResult {
+    pub ok: bool,
+    pub value_id: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmModuleInfo {
+    pub module_id: String,
+    pub value_id: String,
+    pub size_bytes: u64,
+    pub capabilities: MergeWasmCapabilities,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmListResult {
+    pub modules: Vec<MergeWasmModuleInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmDropParams {
+    pub module_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeWasmDropResult {
+    pub ok: bool,
+}
+
+// --------------------------------
+// wasm.plan.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanCompileParams {
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanCompileResult {
+    pub format: String,
+    pub abi: String,
+    pub artifact_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanRunParams {
+    pub artifact_b64: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_format: Option<ResultFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<QueryCache>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<WireHints>,
+}
+
+pub type WasmPlanRunResult = QueryExecResult;
+
+// --------------------------------
+// view.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewCreateParams {
+    pub view: BaseTableRef,
+    pub query: Query,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_not_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewCreateResult {
+    pub ok: bool,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewDropParams {
+    pub view: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewDropResult {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewRefreshParams {
+    pub view: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewRefreshResult {
+    pub mode: String,
+    pub rows: u64,
+    pub last_change_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewStatusParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<BaseTableRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewStatusResult {
+    pub views: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewExplainDepsParams {
+    pub view: BaseTableRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewExplainDepsResult {
+    pub deps: Vec<serde_json::Value>,
+}
+
+// --------------------------------
+// cdc.* (selected)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscribeTableParams {
+    pub db: String,
+    pub table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscribeResult {
+    pub sub_id: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcPollParams {
+    pub sub_id: String,
+    pub from_offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcAckParams {
+    pub sub_id: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcCloseParams {
+    pub sub_id: String,
+}
+
+// --------------------------------
+// stats.* (selected)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsSnapshotResult {
+    pub uptime_s: u64,
+    pub sessions: SessionsStats,
+    pub qps: f64,
+    pub tps: f64,
+    pub process: ProcessStats,
+    pub storage: StorageStats,
+    pub background: BackgroundStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsStats {
+    pub active: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessStats {
+    pub cpu_pct: f64,
+    pub rss_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub wal_bytes: u64,
+    pub dedup_ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundStats {
+    pub compaction: String,
+    pub snapshots: String,
+}

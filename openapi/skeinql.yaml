@@ -1,0 +1,193 @@
+openapi: 3.0.3
+info:
+  title: SkeinQL API
+  version: "1.0"
+  description: |
+    SkeinQL is SkeinDB's native non-SQL API.
+
+    SkeinQL is modeled as a JSON-RPC-style POST endpoint (/api/v1/rpc)
+    plus optional cacheable prepared-query GET endpoints and changefeed streams.
+
+    The normative method catalog and semantics are specified in docs/SKEINQL.md.
+
+servers:
+  - url: http://localhost:{port}
+    variables:
+      port:
+        default: "8080"
+
+x-skeinql-methods:
+  - system.ping
+  - system.version
+  - system.capabilities
+  - auth.login
+  - auth.logout
+  - settings.get
+  - settings.set
+  - settings.list
+  - schema.list_databases
+  - schema.create_database
+  - schema.drop_database
+  - schema.list_tables
+  - schema.describe_table
+  - schema.create_table
+  - schema.alter_table
+  - schema.drop_table
+  - schema.create_index
+  - schema.drop_index
+  - tx.begin
+  - tx.commit
+  - tx.rollback
+  - data.get
+  - data.insert
+  - data.update
+  - data.delete
+  - data.upsert
+  - query.select
+  - query.patch
+  - query.prepare
+  - query.open_cursor
+  - query.fetch
+  - query.close
+  - query.explain
+  - query.subscribe
+  - sql.exec
+  - sql.prepare
+  - sql.explain
+  - sql.translate
+  - cdc.subscribe_table
+  - cdc.subscribe_query
+  - cdc.poll
+  - cdc.ack
+  - cdc.close
+  - udf.install
+  - udf.list
+  - udf.drop
+  - maintenance.checkpoint
+  - maintenance.compact
+  - maintenance.compaction.status
+  - maintenance.compaction.set_policy
+  - maintenance.compaction.pause
+  - maintenance.compaction.resume
+  - maintenance.snapshot_build
+  - maintenance.snapshot.status
+  - maintenance.audit.verify_wal
+  - maintenance.replay.export
+  - maintenance.replay.import
+  - maintenance.replay.run
+  - telemetry.compat_summary
+  - telemetry.migration_hints
+  - advisor.workload.snapshot
+  - advisor.index.recommend
+  - advisor.cluster.recommend
+  - stats.snapshot
+  - admin.user.create
+  - admin.user.list
+  - admin.user.drop
+  - admin.role.create
+  - admin.role.list
+  - admin.role.drop
+  - admin.grant
+  - admin.revoke
+  - cluster.status
+  - cluster.join
+  - cluster.add_node
+  - cluster.remove_node
+  - cluster.promote
+  - cluster.rebalance
+
+paths:
+  /api/v1/rpc:
+    post:
+      summary: SkeinQL RPC endpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RpcRequest"
+      responses:
+        "200":
+          description: SkeinQL response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RpcResponse"
+  /api/v1/q/{query_id}:
+    get:
+      summary: Execute a prepared query by id (optional)
+      parameters:
+        - name: query_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Query result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RpcResponse"
+  /api/v1/cdc/{sub_id}:
+    get:
+      summary: Stream CDC events via text/event-stream (optional)
+      parameters:
+        - name: sub_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+components:
+  schemas:
+    RpcRequest:
+      type: object
+      required: [skeinql, method]
+      properties:
+        skeinql:
+          type: string
+          example: "1.0"
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+        method:
+          type: string
+        params:
+          type: object
+          nullable: true
+    RpcResponse:
+      type: object
+      required: [ok]
+      properties:
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+            - type: "null"
+        ok:
+          type: boolean
+        result:
+          type: object
+          nullable: true
+        error:
+          $ref: "#/components/schemas/RpcError"
+    RpcError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          nullable: true

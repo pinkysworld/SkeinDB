@@ -59,3 +59,32 @@ SkeinDB adoption strategy:
 
 The file `tests/compat/corpus.sql` is the primary compatibility driver.
 Add queries there first, then implement.
+
+---
+
+## 4) Compatibility telemetry (recommended)
+
+SkeinDB should record which MySQL features are exercised by real applications.
+This enables:
+- prioritizing implementation work
+- spotting deprecated patterns
+- generating migration hints toward SkeinQL
+
+See docs/TELEMETRY_AND_MIGRATION.md.
+
+---
+
+## 5) Compatibility-friendly extensions (opt-in)
+
+SkeinDB must remain usable by stock MySQL clients. However, some proprietary features can be exposed
+in ways that do not require new SQL grammar:
+
+- Session variables:
+  - `SET @@skein.as_of = '<iso_ts>'` (historical snapshot reads)
+  - `SET @@skein.autoparameterize = 1` (normalized-plan reuse)
+
+- Comment hints:
+  - `SELECT /*+ SKEIN_AS_OF('2026-01-01T00:00:00Z') */ ...`
+
+Notes:
+- These are intentionally namespaced under `skein.*` and are disabled by default in strict compatibility mode.

@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SkeinAdmin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Space+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f0e9;
+        --panel: #fffaf2;
+        --ink: #1c1712;
+        --muted: #6f6256;
+        --line: #e7dccd;
+        --accent: #c45f1c;
+        --accent-2: #2b7a78;
+        --shadow: rgba(22, 16, 10, 0.08);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+        margin: 0;
+        background: radial-gradient(1200px 800px at 20% -10%, #fff4df 0%, rgba(255, 244, 223, 0) 60%),
+          linear-gradient(180deg, #f6f0e9 0%, #efe5d7 100%);
+        color: var(--ink);
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(600px 300px at 90% 10%, rgba(196, 95, 28, 0.12), transparent 60%);
+        opacity: 0.9;
+      }
+      header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        background: rgba(255, 250, 242, 0.9);
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        backdrop-filter: blur(6px);
+      }
+      header h1 { font-size: 18px; margin: 0; letter-spacing: 0.04em; text-transform: uppercase; }
+      header span { color: var(--muted); font-size: 12px; }
+
+      main { padding: 20px; display: grid; gap: 20px; }
+      .section {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 16px;
+        background: var(--panel);
+        box-shadow: 0 12px 24px var(--shadow);
+        animation: rise 0.7s ease both;
+      }
+      .card.wide { grid-column: span 2; }
+      .card h2 { font-size: 15px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+      .field { margin-bottom: 12px; }
+      label { display: block; font-size: 12px; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+      input, textarea, select {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fffdf8;
+        color: var(--ink);
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      }
+      textarea { min-height: 90px; resize: vertical; }
+      select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) calc(50% + 2px), calc(100% - 12px) calc(50% + 2px); background-size: 6px 6px; background-repeat: no-repeat; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; }
+      .row .field { flex: 1; min-width: 140px; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      button {
+        padding: 9px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff6e9;
+        cursor: pointer;
+        color: var(--ink);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+      button:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(196, 95, 28, 0.2); }
+      button.primary { background: var(--accent); color: #fffaf2; border-color: var(--accent); }
+      button.secondary { background: var(--accent-2); color: #f6fffe; border-color: var(--accent-2); }
+      pre {
+        background: #fdf6ea;
+        padding: 12px;
+        border-radius: 12px;
+        overflow: auto;
+        font-family: "Space Mono", ui-monospace, monospace;
+        font-size: 12px;
+        border: 1px solid var(--line);
+      }
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .toggle input { width: auto; }
+      .grid-two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+      .report-list { display: grid; gap: 12px; }
+      .rewrite-item {
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+        padding: 12px;
+        background: #fffdf8;
+      }
+      .rewrite-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+      .rewrite-title { font-size: 14px; font-weight: 600; margin: 0; }
+      .rewrite-meta { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+      .rewrite-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .tag {
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(196, 95, 28, 0.25);
+        background: rgba(196, 95, 28, 0.1);
+        color: var(--accent);
+      }
+      .tag.secondary {
+        border-color: rgba(43, 122, 120, 0.25);
+        background: rgba(43, 122, 120, 0.1);
+        color: var(--accent-2);
+      }
+      .rewrite-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 8px; }
+      .rewrite-block {
+        background: #fdf6ea;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px;
+        font-family: "Space Mono", ui-monospace, monospace;
+        font-size: 11px;
+        white-space: pre-wrap;
+      }
+      .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>SkeinAdmin</h1>
+      <span style="color:#666; font-size: 12px;">Standalone console (placeholder scaffold)</span>
+    </header>
+    <main>
+      <section class="section">
+        <div class="card">
+          <h2>Connect</h2>
+          <div class="field">
+            <label>Base URL (SkeinDB HTTP)</label>
+            <input id="baseUrl" placeholder="http://localhost:8080" value="http://localhost:8080" />
+          </div>
+          <div class="field">
+            <label>Bearer Token (optional)</label>
+            <input id="token" placeholder="" />
+          </div>
+          <div class="actions">
+            <button id="btnPing">system.ping</button>
+            <button id="btnVersion">system.version</button>
+            <button id="btnStats">stats.snapshot</button>
+            <button id="btnCluster">cluster.status</button>
+            <button id="btnAdvisor">advisor.index_suggestions</button>
+          </div>
+        </div>
+
+        <div class="card wide">
+          <h2>System Response</h2>
+          <pre id="out">Ready.</pre>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="card wide">
+          <h2>NL Query (Experimental)</h2>
+          <div class="grid-two">
+            <div>
+              <div class="field">
+                <label>Database</label>
+                <input id="nlDb" placeholder="app" value="app" />
+              </div>
+              <div class="field">
+                <label>Natural language request</label>
+                <textarea id="nlRequest" placeholder="list users who signed up this week"></textarea>
+              </div>
+              <div class="field">
+                <label>Tables (comma-separated)</label>
+                <input id="nlTables" placeholder="users, orders" />
+              </div>
+              <div class="row">
+                <label class="toggle"><input type="checkbox" id="nlIncludeSchema" checked /> Include schema</label>
+                <label class="toggle"><input type="checkbox" id="nlReadOnly" checked /> Read-only</label>
+              </div>
+              <div class="field">
+                <label>Max tables</label>
+                <input id="nlMaxTables" type="number" min="1" value="16" />
+              </div>
+              <div class="actions">
+                <button id="btnNlTranslate" class="primary">Translate</button>
+              </div>
+            </div>
+            <div>
+              <div class="field">
+                <label>Query JSON</label>
+                <textarea id="nlQuery" placeholder='{"body":{"select":{...}}}'></textarea>
+              </div>
+              <div class="field">
+                <label>Args (JSON array)</label>
+                <textarea id="nlArgs" placeholder='[{"t":"u64","v":1}]'></textarea>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Preview limit</label>
+                  <input id="nlPreviewLimit" type="number" min="0" value="3" />
+                </div>
+                <div class="field">
+                  <label>Format</label>
+                  <select id="nlFormat">
+                    <option value="objects_json">objects_json</option>
+                    <option value="rows_json">rows_json</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label>Approval token</label>
+                <input id="nlApproval" placeholder="Paste from ai.nl.explain" />
+              </div>
+              <div class="actions">
+                <button id="btnNlExplain" class="secondary">Explain</button>
+                <button id="btnNlExecute">Execute</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>NL Output</h2>
+          <pre id="nlOut">Waiting for NL requests.</pre>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="card wide">
+          <h2>Migration Assistant (Experimental)</h2>
+          <div class="grid-two">
+            <div>
+              <div class="field">
+                <label>Samples (JSON array, optional)</label>
+                <textarea id="migSamples" placeholder="[]"></textarea>
+                <div class="hint">Leave empty to use in-memory query history.</div>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Limit</label>
+                  <input id="migLimit" type="number" min="1" value="10" />
+                </div>
+                <div class="field">
+                  <label>Window ms</label>
+                  <input id="migWindow" type="number" min="0" placeholder="60000" />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnMigrationPreview" class="primary">Rewrite Preview</button>
+                <button id="btnMigrationIntent" class="secondary">Intent Report</button>
+                <button id="btnMigrationDownloadJson">Download JSON</button>
+                <button id="btnMigrationDownloadMd">Download Markdown</button>
+                <button id="btnMigrationDownloadHtml">Download HTML</button>
+                <button id="btnMigrationCopyMd">Copy Markdown</button>
+              </div>
+            </div>
+            <div>
+              <div class="field">
+                <label>Rewrite Report</label>
+                <div id="migrationReport" class="report-list">No rewrites yet.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Migration Output</h2>
+          <pre id="migrationOut">Waiting for migration analysis.</pre>
+        </div>
+      </section>
+
+      <p style="margin-top:8px; color:var(--muted); font-size: 13px;">
+        This is a minimal placeholder. The full SkeinAdmin feature set is specified in <code>docs/SKEINADMIN.md</code>.
+      </p>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

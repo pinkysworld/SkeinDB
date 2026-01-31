@@ -1,14 +1,18 @@
 //! SkeinDB Core (scaffold)
 //!
-//! This crate will host:
+//! This crate is intended to host:
 //! - on-disk formats (WAL, segments)
 //! - MVCC engine
-//! - deduplicated ValueStore
+//! - deduplicated ValueStore (content-addressed)
 //! - compaction + GC
 //!
-//! For now it contains only basic encoding helpers used across the project.
+//! For now it contains:
+//! - basic encoding helpers (VarU, CRC32C)
+//! - small format enums/structs used across the project
 
 use thiserror::Error;
+
+pub mod valuestore;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -63,12 +67,74 @@ pub fn crc32c(data: &[u8]) -> u32 {
     crc32c::crc32c(data)
 }
 
-/// Compute ValueID = BLAKE3-128 (first 16 bytes)
+/// Compute ValueID = BLAKE3-128 (first 16 bytes).
 pub fn value_id(bytes: &[u8]) -> [u8; 16] {
     let h = blake3::hash(bytes);
     let mut out = [0u8; 16];
     out.copy_from_slice(&h.as_bytes()[0..16]);
     out
+}
+
+/// Compute an audit hash = BLAKE3-256.
+pub fn audit_hash256(bytes: &[u8]) -> [u8; 32] {
+    let h = blake3::hash(bytes);
+    *h.as_bytes()
+}
+
+/// Value kinds for ValueStore entries.
+///
+/// These numeric values are part of the on-disk format contract (docs/ON_DISK_FORMAT.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ValueKind {
+    /// Raw value bytes.
+    Cell = 1,
+    /// Group object encoding (e.g., small tuple/struct).
+    Group = 2,
+    /// Chunk of a large blob.
+    BlobChunk = 3,
+    /// Manifest referencing blob chunks.
+    BlobManifest = 4,
+    /// Delta patch against a base ValueID.
+    Delta = 5,
+    /// Embedding vector (research / experimental).
+    Embedding = 6,
+}
+
+/// WAL record header versions for audit chaining.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WalHeaderVersion {
+    V1 = 1,
+    V2 = 2,
+}
+
+/// Minimal WAL header fields (v1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalHeaderV1 {
+    pub rec_type: u8,
+    pub rec_ver: WalHeaderVersion,
+    pub flags: u16,
+    pub lsn: u64,
+    pub txn_id: u64,
+}
+
+/// WAL header v2 adds hash chaining fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalHeaderV2 {
+    pub v1: WalHeaderV1,
+    pub prev_hash: [u8; 32],
+    pub rec_hash: [u8; 32],
+}
+
+/// Compatibility telemetry feature identifiers (seed list).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CompatFeature {
+    MysqlSqlCalcFoundRows,
+    MysqlFoundRows,
+    MysqlInsertOnDuplicateKeyUpdate,
+    MysqlInformationSchema,
+    MysqlShow,
 }
 
 #[cfg(test)]
@@ -104,5 +170,12 @@ mod tests {
         let c = value_id(b"world");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn audit_hash_is_stable() {
+        let a = audit_hash256(b"hello");
+        let b = audit_hash256(b"hello");
+        assert_eq!(a, b);
     }
 }

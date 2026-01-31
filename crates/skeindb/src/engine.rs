@@ -1,0 +1,17756 @@
+//! Minimal executable engine for SkeinDB (Codex-ready scaffold).
+//!
+//! This module provides a **working** end-to-end path for:
+//! - schema: create/list/describe tables
+//! - data: insert/get/update/delete
+//! - query: select (subset)
+//! - cache: conservative ETag validation (table-version based)
+//! - wire: optional skeinpack_v1 dictionary transfer
+//!
+//! Notes:
+//! - This is intentionally simple and is **not** the final ValueStore/MVCC/LSM
+//!   engine described in the paper/spec. It exists so SkeinQL becomes usable
+//!   immediately and can be iterated on via Codex.
+//! - Correctness > cleverness: dependency tracking here is coarse
+//!   (per-table version counters). This is safe but may over-invalidate.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::f64::consts::PI;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+
+use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
+use skeindb_core::{encode_varu, value_id, ValueKind};
+use skeindb_skeinql::methods::{
+    AdvisorHistoryEntry, AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams,
+    AdvisorIndexApplyResult, AdvisorIndexDismissParams, AdvisorIndexDismissResult,
+    AdvisorIndexSuggestion, AdvisorIndexSynthesizeParams, AdvisorIndexSynthesizeResult,
+    AiAutoparamAnalyzeParams, AiAutoparamAnalyzeResult, AiAutoparamClassifyParams,
+    AiAutoparamClassifyResult, AiAutoparamLabel, AiAutoparamLiteral, AiAutoparamRules,
+    AiNlExecuteParams, AiNlExecuteResult, AiNlExplainParams, AiNlExplainResult, AiNlPromptPackage,
+    AiNlPromptTable, AiNlTranslateParams, AiNlTranslateResult, ClientStateSummary,
+    DpAggregateParams, DpAggregateResult, DpAggregateSpec, DpAuditLogParams, DpAuditLogResult,
+    DpBounds, DpBudgetGetParams, DpBudgetGetResult, DpBudgetSetParams, EdgeBundle,
+    EdgeBundleApplyParams, EdgeBundleApplyResult, EdgeBundleCoverage, EdgeBundleRecord,
+    EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult, EdgeBundleRoute,
+    EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams, ForensicExportResult,
+    ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams, ForensicVerifyResult,
+    MergeApplyParams, MergeApplyResult, MergeFunctionRef, MergePolicySpec, MergeRegisterParams,
+    MergeRegisterResult, MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities,
+    MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
+    MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
+    MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
+    MigrationIntentSuggestion, MigrationRewritePreview, MigrationRewritePreviewParams,
+    MigrationRewritePreviewResult, ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy,
+    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams, RowObject,
+    SchemaApplyMergeParams, SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp,
+    SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult,
+    SchemaProposeChangeParams, SchemaProposeChangeResult, VectorIndexStatusParams,
+    VectorIndexStatusResult, VectorInsertParams, VectorInsertResult, VectorSearchMatch,
+    VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams,
+    ViewDropResult, ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams,
+    ViewRefreshResult, ViewStatusParams, ViewStatusResult, WasmPlanCompileParams,
+    WasmPlanCompileResult,
+};
+use skeindb_skeinql::types::{
+    BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
+    LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, ResultFormat, SelectBody, SelectItem,
+    TableRef, TypeDesc,
+};
+
+// -----------------------------
+// Persistence models
+// -----------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Catalog {
+    #[serde(default)]
+    pub databases: HashMap<String, Database>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Database {
+    #[serde(default)]
+    pub tables: HashMap<String, TableSchema>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnSchema>,
+
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+
+    #[serde(default)]
+    pub compat_mysql: Option<serde_json::Value>,
+
+    /// Conservative dependency version.
+    #[serde(default)]
+    pub table_version: u64,
+
+    /// Next value for each auto-increment column.
+    #[serde(default)]
+    pub auto_inc_next: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnSchema {
+    pub name: String,
+    pub r#type: TypeDesc,
+    pub nullable: bool,
+    #[serde(default)]
+    pub auto_increment: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RowEntry {
+    pub row: RowObject,
+
+    /// Monotonic row version. Incremented on update.
+    pub version: u64,
+
+    /// Soft delete marker.
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug)]
+struct VectorIndex {
+    built_version: u64,
+    buckets: HashMap<u64, Vec<usize>>,
+}
+
+#[derive(Debug)]
+struct SecondaryIndex {
+    built_version: u64,
+    columns: Vec<String>,
+    include: Vec<String>,
+    keys: HashMap<String, Vec<usize>>,
+}
+
+#[derive(Debug, Default)]
+pub struct TableData {
+    pub rows: Vec<RowEntry>,
+    pub pk_index: HashMap<String, usize>,
+    vector_index: Mutex<HashMap<String, VectorIndex>>,
+    secondary_indexes: Mutex<HashMap<String, SecondaryIndex>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TableKey {
+    db: String,
+    table: String,
+}
+
+// -----------------------------
+// Engine
+// -----------------------------
+
+#[derive(Debug)]
+pub struct Engine {
+    data_dir: PathBuf,
+
+    catalog: Catalog,
+    tables: HashMap<TableKey, TableData>,
+
+    /// Global change sequence for CDC.
+    change_seq: u64,
+    changes: Vec<ChangeEvent>,
+
+    /// Prepared queries.
+    prepared: HashMap<String, PreparedQuery>,
+    next_prepared_id: u64,
+
+    /// Simple in-memory query result cache keyed by ETag.
+    ///
+    /// This is safe because the ETag includes the (conservative) dependency
+    /// signature. When dependencies change, ETags change, and old entries are
+    /// naturally bypassed.
+    cached_select: Mutex<HashMap<String, CachedSelect>>,
+
+    /// Patch cache: computed deltas keyed by (base_etag -> current_etag).
+    ///
+    /// This allows many clients to share the same computed patch and reduces
+    /// repeated diff work under high fan-out reads.
+    cached_patch: Mutex<HashMap<PatchCacheKey, PatchDelta>>,
+
+    /// Research: ValueStore with learned index lookup instrumentation.
+    value_store: Mutex<ValueStore>,
+
+    /// Research: column snapshot manager for adaptive row/column execution.
+    snapshots: Mutex<SnapshotManager>,
+
+    /// Research: index advisor telemetry (R16).
+    index_advisor: Mutex<IndexAdvisor>,
+    index_advisor_persist: bool,
+    index_advisor_history: Vec<AdvisorHistoryEntry>,
+    index_advisor_history_next_id: u64,
+    index_advisor_metrics: Mutex<AdvisorMetrics>,
+
+    /// Research: query intent inference (R17).
+    intent_history: Mutex<Vec<IntentQuerySample>>,
+
+    /// Research: DP budget manager + audit log.
+    dp_budgets: HashMap<String, DpBudget>,
+    dp_audit: Vec<DpAuditEvent>,
+    dp_audit_next_id: u64,
+
+    /// Research: oblivious execution policies.
+    oblivious_policies: HashMap<TableKey, ObliviousPolicy>,
+
+    /// Research: forensic hash chain (prototype).
+    forensic_chain: Vec<ForensicRecord>,
+    forensic_next_id: u64,
+
+    /// Research: merge policies for optimistic concurrency.
+    merge_policies: HashMap<TableKey, MergePolicySpec>,
+
+    /// Research: merge wasm registry (prototype).
+    merge_wasm_registry: HashMap<String, MergeWasmModuleEntry>,
+
+    /// Research: materialized views for incremental maintenance.
+    views: HashMap<TableKey, ViewState>,
+
+    /// Research: edge bundle coverage tracking (R14).
+    edge_coverage: HashMap<TableKey, EdgeCoverage>,
+
+    /// Research: schema evolution tracking (R15).
+    schema_versions: HashMap<TableKey, u64>,
+    schema_changes: Vec<SchemaChangeEntry>,
+    schema_changes_next_id: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedSelect {
+    columns: Vec<ColumnMeta>,
+    rows: Vec<Vec<Lit>>,
+    keys: Option<Vec<Vec<Lit>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PatchCacheKey {
+    base: String,
+    cur: String,
+}
+
+#[derive(Debug, Clone)]
+struct PatchDelta {
+    columns: Vec<ColumnMeta>,
+    window: Option<WindowInfo>,
+
+    added: Vec<PatchRow>,
+    updated: Vec<PatchRow>,
+    removed: Vec<Vec<Lit>>,
+
+    /// Row movement information for ordered windows.
+    moved: Vec<PatchMove>,
+
+    /// Compressed reorder hint (e.g., uniform shift) when applicable.
+    reorder: Option<ReorderHint>,
+
+    /// True if this patch is best-effort/partial (optimization-only modes).
+    partial: bool,
+    /// True if removals are unknown in this response.
+    removed_unknown: bool,
+    /// True if updates are unknown in this response.
+    updated_unknown: bool,
+
+    /// If set, indicates why the server requested a reset (no patch available).
+    reset_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WindowInfo {
+    limit: Option<u64>,
+    offset: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct PatchRow {
+    pk: Vec<Lit>,
+    row: Vec<Lit>,
+    /// Position in the *current* window.
+    at: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PatchMove {
+    pk: Vec<Lit>,
+    from: usize,
+    to: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ReorderHint {
+    kind: String,
+    delta: i64,
+    coverage: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparedQuery {
+    pub id: String,
+    pub query: Query,
+    pub canonical_json: serde_json::Value,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeEvent {
+    pub seq: u64,
+    pub db: String,
+    pub table: String,
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<Vec<Lit>>,
+}
+
+#[derive(Debug, Clone)]
+struct EdgeCoverage {
+    table: TableKey,
+    start_seq: u64,
+    end_seq: u64,
+    bundle_id: String,
+    redaction_mode: String,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaVersionEntry {
+    db: String,
+    table: String,
+    version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaVersionsDisk {
+    format_version: u32,
+    versions: Vec<SchemaVersionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaChangeEntry {
+    id: String,
+    table: BaseTableRef,
+    base_version: u64,
+    changes: Vec<SchemaChangeOp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    created_at_ms: u64,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaChangesDisk {
+    format_version: u32,
+    next_id: u64,
+    changes: Vec<SchemaChangeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorPatternDisk {
+    db: String,
+    table: String,
+    eq_cols: Vec<String>,
+    range_cols: Vec<String>,
+    order_cols: Vec<String>,
+    group_cols: Vec<String>,
+    join_cols: Vec<String>,
+    projection_cols: Vec<String>,
+    count: u64,
+    rows_scanned: u64,
+    last_seen_micros: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorPatternsDisk {
+    format_version: u32,
+    patterns: Vec<AdvisorPatternDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdvisorHistoryDisk {
+    format_version: u32,
+    next_id: u64,
+    entries: Vec<AdvisorHistoryEntry>,
+}
+
+// -----------------------------
+// dp.* (research)
+// -----------------------------
+
+const SCHEMA_VERSION_FORMAT_VERSION: u32 = 1;
+const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
+const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
+const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 1;
+
+const DP_BUDGET_FORMAT_VERSION: u32 = 1;
+const DP_AUDIT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DpBudget {
+    principal: String,
+    total_epsilon: f64,
+    total_delta: f64,
+    consumed_epsilon: f64,
+    consumed_delta: f64,
+    refresh_window_ms: Option<u64>,
+    refreshed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DpBudgetDisk {
+    format_version: u32,
+    budgets: Vec<DpBudget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DpAuditEvent {
+    id: u64,
+    ts_ms: u64,
+    principal: String,
+    table: String,
+    query_fingerprint: String,
+    epsilon: f64,
+    delta: f64,
+    mechanism: String,
+    groups: u64,
+    rows_examined: u64,
+    aggregates: Vec<String>,
+    seed: Option<u64>,
+    budget_remaining_epsilon: f64,
+    budget_remaining_delta: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DpAuditDisk {
+    format_version: u32,
+    next_id: u64,
+    events: Vec<DpAuditEvent>,
+}
+
+// -----------------------------
+// oblivious.* (research)
+// -----------------------------
+
+const OBLIVIOUS_POLICY_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObliviousPolicyEntry {
+    db: String,
+    table: String,
+    policy: ObliviousPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObliviousPolicyDisk {
+    format_version: u32,
+    policies: Vec<ObliviousPolicyEntry>,
+}
+
+// -----------------------------
+// forensic.* (research)
+// -----------------------------
+
+const FORENSIC_CHAIN_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ForensicRecord {
+    id: u64,
+    ts_ms: u64,
+    db: String,
+    table: String,
+    op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pk: Option<Vec<Lit>>,
+    change_seq: u64,
+    prev_hash: String,
+    hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ForensicChainDisk {
+    format_version: u32,
+    next_id: u64,
+    records: Vec<ForensicRecord>,
+}
+
+// -----------------------------
+// merge.* (research)
+// -----------------------------
+
+const MERGE_POLICY_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergePolicyEntry {
+    db: String,
+    table: String,
+    policy: MergePolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergePolicyDisk {
+    format_version: u32,
+    policies: Vec<MergePolicyEntry>,
+}
+
+const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergeWasmModuleEntry {
+    module_id: String,
+    value_id: String,
+    size_bytes: u64,
+    capabilities: MergeWasmCapabilities,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+
+    wasm_b64: String,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MergeWasmRegistryDisk {
+    format_version: u32,
+    modules: Vec<MergeWasmModuleEntry>,
+}
+
+// -----------------------------
+// wasm.plan.* (research)
+// -----------------------------
+
+const WASM_PLAN_FORMAT_V1: &str = "skein.wasm.plan.v1";
+const WASM_PLAN_ABI_V1: &str = "skein.wasm.batch.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WasmPlanArtifactV1 {
+    format: String,
+    abi: String,
+    plan: WasmPlanV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WasmPlanV1 {
+    ops: Vec<WasmPlanOpV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum WasmPlanOpV1 {
+    Scan { table: BaseTableRef },
+    Filter { predicate: Expr },
+    Project { projection: Vec<SelectItem> },
+}
+
+// -----------------------------
+// view.* (research)
+// -----------------------------
+
+const VIEW_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewDependency {
+    db: String,
+    table: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewRowDisk {
+    pk: Vec<Lit>,
+    values: Vec<Lit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewEntryDisk {
+    db: String,
+    name: String,
+    query: Query,
+    #[serde(default)]
+    columns: Vec<String>,
+    #[serde(default)]
+    pk_columns: Vec<String>,
+    #[serde(default)]
+    deps: Vec<ViewDependency>,
+    #[serde(default)]
+    rows: Vec<ViewRowDisk>,
+    #[serde(default)]
+    last_refresh_ms: u64,
+    #[serde(default)]
+    last_change_seq: u64,
+    #[serde(default)]
+    stale: bool,
+    #[serde(default)]
+    last_refresh_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewDisk {
+    format_version: u32,
+    views: Vec<ViewEntryDisk>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewRow {
+    pk: Vec<Lit>,
+    values: Vec<Lit>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewState {
+    db: String,
+    name: String,
+    query: Query,
+    columns: Vec<String>,
+    pk_columns: Vec<String>,
+    deps: Vec<ViewDependency>,
+    rows: Vec<ViewRow>,
+    pk_index: HashMap<String, usize>,
+    last_refresh_ms: u64,
+    last_change_seq: u64,
+    stale: bool,
+    last_refresh_mode: String,
+}
+
+#[derive(Debug, Clone)]
+enum DpAggOp {
+    Count,
+    Sum,
+    Avg,
+    Percentile,
+}
+
+#[derive(Debug, Clone)]
+struct DpAggSpecResolved {
+    op: DpAggOp,
+    column: Option<String>,
+    percentile: Option<f64>,
+    bounds: Option<DpBounds>,
+    label: String,
+    sensitivity: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DpGroupState {
+    key: Vec<Lit>,
+    accs: Vec<DpAggAccumulator>,
+}
+
+#[derive(Debug, Clone)]
+enum DpAggAccumulator {
+    Count(u64),
+    Sum { sum: f64 },
+    Avg { sum: f64, count: u64 },
+    Percentile { values: Vec<f64> },
+}
+
+// -----------------------------
+// Column snapshots (adaptive row/column execution)
+// -----------------------------
+
+const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ColumnSnapshotDisk {
+    pub format_version: u32,
+    pub id: String,
+    pub db: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub pk_columns: Vec<String>,
+    pub snapshot_ts: u64,
+    pub table_version: u64,
+    pub rows: Vec<SnapshotRowDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotRowDisk {
+    pub pk: Vec<Lit>,
+    pub values: Vec<Lit>,
+}
+
+#[derive(Debug, Clone)]
+struct ColumnSnapshot {
+    id: String,
+    db: String,
+    table: String,
+    columns: Vec<String>,
+    pk_columns: Vec<String>,
+    snapshot_ts: u64,
+    table_version: u64,
+    rows: Vec<SnapshotRow>,
+    pk_index: HashMap<String, usize>,
+    column_index: HashMap<String, usize>,
+    stats: SnapshotStats,
+    valid: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotRow {
+    pk: Vec<Lit>,
+    values: Vec<Lit>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SnapshotStats {
+    hits: u64,
+    last_used_micros: u64,
+    build_cost: f64,
+    benefit_score: f64,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotManager {
+    snapshots: HashMap<TableKey, Vec<ColumnSnapshot>>,
+    patterns: QueryPatternTracker,
+    cost_model: SnapshotCostModel,
+    controller: AdaptiveSnapshotController,
+}
+
+#[derive(Debug, Default)]
+struct QueryPatternTracker {
+    by_table: HashMap<TableKey, HashMap<String, ProjectionStats>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProjectionStats {
+    columns: Vec<String>,
+    count: u64,
+    rows_scanned: u64,
+    last_seen_micros: u64,
+}
+
+#[derive(Debug)]
+struct IndexAdvisor {
+    by_table: HashMap<TableKey, HashMap<String, IndexPatternStats>>,
+    max_patterns_per_table: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdvisorMetrics {
+    pub suggestions_total: u64,
+    pub applied_total: u64,
+    pub rejected_total: u64,
+    pub estimated_saved_ms_total: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IndexPatternStats {
+    eq_cols: Vec<String>,
+    range_cols: Vec<String>,
+    order_cols: Vec<String>,
+    group_cols: Vec<String>,
+    join_cols: Vec<String>,
+    projection_cols: Vec<String>,
+    count: u64,
+    rows_scanned: u64,
+    last_seen_micros: u64,
+}
+
+#[derive(Debug, Clone)]
+struct IndexQueryInfo {
+    base: BaseTableRef,
+    eq_cols: Vec<String>,
+    range_cols: Vec<String>,
+    order_cols: Vec<String>,
+    group_cols: Vec<String>,
+    join_cols: Vec<String>,
+    projection_cols: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct IntentQuerySample {
+    ts_ms: u64,
+    query: Query,
+    args: Vec<Lit>,
+}
+
+const INDEX_ADVISOR_MAX_PATTERNS: usize = 128;
+const INDEX_ADVISOR_MIN_QUERIES: u64 = 3;
+const INDEX_ADVISOR_MIN_ROWS: u64 = 32;
+const INDEX_ADVISOR_MAX_COLUMNS: usize = 4;
+const INDEX_ADVISOR_MAX_INCLUDE: usize = 4;
+const INTENT_HISTORY_MAX: usize = 256;
+
+#[derive(Debug, Clone)]
+struct SnapshotCostModel {
+    build_cost_per_cell: f64,
+    row_scan_cost_per_cell: f64,
+    snapshot_scan_cost_per_cell: f64,
+    min_benefit: f64,
+}
+
+#[derive(Debug, Clone)]
+struct AdaptiveSnapshotController {
+    min_queries: u64,
+    min_rows: u64,
+    recency_window_micros: u64,
+    max_snapshots_per_table: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotPlan {
+    table: TableKey,
+    columns: Vec<String>,
+    snapshot_ts: u64,
+    build_cost: f64,
+    benefit: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotView {
+    columns: Vec<String>,
+    rows: Vec<SnapshotRow>,
+}
+
+#[derive(Debug, Clone)]
+struct QuerySnapshotInfo {
+    base: BaseTableRef,
+    alias: String,
+    required_cols: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewQueryInfo {
+    base: BaseTableRef,
+    alias: String,
+    projection: Vec<skeindb_skeinql::types::SelectItem>,
+    predicate: Option<Expr>,
+    required_cols: Vec<String>,
+}
+
+impl Default for SnapshotCostModel {
+    fn default() -> Self {
+        Self {
+            build_cost_per_cell: 1.2,
+            row_scan_cost_per_cell: 1.0,
+            snapshot_scan_cost_per_cell: 0.4,
+            min_benefit: 50.0,
+        }
+    }
+}
+
+impl Default for AdaptiveSnapshotController {
+    fn default() -> Self {
+        Self {
+            min_queries: 3,
+            min_rows: 32,
+            recency_window_micros: 15 * 60 * 1_000_000,
+            max_snapshots_per_table: 4,
+        }
+    }
+}
+
+impl Default for IndexAdvisor {
+    fn default() -> Self {
+        Self {
+            by_table: HashMap::new(),
+            max_patterns_per_table: INDEX_ADVISOR_MAX_PATTERNS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultSet {
+    pub columns: Vec<ColumnMeta>,
+    pub rows: Vec<Vec<Lit>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnMeta {
+    pub name: String,
+    pub r#type: TypeDesc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuerySelectResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default)]
+    pub not_modified: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causality: Option<CausalityToken>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataGetResult {
+    pub row: RowObject,
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteResult {
+    pub affected: u64,
+
+    #[serde(default)]
+    pub last_insert_id: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returning: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscribeResult {
+    pub sub_id: String,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcPollResult {
+    pub events: Vec<ChangeEvent>,
+    pub next_offset: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct Subscriptions {
+    pub subs: HashMap<String, Subscription>,
+    pub next_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Subscription {
+    pub id: String,
+    pub db: String,
+    pub table: String,
+}
+
+impl Engine {
+    pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&data_dir)?;
+
+        let catalog = load_json::<Catalog>(&data_dir.join("catalog.json")).unwrap_or_default();
+        let advisor_persist = advisor_persist_enabled();
+
+        let mut engine = Self {
+            data_dir,
+            catalog,
+            tables: HashMap::new(),
+            change_seq: 0,
+            changes: Vec::new(),
+            prepared: HashMap::new(),
+            next_prepared_id: 1,
+            cached_select: Mutex::new(HashMap::new()),
+            cached_patch: Mutex::new(HashMap::new()),
+            value_store: Mutex::new(ValueStore::new(ValueStoreConfig {
+                enable_learned_index: true,
+                ..ValueStoreConfig::default()
+            })),
+            snapshots: Mutex::new(SnapshotManager::default()),
+            index_advisor: Mutex::new(IndexAdvisor::default()),
+            index_advisor_persist: advisor_persist,
+            index_advisor_history: Vec::new(),
+            index_advisor_history_next_id: 1,
+            index_advisor_metrics: Mutex::new(AdvisorMetrics::default()),
+            intent_history: Mutex::new(Vec::new()),
+            dp_budgets: HashMap::new(),
+            dp_audit: Vec::new(),
+            dp_audit_next_id: 1,
+            oblivious_policies: HashMap::new(),
+            forensic_chain: Vec::new(),
+            forensic_next_id: 1,
+            merge_policies: HashMap::new(),
+            merge_wasm_registry: HashMap::new(),
+            views: HashMap::new(),
+            edge_coverage: HashMap::new(),
+            schema_versions: HashMap::new(),
+            schema_changes: Vec::new(),
+            schema_changes_next_id: 1,
+        };
+
+        engine.load_tables_best_effort();
+        engine.load_changes_best_effort();
+        engine.load_prepared_best_effort();
+        engine.load_snapshots_best_effort();
+        engine.load_dp_best_effort();
+        engine.load_oblivious_best_effort();
+        engine.load_forensic_best_effort();
+        engine.load_merge_policies_best_effort();
+        engine.load_merge_wasm_registry_best_effort();
+        engine.load_views_best_effort();
+        engine.load_schema_versions_best_effort();
+        engine.load_schema_changes_best_effort();
+        engine.load_advisor_best_effort();
+        engine.restore_advisor_indexes();
+
+        Ok(engine)
+    }
+
+    pub fn list_databases(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.catalog.databases.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
+        self.catalog
+            .databases
+            .entry(db.to_string())
+            .or_insert_with(Database::default);
+        self.persist_catalog()
+    }
+
+    pub fn list_tables(&self, db: &str) -> anyhow::Result<Vec<String>> {
+        let Some(d) = self.catalog.databases.get(db) else {
+            anyhow::bail!("database not found: {db}");
+        };
+        let mut v: Vec<String> = d.tables.keys().cloned().collect();
+        v.sort();
+        Ok(v)
+    }
+
+    pub fn create_table(
+        &mut self,
+        db: &str,
+        table: &str,
+        columns: Vec<ColumnSchema>,
+        primary_key: Vec<String>,
+        if_not_exists: bool,
+        compat_mysql: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.create_database(db)?;
+        let d = self.catalog.databases.get_mut(db).expect("db just ensured");
+
+        if d.tables.contains_key(table) {
+            if if_not_exists {
+                return Ok(());
+            }
+            anyhow::bail!("table already exists: {db}.{table}");
+        }
+
+        let mut auto_inc_next = HashMap::new();
+        for c in columns.iter() {
+            if c.auto_increment {
+                auto_inc_next.insert(c.name.clone(), 1u64);
+            }
+        }
+
+        d.tables.insert(
+            table.to_string(),
+            TableSchema {
+                columns,
+                primary_key,
+                compat_mysql,
+                table_version: 0,
+                auto_inc_next,
+            },
+        );
+
+        self.tables.insert(
+            TableKey {
+                db: db.to_string(),
+                table: table.to_string(),
+            },
+            TableData::default(),
+        );
+
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+        self.set_schema_version(&key, 1);
+        self.persist_schema_versions_best_effort();
+
+        self.persist_catalog()?;
+        self.persist_table(db, table)
+    }
+
+    pub fn describe_table(&self, db: &str, table: &str) -> anyhow::Result<serde_json::Value> {
+        let schema = self.get_schema(db, table)?;
+        let columns: Vec<serde_json::Value> = schema
+            .columns
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "type": c.r#type,
+                    "nullable": c.nullable,
+                    "auto_increment": c.auto_increment,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "db": db,
+            "table": table,
+            "columns": columns,
+            "primary_key": schema.primary_key,
+            "indexes": [],
+            "compat_mysql": schema.compat_mysql,
+        }))
+    }
+
+    pub fn schema_propose_change(
+        &mut self,
+        params: SchemaProposeChangeParams,
+    ) -> anyhow::Result<SchemaProposeChangeResult> {
+        if params.changes.is_empty() {
+            anyhow::bail!("invalid_request: changes must not be empty");
+        }
+        let _schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let current_version = self.schema_version_for(&key);
+        if params.base_version > current_version {
+            anyhow::bail!("invalid_request: base_version is ahead of current");
+        }
+
+        let mut seen = HashSet::new();
+        for change in params.changes.iter() {
+            match change {
+                SchemaChangeOp::AddColumn {
+                    name,
+                    nullable,
+                    default,
+                    ..
+                } => {
+                    if !seen.insert(name.clone()) {
+                        anyhow::bail!("invalid_request: duplicate column change");
+                    }
+                    if !*nullable && default.is_none() {
+                        anyhow::bail!("invalid_request: non-null column requires default");
+                    }
+                }
+            }
+        }
+
+        let id = format!("sch_{}", self.schema_changes_next_id);
+        self.schema_changes_next_id = self.schema_changes_next_id.saturating_add(1);
+        self.schema_changes.push(SchemaChangeEntry {
+            id: id.clone(),
+            table: BaseTableRef {
+                db: params.table.db.clone(),
+                table: params.table.table.clone(),
+                r#as: None,
+            },
+            base_version: params.base_version,
+            changes: params.changes,
+            message: params.message,
+            created_at_ms: now_millis(),
+            status: "pending".to_string(),
+            applied_at_ms: None,
+        });
+        self.persist_schema_changes_best_effort();
+
+        Ok(SchemaProposeChangeResult {
+            change_id: id,
+            status: "pending".to_string(),
+        })
+    }
+
+    pub fn schema_merge_status(
+        &self,
+        params: SchemaMergeStatusParams,
+    ) -> anyhow::Result<SchemaMergeStatusResult> {
+        let schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let current_version = self.schema_version_for(&key);
+
+        let mut pending: Vec<&SchemaChangeEntry> = self
+            .schema_changes
+            .iter()
+            .filter(|c| {
+                c.status == "pending"
+                    && c.table.db == params.table.db
+                    && c.table.table == params.table.table
+            })
+            .collect();
+        pending.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
+
+        let mut conflicts = Vec::new();
+        let mut merge_plan = Vec::new();
+        let mut seen_adds: HashMap<String, (SchemaChangeOp, String)> = HashMap::new();
+
+        for change in pending.iter() {
+            let mut conflict: Option<String> = None;
+
+            if change.base_version > current_version {
+                conflict = Some("future_base_version".to_string());
+            }
+
+            if conflict.is_none() {
+                for op in change.changes.iter() {
+                    match op {
+                        SchemaChangeOp::AddColumn { name, .. } => {
+                            if schema.columns.iter().any(|c| c.name == *name) {
+                                conflict = Some("column_exists".to_string());
+                                break;
+                            }
+                            if let Some((prev, prev_id)) = seen_adds.get(name) {
+                                if prev == op {
+                                    conflict = Some("duplicate_change".to_string());
+                                } else {
+                                    conflict = Some(format!("column_conflict:{prev_id}"));
+                                }
+                                break;
+                            }
+                            seen_adds.insert(name.clone(), (op.clone(), change.id.clone()));
+                        }
+                    }
+                }
+            }
+
+            if let Some(reason) = conflict {
+                conflicts.push(SchemaChangeConflict {
+                    change_id: change.id.clone(),
+                    reason,
+                });
+            } else {
+                merge_plan.push(change.id.clone());
+            }
+        }
+
+        let pending_summaries = pending
+            .iter()
+            .map(|change| SchemaChangeSummary {
+                change_id: change.id.clone(),
+                base_version: change.base_version,
+                changes: change.changes.clone(),
+                status: change.status.clone(),
+                created_at_ms: change.created_at_ms,
+                message: change.message.clone(),
+            })
+            .collect();
+
+        Ok(SchemaMergeStatusResult {
+            table: params.table,
+            current_version,
+            pending: pending_summaries,
+            conflicts,
+            merge_plan,
+        })
+    }
+
+    pub fn schema_apply_merge(
+        &mut self,
+        params: SchemaApplyMergeParams,
+    ) -> anyhow::Result<SchemaApplyMergeResult> {
+        let status = self.schema_merge_status(SchemaMergeStatusParams {
+            table: params.table.clone(),
+        })?;
+        let mut conflicts = Vec::new();
+        let mut applied = Vec::new();
+
+        let target_ids = params
+            .change_ids
+            .unwrap_or_else(|| status.merge_plan.clone());
+        let plan_set: HashSet<String> = status.merge_plan.iter().cloned().collect();
+        let conflict_map: HashMap<String, String> = status
+            .conflicts
+            .iter()
+            .map(|c| (c.change_id.clone(), c.reason.clone()))
+            .collect();
+
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let current_version = self.schema_version_for(&key);
+        let mut next_version = current_version;
+
+        for change_id in target_ids.into_iter() {
+            if !plan_set.contains(&change_id) {
+                let reason = conflict_map
+                    .get(&change_id)
+                    .cloned()
+                    .unwrap_or_else(|| "not_eligible".to_string());
+                conflicts.push(SchemaChangeConflict { change_id, reason });
+                continue;
+            }
+
+            let idx = match self
+                .schema_changes
+                .iter()
+                .position(|c| c.id == change_id && c.status == "pending")
+            {
+                Some(idx) => idx,
+                None => {
+                    conflicts.push(SchemaChangeConflict {
+                        change_id,
+                        reason: "not_found".to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            let change = self.schema_changes[idx].clone();
+            let (schema, tdata) = self.get_table_mut(&params.table)?;
+            for op in change.changes.iter() {
+                apply_schema_change(schema, tdata, op)?;
+            }
+            bump_table_version(schema);
+            self.persist_table(&params.table.db, &params.table.table)?;
+            self.persist_catalog()?;
+
+            self.schema_changes[idx].status = "applied".to_string();
+            self.schema_changes[idx].applied_at_ms = Some(now_millis());
+            applied.push(change.id.clone());
+            next_version = next_version.saturating_add(1);
+        }
+
+        if !applied.is_empty() {
+            self.set_schema_version(&key, next_version);
+            self.persist_schema_versions_best_effort();
+            self.persist_schema_changes_best_effort();
+        }
+
+        Ok(SchemaApplyMergeResult {
+            applied,
+            conflicts,
+            new_version: self.schema_version_for(&key),
+        })
+    }
+
+    pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
+        let (_schema, tdata) = self.get_table(table)?;
+
+        let key = pk_key(&pk);
+        let Some(&idx) = tdata.pk_index.get(&key) else {
+            anyhow::bail!("not_found");
+        };
+
+        let entry = &tdata.rows[idx];
+        if entry.deleted {
+            anyhow::bail!("not_found");
+        }
+
+        if let Ok(mut store) = self.value_store.lock() {
+            record_value_store_lookups(&mut store, &entry.row);
+        }
+        if let Some(padding) = self.oblivious_padding_for(table, 1) {
+            let dummy_total = padding.dummy_rows + padding.dummy_value_lookups;
+            self.oblivious_dummy_lookups(table, dummy_total, "get");
+        }
+
+        let etag = row_etag(&entry.row, entry.version);
+        Ok(DataGetResult {
+            row: entry.row.clone(),
+            etag,
+        })
+    }
+
+    pub fn data_insert(
+        &mut self,
+        table: &BaseTableRef,
+        rows: Vec<RowObject>,
+        returning: Option<Vec<String>>,
+    ) -> anyhow::Result<WriteResult> {
+        let mut last_insert_id = 0u64;
+        let mut affected = 0u64;
+        let mut returning_rows: Vec<serde_json::Value> = Vec::new();
+        let mut change_pks: Vec<Vec<Lit>> = Vec::new();
+        let mut intern_items: Vec<ValueStoreItem> = Vec::new();
+        let mut snapshot_rows: Vec<RowObject> = Vec::new();
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+
+            for mut row in rows {
+                // Fill missing cols and apply auto-increment.
+                apply_defaults_and_autoinc(schema, &mut row, &mut last_insert_id)?;
+                if let Some(col) = not_null_violation(schema, &row) {
+                    anyhow::bail!("invalid_request: null value for non-null column {col}");
+                }
+
+                // Build PK
+                let pk = extract_pk(schema, &row)?;
+                let pk_key_s = pk_key(&pk);
+                if tdata.pk_index.contains_key(&pk_key_s) {
+                    anyhow::bail!("conflict");
+                }
+
+                let version = next_row_version(schema);
+                let idx = tdata.rows.len();
+                tdata.rows.push(RowEntry {
+                    row: row.clone(),
+                    version,
+                    deleted: false,
+                });
+                tdata.pk_index.insert(pk_key_s, idx);
+
+                change_pks.push(pk);
+                collect_value_store_items(&row, &mut intern_items);
+                snapshot_rows.push(row.clone());
+                affected += 1;
+
+                if let Some(cols) = returning.as_ref() {
+                    let mut out = serde_json::Map::new();
+                    for c in cols {
+                        if let Some(v) = row.get(c) {
+                            out.insert(c.clone(), serde_json::to_value(v)?);
+                        }
+                    }
+                    returning_rows.push(serde_json::Value::Object(out));
+                }
+            }
+
+            bump_table_version(schema);
+        }
+
+        if !intern_items.is_empty() {
+            if let Ok(mut store) = self.value_store.lock() {
+                store_value_items(&mut store, intern_items);
+            }
+        }
+
+        if self.apply_snapshot_upserts(table, &snapshot_rows) {
+            self.persist_snapshots_best_effort();
+        }
+
+        for pk in change_pks {
+            self.emit_change(&table.db, &table.table, "insert", Some(pk));
+        }
+        self.persist_catalog()?;
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_changes_best_effort();
+
+        Ok(WriteResult {
+            affected,
+            last_insert_id,
+            returning: if returning_rows.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(returning_rows))
+            },
+            etag: None,
+        })
+    }
+
+    pub fn data_update(
+        &mut self,
+        table: &BaseTableRef,
+        predicate: &Expr,
+        set: &RowObject,
+        limit: Option<u64>,
+        if_match: Option<&str>,
+        args: &[Lit],
+    ) -> anyhow::Result<WriteResult> {
+        let mut affected = 0u64;
+        let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
+        let mut intern_items: Vec<ValueStoreItem> = Vec::new();
+        let mut snapshot_rows: Vec<RowObject> = Vec::new();
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+
+            for entry in tdata.rows.iter_mut() {
+                if entry.deleted {
+                    continue;
+                }
+                if !eval_predicate(predicate, &entry.row, None, args)? {
+                    continue;
+                }
+
+                if let Some(tag) = if_match {
+                    let current = row_etag(&entry.row, entry.version);
+                    if current != tag {
+                        anyhow::bail!("conflict");
+                    }
+                }
+
+                let mut new_row = entry.row.clone();
+                for (k, v) in set.iter() {
+                    new_row.insert(k.clone(), v.clone());
+                }
+                if let Some(col) = not_null_violation(schema, &new_row) {
+                    anyhow::bail!("invalid_request: null value for non-null column {col}");
+                }
+                entry.row = new_row;
+                entry.version = next_row_version(schema);
+                affected += 1;
+
+                let pk = extract_pk(schema, &entry.row).ok();
+                change_pks.push(pk);
+                collect_value_store_items(&entry.row, &mut intern_items);
+                snapshot_rows.push(entry.row.clone());
+
+                if let Some(lim) = limit {
+                    if affected >= lim {
+                        break;
+                    }
+                }
+            }
+
+            if affected > 0 {
+                bump_table_version(schema);
+            }
+        }
+
+        if !intern_items.is_empty() {
+            if let Ok(mut store) = self.value_store.lock() {
+                store_value_items(&mut store, intern_items);
+            }
+        }
+
+        if self.apply_snapshot_upserts(table, &snapshot_rows) {
+            self.persist_snapshots_best_effort();
+        }
+
+        for pk in change_pks {
+            self.emit_change(&table.db, &table.table, "update", pk);
+        }
+
+        if affected > 0 {
+            self.persist_catalog()?;
+            self.persist_table(&table.db, &table.table)?;
+            self.persist_changes_best_effort();
+        }
+
+        Ok(WriteResult {
+            affected,
+            last_insert_id: 0,
+            returning: None,
+            etag: None,
+        })
+    }
+
+    pub fn data_delete(
+        &mut self,
+        table: &BaseTableRef,
+        predicate: &Expr,
+        limit: Option<u64>,
+        args: &[Lit],
+    ) -> anyhow::Result<WriteResult> {
+        let mut affected = 0u64;
+        let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
+        let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+
+            for entry in tdata.rows.iter_mut() {
+                if entry.deleted {
+                    continue;
+                }
+                if !eval_predicate(predicate, &entry.row, None, args)? {
+                    continue;
+                }
+                entry.deleted = true;
+                entry.version = next_row_version(schema);
+                affected += 1;
+                let pk = extract_pk(schema, &entry.row).ok();
+                if let Some(ref pk) = pk {
+                    snapshot_pks.push(pk.clone());
+                }
+                change_pks.push(pk);
+                if let Some(lim) = limit {
+                    if affected >= lim {
+                        break;
+                    }
+                }
+            }
+
+            if affected > 0 {
+                bump_table_version(schema);
+            }
+        }
+
+        for pk in change_pks {
+            self.emit_change(&table.db, &table.table, "delete", pk);
+        }
+
+        if self.apply_snapshot_deletes(table, &snapshot_pks) {
+            self.persist_snapshots_best_effort();
+        }
+
+        if affected > 0 {
+            self.persist_catalog()?;
+            self.persist_table(&table.db, &table.table)?;
+            self.persist_changes_best_effort();
+        }
+
+        Ok(WriteResult {
+            affected,
+            last_insert_id: 0,
+            returning: None,
+            etag: None,
+        })
+    }
+
+    pub fn query_prepare(&mut self, query: Query) -> anyhow::Result<PreparedQuery> {
+        let canonical = serde_json::to_value(&query)?;
+        let fp = fingerprint_json(&canonical);
+        let id = format!("q_{:016x}", self.next_prepared_id);
+        self.next_prepared_id += 1;
+
+        let pq = PreparedQuery {
+            id: id.clone(),
+            query,
+            canonical_json: canonical,
+            fingerprint: fp,
+        };
+        self.prepared.insert(id.clone(), pq.clone());
+        self.persist_prepared_best_effort();
+        Ok(pq)
+    }
+
+    pub fn get_prepared(&self, id: &str) -> Option<PreparedQuery> {
+        self.prepared.get(id).cloned()
+    }
+
+    pub fn build_column_snapshot(
+        &self,
+        db: &str,
+        table: &str,
+        columns: Option<Vec<String>>,
+        snapshot_ts: u64,
+    ) -> anyhow::Result<()> {
+        let columns = columns.unwrap_or_default();
+        let snapshot =
+            self.build_column_snapshot_internal(db, table, columns, snapshot_ts, None)?;
+        if let Ok(mut manager) = self.snapshots.lock() {
+            manager.insert_snapshot(snapshot);
+        }
+        self.persist_snapshots_best_effort();
+        Ok(())
+    }
+
+    pub fn advisor_index_synthesize(
+        &self,
+        params: AdvisorIndexSynthesizeParams,
+    ) -> anyhow::Result<AdvisorIndexSynthesizeResult> {
+        let schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+        let min_queries = params.min_queries.unwrap_or(INDEX_ADVISOR_MIN_QUERIES);
+        let min_rows = params.min_rows.unwrap_or(INDEX_ADVISOR_MIN_ROWS);
+
+        let suppressed: HashSet<String> = self
+            .index_advisor_history
+            .iter()
+            .filter(|entry| {
+                entry.table.db == key.db
+                    && entry.table.table == key.table
+                    && matches!(entry.action.as_str(), "apply" | "dismiss")
+            })
+            .map(|entry| entry.suggestion_id.clone())
+            .collect();
+
+        let mut suggestions = if let Ok(advisor) = self.index_advisor.lock() {
+            advisor.synthesize(&key, schema, limit, min_queries, min_rows)
+        } else {
+            Vec::new()
+        };
+        if !suppressed.is_empty() {
+            suggestions.retain(|s| {
+                s.id.as_ref()
+                    .map(|id| !suppressed.contains(id))
+                    .unwrap_or(true)
+            });
+        }
+        if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
+            metrics.suggestions_total = metrics
+                .suggestions_total
+                .saturating_add(suggestions.len() as u64);
+        }
+
+        Ok(AdvisorIndexSynthesizeResult {
+            table: params.table,
+            suggestions,
+        })
+    }
+
+    pub fn advisor_index_apply(
+        &mut self,
+        params: AdvisorIndexApplyParams,
+    ) -> anyhow::Result<AdvisorIndexApplyResult> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+        if params.columns.is_empty() {
+            anyhow::bail!("invalid_request: columns must not be empty");
+        }
+        let columns = dedup_in_order(&params.columns);
+        let mut include = dedup_in_order(&params.include);
+        include.retain(|col| !columns.contains(col));
+        validate_columns(schema, &columns)?;
+        validate_columns(schema, &include)?;
+
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let suggestion_id = advisor_suggestion_id(&key, &columns, &include);
+        let status = register_secondary_index(schema, tdata, &columns, &include)?;
+        let action_id = format!("adv_{:016x}", self.index_advisor_history_next_id);
+        self.index_advisor_history_next_id += 1;
+
+        self.index_advisor_history.push(AdvisorHistoryEntry {
+            id: action_id.clone(),
+            suggestion_id,
+            table: BaseTableRef {
+                db: params.table.db,
+                table: params.table.table,
+                r#as: None,
+            },
+            columns,
+            include,
+            action: "apply".to_string(),
+            created_at_ms: now_millis(),
+            note: params.note,
+        });
+        self.persist_advisor_history_best_effort();
+        if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
+            metrics.applied_total = metrics.applied_total.saturating_add(1);
+        }
+
+        Ok(AdvisorIndexApplyResult {
+            accepted: true,
+            action_id,
+            status: Some(
+                match status {
+                    IndexRegistrationStatus::Built => "built",
+                    IndexRegistrationStatus::Rebuilt => "rebuilt",
+                    IndexRegistrationStatus::Exists => "exists",
+                }
+                .to_string(),
+            ),
+        })
+    }
+
+    pub fn advisor_index_dismiss(
+        &mut self,
+        params: AdvisorIndexDismissParams,
+    ) -> anyhow::Result<AdvisorIndexDismissResult> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+        if params.columns.is_empty() {
+            anyhow::bail!("invalid_request: columns must not be empty");
+        }
+        let columns = dedup_in_order(&params.columns);
+        let mut include = dedup_in_order(&params.include);
+        include.retain(|col| !columns.contains(col));
+        validate_columns(schema, &columns)?;
+        validate_columns(schema, &include)?;
+
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let suggestion_id = advisor_suggestion_id(&key, &columns, &include);
+        drop_secondary_index(tdata, &columns, &include)?;
+        let action_id = format!("adv_{:016x}", self.index_advisor_history_next_id);
+        self.index_advisor_history_next_id += 1;
+
+        self.index_advisor_history.push(AdvisorHistoryEntry {
+            id: action_id.clone(),
+            suggestion_id,
+            table: BaseTableRef {
+                db: params.table.db,
+                table: params.table.table,
+                r#as: None,
+            },
+            columns,
+            include,
+            action: "dismiss".to_string(),
+            created_at_ms: now_millis(),
+            note: params.note,
+        });
+        self.persist_advisor_history_best_effort();
+        if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
+            metrics.rejected_total = metrics.rejected_total.saturating_add(1);
+        }
+
+        Ok(AdvisorIndexDismissResult {
+            dismissed: true,
+            action_id,
+        })
+    }
+
+    pub fn advisor_history(
+        &self,
+        params: AdvisorHistoryParams,
+    ) -> anyhow::Result<AdvisorHistoryResult> {
+        let limit = params.limit.unwrap_or(50).clamp(1, 500) as usize;
+        let mut entries: Vec<AdvisorHistoryEntry> = self
+            .index_advisor_history
+            .iter()
+            .filter(|entry| {
+                if let Some(table) = params.table.as_ref() {
+                    entry.table.db == table.db && entry.table.table == table.table
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        entries.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        if entries.len() > limit {
+            entries.truncate(limit);
+        }
+        Ok(AdvisorHistoryResult { entries })
+    }
+
+    pub fn advisor_metrics_snapshot(&self) -> AdvisorMetrics {
+        self.index_advisor_metrics
+            .lock()
+            .map(|metrics| metrics.clone())
+            .unwrap_or_default()
+    }
+
+    fn resolve_intent_samples(
+        &self,
+        samples: Option<Vec<MigrationIntentSample>>,
+        window_ms: Option<u64>,
+    ) -> Vec<MigrationIntentSample> {
+        let mut samples = if let Some(samples) = samples {
+            samples
+        } else if let Ok(history) = self.intent_history.lock() {
+            history
+                .iter()
+                .map(|sample| MigrationIntentSample {
+                    query: sample.query.clone(),
+                    args: sample.args.clone(),
+                    at_ms: Some(sample.ts_ms),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let window_ms = window_ms.unwrap_or(0);
+        if window_ms > 0 {
+            let now = now_millis();
+            samples.retain(|sample| {
+                sample
+                    .at_ms
+                    .map(|at| now.saturating_sub(at) <= window_ms)
+                    .unwrap_or(true)
+            });
+        }
+
+        samples
+    }
+
+    pub fn migration_intent_report(
+        &self,
+        params: MigrationIntentReportParams,
+    ) -> anyhow::Result<MigrationIntentReportResult> {
+        let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+        let samples = self.resolve_intent_samples(params.samples, params.window_ms);
+
+        let mut suggestions = detect_migration_intents(&samples);
+        suggestions.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if suggestions.len() > limit {
+            suggestions.truncate(limit);
+        }
+
+        Ok(MigrationIntentReportResult { suggestions })
+    }
+
+    pub fn migration_rewrite_preview(
+        &self,
+        params: MigrationRewritePreviewParams,
+    ) -> anyhow::Result<MigrationRewritePreviewResult> {
+        let limit = params.limit.unwrap_or(10).clamp(1, 100) as usize;
+        let samples = self.resolve_intent_samples(params.samples, params.window_ms);
+        let suggestions = detect_migration_intents(&samples);
+
+        let mut rewrites = Vec::new();
+        for suggestion in suggestions.into_iter() {
+            rewrites.push(rewrite_preview_from_suggestion(&suggestion, &samples));
+        }
+
+        rewrites.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if rewrites.len() > limit {
+            rewrites.truncate(limit);
+        }
+
+        Ok(MigrationRewritePreviewResult { rewrites })
+    }
+
+    fn record_intent_sample(&self, query: &Query, args: &[Lit]) {
+        let QueryBody::Select { .. } = query.body.as_ref() else {
+            return;
+        };
+        let Ok(mut history) = self.intent_history.lock() else {
+            return;
+        };
+        history.push(IntentQuerySample {
+            ts_ms: now_millis(),
+            query: query.clone(),
+            args: args.to_vec(),
+        });
+        if history.len() > INTENT_HISTORY_MAX {
+            let overflow = history.len() - INTENT_HISTORY_MAX;
+            history.drain(0..overflow);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_select(
+        &self,
+        query: &Query,
+        args: &[Lit],
+        result_format: ResultFormat,
+        want_etag: bool,
+        if_none_match: Option<&str>,
+        min_causality: Option<&CausalityToken>,
+        wire_known_valueids: Option<&HashSet<String>>,
+        wire_skeinpack: bool,
+    ) -> anyhow::Result<QuerySelectResult> {
+        self.record_intent_sample(query, args);
+
+        // Conservative dependency set: all tables referenced by FROM.
+        let deps = self.dependencies_for_query(query)?;
+        if let Some(min) = min_causality {
+            ensure_min_causality(min, &deps)?;
+        }
+        let causality = Some(build_causality_token(&deps));
+        let etag = if want_etag {
+            Some(build_query_etag(query, args, &deps))
+        } else {
+            None
+        };
+
+        if let (Some(tag), Some(inm)) = (etag.as_deref(), if_none_match) {
+            if tag == inm {
+                return Ok(QuerySelectResult {
+                    etag: Some(tag.to_string()),
+                    not_modified: true,
+                    data: None,
+                    deps: Some(serde_json::json!({"tables": deps})),
+                    causality,
+                    wire: None,
+                });
+            }
+        }
+
+        // Try cache first.
+        let (columns, rows) = if let Some(etag) = etag.as_deref() {
+            let cached = {
+                let cache = self.cached_select.lock().unwrap();
+                cache.get(etag).cloned()
+            };
+            if let Some(hit) = cached {
+                (hit.columns, hit.rows)
+            } else {
+                // Attempt a patchable execution (single-table with PK) so we can
+                // later compute query-scoped deltas (`query.patch`) from cached results.
+                let (c, r, keys) = match execute_select_with_keys(self, query, args) {
+                    Ok((c, r, keys)) => (c, r, Some(keys)),
+                    Err(e) if e.to_string() == "not_patchable" => {
+                        let (c, r) = execute_select(self, query, args)?;
+                        (c, r, None)
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                {
+                    let mut cache = self.cached_select.lock().unwrap();
+                    cache.insert(
+                        etag.to_string(),
+                        CachedSelect {
+                            columns: c.clone(),
+                            rows: r.clone(),
+                            keys,
+                        },
+                    );
+                }
+                (c, r)
+            }
+        } else {
+            execute_select(self, query, args)?
+        };
+
+        // Format output.
+        let (data_json, wire_json) = match (result_format, wire_skeinpack) {
+            (ResultFormat::SkeinpackV1, true) => {
+                let known = wire_known_valueids.cloned().unwrap_or_default();
+                let (packet, wire) = encode_skeinpack_v1(&columns, &rows, &known)?;
+                (packet, Some(wire))
+            }
+            (ResultFormat::WasmBatchV1, _) => (wasm_batch_result(&columns, &rows)?, None),
+            (ResultFormat::ObjectsJson, _) => {
+                let objs = rows_to_objects(&columns, &rows)?;
+                (objs, None)
+            }
+            _ => {
+                let rs = serde_json::json!({
+                    "columns": columns,
+                    "rows": rows,
+                });
+                (rs, None)
+            }
+        };
+
+        Ok(QuerySelectResult {
+            etag,
+            not_modified: false,
+            data: Some(data_json),
+            deps: Some(serde_json::json!({"tables": deps})),
+            causality,
+            wire: wire_json,
+        })
+    }
+
+    /// Compute a query-scoped delta patch between a previously-seen result (base_etag)
+    /// and the current result.
+    ///
+    /// This is a traffic-reduction primitive that complements ETag validators:
+    /// - If unchanged: returns `not_modified=true`
+    /// - If changed slightly: returns small `added/updated/removed` sets
+    /// - If the server cannot compute a patch (cache eviction/restart): returns `reset=true`
+    ///   and (optionally) includes `full` so the client can replace state.
+    pub fn query_patch(
+        &self,
+        query: &Query,
+        args: &[Lit],
+        result_format: ResultFormat,
+        base_etag: Option<&str>,
+        client_state: Option<&ClientStateSummary>,
+        wire_known_valueids: Option<&HashSet<String>>,
+        wire_skeinpack: bool,
+        include_full: bool,
+    ) -> anyhow::Result<QuerySelectResult> {
+        // Same dependency signature as query.select.
+        let deps = self.dependencies_for_query(query)?;
+        let causality = Some(build_causality_token(&deps));
+        let etag = Some(build_query_etag(query, args, &deps));
+
+        // Fast path: already up-to-date.
+        if let (Some(tag), Some(base)) = (etag.as_deref(), base_etag) {
+            if tag == base {
+                return Ok(QuerySelectResult {
+                    etag: Some(tag.to_string()),
+                    not_modified: true,
+                    data: None,
+                    deps: Some(serde_json::json!({"tables": deps})),
+                    causality: causality.clone(),
+                    wire: None,
+                });
+            }
+        }
+
+        let tag = etag.as_deref().unwrap_or("W/\"q:0\"").to_string();
+
+        // Current snapshot (patch requires row identity => single-table SELECT with PK).
+        let (columns, cur_rows, cur_keys) = self.get_or_exec_patchable(&tag, query, args)?;
+
+        // Attach window metadata when LIMIT/OFFSET is used.
+        let window = query.limit.as_ref().map(|l| WindowInfo {
+            limit: l.limit,
+            offset: l.offset,
+        });
+
+        // Helper: stable row fingerprint for update detection.
+        let row_fp = |row: &Vec<Lit>| -> String {
+            let bytes = serde_json::to_vec(row).unwrap_or_default();
+            let id = value_id(&bytes);
+            hex16(&id)
+        };
+
+        // Patch cache: if we already computed (base -> current), return it.
+        if let Some(base) = base_etag {
+            let key = PatchCacheKey {
+                base: base.to_string(),
+                cur: tag.clone(),
+            };
+            if let Some(hit) = self.cached_patch.lock().unwrap().get(&key).cloned() {
+                let (data_json, wire_json) = self.render_patch_obj(
+                    false,
+                    base_etag,
+                    Some("patch_cache"),
+                    &hit.columns,
+                    &cur_rows,
+                    &hit,
+                    result_format,
+                    wire_known_valueids,
+                    wire_skeinpack,
+                    false,
+                )?;
+
+                return Ok(QuerySelectResult {
+                    etag,
+                    not_modified: false,
+                    data: Some(data_json),
+                    deps: Some(serde_json::json!({"tables": deps})),
+                    causality: causality.clone(),
+                    wire: wire_json,
+                });
+            }
+        }
+
+        // Build an old-state view from either:
+        //  1) server cached base snapshot (ETag-keyed)
+        //  2) client_state.rows (pk + optional fp)
+        //  3) client_state.keys_bloom (add-only mode; partial)
+        let mut base_source: Option<&'static str> = None;
+
+        let mut old_pos: HashMap<String, usize> = HashMap::new();
+        let mut old_pk: HashMap<String, Vec<Lit>> = HashMap::new();
+        let mut old_fp: HashMap<String, String> = HashMap::new();
+        let mut have_old = false;
+
+        let mut partial = false;
+        let mut removed_unknown = false;
+        let mut updated_unknown = false;
+
+        let mut reset = false;
+        let mut reset_reason: Option<String> = None;
+
+        // 1) Try server cache by base_etag.
+        if let Some(base) = base_etag {
+            if let Some(hit) = self.cached_select.lock().unwrap().get(base).cloned() {
+                if let Some(keys) = hit.keys.clone() {
+                    base_source = Some("etag_cache");
+                    have_old = true;
+                    for (idx, (pk, row)) in keys.iter().zip(hit.rows.iter()).enumerate() {
+                        let k = pk_key(pk);
+                        old_pos.insert(k.clone(), idx);
+                        old_pk.insert(k.clone(), pk.clone());
+                        old_fp.insert(k, row_fp(row));
+                    }
+                }
+            }
+        }
+
+        // 2) Try client_state.rows.
+        if !have_old {
+            if let Some(cs) = client_state {
+                if let Some(rows) = cs.rows.as_ref() {
+                    base_source = Some("client_state");
+                    have_old = true;
+
+                    let mode = cs.mode.as_deref().unwrap_or("strict");
+                    let mut missing_fp = false;
+
+                    for (idx, rs) in rows.iter().enumerate() {
+                        let k = pk_key(&rs.pk);
+                        old_pos.insert(k.clone(), idx);
+                        old_pk.insert(k.clone(), rs.pk.clone());
+                        if let Some(fp) = rs.fp.as_ref() {
+                            old_fp.insert(k, fp.clone());
+                        } else {
+                            missing_fp = true;
+                        }
+                    }
+
+                    if missing_fp && mode == "strict" {
+                        reset = true;
+                        reset_reason = Some("client_state_missing_fp".to_string());
+                    } else if missing_fp {
+                        updated_unknown = true;
+                    }
+                }
+            }
+        }
+
+        // 3) Bloom add-only mode (optimization-only).
+        //    If enabled, we return a partial patch with only rows that are definitely new.
+        //    Updates and removals are marked unknown.
+        let mut bloom_bits: Vec<u8> = Vec::new();
+        let mut bloom_m_bits: u64 = 0;
+        let mut bloom_k: u32 = 0;
+        let mut bloom_salt: Option<String> = None;
+
+        if !have_old && !reset {
+            if let Some(cs) = client_state {
+                if cs.mode.as_deref() == Some("add_only") {
+                    if let Some(bloom_val) = cs.keys_bloom.as_ref() {
+                        #[derive(serde::Deserialize)]
+                        struct BloomSummary {
+                            bits_b64: String,
+                            m_bits: u64,
+                            k: u32,
+                            #[serde(default)]
+                            salt: Option<String>,
+                        }
+
+                        if let Ok(bloom) = serde_json::from_value::<BloomSummary>(bloom_val.clone())
+                        {
+                            use base64::Engine as _;
+                            if let Ok(bits) = base64::engine::general_purpose::STANDARD
+                                .decode(bloom.bits_b64.as_bytes())
+                            {
+                                base_source = Some("client_bloom_add_only");
+                                partial = true;
+                                removed_unknown = true;
+                                updated_unknown = true;
+
+                                bloom_bits = bits;
+                                bloom_m_bits = bloom.m_bits;
+                                bloom_k = bloom.k;
+                                bloom_salt = bloom.salt;
+                            } else {
+                                reset = true;
+                                reset_reason = Some("invalid_bloom".to_string());
+                            }
+                        } else {
+                            reset = true;
+                            reset_reason = Some("invalid_bloom".to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if !have_old && !partial && !reset {
+            reset = true;
+            reset_reason = Some("missing_base_snapshot".to_string());
+        }
+
+        // Delta computation.
+        let mut delta = PatchDelta {
+            columns: columns.clone(),
+            window: window.clone(),
+            added: Vec::new(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            moved: Vec::new(),
+            reorder: None,
+            partial,
+            removed_unknown,
+            updated_unknown,
+            reset_reason: reset_reason.clone(),
+        };
+
+        if !reset {
+            if partial && bloom_m_bits > 0 && bloom_k > 0 {
+                // Partial add-only patch: include rows definitely not present in client's bloom.
+                for (new_i, (pk, row)) in cur_keys.iter().zip(cur_rows.iter()).enumerate() {
+                    let key_bytes = serde_json::to_vec(pk).unwrap_or_default();
+                    if !bloom_maybe_contains(
+                        &bloom_bits,
+                        bloom_m_bits,
+                        bloom_k,
+                        bloom_salt.as_deref(),
+                        &key_bytes,
+                    ) {
+                        delta.added.push(PatchRow {
+                            pk: pk.clone(),
+                            row: row.clone(),
+                            at: new_i,
+                        });
+                    }
+                }
+            } else if have_old {
+                // Exact diff between old and current window.
+                let mut new_seen: HashSet<String> = HashSet::new();
+                let mut common_moves: Vec<(Vec<Lit>, usize, usize, i64)> = Vec::new();
+
+                for (new_i, (pk, row)) in cur_keys.iter().zip(cur_rows.iter()).enumerate() {
+                    let k = pk_key(pk);
+                    new_seen.insert(k.clone());
+
+                    if !old_pos.contains_key(&k) {
+                        delta.added.push(PatchRow {
+                            pk: pk.clone(),
+                            row: row.clone(),
+                            at: new_i,
+                        });
+                        continue;
+                    }
+
+                    let old_i = *old_pos.get(&k).unwrap_or(&new_i);
+                    let diff = new_i as i64 - old_i as i64;
+                    common_moves.push((pk.clone(), old_i, new_i, diff));
+
+                    if !delta.updated_unknown {
+                        if let Some(old_hash) = old_fp.get(&k) {
+                            let cur_hash = row_fp(row);
+                            if *old_hash != cur_hash {
+                                delta.updated.push(PatchRow {
+                                    pk: pk.clone(),
+                                    row: row.clone(),
+                                    at: new_i,
+                                });
+                            }
+                        } else {
+                            delta.updated_unknown = true;
+                        }
+                    }
+                }
+
+                if !delta.removed_unknown {
+                    for (k, pk) in old_pk.iter() {
+                        if !new_seen.contains(k) {
+                            delta.removed.push(pk.clone());
+                        }
+                    }
+                }
+
+                // Reorder/move analysis for ordered windows.
+                if !delta.partial {
+                    // Compute diff mode (shift) among stable rows.
+                    let mut freq: HashMap<i64, usize> = HashMap::new();
+                    for (_pk, _old_i, _new_i, d) in common_moves.iter() {
+                        *freq.entry(*d).or_insert(0) += 1;
+                    }
+
+                    let mut mode_d: i64 = 0;
+                    let mut mode_c: usize = 0;
+                    for (d, c) in freq.into_iter() {
+                        if c > mode_c {
+                            mode_c = c;
+                            mode_d = d;
+                        }
+                    }
+
+                    let denom = common_moves.len().max(1) as f64;
+                    let coverage = mode_c as f64 / denom;
+
+                    if common_moves.len() >= 8 && coverage >= 0.80 && mode_d != 0 {
+                        delta.reorder = Some(ReorderHint {
+                            kind: "shift".to_string(),
+                            delta: mode_d,
+                            coverage,
+                        });
+                    }
+
+                    for (pk, old_i, new_i, d) in common_moves.into_iter() {
+                        if new_i == old_i {
+                            continue;
+                        }
+                        // If we emitted a uniform shift, include only outliers.
+                        if let Some(r) = delta.reorder.as_ref() {
+                            if r.kind == "shift" && d == r.delta {
+                                continue;
+                            }
+                        }
+                        delta.moved.push(PatchMove {
+                            pk,
+                            from: old_i,
+                            to: new_i,
+                        });
+                    }
+
+                    // If reorder is huge and uncompressed, prefer reset to avoid
+                    // sending a move list nearly as large as the full result.
+                    if delta.reorder.is_none() && delta.moved.len() > 512 {
+                        reset = true;
+                        delta.reset_reason = Some("reorder_too_large".to_string());
+                    }
+                }
+            }
+        }
+
+        // Store computed exact patches for reuse.
+        if !reset && !delta.partial {
+            if let Some(base) = base_etag {
+                let key = PatchCacheKey {
+                    base: base.to_string(),
+                    cur: tag.clone(),
+                };
+                let mut cache = self.cached_patch.lock().unwrap();
+                if cache.len() > 4096 {
+                    cache.clear();
+                }
+                cache.insert(key, delta.clone());
+            }
+        }
+
+        let (data_json, wire_json) = self.render_patch_obj(
+            reset,
+            base_etag,
+            base_source,
+            &columns,
+            &cur_rows,
+            &delta,
+            result_format,
+            wire_known_valueids,
+            wire_skeinpack,
+            include_full,
+        )?;
+
+        Ok(QuerySelectResult {
+            etag,
+            not_modified: false,
+            data: Some(data_json),
+            deps: Some(serde_json::json!({"tables": deps})),
+            causality,
+            wire: wire_json,
+        })
+    }
+
+    fn render_patch_obj(
+        &self,
+        reset: bool,
+        base_etag: Option<&str>,
+        base_source: Option<&str>,
+        columns: &Vec<ColumnMeta>,
+        cur_rows: &Vec<Vec<Lit>>,
+        delta: &PatchDelta,
+        result_format: ResultFormat,
+        wire_known_valueids: Option<&HashSet<String>>,
+        wire_skeinpack: bool,
+        include_full: bool,
+    ) -> anyhow::Result<(serde_json::Value, Option<serde_json::Value>)> {
+        let mut patch_obj = serde_json::Map::new();
+
+        patch_obj.insert("reset".to_string(), serde_json::Value::Bool(reset));
+        if let Some(b) = base_etag {
+            patch_obj.insert(
+                "base_etag".to_string(),
+                serde_json::Value::String(b.to_string()),
+            );
+        }
+        if let Some(src) = base_source {
+            patch_obj.insert(
+                "base_source".to_string(),
+                serde_json::Value::String(src.to_string()),
+            );
+        }
+        if reset {
+            if let Some(reason) = delta.reset_reason.as_ref() {
+                patch_obj.insert(
+                    "reset_reason".to_string(),
+                    serde_json::Value::String(reason.clone()),
+                );
+            }
+        }
+        if delta.partial {
+            patch_obj.insert("partial".to_string(), serde_json::Value::Bool(true));
+        }
+        if delta.removed_unknown {
+            patch_obj.insert("removed_unknown".to_string(), serde_json::Value::Bool(true));
+        }
+        if delta.updated_unknown {
+            patch_obj.insert("updated_unknown".to_string(), serde_json::Value::Bool(true));
+        }
+
+        patch_obj.insert(
+            "columns".to_string(),
+            serde_json::to_value(columns).map_err(|e| anyhow::anyhow!(e))?,
+        );
+
+        if let Some(w) = delta.window.as_ref() {
+            patch_obj.insert(
+                "window".to_string(),
+                serde_json::json!({"limit": w.limit, "offset": w.offset}),
+            );
+        }
+
+        if let Some(r) = delta.reorder.as_ref() {
+            patch_obj.insert(
+                "reorder".to_string(),
+                serde_json::json!({"kind": r.kind, "delta": r.delta, "coverage": r.coverage}),
+            );
+        }
+
+        if !delta.moved.is_empty() {
+            let moved = delta
+                .moved
+                .iter()
+                .map(|m| serde_json::json!({"pk": m.pk, "from": m.from, "to": m.to}))
+                .collect::<Vec<_>>();
+            patch_obj.insert("moved".to_string(), serde_json::Value::Array(moved));
+        }
+
+        // removed: always present
+        let removed_json = delta
+            .removed
+            .iter()
+            .map(|pk| serde_json::json!({"pk": pk}))
+            .collect::<Vec<_>>();
+        patch_obj.insert(
+            "removed".to_string(),
+            serde_json::Value::Array(removed_json),
+        );
+
+        let mut wire_json: Option<serde_json::Value> = None;
+
+        // added/updated
+        if matches!(result_format, ResultFormat::ObjectsJson) {
+            let mut added = Vec::new();
+            for pr in delta.added.iter() {
+                added.push(serde_json::json!({
+                    "pk": pr.pk,
+                    "at": pr.at,
+                    "obj": row_to_object(columns, &pr.row).map_err(|e| anyhow::anyhow!(e))?
+                }));
+            }
+            let mut updated = Vec::new();
+            for pr in delta.updated.iter() {
+                updated.push(serde_json::json!({
+                    "pk": pr.pk,
+                    "at": pr.at,
+                    "obj": row_to_object(columns, &pr.row).map_err(|e| anyhow::anyhow!(e))?
+                }));
+            }
+            patch_obj.insert("added".to_string(), serde_json::Value::Array(added));
+            patch_obj.insert("updated".to_string(), serde_json::Value::Array(updated));
+        } else if matches!(result_format, ResultFormat::SkeinpackV1) && wire_skeinpack {
+            let known = wire_known_valueids.cloned().unwrap_or_default();
+            let mut dict = serde_json::Map::new();
+
+            let added_only = delta
+                .added
+                .iter()
+                .map(|r| r.row.clone())
+                .collect::<Vec<_>>();
+            let updated_only = delta
+                .updated
+                .iter()
+                .map(|r| r.row.clone())
+                .collect::<Vec<_>>();
+
+            let enc_added = encode_skeinpack_rows(&added_only, &known, &mut dict)?;
+            let enc_updated = encode_skeinpack_rows(&updated_only, &known, &mut dict)?;
+
+            let mut added = Vec::new();
+            for (pr, enc) in delta.added.iter().zip(enc_added.iter()) {
+                added.push(serde_json::json!({"pk": pr.pk, "at": pr.at, "row": enc}));
+            }
+            let mut updated = Vec::new();
+            for (pr, enc) in delta.updated.iter().zip(enc_updated.iter()) {
+                updated.push(serde_json::json!({"pk": pr.pk, "at": pr.at, "row": enc}));
+            }
+
+            patch_obj.insert("added".to_string(), serde_json::Value::Array(added));
+            patch_obj.insert("updated".to_string(), serde_json::Value::Array(updated));
+            patch_obj.insert("dict".to_string(), serde_json::Value::Object(dict.clone()));
+
+            wire_json = Some(serde_json::json!({
+                "format": "skeinpack_v1",
+                "dict_added": dict.len()
+            }));
+        } else if matches!(result_format, ResultFormat::WasmBatchV1) {
+            let mut added = Vec::new();
+            for (idx, pr) in delta.added.iter().enumerate() {
+                added.push(serde_json::json!({
+                    "pk": pr.pk,
+                    "at": pr.at,
+                    "row_idx": idx
+                }));
+            }
+            let mut updated = Vec::new();
+            for (idx, pr) in delta.updated.iter().enumerate() {
+                updated.push(serde_json::json!({
+                    "pk": pr.pk,
+                    "at": pr.at,
+                    "row_idx": idx
+                }));
+            }
+            patch_obj.insert("added".to_string(), serde_json::Value::Array(added));
+            patch_obj.insert("updated".to_string(), serde_json::Value::Array(updated));
+
+            if !delta.added.is_empty() {
+                let added_rows = delta
+                    .added
+                    .iter()
+                    .map(|r| r.row.clone())
+                    .collect::<Vec<_>>();
+                patch_obj.insert(
+                    "added_batch".to_string(),
+                    wasm_batch_result(columns, &added_rows)?,
+                );
+            }
+            if !delta.updated.is_empty() {
+                let updated_rows = delta
+                    .updated
+                    .iter()
+                    .map(|r| r.row.clone())
+                    .collect::<Vec<_>>();
+                patch_obj.insert(
+                    "updated_batch".to_string(),
+                    wasm_batch_result(columns, &updated_rows)?,
+                );
+            }
+        } else {
+            // rows_json
+            let mut added = Vec::new();
+            for pr in delta.added.iter() {
+                added.push(serde_json::json!({"pk": pr.pk, "at": pr.at, "row": pr.row}));
+            }
+            let mut updated = Vec::new();
+            for pr in delta.updated.iter() {
+                updated.push(serde_json::json!({"pk": pr.pk, "at": pr.at, "row": pr.row}));
+            }
+            patch_obj.insert("added".to_string(), serde_json::Value::Array(added));
+            patch_obj.insert("updated".to_string(), serde_json::Value::Array(updated));
+        }
+
+        // full result on reset, if requested
+        if reset && include_full {
+            let (full_data, full_wire) = match (result_format, wire_skeinpack) {
+                (ResultFormat::SkeinpackV1, true) => {
+                    let known = wire_known_valueids.cloned().unwrap_or_default();
+                    let (packet, wire) = encode_skeinpack_v1(columns, cur_rows, &known)?;
+                    (packet, Some(wire))
+                }
+                (ResultFormat::WasmBatchV1, _) => (wasm_batch_result(columns, cur_rows)?, None),
+                (ResultFormat::ObjectsJson, _) => (rows_to_objects(columns, cur_rows)?, None),
+                _ => (
+                    serde_json::json!({
+                        "columns": columns,
+                        "rows": cur_rows,
+                    }),
+                    None,
+                ),
+            };
+            patch_obj.insert("full".to_string(), full_data);
+            if wire_json.is_none() {
+                wire_json = full_wire;
+            }
+        }
+
+        Ok((serde_json::Value::Object(patch_obj), wire_json))
+    }
+
+    fn get_or_exec_patchable(
+        &self,
+        etag: &str,
+        query: &Query,
+        args: &[Lit],
+    ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
+        // Try cache first.
+        if let Some(hit) = self.cached_select.lock().unwrap().get(etag).cloned() {
+            if let Some(keys) = hit.keys {
+                return Ok((hit.columns, hit.rows, keys));
+            }
+        }
+
+        // Recompute in patchable mode and refresh cache.
+        let (c, r, keys) = execute_select_with_keys(self, query, args)?;
+        self.cached_select.lock().unwrap().insert(
+            etag.to_string(),
+            CachedSelect {
+                columns: c.clone(),
+                rows: r.clone(),
+                keys: Some(keys.clone()),
+            },
+        );
+        Ok((c, r, keys))
+    }
+
+    // -----------------------------
+    // vector.* (research)
+    // -----------------------------
+
+    pub fn vector_insert(
+        &mut self,
+        params: VectorInsertParams,
+    ) -> anyhow::Result<VectorInsertResult> {
+        if params.rows.is_empty() {
+            return Ok(VectorInsertResult {
+                inserted: 0,
+                updated: 0,
+                embedding_ids: Vec::new(),
+            });
+        }
+
+        let mut inserted = 0u64;
+        let mut updated = 0u64;
+        let mut embedding_ids = Vec::new();
+        let mut change_ops: Vec<(Vec<Lit>, &'static str)> = Vec::new();
+        let mut intern_items = Vec::new();
+        let mut snapshot_rows = Vec::new();
+        let mut last_insert_id = 0u64;
+
+        {
+            let (schema, tdata) = self.get_table_mut(&params.table)?;
+            if schema.primary_key.is_empty() {
+                anyhow::bail!("invalid_request: table has no primary key");
+            }
+            let col = schema
+                .columns
+                .iter()
+                .find(|c| c.name == params.column)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("invalid_request: unknown column {}", params.column)
+                })?;
+            if col.r#type.kind != "embedding" {
+                anyhow::bail!("invalid_request: column {} is not embedding", params.column);
+            }
+
+            for row in params.rows.into_iter() {
+                if row.pk.len() != schema.primary_key.len() {
+                    anyhow::bail!("invalid_request: primary key length mismatch");
+                }
+                let _ = embedding_ref(&row.embedding)?;
+
+                let key = pk_key(&row.pk);
+                if let Some(&idx) = tdata.pk_index.get(&key) {
+                    if !params.upsert {
+                        anyhow::bail!("conflict");
+                    }
+                    let entry = &mut tdata.rows[idx];
+                    if entry.deleted {
+                        entry.deleted = false;
+                    }
+                    entry
+                        .row
+                        .insert(params.column.clone(), row.embedding.clone());
+                    entry.version = next_row_version(schema);
+                    updated += 1;
+                    change_ops.push((row.pk.clone(), "update"));
+                    collect_value_store_items(&entry.row, &mut intern_items);
+                    snapshot_rows.push(entry.row.clone());
+                } else {
+                    let mut new_row = RowObject::new();
+                    ensure_pk_values(schema, &row.pk, &mut new_row)?;
+                    new_row.insert(params.column.clone(), row.embedding.clone());
+                    apply_defaults_and_autoinc(schema, &mut new_row, &mut last_insert_id)?;
+
+                    let version = next_row_version(schema);
+                    let idx = tdata.rows.len();
+                    tdata.rows.push(RowEntry {
+                        row: new_row.clone(),
+                        version,
+                        deleted: false,
+                    });
+                    tdata.pk_index.insert(key, idx);
+                    inserted += 1;
+                    change_ops.push((row.pk.clone(), "insert"));
+                    collect_value_store_items(&new_row, &mut intern_items);
+                    snapshot_rows.push(new_row);
+                }
+
+                let embedding_id = embedding_id_for_lit(&row.embedding)?;
+                embedding_ids.push(hex16(&embedding_id));
+            }
+
+            if inserted + updated > 0 {
+                bump_table_version(schema);
+            }
+        }
+
+        if !intern_items.is_empty() {
+            if let Ok(mut store) = self.value_store.lock() {
+                store_value_items(&mut store, intern_items);
+            }
+        }
+
+        if self.apply_snapshot_upserts(&params.table, &snapshot_rows) {
+            self.persist_snapshots_best_effort();
+        }
+
+        for (pk, op) in change_ops {
+            self.emit_change(&params.table.db, &params.table.table, op, Some(pk));
+        }
+
+        if inserted + updated > 0 {
+            self.persist_catalog()?;
+            self.persist_table(&params.table.db, &params.table.table)?;
+            self.persist_changes_best_effort();
+        }
+
+        Ok(VectorInsertResult {
+            inserted,
+            updated,
+            embedding_ids,
+        })
+    }
+
+    pub fn vector_search(&self, params: VectorSearchParams) -> anyhow::Result<VectorSearchResult> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("invalid_request: table has no primary key");
+        }
+        let col = schema
+            .columns
+            .iter()
+            .find(|c| c.name == params.column)
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown column {}", params.column))?;
+        if col.r#type.kind != "embedding" {
+            anyhow::bail!("invalid_request: column {} is not embedding", params.column);
+        }
+
+        let (dims, query_vec, query_model) = embedding_ref(&params.query)?;
+        let metric = parse_vector_metric(params.metric.as_deref())?;
+        let k = params.k.unwrap_or(10).min(1000) as usize;
+        let use_lsh = params.use_lsh.unwrap_or(true);
+
+        if let Some(filter) = params.filter.as_ref() {
+            let mut refs = Vec::new();
+            let mut has_subquery = false;
+            collect_expr_cols(filter, &mut refs, &mut has_subquery);
+            if has_subquery {
+                anyhow::bail!("invalid_request: filter does not support subqueries");
+            }
+            if refs.iter().any(|(_, col)| col == &params.column) {
+                anyhow::bail!("invalid_request: filter cannot reference embedding column");
+            }
+        }
+
+        let query_bucket = embedding_lsh_bucket(query_vec);
+        let include_row = params.include_row.unwrap_or(false);
+        let mut matches = Vec::new();
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get(&params.column) else {
+                continue;
+            };
+            let (row_dims, row_vec, row_model) = match embedding_ref(lit) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if row_dims != dims {
+                anyhow::bail!("invalid_request: embedding dims mismatch");
+            }
+            if let Some(model) = query_model {
+                if row_model != Some(model) {
+                    continue;
+                }
+            }
+            if use_lsh {
+                let bucket = embedding_lsh_bucket(row_vec);
+                if bucket != query_bucket {
+                    continue;
+                }
+            }
+            if let Some(filter) = params.filter.as_ref() {
+                if !eval_predicate(filter, &entry.row, None, &[])? {
+                    continue;
+                }
+            }
+            let score = vector_score(metric, query_vec, row_vec)?;
+            let pk = extract_pk(schema, &entry.row)?;
+            let embedding_id = embedding_id_for_lit(lit)?;
+            matches.push(VectorSearchMatch {
+                pk,
+                score,
+                embedding_id: hex16(&embedding_id),
+                row: if include_row {
+                    Some(entry.row.clone())
+                } else {
+                    None
+                },
+            });
+        }
+
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| pk_key(&a.pk).cmp(&pk_key(&b.pk)))
+        });
+        if matches.len() > k {
+            matches.truncate(k);
+        }
+
+        Ok(VectorSearchResult { matches })
+    }
+
+    pub fn vector_index_status(
+        &self,
+        params: VectorIndexStatusParams,
+    ) -> anyhow::Result<VectorIndexStatusResult> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+        let col = schema
+            .columns
+            .iter()
+            .find(|c| c.name == params.column)
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown column {}", params.column))?;
+        if col.r#type.kind != "embedding" {
+            anyhow::bail!("invalid_request: column {} is not embedding", params.column);
+        }
+
+        let mut vectors = 0u64;
+        let mut buckets = HashSet::new();
+        let mut min_bucket: Option<u64> = None;
+        let mut max_bucket: Option<u64> = None;
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get(&params.column) else {
+                continue;
+            };
+            let (_, row_vec, _) = match embedding_ref(lit) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let bucket = embedding_lsh_bucket(row_vec);
+            vectors += 1;
+            buckets.insert(bucket);
+            min_bucket = Some(min_bucket.map_or(bucket, |v| v.min(bucket)));
+            max_bucket = Some(max_bucket.map_or(bucket, |v| v.max(bucket)));
+        }
+
+        Ok(VectorIndexStatusResult {
+            table: params.table,
+            column: params.column,
+            vectors,
+            buckets: buckets.len() as u64,
+            min_bucket,
+            max_bucket,
+        })
+    }
+
+    // -----------------------------
+    // ai.* (research)
+    // -----------------------------
+
+    pub fn ai_autoparam_classify(
+        &self,
+        params: AiAutoparamClassifyParams,
+    ) -> anyhow::Result<AiAutoparamClassifyResult> {
+        if params.literals.is_empty() {
+            anyhow::bail!("invalid_request: literals is required");
+        }
+
+        let mut labels = Vec::with_capacity(params.literals.len());
+        for (idx, lit) in params.literals.iter().enumerate() {
+            labels.push(classify_autoparam_literal(
+                self,
+                idx as u64,
+                lit,
+                params.db.as_deref(),
+                params.rules.as_ref(),
+            ));
+        }
+
+        Ok(AiAutoparamClassifyResult { labels })
+    }
+
+    pub fn ai_autoparam_analyze(
+        &self,
+        params: AiAutoparamAnalyzeParams,
+    ) -> anyhow::Result<AiAutoparamAnalyzeResult> {
+        let extract = sql_autoparam_extract(&params.sql);
+        if extract.literals.is_empty() {
+            anyhow::bail!("invalid_request: no literals found");
+        }
+
+        let labels = self
+            .ai_autoparam_classify(AiAutoparamClassifyParams {
+                sql: Some(params.sql.clone()),
+                db: params.db.clone(),
+                literals: extract.literals.clone(),
+                rules: params.rules.clone(),
+            })?
+            .labels;
+
+        let fingerprint = fingerprint_json(&serde_json::json!({
+            "sql": extract.normalized_sql,
+        }));
+
+        Ok(AiAutoparamAnalyzeResult {
+            normalized_sql: extract.normalized_sql,
+            fingerprint,
+            literals: extract.literals,
+            labels,
+        })
+    }
+
+    pub fn ai_nl_translate(
+        &self,
+        params: AiNlTranslateParams,
+    ) -> anyhow::Result<AiNlTranslateResult> {
+        let request = params.request.trim();
+        if request.is_empty() {
+            anyhow::bail!("invalid_request: request is required");
+        }
+
+        let read_only = params.read_only.unwrap_or(true);
+        let include_schema = params.include_schema.unwrap_or(true);
+        let max_tables = params.max_tables.unwrap_or(16).max(1) as usize;
+
+        let (tables, mut warnings) = if include_schema {
+            self.ai_nl_prompt_tables(&params.db, params.tables.as_ref(), max_tables)?
+        } else {
+            let (_, warnings) = self.ai_nl_prompt_tables(&params.db, params.tables.as_ref(), 0)?;
+            (Vec::new(), warnings)
+        };
+
+        let prompt = build_nl_prompt(&params.db, request, &tables, read_only);
+        let fingerprint = fingerprint_json(&serde_json::json!({
+            "db": params.db.as_str(),
+            "request": request,
+            "tables": tables.iter().map(|t| t.table.clone()).collect::<Vec<_>>(),
+            "read_only": read_only
+        }));
+
+        if !include_schema {
+            warnings.push("schema omitted from prompt".to_string());
+        }
+
+        let package = AiNlPromptPackage {
+            version: "nl_prompt_v1".to_string(),
+            db: params.db.clone(),
+            request: request.to_string(),
+            read_only,
+            tables: tables.clone(),
+            prompt,
+            fingerprint,
+        };
+
+        let query = ai_nl_rule_translate(self, &params.db, request, &tables);
+
+        Ok(AiNlTranslateResult {
+            package,
+            query,
+            warnings,
+        })
+    }
+
+    pub fn ai_nl_explain(&self, params: AiNlExplainParams) -> anyhow::Result<AiNlExplainResult> {
+        let args = params.args.unwrap_or_default();
+        let QueryBody::Select { select } = params.query.body.as_ref() else {
+            anyhow::bail!("invalid_request: only SELECT queries are supported");
+        };
+
+        let mut tables = Vec::new();
+        collect_tables(&params.query, &mut tables);
+        let mut table_names: Vec<String> = tables
+            .into_iter()
+            .map(|(db, table)| format!("{db}.{table}"))
+            .collect();
+        table_names.sort();
+        table_names.dedup();
+
+        let projection: Vec<String> = select
+            .projection
+            .iter()
+            .map(|item| infer_select_name(&item.expr))
+            .collect();
+
+        let mut filters = Vec::new();
+        if let Some(pred) = select.r#where.as_ref() {
+            filters.push(render_expr_summary(pred));
+        }
+
+        let mut order_by = Vec::new();
+        for ob in params.query.order_by.iter() {
+            let dir = ob.dir.clone().unwrap_or(OrderDir::Asc);
+            let expr = render_expr_summary(&ob.expr);
+            order_by.push(format!(
+                "{} {}",
+                expr,
+                match dir {
+                    OrderDir::Asc => "asc",
+                    OrderDir::Desc => "desc",
+                }
+            ));
+        }
+
+        let limit = params.query.limit.as_ref().and_then(|lim| lim.limit);
+
+        let mut summary = String::new();
+        summary.push_str(&format!(
+            "Selects {} from {}",
+            projection.join(", "),
+            table_names.join(", ")
+        ));
+        if !filters.is_empty() {
+            summary.push_str(&format!(" where {}", filters.join(" and ")));
+        }
+        if !order_by.is_empty() {
+            summary.push_str(&format!(" order by {}", order_by.join(", ")));
+        }
+        if let Some(limit) = limit {
+            summary.push_str(&format!(" limit {}", limit));
+        }
+
+        let deps_list = self.dependencies_for_query(&params.query)?;
+        let approval_token = ai_nl_approval_token(&params.query, &args, &deps_list);
+        let deps = serde_json::json!({
+            "tables": deps_list
+        });
+
+        let (preview, preview_format) = ai_nl_preview(
+            self,
+            &params.query,
+            &args,
+            params.preview_limit,
+            params.preview_format,
+        )?;
+
+        Ok(AiNlExplainResult {
+            summary,
+            tables: table_names,
+            projection,
+            filters,
+            order_by,
+            limit,
+            deps,
+            approval_token,
+            preview,
+            preview_format,
+        })
+    }
+
+    pub fn ai_nl_execute(&self, params: AiNlExecuteParams) -> anyhow::Result<AiNlExecuteResult> {
+        let args = params.args.unwrap_or_default();
+        let deps_list = self.dependencies_for_query(&params.query)?;
+        let expected = ai_nl_approval_token(&params.query, &args, &deps_list);
+        if params.approval_token != expected {
+            anyhow::bail!("invalid_request: approval_token mismatch");
+        }
+        let result_format = params.result_format.unwrap_or(ResultFormat::ObjectsJson);
+        let want_etag = params.want_etag.unwrap_or(false);
+        let if_none_match = params.if_none_match.as_deref();
+        let select = self.query_select(
+            &params.query,
+            &args,
+            result_format,
+            want_etag,
+            if_none_match,
+            params.min_causality.as_ref(),
+            None,
+            false,
+        )?;
+
+        Ok(AiNlExecuteResult {
+            etag: select.etag,
+            not_modified: select.not_modified,
+            data: select.data,
+            deps: select.deps,
+            causality: select.causality,
+            wire: select.wire,
+        })
+    }
+
+    // -----------------------------
+    // dp.* (research)
+    // -----------------------------
+
+    pub fn dp_budget_set(
+        &mut self,
+        params: DpBudgetSetParams,
+    ) -> anyhow::Result<DpBudgetGetResult> {
+        if params.total_epsilon <= 0.0 {
+            anyhow::bail!("invalid_request: total_epsilon must be > 0");
+        }
+        if params.total_delta < 0.0 {
+            anyhow::bail!("invalid_request: total_delta must be >= 0");
+        }
+
+        let now_ms = now_millis();
+        let budget = DpBudget {
+            principal: params.principal.clone(),
+            total_epsilon: params.total_epsilon,
+            total_delta: params.total_delta,
+            consumed_epsilon: 0.0,
+            consumed_delta: 0.0,
+            refresh_window_ms: params.refresh_window_ms,
+            refreshed_at_ms: now_ms,
+        };
+
+        self.dp_budgets.insert(params.principal.clone(), budget);
+        self.persist_dp_best_effort();
+
+        self.dp_budget_get(DpBudgetGetParams {
+            principal: Some(params.principal),
+            include_usage: Some(false),
+        })
+    }
+
+    pub fn dp_budget_get(
+        &mut self,
+        params: DpBudgetGetParams,
+    ) -> anyhow::Result<DpBudgetGetResult> {
+        let include_usage = params.include_usage.unwrap_or(false);
+        let now_ms = now_millis();
+
+        let mut principals: Vec<String> = if let Some(p) = params.principal.as_ref() {
+            vec![p.clone()]
+        } else {
+            self.dp_budgets.keys().cloned().collect()
+        };
+        principals.sort();
+
+        let mut budgets = Vec::new();
+        for principal in principals.iter() {
+            let Some(budget) = self.dp_budgets.get_mut(principal) else {
+                anyhow::bail!("dp_budget_missing");
+            };
+            dp_refresh_budget(budget, now_ms);
+            budgets.push(serde_json::json!({
+                "principal": budget.principal,
+                "total_epsilon": budget.total_epsilon,
+                "total_delta": budget.total_delta,
+                "consumed_epsilon": budget.consumed_epsilon,
+                "consumed_delta": budget.consumed_delta,
+                "refresh_window_ms": budget.refresh_window_ms,
+                "refreshed_at_ms": budget.refreshed_at_ms
+            }));
+        }
+
+        let usage = if include_usage {
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            let mut by_key: HashMap<(String, String), (f64, f64, u64, u64)> = HashMap::new();
+            for ev in self.dp_audit.iter() {
+                if let Some(p) = params.principal.as_ref() {
+                    if &ev.principal != p {
+                        continue;
+                    }
+                }
+                let key = (ev.principal.clone(), ev.query_fingerprint.clone());
+                let entry = by_key.entry(key).or_insert((0.0, 0.0, 0, 0));
+                entry.0 += ev.epsilon;
+                entry.1 += ev.delta;
+                entry.2 += 1;
+                entry.3 = entry.3.max(ev.ts_ms);
+            }
+            for ((principal, fingerprint), (eps, delta, count, last_ts)) in by_key.into_iter() {
+                out.push(serde_json::json!({
+                    "principal": principal,
+                    "query_fingerprint": fingerprint,
+                    "epsilon": eps,
+                    "delta": delta,
+                    "count": count,
+                    "last_ts_ms": last_ts
+                }));
+            }
+            Some(out)
+        } else {
+            None
+        };
+
+        Ok(DpBudgetGetResult { budgets, usage })
+    }
+
+    pub fn dp_audit_log(&self, params: DpAuditLogParams) -> anyhow::Result<DpAuditLogResult> {
+        let from_id = params.from_id.unwrap_or(0);
+        let limit = params.limit.unwrap_or(200).min(1000) as usize;
+
+        let mut events = Vec::new();
+        for ev in self
+            .dp_audit
+            .iter()
+            .filter(|ev| ev.id >= from_id)
+            .filter(|ev| {
+                if let Some(p) = params.principal.as_ref() {
+                    &ev.principal == p
+                } else {
+                    true
+                }
+            })
+        {
+            if events.len() >= limit {
+                break;
+            }
+            events.push(serde_json::to_value(ev)?);
+        }
+
+        let next_id = events
+            .last()
+            .and_then(|v| v.get("id").and_then(|v| v.as_u64()))
+            .map(|id| id + 1)
+            .unwrap_or(from_id);
+
+        Ok(DpAuditLogResult { events, next_id })
+    }
+
+    pub fn dp_aggregate(&mut self, params: DpAggregateParams) -> anyhow::Result<DpAggregateResult> {
+        if params.aggregates.is_empty() {
+            anyhow::bail!("invalid_request: aggregates is required");
+        }
+        if params.epsilon <= 0.0 {
+            anyhow::bail!("invalid_request: epsilon must be > 0");
+        }
+
+        let delta = params.delta.unwrap_or(0.0);
+        if delta < 0.0 {
+            anyhow::bail!("invalid_request: delta must be >= 0");
+        }
+
+        let mechanism = params
+            .mechanism
+            .clone()
+            .unwrap_or_else(|| "laplace".to_string())
+            .to_lowercase();
+        if mechanism != "laplace" && mechanism != "gaussian" {
+            anyhow::bail!("invalid_request: unknown mechanism");
+        }
+        if mechanism == "gaussian" && delta <= 0.0 {
+            anyhow::bail!("invalid_request: gaussian requires delta");
+        }
+
+        if let Some(principal) = params.principal.as_ref() {
+            let now_ms = now_millis();
+            let Some(budget) = self.dp_budgets.get_mut(principal) else {
+                anyhow::bail!("dp_budget_missing");
+            };
+            dp_refresh_budget(budget, now_ms);
+            let next_eps = budget.consumed_epsilon + params.epsilon;
+            let next_delta = budget.consumed_delta + delta;
+            if next_eps > budget.total_epsilon || next_delta > budget.total_delta {
+                anyhow::bail!("dp_budget_exhausted");
+            }
+        }
+
+        let (resolved, mut groups, rows_examined, rows_matched) = {
+            let (schema, tdata) = self.get_table(&params.table)?;
+
+            for col in params.group_by.iter() {
+                if !schema.columns.iter().any(|c| c.name == *col) {
+                    anyhow::bail!("invalid_request: unknown group_by column {col}");
+                }
+            }
+
+            let resolved = resolve_dp_aggregates(schema, &params.aggregates)?;
+
+            let mut groups: BTreeMap<String, DpGroupState> = BTreeMap::new();
+            let mut rows_examined = 0u64;
+            let mut rows_matched = 0u64;
+
+            for entry in tdata.rows.iter() {
+                if entry.deleted {
+                    continue;
+                }
+                rows_examined += 1;
+                if let Some(pred) = params.r#where.as_ref() {
+                    if !eval_predicate(pred, &entry.row, None, &[])? {
+                        continue;
+                    }
+                }
+                rows_matched += 1;
+
+                let mut key_vals = Vec::new();
+                for col in params.group_by.iter() {
+                    let Some(v) = entry.row.get(col) else {
+                        anyhow::bail!("invalid_request: missing group_by column {col}");
+                    };
+                    key_vals.push(v.clone());
+                }
+                let key = dp_group_key(&key_vals);
+
+                let group = groups.entry(key).or_insert_with(|| DpGroupState {
+                    key: key_vals,
+                    accs: resolved.iter().map(dp_init_acc).collect(),
+                });
+
+                for (idx, spec) in resolved.iter().enumerate() {
+                    dp_update_acc(&mut group.accs[idx], spec, &entry.row)?;
+                }
+            }
+
+            (resolved, groups, rows_examined, rows_matched)
+        };
+
+        let group_count = groups.len() as u64;
+        let per_agg_epsilon = params.epsilon / resolved.len() as f64;
+        let per_agg_delta = delta / resolved.len() as f64;
+
+        let mut rng = DpRng::new(params.seed.unwrap_or_else(now_millis));
+
+        let mut columns = Vec::new();
+        for col in params.group_by.iter() {
+            columns.push(col.clone());
+        }
+        for spec in resolved.iter() {
+            columns.push(spec.label.clone());
+        }
+
+        let mut rows = Vec::new();
+        for group in groups.values_mut() {
+            let mut row = Vec::new();
+            for key in group.key.iter() {
+                row.push(lit_to_json_value(key.clone())?);
+            }
+            for (spec, acc) in resolved.iter().zip(group.accs.iter_mut()) {
+                let noisy = dp_finalize_acc(
+                    spec,
+                    acc,
+                    &mechanism,
+                    per_agg_epsilon,
+                    per_agg_delta,
+                    &mut rng,
+                )?;
+                row.push(lit_to_json_value(noisy)?);
+            }
+            rows.push(row);
+        }
+
+        let query_fingerprint = dp_query_fingerprint(&params, &mechanism)?;
+        let mut budget_json = None;
+        if let Some(principal) = params.principal.as_ref() {
+            let now_ms = now_millis();
+            let Some(budget) = self.dp_budgets.get_mut(principal) else {
+                anyhow::bail!("dp_budget_missing");
+            };
+            dp_refresh_budget(budget, now_ms);
+            budget.consumed_epsilon += params.epsilon;
+            budget.consumed_delta += delta;
+            budget_json = Some(dp_budget_summary(budget));
+
+            let aggregates = resolved.iter().map(dp_agg_label).collect();
+            let event = DpAuditEvent {
+                id: self.dp_audit_next_id,
+                ts_ms: now_ms,
+                principal: principal.clone(),
+                table: format!("{}.{}", params.table.db, params.table.table),
+                query_fingerprint: query_fingerprint.clone(),
+                epsilon: params.epsilon,
+                delta,
+                mechanism: mechanism.clone(),
+                groups: group_count,
+                rows_examined,
+                aggregates,
+                seed: params.seed,
+                budget_remaining_epsilon: budget.total_epsilon - budget.consumed_epsilon,
+                budget_remaining_delta: budget.total_delta - budget.consumed_delta,
+            };
+            self.dp_audit_next_id = self.dp_audit_next_id.saturating_add(1);
+            self.dp_audit.push(event);
+            self.persist_dp_best_effort();
+        }
+
+        let privacy = serde_json::json!({
+            "epsilon": params.epsilon,
+            "delta": delta,
+            "mechanism": mechanism,
+            "query_fingerprint": query_fingerprint,
+            "groups": group_count,
+            "rows_examined": rows_examined,
+            "rows_matched": rows_matched,
+            "seed": params.seed,
+            "budget": budget_json,
+            "aggregates": resolved
+                .iter()
+                .map(|spec| serde_json::json!({
+                    "op": dp_agg_op_name(&spec.op),
+                    "column": spec.column,
+                    "percentile": spec.percentile,
+                    "bounds": spec.bounds,
+                    "sensitivity": spec.sensitivity,
+                    "epsilon": per_agg_epsilon,
+                    "delta": per_agg_delta
+                }))
+                .collect::<Vec<_>>()
+        });
+
+        Ok(DpAggregateResult {
+            columns,
+            rows,
+            privacy: Some(privacy),
+        })
+    }
+
+    // -----------------------------
+    // oblivious.* (research)
+    // -----------------------------
+
+    pub fn oblivious_policy_set(
+        &mut self,
+        params: ObliviousPolicySetParams,
+    ) -> anyhow::Result<ObliviousPolicyGetResult> {
+        let table = params.table;
+        let _ = self.get_schema(&table.db, &table.table)?;
+        let policy = normalize_oblivious_policy(params.policy)?;
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+
+        if policy.level == "off" {
+            self.oblivious_policies.remove(&key);
+        } else {
+            self.oblivious_policies.insert(key, policy);
+        }
+
+        self.persist_oblivious_best_effort();
+
+        let current = self.oblivious_policy_for(&table);
+        Ok(ObliviousPolicyGetResult {
+            policies: vec![serde_json::json!({"table": table, "policy": current})],
+        })
+    }
+
+    pub fn oblivious_policy_get(
+        &self,
+        params: ObliviousPolicyGetParams,
+    ) -> anyhow::Result<ObliviousPolicyGetResult> {
+        if let Some(table) = params.table {
+            let _ = self.get_schema(&table.db, &table.table)?;
+            let policy = self.oblivious_policy_for(&table);
+            return Ok(ObliviousPolicyGetResult {
+                policies: vec![serde_json::json!({"table": table, "policy": policy})],
+            });
+        }
+
+        let mut policies = Vec::new();
+        for (key, policy) in self.oblivious_policies.iter() {
+            let table = BaseTableRef {
+                db: key.db.clone(),
+                table: key.table.clone(),
+                r#as: None,
+            };
+            policies.push(serde_json::json!({"table": table, "policy": policy}));
+        }
+        Ok(ObliviousPolicyGetResult { policies })
+    }
+
+    pub fn oblivious_explain(
+        &self,
+        params: ObliviousExplainParams,
+    ) -> anyhow::Result<ObliviousExplainResult> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+        let actual_rows = tdata.rows.iter().filter(|row| !row.deleted).count() as u64;
+        let policy = self.oblivious_policy_for(&params.table);
+        let padding = compute_oblivious_padding(&policy, actual_rows);
+
+        let plan = serde_json::json!({
+            "table": format!("{}.{}", params.table.db, params.table.table),
+            "primary_key": schema.primary_key,
+            "level": policy.level,
+            "actual_rows": actual_rows,
+            "target_rows": padding.target_rows,
+            "dummy_rows": padding.dummy_rows,
+            "pad_to_multiple": policy.pad_to_multiple,
+            "target_rows_policy": policy.target_rows,
+            "dummy_value_lookups": padding.dummy_value_lookups,
+            "shuffle": padding.shuffle
+        });
+
+        Ok(ObliviousExplainResult { plan })
+    }
+
+    // -----------------------------
+    // forensic.* (research)
+    // -----------------------------
+
+    pub fn forensic_query(
+        &self,
+        params: ForensicQueryParams,
+    ) -> anyhow::Result<ForensicQueryResult> {
+        let from_id = params.from_id.unwrap_or(0);
+        let to_id = params.to_id.unwrap_or(u64::MAX);
+        let limit = params.limit.unwrap_or(200).min(1000) as usize;
+
+        let mut records = Vec::new();
+        for rec in self.forensic_chain.iter() {
+            if rec.id < from_id || rec.id > to_id {
+                continue;
+            }
+            if let Some(op) = params.op.as_ref() {
+                if rec.op != *op {
+                    continue;
+                }
+            }
+            if let Some(table) = params.table.as_ref() {
+                if rec.db != table.db || rec.table != table.table {
+                    continue;
+                }
+            }
+            records.push(rec.clone());
+            if records.len() >= limit {
+                break;
+            }
+        }
+
+        let chain_head = self.forensic_chain.last().map(|r| r.hash.clone());
+        let start_hash = records.first().map(|r| r.hash.clone());
+        let end_hash = records.last().map(|r| r.hash.clone());
+        let contiguous = records.windows(2).all(|w| w[1].id == w[0].id + 1)
+            && params.table.is_none()
+            && params.op.is_none();
+
+        let preceding_hash = if contiguous {
+            records
+                .first()
+                .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+                .and_then(|idx| {
+                    if idx == 0 {
+                        Some(forensic_genesis_hash())
+                    } else {
+                        self.forensic_chain.get(idx - 1).map(|r| r.hash.clone())
+                    }
+                })
+        } else {
+            None
+        };
+
+        let following_hash = if contiguous {
+            records
+                .last()
+                .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+                .and_then(|idx| self.forensic_chain.get(idx + 1).map(|r| r.hash.clone()))
+        } else {
+            None
+        };
+
+        let proof = serde_json::json!({
+            "contiguous": contiguous,
+            "from_id": from_id,
+            "to_id": to_id,
+            "start_hash": start_hash,
+            "end_hash": end_hash,
+            "preceding_hash": preceding_hash,
+            "following_hash": following_hash,
+            "chain_head": chain_head,
+            "record_count": records.len()
+        });
+
+        let out_records = records
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ForensicQueryResult {
+            records: out_records,
+            proof,
+        })
+    }
+
+    pub fn forensic_verify(
+        &self,
+        params: ForensicVerifyParams,
+    ) -> anyhow::Result<ForensicVerifyResult> {
+        if params.records.is_empty() {
+            return Ok(ForensicVerifyResult {
+                ok: true,
+                bad_index: None,
+                reason: None,
+                head_hash: params.start_hash,
+            });
+        }
+
+        let mut records = Vec::new();
+        for val in params.records.into_iter() {
+            let rec: ForensicRecord = serde_json::from_value(val)?;
+            records.push(rec);
+        }
+
+        let mut prev_hash = params
+            .start_hash
+            .unwrap_or_else(|| records[0].prev_hash.clone());
+
+        for (idx, rec) in records.iter().enumerate() {
+            if rec.prev_hash != prev_hash {
+                return Ok(ForensicVerifyResult {
+                    ok: false,
+                    bad_index: Some(idx as u64),
+                    reason: Some("prev_hash_mismatch".to_string()),
+                    head_hash: None,
+                });
+            }
+            let computed = forensic_record_hash(
+                &rec.prev_hash,
+                rec.id,
+                rec.ts_ms,
+                &rec.db,
+                &rec.table,
+                &rec.op,
+                rec.pk.as_ref(),
+                rec.change_seq,
+            );
+            if computed != rec.hash {
+                return Ok(ForensicVerifyResult {
+                    ok: false,
+                    bad_index: Some(idx as u64),
+                    reason: Some("hash_mismatch".to_string()),
+                    head_hash: None,
+                });
+            }
+            prev_hash = rec.hash.clone();
+        }
+
+        Ok(ForensicVerifyResult {
+            ok: true,
+            bad_index: None,
+            reason: None,
+            head_hash: Some(prev_hash),
+        })
+    }
+
+    pub fn forensic_export(
+        &self,
+        params: ForensicExportParams,
+    ) -> anyhow::Result<ForensicExportResult> {
+        let query = ForensicQueryParams {
+            table: params.table.clone(),
+            op: params.op.clone(),
+            from_id: params.from_id,
+            to_id: params.to_id,
+            limit: params.limit,
+        };
+        let result = self.forensic_query(query)?;
+        let bundle_id = params
+            .bundle_id
+            .unwrap_or_else(|| format!("bundle_{:x}", now_millis()));
+
+        let bundle = serde_json::json!({
+            "bundle_id": bundle_id,
+            "generated_at_ms": now_millis(),
+            "records": result.records,
+            "proof": result.proof
+        });
+
+        Ok(ForensicExportResult { bundle })
+    }
+
+    // -----------------------------
+    // edge.* (research)
+    // -----------------------------
+
+    pub fn edge_bundle_request(
+        &self,
+        params: EdgeBundleRequestParams,
+    ) -> anyhow::Result<EdgeBundleRequestResult> {
+        if params.windows.is_empty() {
+            anyhow::bail!("invalid_request: windows must not be empty");
+        }
+
+        let redaction = normalize_edge_redaction(params.redaction)?;
+        let bundle_id = params
+            .bundle_id
+            .unwrap_or_else(|| format!("edge_bundle_{:x}", now_millis()));
+        let generated_at_ms = now_millis();
+
+        let mut coverage = Vec::new();
+        let mut records = Vec::new();
+
+        for window in params.windows.iter() {
+            let _schema = self.get_schema(&window.table.db, &window.table.table)?;
+            let key = TableKey {
+                db: window.table.db.clone(),
+                table: window.table.table.clone(),
+            };
+
+            let from_seq = window.from_seq.unwrap_or(0);
+            let to_seq = window
+                .to_seq
+                .unwrap_or_else(|| self.last_change_seq_for_table(&key));
+            if to_seq < from_seq {
+                anyhow::bail!("invalid_request: to_seq before from_seq");
+            }
+
+            let mut events = self
+                .changes
+                .iter()
+                .filter(|ev| {
+                    ev.db == key.db
+                        && ev.table == key.table
+                        && ev.seq > from_seq
+                        && ev.seq <= to_seq
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if let Some(max_events) = window.max_events {
+                let max_events = max_events as usize;
+                if max_events == 0 {
+                    events.clear();
+                } else if events.len() > max_events {
+                    events = events[events.len() - max_events..].to_vec();
+                }
+            }
+
+            let start_seq = events.first().map(|e| e.seq).unwrap_or(to_seq);
+            let end_seq = to_seq;
+
+            coverage.push(EdgeBundleCoverage {
+                table: window.table.clone(),
+                start_seq,
+                end_seq,
+                updated_at_ms: generated_at_ms,
+                bundle_id: bundle_id.clone(),
+                redaction_mode: redaction.mode.clone(),
+            });
+
+            for ev in events.into_iter() {
+                let (pk, pk_hash) = redact_edge_pk(&ev.pk, &redaction);
+                records.push(EdgeBundleRecord {
+                    seq: ev.seq,
+                    db: ev.db,
+                    table: ev.table,
+                    op: ev.op,
+                    pk,
+                    pk_hash,
+                });
+            }
+        }
+
+        let bundle = EdgeBundle {
+            bundle_id,
+            generated_at_ms,
+            redaction,
+            coverage,
+            records,
+        };
+
+        Ok(EdgeBundleRequestResult { bundle })
+    }
+
+    pub fn edge_bundle_apply(
+        &mut self,
+        params: EdgeBundleApplyParams,
+    ) -> anyhow::Result<EdgeBundleApplyResult> {
+        let mut updated = false;
+        let now_ms = now_millis();
+
+        for cover in params.bundle.coverage.iter() {
+            let key = TableKey {
+                db: cover.table.db.clone(),
+                table: cover.table.table.clone(),
+            };
+            let entry = self
+                .edge_coverage
+                .entry(key.clone())
+                .or_insert_with(|| EdgeCoverage {
+                    table: key,
+                    start_seq: cover.start_seq,
+                    end_seq: cover.end_seq,
+                    bundle_id: cover.bundle_id.clone(),
+                    redaction_mode: cover.redaction_mode.clone(),
+                    updated_at_ms: now_ms,
+                });
+
+            if cover.end_seq >= entry.end_seq {
+                entry.start_seq = entry.start_seq.min(cover.start_seq);
+                entry.end_seq = cover.end_seq;
+                entry.bundle_id = cover.bundle_id.clone();
+                entry.redaction_mode = cover.redaction_mode.clone();
+                entry.updated_at_ms = now_ms;
+                updated = true;
+            }
+        }
+
+        Ok(EdgeBundleApplyResult {
+            applied: updated,
+            coverage: self.edge_coverage_list(),
+        })
+    }
+
+    pub fn edge_bundle_status(
+        &self,
+        params: EdgeBundleStatusParams,
+    ) -> anyhow::Result<EdgeBundleStatusResult> {
+        let coverage = self.edge_coverage_list();
+
+        let Some(query) = params.query else {
+            return Ok(EdgeBundleStatusResult {
+                coverage,
+                route: None,
+            });
+        };
+
+        let mut tables = Vec::new();
+        collect_tables(&query, &mut tables);
+        let mut table_names = Vec::new();
+        let mut missing = Vec::new();
+        let mut observed_lag = 0u64;
+
+        for (db, table) in tables {
+            let key = TableKey {
+                db: db.clone(),
+                table: table.clone(),
+            };
+            let name = format!("{db}.{table}");
+            table_names.push(name.clone());
+
+            let Some(cover) = self.edge_coverage.get(&key) else {
+                missing.push(name);
+                continue;
+            };
+            let origin_seq = self.last_change_seq_for_table(&key);
+            let lag = origin_seq.saturating_sub(cover.end_seq);
+            if lag > observed_lag {
+                observed_lag = lag;
+            }
+        }
+
+        let max_lag = params.max_lag.unwrap_or(u64::MAX);
+        let (eligible, reason) = if !missing.is_empty() {
+            (false, Some("missing_coverage".to_string()))
+        } else if observed_lag > max_lag {
+            (false, Some("stale".to_string()))
+        } else {
+            (true, None)
+        };
+
+        Ok(EdgeBundleStatusResult {
+            coverage,
+            route: Some(EdgeBundleRoute {
+                eligible,
+                reason,
+                max_lag,
+                observed_lag,
+                tables: table_names,
+            }),
+        })
+    }
+
+    // -----------------------------
+    // merge.* (research)
+    // -----------------------------
+
+    pub fn merge_register(
+        &mut self,
+        params: MergeRegisterParams,
+    ) -> anyhow::Result<MergeRegisterResult> {
+        let _schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let policy = normalize_merge_policy(params.policy, MergeWasmPolicy::Allow)?;
+        self.validate_merge_wasm_policy(&policy)?;
+        let key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        self.merge_policies.insert(key, policy);
+        self.persist_merge_policies_best_effort();
+        Ok(MergeRegisterResult { ok: true })
+    }
+
+    pub fn merge_apply(&mut self, params: MergeApplyParams) -> anyhow::Result<MergeApplyResult> {
+        let policy = match params.policy {
+            Some(policy) => policy,
+            None => self.merge_policy_for(&params.table),
+        };
+        let policy = normalize_merge_policy(policy, MergeWasmPolicy::Allow)?;
+        self.validate_merge_wasm_policy(&policy)?;
+        if policy_contains_wasm(&policy) {
+            anyhow::bail!("not_supported: wasm merge execution not implemented");
+        }
+
+        let mut intern_items = Vec::new();
+        let mut snapshot_rows = Vec::new();
+        let mut merged_row: RowObject;
+        let mut applied = false;
+        let mut conflict = false;
+        let mut conflicts = Vec::new();
+        let mut etag = None;
+        let mut op = None;
+
+        {
+            let (schema, tdata) = self.get_table_mut(&params.table)?;
+            if schema.primary_key.is_empty() {
+                anyhow::bail!("invalid_request: table has no primary key");
+            }
+            if params.pk.len() != schema.primary_key.len() {
+                anyhow::bail!("invalid_request: primary key length mismatch");
+            }
+
+            let key = pk_key(&params.pk);
+            let existing_idx = tdata.pk_index.get(&key).copied();
+            let (current_row, current_etag, current_deleted) = match existing_idx {
+                Some(idx) => {
+                    let entry = &tdata.rows[idx];
+                    (
+                        Some(entry.row.clone()),
+                        Some(row_etag(&entry.row, entry.version)),
+                        entry.deleted,
+                    )
+                }
+                None => (None, None, false),
+            };
+
+            if let Some(min) = params.min_causality.as_ref() {
+                let deps = vec![CausalityDependency {
+                    table: format!("{}.{}", params.table.db, params.table.table),
+                    v: Some(schema.table_version),
+                    view: None,
+                    change_seq: None,
+                    stale: None,
+                }];
+                if let Err(err) = ensure_min_causality(min, &deps) {
+                    if err.to_string().contains("causality_not_satisfied") {
+                        push_merge_conflict(&mut conflicts, &mut conflict, "dependency");
+                        let merged = match (current_deleted, current_row) {
+                            (false, Some(row)) => row,
+                            _ => {
+                                let mut row = params.incoming.clone();
+                                ensure_pk_values(schema, &params.pk, &mut row)?;
+                                row
+                            }
+                        };
+                        return Ok(MergeApplyResult {
+                            applied: false,
+                            conflict: true,
+                            merged,
+                            etag: current_etag,
+                            conflicts,
+                        });
+                    }
+                    return Err(err);
+                }
+            }
+
+            if incoming_pk_conflict(schema, &params.pk, &params.incoming) {
+                push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                merged_row = params.incoming.clone();
+                return Ok(MergeApplyResult {
+                    applied: false,
+                    conflict: true,
+                    merged: merged_row,
+                    etag: current_etag,
+                    conflicts,
+                });
+            }
+
+            if let Some(idx) = existing_idx {
+                let entry = &mut tdata.rows[idx];
+                if entry.deleted {
+                    if params.expected_etag.is_some() {
+                        push_merge_conflict(&mut conflicts, &mut conflict, "write_write");
+                        merged_row = params.incoming.clone();
+                        ensure_pk_values(schema, &params.pk, &mut merged_row)?;
+                        if not_null_violation(schema, &merged_row).is_some() {
+                            push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                            return Ok(MergeApplyResult {
+                                applied: false,
+                                conflict: true,
+                                merged: merged_row,
+                                etag: current_etag,
+                                conflicts,
+                            });
+                        }
+                    } else {
+                        merged_row = merge_rows(&RowObject::new(), &params.incoming, &policy)?;
+                        ensure_pk_values(schema, &params.pk, &mut merged_row)?;
+                        if not_null_violation(schema, &merged_row).is_some() {
+                            push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                            return Ok(MergeApplyResult {
+                                applied: false,
+                                conflict: true,
+                                merged: merged_row,
+                                etag: current_etag,
+                                conflicts,
+                            });
+                        }
+                        entry.row = merged_row.clone();
+                        entry.deleted = false;
+                        entry.version = next_row_version(schema);
+                        bump_table_version(schema);
+                        applied = true;
+                        etag = Some(row_etag(&entry.row, entry.version));
+                        op = Some("insert".to_string());
+                        collect_value_store_items(&entry.row, &mut intern_items);
+                        snapshot_rows.push(entry.row.clone());
+                    }
+                } else {
+                    let current_etag = row_etag(&entry.row, entry.version);
+                    if let Some(expected) = params.expected_etag.as_deref() {
+                        if expected != current_etag {
+                            push_merge_conflict(&mut conflicts, &mut conflict, "write_write");
+                        }
+                    }
+
+                    merged_row = merge_rows(&entry.row, &params.incoming, &policy)?;
+                    ensure_pk_values(schema, &params.pk, &mut merged_row)?;
+                    if not_null_violation(schema, &merged_row).is_some() {
+                        push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                        return Ok(MergeApplyResult {
+                            applied: false,
+                            conflict: true,
+                            merged: merged_row,
+                            etag: Some(current_etag),
+                            conflicts,
+                        });
+                    }
+
+                    if conflict && merge_policy_rejects(&policy) {
+                        return Ok(MergeApplyResult {
+                            applied: false,
+                            conflict: true,
+                            merged: entry.row.clone(),
+                            etag: Some(current_etag),
+                            conflicts,
+                        });
+                    }
+
+                    entry.row = merged_row.clone();
+                    entry.version = next_row_version(schema);
+                    bump_table_version(schema);
+                    applied = true;
+                    etag = Some(row_etag(&entry.row, entry.version));
+                    op = Some("update".to_string());
+                    collect_value_store_items(&entry.row, &mut intern_items);
+                    snapshot_rows.push(entry.row.clone());
+                }
+            } else {
+                if params.expected_etag.is_some() {
+                    push_merge_conflict(&mut conflicts, &mut conflict, "write_write");
+                    merged_row = params.incoming.clone();
+                    ensure_pk_values(schema, &params.pk, &mut merged_row)?;
+                    if not_null_violation(schema, &merged_row).is_some() {
+                        push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                        return Ok(MergeApplyResult {
+                            applied: false,
+                            conflict: true,
+                            merged: merged_row,
+                            etag: current_etag,
+                            conflicts,
+                        });
+                    }
+                } else {
+                    let mut row = params.incoming.clone();
+                    ensure_pk_values(schema, &params.pk, &mut row)?;
+                    merged_row = row.clone();
+                    if not_null_violation(schema, &merged_row).is_some() {
+                        push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+                        return Ok(MergeApplyResult {
+                            applied: false,
+                            conflict: true,
+                            merged: merged_row,
+                            etag: current_etag,
+                            conflicts,
+                        });
+                    }
+                    let version = next_row_version(schema);
+                    let idx = tdata.rows.len();
+                    tdata.rows.push(RowEntry {
+                        row,
+                        version,
+                        deleted: false,
+                    });
+                    tdata.pk_index.insert(key, idx);
+                    bump_table_version(schema);
+                    applied = true;
+                    etag = Some(row_etag(&merged_row, version));
+                    op = Some("insert".to_string());
+                    collect_value_store_items(&merged_row, &mut intern_items);
+                    snapshot_rows.push(merged_row.clone());
+                }
+            }
+        }
+
+        if !intern_items.is_empty() {
+            if let Ok(mut store) = self.value_store.lock() {
+                store_value_items(&mut store, intern_items);
+            }
+        }
+
+        if applied {
+            if self.apply_snapshot_upserts(&params.table, &snapshot_rows) {
+                self.persist_snapshots_best_effort();
+            }
+            if let Some(op) = op {
+                self.emit_change(&params.table.db, &params.table.table, &op, Some(params.pk));
+            }
+            self.persist_catalog()?;
+            self.persist_table(&params.table.db, &params.table.table)?;
+            self.persist_changes_best_effort();
+        }
+
+        Ok(MergeApplyResult {
+            applied,
+            conflict,
+            merged: merged_row,
+            etag,
+            conflicts,
+        })
+    }
+
+    pub fn merge_simulate(
+        &self,
+        params: MergeSimulateParams,
+    ) -> anyhow::Result<MergeSimulateResult> {
+        let policy = normalize_merge_policy(params.policy, MergeWasmPolicy::Allow)?;
+        self.validate_merge_wasm_policy(&policy)?;
+        if policy_contains_wasm(&policy) {
+            anyhow::bail!("not_supported: wasm merge execution not implemented");
+        }
+        let merged = merge_rows(&params.current, &params.incoming, &policy)?;
+        Ok(MergeSimulateResult { merged })
+    }
+
+    pub fn merge_wasm_register(
+        &mut self,
+        params: MergeWasmRegisterParams,
+    ) -> anyhow::Result<MergeWasmRegisterResult> {
+        let module_id = params.module_id.trim();
+        if module_id.is_empty() {
+            anyhow::bail!("invalid_request: module_id must not be empty");
+        }
+        if !params.capabilities.values_only {
+            anyhow::bail!("invalid_request: merge wasm must be values_only");
+        }
+
+        let bytes = BASE64_STANDARD
+            .decode(params.wasm_b64.as_bytes())
+            .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm_b64"))?;
+        if bytes.is_empty() {
+            anyhow::bail!("invalid_request: wasm module must not be empty");
+        }
+
+        let overwrite = params.overwrite.unwrap_or(false);
+        if !overwrite && self.merge_wasm_registry.contains_key(module_id) {
+            anyhow::bail!("conflict");
+        }
+
+        let value_id = value_id(&bytes);
+        let value_hex = hex16(&value_id);
+        let stored_b64 = BASE64_STANDARD.encode(&bytes);
+
+        let entry = MergeWasmModuleEntry {
+            module_id: module_id.to_string(),
+            value_id: value_hex.clone(),
+            size_bytes: bytes.len() as u64,
+            capabilities: params.capabilities,
+            name: params.name,
+            wasm_b64: stored_b64,
+            created_at_ms: now_millis(),
+        };
+
+        self.merge_wasm_registry
+            .insert(module_id.to_string(), entry);
+        self.persist_merge_wasm_registry_best_effort();
+
+        Ok(MergeWasmRegisterResult {
+            ok: true,
+            value_id: value_hex,
+            size_bytes: bytes.len() as u64,
+        })
+    }
+
+    pub fn merge_wasm_list(&self) -> anyhow::Result<MergeWasmListResult> {
+        let mut modules: Vec<MergeWasmModuleInfo> = self
+            .merge_wasm_registry
+            .values()
+            .map(|entry| MergeWasmModuleInfo {
+                module_id: entry.module_id.clone(),
+                value_id: entry.value_id.clone(),
+                size_bytes: entry.size_bytes,
+                capabilities: entry.capabilities.clone(),
+                name: entry.name.clone(),
+                created_at_ms: entry.created_at_ms,
+            })
+            .collect();
+        modules.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        Ok(MergeWasmListResult { modules })
+    }
+
+    pub fn merge_wasm_drop(
+        &mut self,
+        params: MergeWasmDropParams,
+    ) -> anyhow::Result<MergeWasmDropResult> {
+        if self.merge_wasm_registry.remove(&params.module_id).is_none() {
+            anyhow::bail!("not_found");
+        }
+        self.persist_merge_wasm_registry_best_effort();
+        Ok(MergeWasmDropResult { ok: true })
+    }
+
+    // -----------------------------
+    // wasm.plan.* (research)
+    // -----------------------------
+
+    pub fn wasm_plan_compile(
+        &self,
+        params: WasmPlanCompileParams,
+    ) -> anyhow::Result<WasmPlanCompileResult> {
+        let abi = params.abi.as_deref().unwrap_or(WASM_PLAN_ABI_V1);
+        if abi != WASM_PLAN_ABI_V1 {
+            anyhow::bail!("invalid_request: unsupported wasm plan abi");
+        }
+        if let Some(target) = params.target.as_deref() {
+            if !matches!(target, "wasm32-unknown-unknown" | "wasm32-wasi") {
+                anyhow::bail!("invalid_request: unsupported wasm plan target");
+            }
+        }
+
+        let plan = wasm_plan_from_query(&params.query)?;
+        let format = WASM_PLAN_FORMAT_V1.to_string();
+        let abi = abi.to_string();
+        let artifact = WasmPlanArtifactV1 {
+            format: format.clone(),
+            abi: abi.clone(),
+            plan,
+        };
+        let bytes = serde_json::to_vec(&artifact)?;
+        let artifact_b64 = BASE64_STANDARD.encode(&bytes);
+
+        Ok(WasmPlanCompileResult {
+            format,
+            abi,
+            artifact_b64,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wasm_plan_run(
+        &self,
+        artifact_b64: &str,
+        args: &[Lit],
+        result_format: ResultFormat,
+        want_etag: bool,
+        if_none_match: Option<&str>,
+        min_causality: Option<&CausalityToken>,
+        wire_known_valueids: Option<&HashSet<String>>,
+        wire_skeinpack: bool,
+    ) -> anyhow::Result<QuerySelectResult> {
+        let bytes = BASE64_STANDARD
+            .decode(artifact_b64.as_bytes())
+            .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
+        let artifact: WasmPlanArtifactV1 = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
+        if artifact.format != WASM_PLAN_FORMAT_V1 {
+            anyhow::bail!("invalid_request: unsupported wasm plan format");
+        }
+        if artifact.abi != WASM_PLAN_ABI_V1 {
+            anyhow::bail!("invalid_request: unsupported wasm plan abi");
+        }
+
+        let query = query_from_wasm_plan(&artifact.plan)?;
+
+        let deps = self.dependencies_for_query(&query)?;
+        if let Some(min) = min_causality {
+            ensure_min_causality(min, &deps)?;
+        }
+        let causality = Some(build_causality_token(&deps));
+        let etag = if want_etag {
+            Some(build_query_etag(&query, args, &deps))
+        } else {
+            None
+        };
+
+        if let (Some(tag), Some(inm)) = (etag.as_deref(), if_none_match) {
+            if tag == inm {
+                return Ok(QuerySelectResult {
+                    etag: Some(tag.to_string()),
+                    not_modified: true,
+                    data: None,
+                    deps: Some(serde_json::json!({"tables": deps})),
+                    causality,
+                    wire: None,
+                });
+            }
+        }
+
+        let (columns, rows) = execute_select(self, &query, args)?;
+
+        let (data_json, wire_json) = match (result_format, wire_skeinpack) {
+            (ResultFormat::SkeinpackV1, true) => {
+                let known = wire_known_valueids.cloned().unwrap_or_default();
+                let (packet, wire) = encode_skeinpack_v1(&columns, &rows, &known)?;
+                (packet, Some(wire))
+            }
+            (ResultFormat::WasmBatchV1, _) => (wasm_batch_result(&columns, &rows)?, None),
+            (ResultFormat::ObjectsJson, _) => (rows_to_objects(&columns, &rows)?, None),
+            _ => {
+                let rs = serde_json::json!({
+                    "columns": columns,
+                    "rows": rows,
+                });
+                (rs, None)
+            }
+        };
+
+        Ok(QuerySelectResult {
+            etag,
+            not_modified: false,
+            data: Some(data_json),
+            deps: Some(serde_json::json!({"tables": deps})),
+            causality,
+            wire: wire_json,
+        })
+    }
+
+    // -----------------------------
+    // view.* (research)
+    // -----------------------------
+
+    pub fn view_create(&mut self, params: ViewCreateParams) -> anyhow::Result<ViewCreateResult> {
+        let key = TableKey {
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
+        };
+        if let Ok(_) = self.get_schema(&params.view.db, &params.view.table) {
+            anyhow::bail!("invalid_request: table already exists");
+        }
+        if self.views.contains_key(&key) {
+            if params.if_not_exists.unwrap_or(false) {
+                let view = self.views.get(&key).unwrap();
+                return Ok(ViewCreateResult {
+                    ok: true,
+                    columns: view.columns.clone(),
+                });
+            }
+            anyhow::bail!("invalid_request: view already exists");
+        }
+
+        let info = view_query_info(&params.query)?;
+        let schema = self.get_schema(&info.base.db, &info.base.table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("invalid_request: base table has no primary key");
+        }
+
+        let columns = projection_columns(&info.projection)
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+
+        let deps = vec![ViewDependency {
+            db: info.base.db.clone(),
+            table: info.base.table.clone(),
+            columns: info.required_cols.clone(),
+        }];
+
+        let mut view = ViewState {
+            db: params.view.db.clone(),
+            name: params.view.table.clone(),
+            query: params.query,
+            columns,
+            pk_columns: schema.primary_key.clone(),
+            deps,
+            rows: Vec::new(),
+            pk_index: HashMap::new(),
+            last_refresh_ms: 0,
+            last_change_seq: 0,
+            stale: false,
+            last_refresh_mode: "full".to_string(),
+        };
+
+        self.refresh_view_full(&mut view)?;
+        self.views.insert(key, view);
+        self.persist_views_best_effort();
+
+        Ok(ViewCreateResult {
+            ok: true,
+            columns: self
+                .views
+                .get(&TableKey {
+                    db: params.view.db,
+                    table: params.view.table,
+                })
+                .map(|v| v.columns.clone())
+                .unwrap_or_default(),
+        })
+    }
+
+    pub fn view_drop(&mut self, params: ViewDropParams) -> anyhow::Result<ViewDropResult> {
+        let key = TableKey {
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
+        };
+        if self.views.remove(&key).is_none() && !params.if_exists.unwrap_or(false) {
+            anyhow::bail!("invalid_request: view not found");
+        }
+        self.persist_views_best_effort();
+        Ok(ViewDropResult { ok: true })
+    }
+
+    pub fn view_refresh(&mut self, params: ViewRefreshParams) -> anyhow::Result<ViewRefreshResult> {
+        let key = TableKey {
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
+        };
+        let mut view = self
+            .views
+            .remove(&key)
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
+
+        let mode = params.mode.as_deref().unwrap_or("auto").to_lowercase();
+
+        let refresh = (|| -> anyhow::Result<(u64, String)> {
+            let mut used_mode = mode.clone();
+            let rows = match mode.as_str() {
+                "full" => self.refresh_view_full(&mut view)?,
+                "incremental" => self.refresh_view_incremental(&mut view)?,
+                _ => {
+                    let change_count = self.view_change_count(&view).unwrap_or(usize::MAX);
+                    let prefer_full = change_count > view.rows.len().saturating_add(1);
+                    if prefer_full {
+                        used_mode = "full".to_string();
+                        self.refresh_view_full(&mut view)?
+                    } else {
+                        match self.refresh_view_incremental(&mut view) {
+                            Ok(rows) => {
+                                used_mode = "incremental".to_string();
+                                rows
+                            }
+                            Err(_) => {
+                                used_mode = "full".to_string();
+                                self.refresh_view_full(&mut view)?
+                            }
+                        }
+                    }
+                }
+            };
+            Ok((rows, used_mode))
+        })();
+
+        let (rows, used_mode) = match refresh {
+            Ok(v) => v,
+            Err(err) => {
+                self.views.insert(key, view);
+                return Err(err);
+            }
+        };
+
+        view.last_refresh_mode = used_mode.clone();
+        let last_change_seq = view.last_change_seq;
+        self.views.insert(key, view);
+        self.persist_views_best_effort();
+
+        Ok(ViewRefreshResult {
+            mode: used_mode,
+            rows,
+            last_change_seq,
+        })
+    }
+
+    pub fn view_status(&self, params: ViewStatusParams) -> anyhow::Result<ViewStatusResult> {
+        let mut views = Vec::new();
+        let filter = params.view.map(|v| (v.db, v.table));
+        let mut matched = false;
+        for view in self.views.values() {
+            if let Some((db, name)) = filter.as_ref() {
+                if &view.db != db || &view.name != name {
+                    continue;
+                }
+                matched = true;
+            }
+            views.push(serde_json::json!({
+                "db": view.db,
+                "view": view.name,
+                "columns": view.columns,
+                "pk_columns": view.pk_columns,
+                "deps": view.deps.iter().map(|d| {
+                    serde_json::json!({
+                        "db": d.db,
+                        "table": d.table,
+                        "columns": d.columns,
+                    })
+                }).collect::<Vec<_>>(),
+                "rows": view.rows.len(),
+                "stale": view.stale,
+                "last_refresh_ms": view.last_refresh_ms,
+                "last_change_seq": view.last_change_seq,
+                "last_refresh_mode": view.last_refresh_mode,
+            }));
+        }
+        if filter.is_some() && !matched {
+            anyhow::bail!("invalid_request: view not found");
+        }
+
+        Ok(ViewStatusResult { views })
+    }
+
+    pub fn view_explain_deps(
+        &self,
+        params: ViewExplainDepsParams,
+    ) -> anyhow::Result<ViewExplainDepsResult> {
+        let key = TableKey {
+            db: params.view.db,
+            table: params.view.table,
+        };
+        let view = self
+            .views
+            .get(&key)
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
+        let deps = view
+            .deps
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "db": d.db,
+                    "table": d.table,
+                    "columns": d.columns,
+                })
+            })
+            .collect();
+        Ok(ViewExplainDepsResult { deps })
+    }
+
+    fn merge_policy_for(&self, table: &BaseTableRef) -> MergePolicySpec {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        self.merge_policies
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(merge_policy_default)
+    }
+
+    fn validate_merge_wasm_policy(&self, policy: &MergePolicySpec) -> anyhow::Result<()> {
+        for func in policy
+            .per_column
+            .values()
+            .chain(std::iter::once(&policy.default))
+        {
+            if func.kind == "wasm" {
+                let module_id = func.module.as_deref().unwrap_or("");
+                if module_id.is_empty() {
+                    anyhow::bail!("invalid_request: wasm merge function requires module id");
+                }
+                if !self.merge_wasm_registry.contains_key(module_id) {
+                    anyhow::bail!("invalid_request: merge wasm module not found");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_view_full(&self, view: &mut ViewState) -> anyhow::Result<u64> {
+        let (columns, rows, keys) = execute_select_with_keys(self, &view.query, &[])?;
+        let mut view_rows = Vec::new();
+        let mut pk_index = HashMap::new();
+        for (idx, (pk, values)) in keys.into_iter().zip(rows.into_iter()).enumerate() {
+            pk_index.insert(pk_key(&pk), idx);
+            view_rows.push(ViewRow { pk, values });
+        }
+        view.columns = columns.into_iter().map(|c| c.name).collect();
+        view.rows = view_rows;
+        view.pk_index = pk_index;
+        view.last_refresh_ms = now_millis();
+        view.last_change_seq = self.change_seq;
+        view.stale = false;
+        view.last_refresh_mode = "full".to_string();
+        Ok(view.rows.len() as u64)
+    }
+
+    fn refresh_view_incremental(&self, view: &mut ViewState) -> anyhow::Result<u64> {
+        let info = view_query_info(&view.query)?;
+        if view.deps.len() != 1 {
+            anyhow::bail!("invalid_request: incremental refresh requires single-table views");
+        }
+        let schema = self.get_schema(&info.base.db, &info.base.table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("invalid_request: base table has no primary key");
+        }
+        if view.columns.is_empty() {
+            view.columns = projection_columns(&info.projection)
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+        }
+
+        let mut changes = Vec::new();
+        for ev in self.changes.iter() {
+            if ev.seq <= view.last_change_seq {
+                continue;
+            }
+            if ev.db == info.base.db && ev.table == info.base.table {
+                changes.push(ev.clone());
+            }
+        }
+
+        if changes.is_empty() {
+            view.last_refresh_ms = now_millis();
+            view.stale = false;
+            view.last_refresh_mode = "incremental".to_string();
+            return Ok(view.rows.len() as u64);
+        }
+
+        for change in changes.into_iter() {
+            let Some(pk) = change.pk else {
+                anyhow::bail!("invalid_request: change missing primary key");
+            };
+
+            match change.op.as_str() {
+                "insert" | "update" => {
+                    let row = self.get_row_by_pk(&info.base, &pk).ok();
+                    if let Some(row) = row {
+                        let ctx = row_ctx_from_row(&info.alias, &row);
+                        let matches = if let Some(pred) = info.predicate.as_ref() {
+                            eval_predicate(pred, &RowObject::new(), Some(&ctx), &[])?
+                        } else {
+                            true
+                        };
+                        if matches {
+                            let values = build_view_values(&info.projection, &ctx)?;
+                            view_upsert_row(view, pk, values);
+                        } else {
+                            view_remove_row(view, &pk);
+                        }
+                    } else {
+                        view_remove_row(view, &pk);
+                    }
+                }
+                "delete" => {
+                    view_remove_row(view, &pk);
+                }
+                _ => {
+                    anyhow::bail!("invalid_request: unsupported change op");
+                }
+            }
+
+            view.last_change_seq = view.last_change_seq.max(change.seq);
+        }
+
+        view.last_refresh_ms = now_millis();
+        view.stale = false;
+        view.last_refresh_mode = "incremental".to_string();
+        Ok(view.rows.len() as u64)
+    }
+
+    fn view_change_count(&self, view: &ViewState) -> anyhow::Result<usize> {
+        let info = view_query_info(&view.query)?;
+        let mut count = 0usize;
+        for ev in self.changes.iter() {
+            if ev.seq <= view.last_change_seq {
+                continue;
+            }
+            if ev.db == info.base.db && ev.table == info.base.table {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn get_row_by_pk(&self, table: &BaseTableRef, pk: &[Lit]) -> anyhow::Result<RowObject> {
+        let (_schema, tdata) = self.get_table(table)?;
+        let key = pk_key(pk);
+        let Some(&idx) = tdata.pk_index.get(&key) else {
+            anyhow::bail!("not_found");
+        };
+        let entry = &tdata.rows[idx];
+        if entry.deleted {
+            anyhow::bail!("not_found");
+        }
+        Ok(entry.row.clone())
+    }
+
+    fn mark_views_stale(&mut self, db: &str, table: &str) {
+        let mut touched = false;
+        for view in self.views.values_mut() {
+            if view
+                .deps
+                .iter()
+                .any(|dep| dep.db == db && dep.table == table)
+            {
+                if !view.stale {
+                    view.stale = true;
+                    touched = true;
+                }
+            }
+        }
+        if touched {
+            self.persist_views_best_effort();
+        }
+    }
+
+    fn oblivious_policy_for(&self, table: &BaseTableRef) -> ObliviousPolicy {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        self.oblivious_policies
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(oblivious_policy_default)
+    }
+
+    fn oblivious_padding_for(
+        &self,
+        table: &BaseTableRef,
+        actual_rows: u64,
+    ) -> Option<ObliviousPadding> {
+        let policy = self.oblivious_policy_for(table);
+        if policy.level == "off" {
+            return None;
+        }
+        Some(compute_oblivious_padding(&policy, actual_rows))
+    }
+
+    fn oblivious_dummy_lookups(&self, table: &BaseTableRef, count: u64, tag: &str) {
+        if count == 0 {
+            return;
+        }
+        if let Ok(mut store) = self.value_store.lock() {
+            for idx in 0..count {
+                let bytes =
+                    format!("oblivious:{}:{}:{}:{}", table.db, table.table, tag, idx).into_bytes();
+                let id = value_id(&bytes);
+                let _ = store.get(&id);
+            }
+        }
+    }
+
+    fn append_forensic_record(
+        &mut self,
+        db: &str,
+        table: &str,
+        op: &str,
+        change_seq: u64,
+        pk: Option<Vec<Lit>>,
+    ) {
+        let prev_hash = self
+            .forensic_chain
+            .last()
+            .map(|r| r.hash.clone())
+            .unwrap_or_else(forensic_genesis_hash);
+        let id = self.forensic_next_id;
+        let ts_ms = now_millis();
+        let hash = forensic_record_hash(
+            &prev_hash,
+            id,
+            ts_ms,
+            db,
+            table,
+            op,
+            pk.as_ref(),
+            change_seq,
+        );
+        let record = ForensicRecord {
+            id,
+            ts_ms,
+            db: db.to_string(),
+            table: table.to_string(),
+            op: op.to_string(),
+            pk,
+            change_seq,
+            prev_hash,
+            hash,
+        };
+        self.forensic_next_id = self.forensic_next_id.saturating_add(1);
+        self.forensic_chain.push(record);
+        self.persist_forensic_best_effort();
+    }
+
+    pub fn cdc_subscribe_table(
+        &self,
+        subs: &mut Subscriptions,
+        db: &str,
+        table: &str,
+    ) -> anyhow::Result<CdcSubscribeResult> {
+        // Validate table exists.
+        let _ = self.get_schema(db, table)?;
+
+        let id = format!("sub_{:016x}", subs.next_id);
+        subs.next_id += 1;
+        subs.subs.insert(
+            id.clone(),
+            Subscription {
+                id: id.clone(),
+                db: db.to_string(),
+                table: table.to_string(),
+            },
+        );
+
+        Ok(CdcSubscribeResult {
+            sub_id: id,
+            offset: self.change_seq,
+        })
+    }
+
+    pub fn cdc_poll(
+        &self,
+        subs: &Subscriptions,
+        sub_id: &str,
+        from_offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<CdcPollResult> {
+        let Some(sub) = subs.subs.get(sub_id) else {
+            anyhow::bail!("not_found");
+        };
+
+        let mut events = Vec::new();
+        let mut next_offset = from_offset;
+        for ev in self.changes.iter() {
+            if ev.seq <= from_offset {
+                continue;
+            }
+            if ev.db == sub.db && ev.table == sub.table {
+                events.push(ev.clone());
+                next_offset = ev.seq;
+                if events.len() as u64 >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(CdcPollResult {
+            events,
+            next_offset,
+        })
+    }
+
+    // -----------------------------
+    // Internal helpers
+    // -----------------------------
+
+    fn get_schema(&self, db: &str, table: &str) -> anyhow::Result<&TableSchema> {
+        let Some(d) = self.catalog.databases.get(db) else {
+            anyhow::bail!("database not found: {db}");
+        };
+        let Some(t) = d.tables.get(table) else {
+            anyhow::bail!("table not found: {db}.{table}");
+        };
+        Ok(t)
+    }
+
+    fn get_schema_mut(&mut self, db: &str, table: &str) -> anyhow::Result<&mut TableSchema> {
+        let Some(d) = self.catalog.databases.get_mut(db) else {
+            anyhow::bail!("database not found: {db}");
+        };
+        let Some(t) = d.tables.get_mut(table) else {
+            anyhow::bail!("table not found: {db}.{table}");
+        };
+        Ok(t)
+    }
+
+    fn get_table(&self, table: &BaseTableRef) -> anyhow::Result<(&TableSchema, &TableData)> {
+        let schema = self.get_schema(&table.db, &table.table)?;
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let Some(tdata) = self.tables.get(&key) else {
+            anyhow::bail!("table data not loaded: {}.{}", table.db, table.table);
+        };
+        Ok((schema, tdata))
+    }
+
+    fn ai_nl_prompt_tables(
+        &self,
+        db: &str,
+        tables: Option<&Vec<String>>,
+        max_tables: usize,
+    ) -> anyhow::Result<(Vec<AiNlPromptTable>, Vec<String>)> {
+        let database = self
+            .catalog
+            .databases
+            .get(db)
+            .ok_or_else(|| anyhow::anyhow!("database not found: {db}"))?;
+        let mut warnings = Vec::new();
+
+        let mut table_names: Vec<String> = if let Some(list) = tables {
+            let mut out: Vec<String> = Vec::new();
+            for name in list.iter() {
+                let base = name.rsplit('.').next().unwrap_or(name);
+                let resolved = resolve_table_name(self, db, base)
+                    .ok_or_else(|| anyhow::anyhow!("table not found: {db}.{base}"))?;
+                if !out.iter().any(|t| t.eq_ignore_ascii_case(&resolved)) {
+                    out.push(resolved);
+                }
+            }
+            out
+        } else {
+            let mut out: Vec<String> = database.tables.keys().cloned().collect();
+            out.sort();
+            out
+        };
+
+        if max_tables == 0 {
+            table_names.clear();
+        } else if table_names.len() > max_tables {
+            table_names.truncate(max_tables);
+            warnings.push(format!("schema truncated to first {} tables", max_tables));
+        }
+
+        let mut tables_out = Vec::new();
+        for name in table_names.into_iter() {
+            let schema = database
+                .tables
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("table not found: {db}.{name}"))?;
+            let columns = schema
+                .columns
+                .iter()
+                .map(|col| SchemaColumnInfo {
+                    name: col.name.clone(),
+                    r#type: col.r#type.clone(),
+                    nullable: col.nullable,
+                    auto_increment: col.auto_increment,
+                })
+                .collect();
+            tables_out.push(AiNlPromptTable {
+                table: name,
+                columns,
+                primary_key: schema.primary_key.clone(),
+            });
+        }
+
+        Ok((tables_out, warnings))
+    }
+
+    fn get_table_mut(
+        &mut self,
+        table: &BaseTableRef,
+    ) -> anyhow::Result<(&mut TableSchema, &mut TableData)> {
+        // Borrow dance: fetch schema and tabledata separately.
+        let schema_ptr: *mut TableSchema = {
+            let schema = self.get_schema_mut(&table.db, &table.table)? as *mut TableSchema;
+            schema
+        };
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let tdata_ptr: *mut TableData = self
+            .tables
+            .get_mut(&key)
+            .ok_or_else(|| anyhow::anyhow!("table data not loaded"))?
+            as *mut TableData;
+
+        // SAFETY: schema and tdata live in different hashmaps; pointers are stable for this scope.
+        unsafe { Ok((&mut *schema_ptr, &mut *tdata_ptr)) }
+    }
+
+    fn persist_catalog(&self) -> anyhow::Result<()> {
+        save_json(&self.data_dir.join("catalog.json"), &self.catalog)
+    }
+
+    fn table_path(&self, db: &str, table: &str) -> PathBuf {
+        self.data_dir
+            .join("tables")
+            .join(db)
+            .join(format!("{table}.json"))
+    }
+
+    fn persist_table(&self, db: &str, table: &str) -> anyhow::Result<()> {
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+        let Some(tdata) = self.tables.get(&key) else {
+            return Ok(());
+        };
+        let path = self.table_path(db, table);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        save_json(&path, &tdata.rows)
+    }
+
+    fn load_tables_best_effort(&mut self) {
+        for (db, d) in self.catalog.databases.iter() {
+            for (table, _) in d.tables.iter() {
+                let path = self.table_path(db, table);
+                let rows: Vec<RowEntry> = load_json(&path).unwrap_or_default();
+                let mut tdata = TableData::default();
+                tdata.rows = rows;
+                // Build pk index.
+                if let Ok(schema) = self.get_schema(db, table) {
+                    for (idx, entry) in tdata.rows.iter().enumerate() {
+                        if entry.deleted {
+                            continue;
+                        }
+                        if let Ok(pk) = extract_pk(schema, &entry.row) {
+                            tdata.pk_index.insert(pk_key(&pk), idx);
+                        }
+                    }
+                }
+
+                self.tables.insert(
+                    TableKey {
+                        db: db.clone(),
+                        table: table.clone(),
+                    },
+                    tdata,
+                );
+            }
+        }
+    }
+
+    fn changes_path(&self) -> PathBuf {
+        self.data_dir.join("changes.json")
+    }
+
+    fn load_changes_best_effort(&mut self) {
+        let path = self.changes_path();
+        let events: Vec<ChangeEvent> = load_json(&path).unwrap_or_default();
+        self.changes = events;
+        self.change_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
+    }
+
+    fn persist_changes_best_effort(&self) {
+        let _ = save_json(&self.changes_path(), &self.changes);
+    }
+
+    fn prepared_path(&self) -> PathBuf {
+        self.data_dir.join("prepared.json")
+    }
+
+    fn load_prepared_best_effort(&mut self) {
+        let path = self.prepared_path();
+        let list: Vec<PreparedQuery> = load_json(&path).unwrap_or_default();
+        for pq in list {
+            self.next_prepared_id = self.next_prepared_id.max(
+                u64::from_str_radix(pq.id.trim_start_matches("q_").trim_start_matches('0'), 16)
+                    .unwrap_or(self.next_prepared_id)
+                    + 1,
+            );
+            self.prepared.insert(pq.id.clone(), pq);
+        }
+    }
+
+    fn persist_prepared_best_effort(&self) {
+        let list: Vec<PreparedQuery> = self.prepared.values().cloned().collect();
+        let _ = save_json(&self.prepared_path(), &list);
+    }
+
+    fn snapshots_path(&self) -> PathBuf {
+        self.data_dir.join("snapshots.json")
+    }
+
+    fn load_snapshots_best_effort(&mut self) {
+        let path = self.snapshots_path();
+        let list: Vec<ColumnSnapshotDisk> = load_json(&path).unwrap_or_default();
+        if let Ok(mut manager) = self.snapshots.lock() {
+            manager.load_from_disk(self, list);
+        }
+    }
+
+    fn persist_snapshots_best_effort(&self) {
+        if let Ok(manager) = self.snapshots.lock() {
+            let list = manager.to_disk();
+            let _ = save_json(&self.snapshots_path(), &list);
+        }
+    }
+
+    fn advisor_patterns_path(&self) -> PathBuf {
+        self.data_dir.join("advisor_patterns.json")
+    }
+
+    fn advisor_history_path(&self) -> PathBuf {
+        self.data_dir.join("advisor_history.json")
+    }
+
+    fn load_advisor_best_effort(&mut self) {
+        if !self.index_advisor_persist {
+            return;
+        }
+        if let Some(disk) = load_json::<AdvisorPatternsDisk>(&self.advisor_patterns_path()) {
+            if disk.format_version == ADVISOR_PATTERNS_FORMAT_VERSION {
+                if let Ok(mut advisor) = self.index_advisor.lock() {
+                    advisor.load_from_disk(disk.patterns);
+                }
+            }
+        }
+        if let Some(disk) = load_json::<AdvisorHistoryDisk>(&self.advisor_history_path()) {
+            if disk.format_version == ADVISOR_HISTORY_FORMAT_VERSION {
+                self.index_advisor_history = disk.entries;
+                self.index_advisor_history_next_id = disk.next_id.max(1);
+            }
+        }
+    }
+
+    fn restore_advisor_indexes(&mut self) {
+        if self.index_advisor_history.is_empty() {
+            return;
+        }
+        let mut latest: HashMap<String, &AdvisorHistoryEntry> = HashMap::new();
+        for entry in self.index_advisor_history.iter() {
+            latest.insert(entry.suggestion_id.clone(), entry);
+        }
+
+        for entry in latest.values() {
+            if entry.action != "apply" {
+                continue;
+            }
+            if entry.columns.is_empty() {
+                continue;
+            }
+            let columns = dedup_in_order(&entry.columns);
+            let mut include = dedup_in_order(&entry.include);
+            include.retain(|col| !columns.contains(col));
+            let table = BaseTableRef {
+                db: entry.table.db.clone(),
+                table: entry.table.table.clone(),
+                r#as: None,
+            };
+            let Ok((schema, tdata)) = self.get_table(&table) else {
+                continue;
+            };
+            if validate_columns(schema, &columns).is_err() {
+                continue;
+            }
+            if validate_columns(schema, &include).is_err() {
+                continue;
+            }
+            let _ = register_secondary_index(schema, tdata, &columns, &include);
+        }
+    }
+
+    fn persist_advisor_patterns_best_effort(&self) {
+        if !self.index_advisor_persist {
+            return;
+        }
+        if let Ok(advisor) = self.index_advisor.lock() {
+            let disk = advisor.to_disk();
+            let _ = save_json(&self.advisor_patterns_path(), &disk);
+        }
+    }
+
+    fn persist_advisor_history_best_effort(&self) {
+        if !self.index_advisor_persist {
+            return;
+        }
+        let disk = AdvisorHistoryDisk {
+            format_version: ADVISOR_HISTORY_FORMAT_VERSION,
+            next_id: self.index_advisor_history_next_id,
+            entries: self.index_advisor_history.clone(),
+        };
+        let _ = save_json(&self.advisor_history_path(), &disk);
+    }
+
+    fn dp_budgets_path(&self) -> PathBuf {
+        self.data_dir.join("dp_budgets.json")
+    }
+
+    fn dp_audit_path(&self) -> PathBuf {
+        self.data_dir.join("dp_audit.json")
+    }
+
+    fn load_dp_best_effort(&mut self) {
+        if let Some(disk) = load_json::<DpBudgetDisk>(&self.dp_budgets_path()) {
+            if disk.format_version == DP_BUDGET_FORMAT_VERSION {
+                self.dp_budgets = disk
+                    .budgets
+                    .into_iter()
+                    .map(|b| (b.principal.clone(), b))
+                    .collect();
+            }
+        }
+
+        if let Some(disk) = load_json::<DpAuditDisk>(&self.dp_audit_path()) {
+            if disk.format_version == DP_AUDIT_FORMAT_VERSION {
+                self.dp_audit_next_id = disk.next_id.max(1);
+                self.dp_audit = disk.events;
+            }
+        }
+    }
+
+    fn persist_dp_best_effort(&self) {
+        let budgets: Vec<DpBudget> = self.dp_budgets.values().cloned().collect();
+        let _ = save_json(
+            &self.dp_budgets_path(),
+            &DpBudgetDisk {
+                format_version: DP_BUDGET_FORMAT_VERSION,
+                budgets,
+            },
+        );
+        let _ = save_json(
+            &self.dp_audit_path(),
+            &DpAuditDisk {
+                format_version: DP_AUDIT_FORMAT_VERSION,
+                next_id: self.dp_audit_next_id,
+                events: self.dp_audit.clone(),
+            },
+        );
+    }
+
+    fn oblivious_policies_path(&self) -> PathBuf {
+        self.data_dir.join("oblivious_policies.json")
+    }
+
+    fn load_oblivious_best_effort(&mut self) {
+        if let Some(disk) = load_json::<ObliviousPolicyDisk>(&self.oblivious_policies_path()) {
+            if disk.format_version == OBLIVIOUS_POLICY_FORMAT_VERSION {
+                let mut map = HashMap::new();
+                for entry in disk.policies.into_iter() {
+                    if let Ok(policy) = normalize_oblivious_policy(entry.policy) {
+                        map.insert(
+                            TableKey {
+                                db: entry.db,
+                                table: entry.table,
+                            },
+                            policy,
+                        );
+                    }
+                }
+                self.oblivious_policies = map;
+            }
+        }
+    }
+
+    fn persist_oblivious_best_effort(&self) {
+        let policies = self
+            .oblivious_policies
+            .iter()
+            .map(|(key, policy)| ObliviousPolicyEntry {
+                db: key.db.clone(),
+                table: key.table.clone(),
+                policy: policy.clone(),
+            })
+            .collect::<Vec<_>>();
+        let _ = save_json(
+            &self.oblivious_policies_path(),
+            &ObliviousPolicyDisk {
+                format_version: OBLIVIOUS_POLICY_FORMAT_VERSION,
+                policies,
+            },
+        );
+    }
+
+    fn forensic_chain_path(&self) -> PathBuf {
+        self.data_dir.join("forensic_chain.json")
+    }
+
+    fn load_forensic_best_effort(&mut self) {
+        if let Some(disk) = load_json::<ForensicChainDisk>(&self.forensic_chain_path()) {
+            if disk.format_version == FORENSIC_CHAIN_FORMAT_VERSION {
+                self.forensic_next_id = disk.next_id.max(1);
+                self.forensic_chain = disk.records;
+            }
+        }
+    }
+
+    fn persist_forensic_best_effort(&self) {
+        let _ = save_json(
+            &self.forensic_chain_path(),
+            &ForensicChainDisk {
+                format_version: FORENSIC_CHAIN_FORMAT_VERSION,
+                next_id: self.forensic_next_id,
+                records: self.forensic_chain.clone(),
+            },
+        );
+    }
+
+    fn merge_policies_path(&self) -> PathBuf {
+        self.data_dir.join("merge_policies.json")
+    }
+
+    fn load_merge_policies_best_effort(&mut self) {
+        if let Some(disk) = load_json::<MergePolicyDisk>(&self.merge_policies_path()) {
+            if disk.format_version == MERGE_POLICY_FORMAT_VERSION {
+                let mut map = HashMap::new();
+                for entry in disk.policies.into_iter() {
+                    if let Ok(policy) = normalize_merge_policy(entry.policy, MergeWasmPolicy::Allow)
+                    {
+                        map.insert(
+                            TableKey {
+                                db: entry.db,
+                                table: entry.table,
+                            },
+                            policy,
+                        );
+                    }
+                }
+                self.merge_policies = map;
+            }
+        }
+    }
+
+    fn persist_merge_policies_best_effort(&self) {
+        let policies = self
+            .merge_policies
+            .iter()
+            .map(|(key, policy)| MergePolicyEntry {
+                db: key.db.clone(),
+                table: key.table.clone(),
+                policy: policy.clone(),
+            })
+            .collect::<Vec<_>>();
+        let _ = save_json(
+            &self.merge_policies_path(),
+            &MergePolicyDisk {
+                format_version: MERGE_POLICY_FORMAT_VERSION,
+                policies,
+            },
+        );
+    }
+
+    fn merge_wasm_registry_path(&self) -> PathBuf {
+        self.data_dir.join("merge_wasm_registry.json")
+    }
+
+    fn load_merge_wasm_registry_best_effort(&mut self) {
+        if let Some(disk) = load_json::<MergeWasmRegistryDisk>(&self.merge_wasm_registry_path()) {
+            if disk.format_version == MERGE_WASM_REGISTRY_FORMAT_VERSION {
+                let mut map = HashMap::new();
+                for module in disk.modules.into_iter() {
+                    map.insert(module.module_id.clone(), module);
+                }
+                self.merge_wasm_registry = map;
+            }
+        }
+    }
+
+    fn persist_merge_wasm_registry_best_effort(&self) {
+        let mut modules: Vec<MergeWasmModuleEntry> =
+            self.merge_wasm_registry.values().cloned().collect();
+        modules.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        let _ = save_json(
+            &self.merge_wasm_registry_path(),
+            &MergeWasmRegistryDisk {
+                format_version: MERGE_WASM_REGISTRY_FORMAT_VERSION,
+                modules,
+            },
+        );
+    }
+
+    fn views_path(&self) -> PathBuf {
+        self.data_dir.join("views.json")
+    }
+
+    fn load_views_best_effort(&mut self) {
+        if let Some(disk) = load_json::<ViewDisk>(&self.views_path()) {
+            if disk.format_version == VIEW_FORMAT_VERSION {
+                let mut map = HashMap::new();
+                for entry in disk.views.into_iter() {
+                    let mut rows = Vec::new();
+                    let mut pk_index = HashMap::new();
+                    for (idx, row) in entry.rows.into_iter().enumerate() {
+                        let key = pk_key(&row.pk);
+                        pk_index.insert(key, idx);
+                        rows.push(ViewRow {
+                            pk: row.pk,
+                            values: row.values,
+                        });
+                    }
+                    map.insert(
+                        TableKey {
+                            db: entry.db.clone(),
+                            table: entry.name.clone(),
+                        },
+                        ViewState {
+                            db: entry.db,
+                            name: entry.name,
+                            query: entry.query,
+                            columns: entry.columns,
+                            pk_columns: entry.pk_columns,
+                            deps: entry.deps,
+                            rows,
+                            pk_index,
+                            last_refresh_ms: entry.last_refresh_ms,
+                            last_change_seq: entry.last_change_seq,
+                            stale: entry.stale,
+                            last_refresh_mode: if entry.last_refresh_mode.is_empty() {
+                                "full".to_string()
+                            } else {
+                                entry.last_refresh_mode
+                            },
+                        },
+                    );
+                }
+                self.views = map;
+            }
+        }
+    }
+
+    fn persist_views_best_effort(&self) {
+        let mut views = self
+            .views
+            .values()
+            .map(|view| ViewEntryDisk {
+                db: view.db.clone(),
+                name: view.name.clone(),
+                query: view.query.clone(),
+                columns: view.columns.clone(),
+                pk_columns: view.pk_columns.clone(),
+                deps: view.deps.clone(),
+                rows: view
+                    .rows
+                    .iter()
+                    .map(|row| ViewRowDisk {
+                        pk: row.pk.clone(),
+                        values: row.values.clone(),
+                    })
+                    .collect(),
+                last_refresh_ms: view.last_refresh_ms,
+                last_change_seq: view.last_change_seq,
+                stale: view.stale,
+                last_refresh_mode: view.last_refresh_mode.clone(),
+            })
+            .collect::<Vec<_>>();
+        views.sort_by(|a, b| (a.db.clone(), a.name.clone()).cmp(&(b.db.clone(), b.name.clone())));
+        let _ = save_json(
+            &self.views_path(),
+            &ViewDisk {
+                format_version: VIEW_FORMAT_VERSION,
+                views,
+            },
+        );
+    }
+
+    fn schema_versions_path(&self) -> PathBuf {
+        self.data_dir.join("schema_versions.json")
+    }
+
+    fn schema_changes_path(&self) -> PathBuf {
+        self.data_dir.join("schema_changes.json")
+    }
+
+    fn load_schema_versions_best_effort(&mut self) {
+        let mut versions = HashMap::new();
+        if let Some(disk) = load_json::<SchemaVersionsDisk>(&self.schema_versions_path()) {
+            if disk.format_version == SCHEMA_VERSION_FORMAT_VERSION {
+                for entry in disk.versions {
+                    versions.insert(
+                        TableKey {
+                            db: entry.db,
+                            table: entry.table,
+                        },
+                        entry.version.max(1),
+                    );
+                }
+            }
+        }
+
+        let mut touched = false;
+        for (db, d) in self.catalog.databases.iter() {
+            for table in d.tables.keys() {
+                let key = TableKey {
+                    db: db.clone(),
+                    table: table.clone(),
+                };
+                if !versions.contains_key(&key) {
+                    versions.insert(key, 1);
+                    touched = true;
+                }
+            }
+        }
+
+        self.schema_versions = versions;
+        if touched {
+            self.persist_schema_versions_best_effort();
+        }
+    }
+
+    fn persist_schema_versions_best_effort(&self) {
+        let mut versions = self
+            .schema_versions
+            .iter()
+            .map(|(key, version)| SchemaVersionEntry {
+                db: key.db.clone(),
+                table: key.table.clone(),
+                version: *version,
+            })
+            .collect::<Vec<_>>();
+        versions
+            .sort_by(|a, b| (a.db.clone(), a.table.clone()).cmp(&(b.db.clone(), b.table.clone())));
+        let _ = save_json(
+            &self.schema_versions_path(),
+            &SchemaVersionsDisk {
+                format_version: SCHEMA_VERSION_FORMAT_VERSION,
+                versions,
+            },
+        );
+    }
+
+    fn load_schema_changes_best_effort(&mut self) {
+        if let Some(disk) = load_json::<SchemaChangesDisk>(&self.schema_changes_path()) {
+            if disk.format_version == SCHEMA_CHANGES_FORMAT_VERSION {
+                self.schema_changes = disk.changes;
+                self.schema_changes_next_id = disk.next_id.max(1);
+                return;
+            }
+        }
+        self.schema_changes = Vec::new();
+        self.schema_changes_next_id = 1;
+    }
+
+    fn persist_schema_changes_best_effort(&self) {
+        let _ = save_json(
+            &self.schema_changes_path(),
+            &SchemaChangesDisk {
+                format_version: SCHEMA_CHANGES_FORMAT_VERSION,
+                next_id: self.schema_changes_next_id,
+                changes: self.schema_changes.clone(),
+            },
+        );
+    }
+
+    fn emit_change(&mut self, db: &str, table: &str, op: &str, pk: Option<Vec<Lit>>) {
+        self.change_seq += 1;
+        let pk_for_forensic = pk.clone();
+        self.changes.push(ChangeEvent {
+            seq: self.change_seq,
+            db: db.to_string(),
+            table: table.to_string(),
+            op: op.to_string(),
+            pk,
+        });
+        self.append_forensic_record(db, table, op, self.change_seq, pk_for_forensic);
+        self.mark_views_stale(db, table);
+    }
+
+    fn last_change_seq_for_table(&self, key: &TableKey) -> u64 {
+        self.changes
+            .iter()
+            .rev()
+            .find(|ev| ev.db == key.db && ev.table == key.table)
+            .map(|ev| ev.seq)
+            .unwrap_or(0)
+    }
+
+    fn edge_coverage_list(&self) -> Vec<EdgeBundleCoverage> {
+        let mut out = Vec::new();
+        for cover in self.edge_coverage.values() {
+            out.push(EdgeBundleCoverage {
+                table: BaseTableRef {
+                    db: cover.table.db.clone(),
+                    table: cover.table.table.clone(),
+                    r#as: None,
+                },
+                start_seq: cover.start_seq,
+                end_seq: cover.end_seq,
+                updated_at_ms: cover.updated_at_ms,
+                bundle_id: cover.bundle_id.clone(),
+                redaction_mode: cover.redaction_mode.clone(),
+            });
+        }
+        out.sort_by(|a, b| {
+            (a.table.db.clone(), a.table.table.clone())
+                .cmp(&(b.table.db.clone(), b.table.table.clone()))
+        });
+        out
+    }
+
+    fn schema_version_for(&self, key: &TableKey) -> u64 {
+        self.schema_versions.get(key).copied().unwrap_or(1)
+    }
+
+    fn set_schema_version(&mut self, key: &TableKey, version: u64) {
+        self.schema_versions.insert(key.clone(), version.max(1));
+    }
+
+    fn dependencies_for_query(&self, query: &Query) -> anyhow::Result<Vec<CausalityDependency>> {
+        let mut tables = Vec::new();
+        let mut seen = HashSet::new();
+        collect_tables(query, &mut tables);
+        let mut out = Vec::new();
+        for (db, table) in tables {
+            let key = format!("{db}.{table}");
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Ok(schema) = self.get_schema(&db, &table) {
+                out.push(CausalityDependency {
+                    table: key,
+                    v: Some(schema.table_version),
+                    view: None,
+                    change_seq: None,
+                    stale: None,
+                });
+            } else if let Some(view) = self.views.get(&TableKey {
+                db: db.clone(),
+                table: table.clone(),
+            }) {
+                out.push(CausalityDependency {
+                    table: key,
+                    v: None,
+                    view: Some(true),
+                    change_seq: Some(view.last_change_seq),
+                    stale: Some(view.stale),
+                });
+            } else {
+                anyhow::bail!("table not found: {db}.{table}");
+            }
+        }
+        Ok(out)
+    }
+
+    fn build_column_snapshot_from_plan(&self, plan: SnapshotPlan) -> anyhow::Result<bool> {
+        let snapshot = self.build_column_snapshot_internal(
+            &plan.table.db,
+            &plan.table.table,
+            plan.columns.clone(),
+            plan.snapshot_ts,
+            Some((plan.build_cost, plan.benefit)),
+        )?;
+        let mut inserted = false;
+        if let Ok(mut manager) = self.snapshots.lock() {
+            inserted = manager.insert_snapshot(snapshot);
+        }
+        if inserted {
+            self.persist_snapshots_best_effort();
+        }
+        Ok(inserted)
+    }
+
+    fn build_column_snapshot_internal(
+        &self,
+        db: &str,
+        table: &str,
+        requested_columns: Vec<String>,
+        snapshot_ts: u64,
+        stats: Option<(f64, f64)>,
+    ) -> anyhow::Result<ColumnSnapshot> {
+        let schema = self.get_schema(db, table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("table has no primary key");
+        }
+
+        let columns = if requested_columns.is_empty() {
+            schema.columns.iter().map(|c| c.name.clone()).collect()
+        } else {
+            resolve_snapshot_columns(schema, &requested_columns)?
+        };
+
+        let id = snapshot_id(db, table, snapshot_ts, &columns);
+
+        let table_ref = BaseTableRef {
+            db: db.to_string(),
+            table: table.to_string(),
+            r#as: None,
+        };
+        let (_, tdata) = self.get_table(&table_ref)?;
+
+        let mut rows = Vec::new();
+        let mut pk_index = HashMap::new();
+
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            let pk = extract_pk(schema, &entry.row)?;
+            let key = pk_key(&pk);
+            if pk_index.contains_key(&key) {
+                continue;
+            }
+            let values = snapshot_values(&columns, &entry.row);
+            let idx = rows.len();
+            rows.push(SnapshotRow { pk, values });
+            pk_index.insert(key, idx);
+        }
+
+        let mut column_index = HashMap::new();
+        for (idx, col) in columns.iter().enumerate() {
+            column_index.insert(col.clone(), idx);
+        }
+
+        let mut snapshot = ColumnSnapshot {
+            id,
+            db: db.to_string(),
+            table: table.to_string(),
+            columns,
+            pk_columns: schema.primary_key.clone(),
+            snapshot_ts,
+            table_version: schema.table_version,
+            rows,
+            pk_index,
+            column_index,
+            stats: SnapshotStats::default(),
+            valid: true,
+        };
+
+        if let Some((build_cost, benefit)) = stats {
+            snapshot.stats.build_cost = build_cost;
+            snapshot.stats.benefit_score = benefit;
+        }
+
+        Ok(snapshot)
+    }
+
+    fn apply_snapshot_upserts(&self, table: &BaseTableRef, rows: &[RowObject]) -> bool {
+        if rows.is_empty() {
+            return false;
+        }
+        let schema = match self.get_schema(&table.db, &table.table) {
+            Ok(schema) => schema,
+            Err(_) => return false,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = self.snapshots.lock() {
+            return manager.apply_upserts(&key, rows, schema.table_version);
+        }
+        false
+    }
+
+    fn apply_snapshot_deletes(&self, table: &BaseTableRef, pks: &[Vec<Lit>]) -> bool {
+        if pks.is_empty() {
+            return false;
+        }
+        let schema = match self.get_schema(&table.db, &table.table) {
+            Ok(schema) => schema,
+            Err(_) => return false,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = self.snapshots.lock() {
+            return manager.apply_deletes(&key, pks, schema.table_version);
+        }
+        false
+    }
+
+    fn observe_and_plan_snapshot(&self, info: &QuerySnapshotInfo, rows_scanned: u64) {
+        if rows_scanned == 0 {
+            return;
+        }
+        let schema = match self.get_schema(&info.base.db, &info.base.table) {
+            Ok(schema) => schema,
+            Err(_) => return,
+        };
+        let key = TableKey {
+            db: info.base.db.clone(),
+            table: info.base.table.clone(),
+        };
+        let now = now_micros();
+        let plan = if let Ok(mut manager) = self.snapshots.lock() {
+            manager.record_query(&key, info.required_cols.clone(), rows_scanned, now);
+            manager.next_plan(
+                &key,
+                &schema.primary_key,
+                rows_scanned,
+                schema.columns.len(),
+                schema.table_version,
+                now,
+            )
+        } else {
+            None
+        };
+
+        if let Some(plan) = plan {
+            let _ = self.build_column_snapshot_from_plan(plan);
+        }
+    }
+
+    fn observe_index_advisor(&self, infos: &[IndexQueryInfo], rows_scanned: u64) {
+        if infos.is_empty() {
+            return;
+        }
+        let now = now_micros();
+        let multi_table = infos.len() > 1;
+        let Ok(mut advisor) = self.index_advisor.lock() else {
+            return;
+        };
+        for info in infos.iter() {
+            let scan = if multi_table {
+                self.get_table(&info.base)
+                    .map(|(_, tdata)| tdata.rows.len() as u64)
+                    .unwrap_or(0)
+            } else {
+                rows_scanned
+            };
+            if scan == 0 {
+                continue;
+            }
+            let key = TableKey {
+                db: info.base.db.clone(),
+                table: info.base.table.clone(),
+            };
+            advisor.record_query(&key, info, scan, now);
+        }
+        drop(advisor);
+        self.persist_advisor_patterns_best_effort();
+    }
+}
+
+impl SnapshotManager {
+    fn load_from_disk(&mut self, engine: &Engine, list: Vec<ColumnSnapshotDisk>) {
+        self.snapshots.clear();
+        for disk in list {
+            if disk.format_version != SNAPSHOT_FORMAT_VERSION {
+                continue;
+            }
+            let schema = match engine.get_schema(&disk.db, &disk.table) {
+                Ok(schema) => schema,
+                Err(_) => continue,
+            };
+            if schema.primary_key != disk.pk_columns {
+                continue;
+            }
+            if disk.table_version != schema.table_version {
+                continue;
+            }
+            if !snapshot_columns_match_schema(schema, &disk.columns) {
+                continue;
+            }
+            let snapshot = ColumnSnapshot::from_disk(disk);
+            let key = TableKey {
+                db: snapshot.db.clone(),
+                table: snapshot.table.clone(),
+            };
+            self.snapshots.entry(key).or_default().push(snapshot);
+        }
+    }
+
+    fn to_disk(&self) -> Vec<ColumnSnapshotDisk> {
+        let mut out = Vec::new();
+        for snapshots in self.snapshots.values() {
+            for snapshot in snapshots.iter() {
+                if !snapshot.valid {
+                    continue;
+                }
+                out.push(snapshot.to_disk());
+            }
+        }
+        out
+    }
+
+    fn snapshot_view_for_query(
+        &mut self,
+        table: &TableKey,
+        required: &HashSet<String>,
+        table_version: u64,
+        now: u64,
+    ) -> Option<SnapshotView> {
+        let snapshots = self.snapshots.get_mut(table)?;
+        let mut best_idx: Option<usize> = None;
+        let mut best_cols = usize::MAX;
+
+        for (idx, snap) in snapshots.iter().enumerate() {
+            if !snap.valid || snap.table_version != table_version {
+                continue;
+            }
+            if !snap.covers(required) {
+                continue;
+            }
+            if snap.columns.len() < best_cols {
+                best_cols = snap.columns.len();
+                best_idx = Some(idx);
+            }
+        }
+
+        let idx = best_idx?;
+        let snap = &mut snapshots[idx];
+        snap.stats.hits = snap.stats.hits.saturating_add(1);
+        snap.stats.last_used_micros = now;
+
+        Some(SnapshotView {
+            columns: snap.columns.clone(),
+            rows: snap.rows.clone(),
+        })
+    }
+
+    fn record_query(
+        &mut self,
+        table: &TableKey,
+        columns: Vec<String>,
+        rows_scanned: u64,
+        now: u64,
+    ) {
+        self.patterns
+            .record_query(table, columns, rows_scanned, now);
+    }
+
+    fn next_plan(
+        &self,
+        table: &TableKey,
+        pk_cols: &[String],
+        table_rows: u64,
+        table_cols: usize,
+        table_version: u64,
+        now: u64,
+    ) -> Option<SnapshotPlan> {
+        let patterns = self.patterns.by_table.get(table)?;
+        let mut best: Option<SnapshotPlan> = None;
+        let mut best_benefit = f64::MIN;
+
+        for stats in patterns.values() {
+            if stats.count < self.controller.min_queries {
+                continue;
+            }
+            if stats.rows_scanned < self.controller.min_rows {
+                continue;
+            }
+            if now.saturating_sub(stats.last_seen_micros) > self.controller.recency_window_micros {
+                continue;
+            }
+            let candidate_cols = stats.columns.clone();
+            if self.has_covering_snapshot(table, &candidate_cols, table_version) {
+                continue;
+            }
+
+            let stored_cols = candidate_cols.len() + pk_cols.len();
+            let build_cost =
+                self.cost_model.build_cost_per_cell * (table_rows as f64) * (stored_cols as f64);
+            let row_scan_cost = self.cost_model.row_scan_cost_per_cell
+                * (table_cols as f64)
+                * (stats.rows_scanned as f64);
+            let snapshot_scan_cost = self.cost_model.snapshot_scan_cost_per_cell
+                * (candidate_cols.len() as f64)
+                * (stats.rows_scanned as f64);
+            let benefit = row_scan_cost - snapshot_scan_cost - build_cost;
+
+            if benefit < self.cost_model.min_benefit {
+                continue;
+            }
+
+            if benefit > best_benefit {
+                best_benefit = benefit;
+                best = Some(SnapshotPlan {
+                    table: table.clone(),
+                    columns: candidate_cols,
+                    snapshot_ts: now,
+                    build_cost,
+                    benefit,
+                });
+            }
+        }
+
+        best
+    }
+
+    fn insert_snapshot(&mut self, snapshot: ColumnSnapshot) -> bool {
+        let key = TableKey {
+            db: snapshot.db.clone(),
+            table: snapshot.table.clone(),
+        };
+        let list = self.snapshots.entry(key).or_default();
+
+        if let Some(existing) = list
+            .iter_mut()
+            .find(|s| s.columns == snapshot.columns && s.pk_columns == snapshot.pk_columns)
+        {
+            *existing = snapshot;
+            return true;
+        }
+
+        if list.len() >= self.controller.max_snapshots_per_table {
+            if let Some(idx) = select_eviction_index(list) {
+                list.remove(idx);
+            }
+        }
+
+        list.push(snapshot);
+        true
+    }
+
+    fn apply_upserts(&mut self, table: &TableKey, rows: &[RowObject], table_version: u64) -> bool {
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return false;
+        };
+
+        let mut changed = false;
+        for snap in list.iter_mut() {
+            if !snap.valid {
+                continue;
+            }
+            let mut invalidated = false;
+            for row in rows.iter() {
+                let pk = match extract_pk_from_cols(&snap.pk_columns, row) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        invalidated = true;
+                        break;
+                    }
+                };
+                let values = snapshot_values(&snap.columns, row);
+                let key = pk_key(&pk);
+                if let Some(&idx) = snap.pk_index.get(&key) {
+                    snap.rows[idx].pk = pk;
+                    snap.rows[idx].values = values;
+                } else {
+                    let idx = snap.rows.len();
+                    snap.rows.push(SnapshotRow { pk, values });
+                    snap.pk_index.insert(key, idx);
+                }
+                changed = true;
+            }
+            if invalidated {
+                snap.valid = false;
+                changed = true;
+            } else {
+                snap.table_version = table_version;
+            }
+        }
+
+        changed
+    }
+
+    fn apply_deletes(&mut self, table: &TableKey, pks: &[Vec<Lit>], table_version: u64) -> bool {
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return false;
+        };
+
+        let mut changed = false;
+        for snap in list.iter_mut() {
+            if !snap.valid {
+                continue;
+            }
+            for pk in pks.iter() {
+                if remove_snapshot_row(snap, pk) {
+                    changed = true;
+                }
+            }
+            if !pks.is_empty() {
+                snap.table_version = table_version;
+            }
+        }
+
+        changed
+    }
+
+    fn has_covering_snapshot(
+        &self,
+        table: &TableKey,
+        columns: &[String],
+        table_version: u64,
+    ) -> bool {
+        let Some(list) = self.snapshots.get(table) else {
+            return false;
+        };
+        let required: HashSet<String> = columns.iter().cloned().collect();
+        list.iter()
+            .any(|snap| snap.valid && snap.table_version == table_version && snap.covers(&required))
+    }
+}
+
+impl ColumnSnapshot {
+    fn from_disk(disk: ColumnSnapshotDisk) -> Self {
+        let ColumnSnapshotDisk {
+            id,
+            db,
+            table,
+            columns,
+            pk_columns,
+            snapshot_ts,
+            table_version,
+            rows,
+            ..
+        } = disk;
+
+        let mut out_rows = Vec::new();
+        let mut pk_index = HashMap::new();
+        for row in rows.into_iter() {
+            if row.values.len() != columns.len() {
+                continue;
+            }
+            let key = pk_key(&row.pk);
+            if pk_index.contains_key(&key) {
+                continue;
+            }
+            let idx = out_rows.len();
+            out_rows.push(SnapshotRow {
+                pk: row.pk,
+                values: row.values,
+            });
+            pk_index.insert(key, idx);
+        }
+        let mut column_index = HashMap::new();
+        for (idx, col) in columns.iter().enumerate() {
+            column_index.insert(col.clone(), idx);
+        }
+
+        Self {
+            id,
+            db,
+            table,
+            columns,
+            pk_columns,
+            snapshot_ts,
+            table_version,
+            rows: out_rows,
+            pk_index,
+            column_index,
+            stats: SnapshotStats::default(),
+            valid: true,
+        }
+    }
+
+    fn to_disk(&self) -> ColumnSnapshotDisk {
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| SnapshotRowDisk {
+                pk: row.pk.clone(),
+                values: row.values.clone(),
+            })
+            .collect();
+        ColumnSnapshotDisk {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            id: self.id.clone(),
+            db: self.db.clone(),
+            table: self.table.clone(),
+            columns: self.columns.clone(),
+            pk_columns: self.pk_columns.clone(),
+            snapshot_ts: self.snapshot_ts,
+            table_version: self.table_version,
+            rows,
+        }
+    }
+
+    fn covers(&self, required: &HashSet<String>) -> bool {
+        required
+            .iter()
+            .all(|col| self.column_index.contains_key(col))
+    }
+}
+
+impl QueryPatternTracker {
+    fn record_query(
+        &mut self,
+        table: &TableKey,
+        columns: Vec<String>,
+        rows_scanned: u64,
+        now: u64,
+    ) {
+        let normalized = normalize_columns(&columns);
+        let key = projection_key(&normalized);
+        let per_table = self.by_table.entry(table.clone()).or_default();
+        let entry = per_table.entry(key).or_insert_with(|| ProjectionStats {
+            columns: normalized.clone(),
+            count: 0,
+            rows_scanned: 0,
+            last_seen_micros: now,
+        });
+        entry.columns = normalized;
+        entry.count = entry.count.saturating_add(1);
+        entry.rows_scanned = entry.rows_scanned.saturating_add(rows_scanned);
+        entry.last_seen_micros = now;
+    }
+}
+
+impl IndexAdvisor {
+    fn record_query(
+        &mut self,
+        table: &TableKey,
+        info: &IndexQueryInfo,
+        rows_scanned: u64,
+        now: u64,
+    ) {
+        if rows_scanned == 0 {
+            return;
+        }
+        let eq_cols = normalize_columns(&info.eq_cols);
+        let range_cols = normalize_columns(&info.range_cols);
+        let order_cols = dedup_in_order(&info.order_cols);
+        let group_cols = dedup_in_order(&info.group_cols);
+        let join_cols = normalize_columns(&info.join_cols);
+        let projection_cols = normalize_columns(&info.projection_cols);
+
+        if eq_cols.is_empty()
+            && range_cols.is_empty()
+            && order_cols.is_empty()
+            && group_cols.is_empty()
+            && join_cols.is_empty()
+        {
+            return;
+        }
+
+        let key = index_pattern_key(
+            &eq_cols,
+            &range_cols,
+            &order_cols,
+            &group_cols,
+            &join_cols,
+            &projection_cols,
+        );
+        let per_table = self.by_table.entry(table.clone()).or_default();
+        if !per_table.contains_key(&key) && per_table.len() >= self.max_patterns_per_table {
+            return;
+        }
+        let entry = per_table.entry(key).or_default();
+        entry.eq_cols = eq_cols;
+        entry.range_cols = range_cols;
+        entry.order_cols = order_cols;
+        entry.group_cols = group_cols;
+        entry.join_cols = join_cols;
+        entry.projection_cols = projection_cols;
+        entry.count = entry.count.saturating_add(1);
+        entry.rows_scanned = entry.rows_scanned.saturating_add(rows_scanned);
+        entry.last_seen_micros = now;
+    }
+
+    fn synthesize(
+        &self,
+        table: &TableKey,
+        schema: &TableSchema,
+        limit: usize,
+        min_queries: u64,
+        min_rows: u64,
+    ) -> Vec<AdvisorIndexSuggestion> {
+        let Some(patterns) = self.by_table.get(table) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+
+        for stats in patterns.values() {
+            if stats.count < min_queries || stats.rows_scanned < min_rows {
+                continue;
+            }
+            let mut key_cols = stats.eq_cols.clone();
+            if let Some(range) = stats.range_cols.first() {
+                if !key_cols.contains(range) {
+                    key_cols.push(range.clone());
+                }
+            }
+            for col in stats.group_cols.iter().chain(stats.order_cols.iter()) {
+                if !key_cols.contains(col) {
+                    key_cols.push(col.clone());
+                }
+            }
+
+            if key_cols.is_empty() {
+                continue;
+            }
+            if key_cols.len() > INDEX_ADVISOR_MAX_COLUMNS {
+                continue;
+            }
+            if pk_prefix_match(&schema.primary_key, &key_cols) {
+                continue;
+            }
+
+            let key = projection_key(&key_cols);
+            if !seen.insert(key) {
+                continue;
+            }
+
+            let include = stats
+                .projection_cols
+                .iter()
+                .filter(|col| !key_cols.contains(*col))
+                .take(INDEX_ADVISOR_MAX_INCLUDE)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let mut score = stats.rows_scanned as f64;
+            if !stats.group_cols.is_empty() {
+                score *= 1.05;
+            }
+            score *= join_selectivity_factor(schema, &stats.join_cols);
+            score += stats.count as f64 * 0.1;
+
+            let id = advisor_suggestion_id(table, &key_cols, &include);
+            out.push(AdvisorIndexSuggestion {
+                id: Some(id),
+                columns: key_cols,
+                include,
+                score,
+                count: stats.count,
+                rows_scanned: stats.rows_scanned,
+            });
+        }
+
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if out.len() > limit {
+            out.truncate(limit);
+        }
+        out
+    }
+
+    fn to_disk(&self) -> AdvisorPatternsDisk {
+        let mut patterns = Vec::new();
+        for (table, per_table) in self.by_table.iter() {
+            for stats in per_table.values() {
+                patterns.push(AdvisorPatternDisk {
+                    db: table.db.clone(),
+                    table: table.table.clone(),
+                    eq_cols: stats.eq_cols.clone(),
+                    range_cols: stats.range_cols.clone(),
+                    order_cols: stats.order_cols.clone(),
+                    group_cols: stats.group_cols.clone(),
+                    join_cols: stats.join_cols.clone(),
+                    projection_cols: stats.projection_cols.clone(),
+                    count: stats.count,
+                    rows_scanned: stats.rows_scanned,
+                    last_seen_micros: stats.last_seen_micros,
+                });
+            }
+        }
+        AdvisorPatternsDisk {
+            format_version: ADVISOR_PATTERNS_FORMAT_VERSION,
+            patterns,
+        }
+    }
+
+    fn load_from_disk(&mut self, patterns: Vec<AdvisorPatternDisk>) {
+        self.by_table.clear();
+        for entry in patterns.into_iter() {
+            let key = TableKey {
+                db: entry.db,
+                table: entry.table,
+            };
+            let stats = IndexPatternStats {
+                eq_cols: entry.eq_cols,
+                range_cols: entry.range_cols,
+                order_cols: entry.order_cols,
+                group_cols: entry.group_cols,
+                join_cols: entry.join_cols,
+                projection_cols: entry.projection_cols,
+                count: entry.count,
+                rows_scanned: entry.rows_scanned,
+                last_seen_micros: entry.last_seen_micros,
+            };
+            let pattern_key = index_pattern_key(
+                &stats.eq_cols,
+                &stats.range_cols,
+                &stats.order_cols,
+                &stats.group_cols,
+                &stats.join_cols,
+                &stats.projection_cols,
+            );
+            self.by_table
+                .entry(key)
+                .or_default()
+                .insert(pattern_key, stats);
+        }
+    }
+}
+
+// -----------------------------
+// Query execution (subset)
+// -----------------------------
+
+fn index_prefilter_candidates(
+    engine: &Engine,
+    base: &BaseTableRef,
+    predicate: Option<&Expr>,
+    args: &[Lit],
+) -> Option<Vec<usize>> {
+    let predicate = predicate?;
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if engine.views.contains_key(&key) {
+        return None;
+    }
+    if engine.oblivious_policy_for(base).level != "off" {
+        return None;
+    }
+
+    let (schema, tdata) = engine.get_table(base).ok()?;
+    let mut alias_map = HashMap::new();
+    alias_map.insert(alias.clone(), base.clone());
+
+    let mut pairs = Vec::new();
+    if !collect_index_eq_filters(predicate, Some(&alias), &alias_map, args, &mut pairs) {
+        return None;
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+
+    let mut filters: HashMap<String, Lit> = HashMap::new();
+    for (col, value) in pairs.into_iter() {
+        filters.entry(col).or_insert(value);
+    }
+
+    secondary_index_candidates(schema, tdata, &filters)
+}
+
+fn execute_select(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>)> {
+    let snapshot_info = query_snapshot_info(query);
+    let index_infos = query_index_infos(query);
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        anyhow::bail!("set operations not implemented in this prototype");
+    };
+    let SelectBody {
+        projection,
+        from,
+        r#where,
+        group_by,
+        having,
+        ..
+    } = select.as_ref();
+
+    if group_by.is_some() || having.is_some() {
+        anyhow::bail!("group_by/having not implemented in this prototype");
+    }
+
+    let from = from.clone().unwrap_or_default();
+    if from.is_empty() {
+        anyhow::bail!("SELECT without FROM is not implemented");
+    }
+
+    if let Some(info) = snapshot_info.as_ref() {
+        if let Some((columns, rows, rows_scanned)) =
+            try_execute_select_snapshot(engine, query, args, info)?
+        {
+            if !index_infos.is_empty() {
+                engine.observe_index_advisor(&index_infos, rows_scanned);
+            }
+            engine.observe_and_plan_snapshot(info, rows_scanned);
+            return Ok((columns, rows));
+        }
+    }
+
+    if from.len() == 1 {
+        if let TableRef::Base(base) = &from[0] {
+            let has_limit = query
+                .limit
+                .as_ref()
+                .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
+            if let (Some((limit, offset)), Some(hint)) = (
+                has_limit,
+                vector_order_prefilter_hint(&query.order_by, args),
+            ) {
+                let key = TableKey {
+                    db: base.db.clone(),
+                    table: base.table.clone(),
+                };
+                if !engine.views.contains_key(&key)
+                    && engine.oblivious_policy_for(base).level == "off"
+                {
+                    let required = limit.saturating_add(offset);
+                    if required > 0 {
+                        let (schema, tdata) = engine.get_table(base)?;
+                        if let Some(candidates) = vector_prefilter_candidates(
+                            schema,
+                            tdata,
+                            &hint.column,
+                            &hint.query_vec,
+                        ) {
+                            if candidates.len() as u64 >= required {
+                                let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+                                let columns = projection_columns(projection);
+                                let order = &query.order_by;
+                                let mut rows = Vec::new();
+                                let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+                                let mut rows_scanned = 0u64;
+                                for idx in candidates.iter() {
+                                    let Some(entry) = tdata.rows.get(*idx) else {
+                                        continue;
+                                    };
+                                    if entry.deleted {
+                                        continue;
+                                    }
+                                    rows_scanned = rows_scanned.saturating_add(1);
+                                    let ctx = row_ctx_from_row(&alias, &entry.row);
+                                    if let Some(pred) = r#where {
+                                        if !eval_predicate(
+                                            pred,
+                                            &BTreeMap::new(),
+                                            Some(&ctx),
+                                            args,
+                                        )? {
+                                            continue;
+                                        }
+                                    }
+                                    let mut out_row = Vec::new();
+                                    for item in projection.iter() {
+                                        out_row.push(eval_expr(
+                                            &item.expr,
+                                            &BTreeMap::new(),
+                                            Some(&ctx),
+                                            args,
+                                        )?);
+                                    }
+                                    if order.is_empty() {
+                                        rows.push(out_row);
+                                    } else {
+                                        let keys = eval_order_keys(order, &ctx, args)?;
+                                        items.push((keys, out_row));
+                                    }
+                                }
+
+                                if !order.is_empty() {
+                                    items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+                                    rows = items.into_iter().map(|(_, row)| row).collect();
+                                }
+
+                                if let Some(limit) = &query.limit {
+                                    let off = limit.offset.unwrap_or(0) as usize;
+                                    let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+                                    let end = (off + lim).min(rows.len());
+                                    rows = if off >= rows.len() {
+                                        Vec::new()
+                                    } else {
+                                        rows[off..end].to_vec()
+                                    };
+                                }
+
+                                if let Some(info) = snapshot_info.as_ref() {
+                                    engine.observe_and_plan_snapshot(info, rows_scanned);
+                                }
+                                if !index_infos.is_empty() {
+                                    engine.observe_index_advisor(&index_infos, rows_scanned);
+                                }
+
+                                return Ok((columns, rows));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build row contexts.
+    let mut ctxs = Vec::new();
+    let mut rows_scanned = 0u64;
+    let mut used_index = false;
+    if from.len() == 1 {
+        if let TableRef::Base(base) = &from[0] {
+            if let Some(candidates) =
+                index_prefilter_candidates(engine, base, r#where.as_ref(), args)
+            {
+                let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+                let (_, tdata) = engine.get_table(base)?;
+                for idx in candidates.iter() {
+                    let Some(entry) = tdata.rows.get(*idx) else {
+                        continue;
+                    };
+                    if entry.deleted {
+                        continue;
+                    }
+                    ctxs.push(row_ctx_from_row(&alias, &entry.row));
+                }
+                rows_scanned = ctxs.len() as u64;
+                used_index = true;
+            }
+        }
+    }
+    if !used_index {
+        ctxs = eval_from(engine, &from[0], args)?;
+        rows_scanned = ctxs.len() as u64;
+    }
+    // If there are multiple from items (comma join), treat as CROSS joins.
+    for tref in from.iter().skip(1) {
+        let rhs = eval_from(engine, tref, args)?;
+        let mut next = Vec::new();
+        for a in ctxs.iter() {
+            for b in rhs.iter() {
+                let mut merged = a.clone();
+                merged.extend(b.clone());
+                next.push(merged);
+            }
+        }
+        ctxs = next;
+    }
+
+    // Apply WHERE.
+    if let Some(pred) = r#where {
+        let mut filtered = Vec::new();
+        for ctx in ctxs.iter() {
+            if eval_predicate(pred, &BTreeMap::new(), Some(ctx), args)? {
+                filtered.push(ctx.clone());
+            }
+        }
+        ctxs = filtered;
+    }
+
+    // Projection.
+    let columns = projection_columns(projection);
+
+    let order = &query.order_by;
+    let mut rows = Vec::new();
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+    for ctx in ctxs.iter() {
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(ctx), args)?);
+        }
+        if order.is_empty() {
+            rows.push(out_row);
+        } else {
+            let keys = eval_order_keys(order, ctx, args)?;
+            items.push((keys, out_row));
+        }
+    }
+
+    // ORDER BY
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+        rows = items.into_iter().map(|(_, row)| row).collect();
+    }
+
+    // LIMIT/OFFSET
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+        let end = (off + lim).min(rows.len());
+        rows = if off >= rows.len() {
+            Vec::new()
+        } else {
+            rows[off..end].to_vec()
+        };
+    }
+
+    if let Some(info) = snapshot_info.as_ref() {
+        engine.observe_and_plan_snapshot(info, rows_scanned);
+    }
+    if !index_infos.is_empty() {
+        engine.observe_index_advisor(&index_infos, rows_scanned);
+    }
+
+    Ok((columns, rows))
+}
+
+fn execute_select_with_keys(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
+    let snapshot_info = query_snapshot_info(query);
+    let index_infos = query_index_infos(query);
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        anyhow::bail!("not_patchable");
+    };
+    let SelectBody {
+        projection,
+        from,
+        r#where,
+        group_by,
+        having,
+        ..
+    } = select.as_ref();
+
+    // Patchability: only simple single-table SELECTs with primary keys.
+    if group_by.is_some() || having.is_some() {
+        anyhow::bail!("not_patchable");
+    }
+
+    let from = from.clone().unwrap_or_default();
+    if from.len() != 1 {
+        anyhow::bail!("not_patchable");
+    }
+
+    let TableRef::Base(base) = &from[0] else {
+        anyhow::bail!("not_patchable");
+    };
+
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if let Some(view) = engine.views.get(&key) {
+        let columns = projection_columns(projection);
+        let order = &query.order_by;
+        let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new();
+        let mut rows_scanned = 0u64;
+
+        for row in view.rows.iter() {
+            rows_scanned = rows_scanned.saturating_add(1);
+            let ctx = view_row_ctx(&alias, &view.columns, row);
+
+            if let Some(pred) = r#where {
+                if !eval_predicate(pred, &BTreeMap::new(), Some(&ctx), args)? {
+                    continue;
+                }
+            }
+
+            let mut out_row = Vec::new();
+            for item in projection.iter() {
+                out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+            }
+            let keys = if order.is_empty() {
+                Vec::new()
+            } else {
+                eval_order_keys(order, &ctx, args)?
+            };
+            items.push((keys, row.pk.clone(), out_row));
+        }
+
+        if !order.is_empty() {
+            items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+        }
+
+        if let Some(limit) = &query.limit {
+            let off = limit.offset.unwrap_or(0) as usize;
+            let lim = limit.limit.unwrap_or(items.len() as u64) as usize;
+            let end = (off + lim).min(items.len());
+            items = if off >= items.len() {
+                Vec::new()
+            } else {
+                items[off..end].to_vec()
+            };
+        }
+
+        let mut rows = Vec::new();
+        let mut keys = Vec::new();
+        for (_, pk, row) in items.into_iter() {
+            keys.push(pk);
+            rows.push(row);
+        }
+
+        if let Some(info) = snapshot_info.as_ref() {
+            engine.observe_and_plan_snapshot(info, rows_scanned);
+        }
+        if !index_infos.is_empty() {
+            engine.observe_index_advisor(&index_infos, rows_scanned);
+        }
+
+        return Ok((columns, rows, keys));
+    }
+
+    let (schema, tdata) = engine.get_table(base)?;
+
+    if schema.primary_key.is_empty() {
+        anyhow::bail!("not_patchable");
+    }
+
+    if let Some(info) = snapshot_info.as_ref() {
+        if let Some((columns, rows, keys, rows_scanned)) =
+            try_execute_select_with_keys_snapshot(engine, query, args, info)?
+        {
+            if !index_infos.is_empty() {
+                engine.observe_index_advisor(&index_infos, rows_scanned);
+            }
+            engine.observe_and_plan_snapshot(info, rows_scanned);
+            return Ok((columns, rows, keys));
+        }
+    }
+
+    // Columns (same as execute_select)
+    let columns = projection_columns(projection);
+
+    let order = &query.order_by;
+    let candidates = query
+        .limit
+        .as_ref()
+        .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))))
+        .and_then(|(limit, offset)| {
+            let required = limit.saturating_add(offset);
+            if required == 0 || order.is_empty() {
+                return None;
+            }
+            let hint = vector_order_prefilter_hint(order, args)?;
+            let candidates =
+                vector_prefilter_candidates(schema, tdata, &hint.column, &hint.query_vec)?;
+            if candidates.len() as u64 >= required {
+                Some(candidates)
+            } else {
+                None
+            }
+        });
+    let index_candidates = if candidates.is_none() {
+        index_prefilter_candidates(engine, base, r#where.as_ref(), args)
+    } else {
+        None
+    };
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new(); // (order_keys, pk, projected_row)
+    let mut rows_scanned = 0u64;
+    let mut push_entry = |entry: &RowEntry| -> anyhow::Result<()> {
+        if entry.deleted {
+            return Ok(());
+        }
+        rows_scanned = rows_scanned.saturating_add(1);
+
+        let mut ctx = RowCtx::new();
+        for (k, v) in entry.row.iter() {
+            ctx.insert(format!("{}.{}", alias, k), v.clone());
+        }
+
+        // WHERE
+        if let Some(pred) = r#where {
+            if !eval_predicate(pred, &BTreeMap::new(), Some(&ctx), args)? {
+                return Ok(());
+            }
+        }
+
+        let pk = extract_pk(schema, &entry.row)?;
+
+        // Projection
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        let keys = if order.is_empty() {
+            Vec::new()
+        } else {
+            eval_order_keys(order, &ctx, args)?
+        };
+
+        items.push((keys, pk, out_row));
+        Ok(())
+    };
+
+    if let Some(indices) = candidates {
+        for idx in indices.iter() {
+            let Some(entry) = tdata.rows.get(*idx) else {
+                continue;
+            };
+            push_entry(entry)?;
+        }
+    } else if let Some(indices) = index_candidates {
+        for idx in indices.iter() {
+            let Some(entry) = tdata.rows.get(*idx) else {
+                continue;
+            };
+            push_entry(entry)?;
+        }
+    } else {
+        for entry in tdata.rows.iter() {
+            push_entry(entry)?;
+        }
+    }
+
+    // ORDER BY
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+    }
+
+    // LIMIT/OFFSET
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(items.len() as u64) as usize;
+        let end = (off + lim).min(items.len());
+        items = if off >= items.len() {
+            Vec::new()
+        } else {
+            items[off..end].to_vec()
+        };
+    }
+
+    let mut rows = Vec::new();
+    let mut keys = Vec::new();
+    for (_, pk, row) in items.into_iter() {
+        keys.push(pk);
+        rows.push(row);
+    }
+
+    if let Some(info) = snapshot_info.as_ref() {
+        engine.observe_and_plan_snapshot(info, rows_scanned);
+    }
+    if !index_infos.is_empty() {
+        engine.observe_index_advisor(&index_infos, rows_scanned);
+    }
+
+    Ok((columns, rows, keys))
+}
+
+fn try_execute_select_snapshot(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+    info: &QuerySnapshotInfo,
+) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Ok(None);
+    };
+    let SelectBody {
+        projection,
+        r#where,
+        ..
+    } = select.as_ref();
+
+    let schema = match engine.get_schema(&info.base.db, &info.base.table) {
+        Ok(schema) => schema,
+        Err(_) => return Ok(None),
+    };
+
+    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
+    let table_key = TableKey {
+        db: info.base.db.clone(),
+        table: info.base.table.clone(),
+    };
+    let now = now_micros();
+    let view = if let Ok(mut manager) = engine.snapshots.lock() {
+        manager.snapshot_view_for_query(&table_key, &required, schema.table_version, now)
+    } else {
+        None
+    };
+    let Some(view) = view else {
+        return Ok(None);
+    };
+
+    let order = &query.order_by;
+    let mut rows = Vec::new();
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+    for row in view.rows.iter() {
+        let ctx = snapshot_row_ctx(&info.alias, &view.columns, row);
+        if let Some(pred) = r#where.as_ref() {
+            if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
+                continue;
+            }
+        }
+
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        if order.is_empty() {
+            rows.push(out_row);
+        } else {
+            let keys = eval_order_keys(order, &ctx, args)?;
+            items.push((keys, out_row));
+        }
+    }
+
+    // ORDER BY
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+        rows = items.into_iter().map(|(_, row)| row).collect();
+    }
+
+    // LIMIT/OFFSET
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+        let end = (off + lim).min(rows.len());
+        rows = if off >= rows.len() {
+            Vec::new()
+        } else {
+            rows[off..end].to_vec()
+        };
+    }
+
+    let columns = projection_columns(projection);
+    Ok(Some((columns, rows, view.rows.len() as u64)))
+}
+
+fn try_execute_select_with_keys_snapshot(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+    info: &QuerySnapshotInfo,
+) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>, u64)>> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Ok(None);
+    };
+    let SelectBody {
+        projection,
+        r#where,
+        ..
+    } = select.as_ref();
+
+    let schema = match engine.get_schema(&info.base.db, &info.base.table) {
+        Ok(schema) => schema,
+        Err(_) => return Ok(None),
+    };
+
+    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
+    let table_key = TableKey {
+        db: info.base.db.clone(),
+        table: info.base.table.clone(),
+    };
+    let now = now_micros();
+    let view = if let Ok(mut manager) = engine.snapshots.lock() {
+        manager.snapshot_view_for_query(&table_key, &required, schema.table_version, now)
+    } else {
+        None
+    };
+    let Some(view) = view else {
+        return Ok(None);
+    };
+
+    let order = &query.order_by;
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new();
+    for row in view.rows.iter() {
+        let ctx = snapshot_row_ctx(&info.alias, &view.columns, row);
+        if let Some(pred) = r#where.as_ref() {
+            if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
+                continue;
+            }
+        }
+
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        let keys = if order.is_empty() {
+            Vec::new()
+        } else {
+            eval_order_keys(order, &ctx, args)?
+        };
+
+        items.push((keys, row.pk.clone(), out_row));
+    }
+
+    // ORDER BY
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+    }
+
+    // LIMIT/OFFSET
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(items.len() as u64) as usize;
+        let end = (off + lim).min(items.len());
+        items = if off >= items.len() {
+            Vec::new()
+        } else {
+            items[off..end].to_vec()
+        };
+    }
+
+    let columns = projection_columns(projection);
+    let mut rows = Vec::new();
+    let mut keys = Vec::new();
+    for (_, pk, row) in items.into_iter() {
+        keys.push(pk);
+        rows.push(row);
+    }
+
+    Ok(Some((columns, rows, keys, view.rows.len() as u64)))
+}
+
+fn projection_columns(projection: &[skeindb_skeinql::types::SelectItem]) -> Vec<ColumnMeta> {
+    let mut columns = Vec::new();
+    for item in projection.iter() {
+        let name = item
+            .r#as
+            .clone()
+            .unwrap_or_else(|| infer_select_name(&item.expr));
+        columns.push(ColumnMeta {
+            name,
+            r#type: TypeDesc {
+                kind: "unknown".to_string(),
+                max: None,
+                precision: None,
+                scale: None,
+                charset: None,
+                collation: None,
+                unsigned: None,
+            },
+        });
+    }
+    columns
+}
+
+fn wasm_plan_parts(query: &Query) -> anyhow::Result<(BaseTableRef, Vec<SelectItem>, Option<Expr>)> {
+    if !query.with.is_empty() {
+        anyhow::bail!("invalid_request: wasm plans do not support CTEs");
+    }
+    if !query.order_by.is_empty() {
+        anyhow::bail!("invalid_request: wasm plans do not support order_by");
+    }
+    if query.limit.is_some() {
+        anyhow::bail!("invalid_request: wasm plans do not support limit");
+    }
+    if query.lock.is_some() {
+        anyhow::bail!("invalid_request: wasm plans do not support locks");
+    }
+
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        anyhow::bail!("invalid_request: wasm plans only support select");
+    };
+    let select = select.as_ref();
+    if select.distinct.unwrap_or(false) {
+        anyhow::bail!("invalid_request: wasm plans do not support distinct");
+    }
+    if select.group_by.is_some() || select.having.is_some() {
+        anyhow::bail!("invalid_request: wasm plans do not support group_by/having");
+    }
+
+    let from = select
+        .from
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: wasm plans require from"))?;
+    if from.len() != 1 {
+        anyhow::bail!("invalid_request: wasm plans require single-table from");
+    }
+    let TableRef::Base(base) = &from[0] else {
+        anyhow::bail!("invalid_request: wasm plans require base table from");
+    };
+
+    if select.projection.is_empty() {
+        anyhow::bail!("invalid_request: wasm plans require projection");
+    }
+
+    for item in select.projection.iter() {
+        validate_wasm_expr(&item.expr)?;
+    }
+    if let Some(pred) = select.r#where.as_ref() {
+        validate_wasm_expr(pred)?;
+    }
+
+    Ok((
+        base.clone(),
+        select.projection.clone(),
+        select.r#where.clone(),
+    ))
+}
+
+fn wasm_plan_from_query(query: &Query) -> anyhow::Result<WasmPlanV1> {
+    let (table, projection, predicate) = wasm_plan_parts(query)?;
+    let mut ops = Vec::new();
+    ops.push(WasmPlanOpV1::Scan { table });
+    if let Some(predicate) = predicate {
+        ops.push(WasmPlanOpV1::Filter { predicate });
+    }
+    ops.push(WasmPlanOpV1::Project { projection });
+    Ok(WasmPlanV1 { ops })
+}
+
+fn query_from_wasm_plan(plan: &WasmPlanV1) -> anyhow::Result<Query> {
+    let mut scan: Option<(usize, BaseTableRef)> = None;
+    let mut filter: Option<(usize, Expr)> = None;
+    let mut project: Option<(usize, Vec<SelectItem>)> = None;
+
+    for (idx, op) in plan.ops.iter().enumerate() {
+        match op {
+            WasmPlanOpV1::Scan { table } => {
+                if scan.is_some() {
+                    anyhow::bail!("invalid_request: wasm plan has multiple scans");
+                }
+                scan = Some((idx, table.clone()));
+            }
+            WasmPlanOpV1::Filter { predicate } => {
+                if filter.is_some() {
+                    anyhow::bail!("invalid_request: wasm plan has multiple filters");
+                }
+                validate_wasm_expr(predicate)?;
+                filter = Some((idx, predicate.clone()));
+            }
+            WasmPlanOpV1::Project { projection } => {
+                if project.is_some() {
+                    anyhow::bail!("invalid_request: wasm plan has multiple projections");
+                }
+                if projection.is_empty() {
+                    anyhow::bail!("invalid_request: wasm plan requires projection");
+                }
+                for item in projection.iter() {
+                    validate_wasm_expr(&item.expr)?;
+                }
+                project = Some((idx, projection.clone()));
+            }
+        }
+    }
+
+    let Some((scan_idx, table)) = scan else {
+        anyhow::bail!("invalid_request: wasm plan missing scan");
+    };
+    let Some((project_idx, projection)) = project else {
+        anyhow::bail!("invalid_request: wasm plan missing projection");
+    };
+
+    if scan_idx != 0 {
+        anyhow::bail!("invalid_request: wasm plan must start with scan");
+    }
+    if project_idx != plan.ops.len() - 1 {
+        anyhow::bail!("invalid_request: wasm plan must end with project");
+    }
+    if let Some((filter_idx, _)) = filter.as_ref() {
+        if *filter_idx <= scan_idx || *filter_idx >= project_idx {
+            anyhow::bail!("invalid_request: wasm plan filter must follow scan");
+        }
+    }
+
+    Ok(Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection,
+                from: Some(vec![TableRef::Base(table)]),
+                r#where: filter.map(|(_, predicate)| predicate),
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    })
+}
+
+fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
+    match expr {
+        Expr::Lit { .. } | Expr::Param { .. } | Expr::Col { .. } => Ok(()),
+        Expr::Op {
+            op,
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+        } => {
+            let op_name = op.as_str();
+            let allowed = matches!(
+                op_name,
+                "and" | "or" | "not" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "in" | "between"
+            );
+            if !allowed {
+                anyhow::bail!("invalid_request: unsupported op in wasm plan");
+            }
+            if let Some(expr) = a.as_ref() {
+                validate_wasm_expr(expr)?;
+            }
+            if let Some(expr) = b.as_ref() {
+                validate_wasm_expr(expr)?;
+            }
+            if let Some(exprs) = args.as_ref() {
+                for expr in exprs {
+                    validate_wasm_expr(expr)?;
+                }
+            }
+            if let Some(exprs) = list.as_ref() {
+                for expr in exprs {
+                    validate_wasm_expr(expr)?;
+                }
+            }
+            if let Some(expr) = lo.as_ref() {
+                validate_wasm_expr(expr)?;
+            }
+            if let Some(expr) = hi.as_ref() {
+                validate_wasm_expr(expr)?;
+            }
+            Ok(())
+        }
+        Expr::Func {
+            name,
+            args,
+            distinct,
+        } => {
+            if distinct.unwrap_or(false) {
+                anyhow::bail!("invalid_request: wasm plans do not support distinct functions");
+            }
+            let allowed = matches!(
+                name.as_str(),
+                "lower" | "upper" | "vector.cosine" | "vector.dot" | "vector.l2"
+            );
+            if !allowed {
+                anyhow::bail!("invalid_request: unsupported function in wasm plan");
+            }
+            for arg in args {
+                validate_wasm_expr(arg)?;
+            }
+            Ok(())
+        }
+        Expr::Cast { .. } => anyhow::bail!("invalid_request: wasm plans do not support cast"),
+        Expr::Case { .. } => anyhow::bail!("invalid_request: wasm plans do not support case"),
+        Expr::Subquery { .. } | Expr::Exists { .. } => {
+            anyhow::bail!("invalid_request: wasm plans do not support subqueries")
+        }
+    }
+}
+
+fn snapshot_row_ctx(alias: &str, columns: &[String], row: &SnapshotRow) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for (col, val) in columns.iter().zip(row.values.iter()) {
+        ctx.insert(format!("{}.{}", alias, col), val.clone());
+    }
+    ctx
+}
+
+fn row_ctx_from_row(alias: &str, row: &RowObject) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for (col, val) in row.iter() {
+        ctx.insert(format!("{}.{}", alias, col), val.clone());
+    }
+    ctx
+}
+
+fn view_row_ctx(alias: &str, columns: &[String], row: &ViewRow) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for (col, val) in columns.iter().zip(row.values.iter()) {
+        ctx.insert(format!("{}.{}", alias, col), val.clone());
+    }
+    ctx
+}
+
+type RowCtx = BTreeMap<String, Lit>; // keys like "alias.col"
+
+fn eval_from(engine: &Engine, tref: &TableRef, args: &[Lit]) -> anyhow::Result<Vec<RowCtx>> {
+    match tref {
+        TableRef::Base(base) => scan_table(engine, base),
+        TableRef::Join(join) => eval_join(engine, &join.join, args),
+        TableRef::Subquery(_) => anyhow::bail!("subqueries in FROM are not implemented"),
+    }
+}
+
+fn scan_table(engine: &Engine, base: &BaseTableRef) -> anyhow::Result<Vec<RowCtx>> {
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if let Some(view) = engine.views.get(&key) {
+        let mut out = Vec::new();
+        for row in view.rows.iter() {
+            out.push(view_row_ctx(&alias, &view.columns, row));
+        }
+        return Ok(out);
+    }
+
+    let (_, tdata) = engine.get_table(base)?;
+    let mut out = Vec::new();
+    for entry in tdata.rows.iter() {
+        if entry.deleted {
+            continue;
+        }
+        out.push(row_ctx_from_row(&alias, &entry.row));
+    }
+    if let Some(padding) = engine.oblivious_padding_for(base, out.len() as u64) {
+        if padding.shuffle {
+            let seed = oblivious_shuffle_seed(base, padding.target_rows);
+            shuffle_rows(&mut out, seed);
+        }
+        let dummy_total = padding.dummy_rows + padding.dummy_value_lookups;
+        engine.oblivious_dummy_lookups(base, dummy_total, "scan");
+    }
+    Ok(out)
+}
+
+fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Vec<RowCtx>> {
+    let left = eval_from(engine, &join.left, args)?;
+    let right = eval_from(engine, &join.right, args)?;
+    let mut out = Vec::new();
+
+    match join.join_type {
+        JoinType::Cross => {
+            for a in left.iter() {
+                for b in right.iter() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    out.push(merged);
+                }
+            }
+        }
+        JoinType::Inner => {
+            for a in left.iter() {
+                for b in right.iter() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                        }
+                    } else {
+                        out.push(merged);
+                    }
+                }
+            }
+        }
+        _ => {
+            anyhow::bail!("only INNER and CROSS joins are implemented in this prototype")
+        }
+    }
+
+    Ok(out)
+}
+
+fn infer_select_name(expr: &Expr) -> String {
+    match expr {
+        Expr::Col { col, table } => match table {
+            Some(t) => format!("{t}.{col}"),
+            None => col.clone(),
+        },
+        Expr::Lit { .. } => "lit".to_string(),
+        Expr::Param { param } => format!("param_{param}"),
+        Expr::Func { name, .. } => name.clone(),
+        Expr::Op { op, .. } => op.clone(),
+        _ => "expr".to_string(),
+    }
+}
+
+fn eval_predicate(
+    expr: &Expr,
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<bool> {
+    let v = eval_expr(expr, row, ctx, args)?;
+    Ok(matches!(v, Lit::Bool { v: true }))
+}
+
+fn eval_expr(
+    expr: &Expr,
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<Lit> {
+    match expr {
+        Expr::Lit { lit } => Ok(lit.clone()),
+        Expr::Param { param } => {
+            let idx = *param as usize;
+            args.get(idx)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing param {idx}"))
+        }
+        Expr::Col { col, table } => {
+            if let Some(ctx) = ctx {
+                if let Some(t) = table {
+                    ctx.get(&format!("{}.{}", t, col))
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("unknown column {}.{}", t, col))
+                } else {
+                    // Try to find any matching suffix ".col".
+                    let suffix = format!(".{col}");
+                    let mut found = None;
+                    for (k, v) in ctx.iter() {
+                        if k.ends_with(&suffix) {
+                            if found.is_some() {
+                                return Err(anyhow::anyhow!("ambiguous column {col}"));
+                            }
+                            found = Some(v.clone());
+                        }
+                    }
+                    found.ok_or_else(|| anyhow::anyhow!("unknown column {col}"))
+                }
+            } else {
+                row.get(col)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown column {col}"))
+            }
+        }
+        Expr::Op {
+            op,
+            a,
+            b,
+            args: vargs,
+            list,
+            lo,
+            hi,
+        } => {
+            let op = op.as_str();
+            match op {
+                "and" => {
+                    let xs = if let Some(v) = vargs {
+                        v
+                    } else {
+                        // also accept binary form
+                        let mut tmp = Vec::new();
+                        if let Some(a) = a.as_ref() {
+                            tmp.push((**a).clone());
+                        }
+                        if let Some(b) = b.as_ref() {
+                            tmp.push((**b).clone());
+                        }
+                        // local owned list
+                        return eval_and_list(&tmp, row, ctx, args);
+                    };
+                    eval_and_list(xs, row, ctx, args)
+                }
+                "or" => {
+                    let xs = if let Some(v) = vargs {
+                        v
+                    } else {
+                        let mut tmp = Vec::new();
+                        if let Some(a) = a.as_ref() {
+                            tmp.push((**a).clone());
+                        }
+                        if let Some(b) = b.as_ref() {
+                            tmp.push((**b).clone());
+                        }
+                        return eval_or_list(&tmp, row, ctx, args);
+                    };
+                    eval_or_list(xs, row, ctx, args)
+                }
+                "not" => {
+                    let inner = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("not requires a"))?;
+                    let v = eval_predicate(inner, row, ctx, args)?;
+                    Ok(Lit::Bool { v: !v })
+                }
+                "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    let ord = cmp_lit(&va, &vb)?;
+                    let out = match op {
+                        "eq" => ord == std::cmp::Ordering::Equal,
+                        "ne" => ord != std::cmp::Ordering::Equal,
+                        "lt" => ord == std::cmp::Ordering::Less,
+                        "le" => ord != std::cmp::Ordering::Greater,
+                        "gt" => ord == std::cmp::Ordering::Greater,
+                        "ge" => ord != std::cmp::Ordering::Less,
+                        _ => false,
+                    };
+                    Ok(Lit::Bool { v: out })
+                }
+                "in" => {
+                    let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("in requires a"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let xs = list
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("in requires list"))?;
+                    for x in xs {
+                        let vx = eval_expr(x, row, ctx, args)?;
+                        if cmp_lit(&va, &vx)? == std::cmp::Ordering::Equal {
+                            return Ok(Lit::Bool { v: true });
+                        }
+                    }
+                    Ok(Lit::Bool { v: false })
+                }
+                "between" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("between requires a"))?;
+                    let vlo = lo
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("between requires lo"))?;
+                    let vhi = hi
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("between requires hi"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let lo = eval_expr(vlo, row, ctx, args)?;
+                    let hi = eval_expr(vhi, row, ctx, args)?;
+                    let ge = cmp_lit(&va, &lo)? != std::cmp::Ordering::Less;
+                    let le = cmp_lit(&va, &hi)? != std::cmp::Ordering::Greater;
+                    Ok(Lit::Bool { v: ge && le })
+                }
+                _ => anyhow::bail!("unsupported op: {op}"),
+            }
+        }
+        Expr::Func {
+            name, args: fargs, ..
+        } => {
+            let name = name.as_str();
+            match name {
+                "lower" => {
+                    let x = fargs
+                        .get(0)
+                        .ok_or_else(|| anyhow::anyhow!("lower requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    match v {
+                        Lit::Str { v } => Ok(Lit::Str {
+                            v: v.to_lowercase(),
+                        }),
+                        _ => Ok(Lit::Null),
+                    }
+                }
+                "upper" => {
+                    let x = fargs
+                        .get(0)
+                        .ok_or_else(|| anyhow::anyhow!("upper requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    match v {
+                        Lit::Str { v } => Ok(Lit::Str {
+                            v: v.to_uppercase(),
+                        }),
+                        _ => Ok(Lit::Null),
+                    }
+                }
+                "vector.cosine" | "vector.dot" | "vector.l2" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let a = eval_expr(&fargs[0], row, ctx, args)?;
+                    let b = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (a_dims, a_vec, a_model) = embedding_ref(&a)?;
+                    let (b_dims, b_vec, b_model) = embedding_ref(&b)?;
+                    if a_dims != b_dims {
+                        anyhow::bail!("invalid_request: embedding dims mismatch");
+                    }
+                    if let (Some(ma), Some(mb)) = (a_model, b_model) {
+                        if ma != mb {
+                            anyhow::bail!("invalid_request: embedding model mismatch");
+                        }
+                    }
+                    let metric = match name {
+                        "vector.cosine" => VectorMetric::Cosine,
+                        "vector.dot" => VectorMetric::Dot,
+                        _ => VectorMetric::L2,
+                    };
+                    let score = vector_score(metric, a_vec, b_vec)?;
+                    Ok(Lit::F64 { v: score })
+                }
+                _ => anyhow::bail!("unsupported function: {name}"),
+            }
+        }
+        _ => anyhow::bail!("expression form not implemented"),
+    }
+}
+
+fn eval_and_list(
+    xs: &[Expr],
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<Lit> {
+    for x in xs {
+        if !eval_predicate(x, row, ctx, args)? {
+            return Ok(Lit::Bool { v: false });
+        }
+    }
+    Ok(Lit::Bool { v: true })
+}
+
+fn eval_or_list(
+    xs: &[Expr],
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<Lit> {
+    for x in xs {
+        if eval_predicate(x, row, ctx, args)? {
+            return Ok(Lit::Bool { v: true });
+        }
+    }
+    Ok(Lit::Bool { v: false })
+}
+
+fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Lit::I64 { v: x }, Lit::I64 { v: y }) => Ok(x.cmp(y)),
+        (Lit::U64 { v: x }, Lit::U64 { v: y }) => Ok(x.cmp(y)),
+        (Lit::F64 { v: x }, Lit::F64 { v: y }) => Ok(x.partial_cmp(y).unwrap_or(Ordering::Equal)),
+        (Lit::Str { v: x }, Lit::Str { v: y }) => Ok(x.cmp(y)),
+        (Lit::Bool { v: x }, Lit::Bool { v: y }) => Ok(x.cmp(y)),
+        // Cross numeric compare (very small helper)
+        (Lit::I64 { v: x }, Lit::U64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
+        (Lit::U64 { v: x }, Lit::I64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
+        _ => Ok(Ordering::Equal),
+    }
+}
+
+#[derive(Debug)]
+struct VectorPrefilterHint {
+    column: String,
+    query_vec: Vec<f32>,
+}
+
+fn vector_order_prefilter_hint(order: &[OrderBy], args: &[Lit]) -> Option<VectorPrefilterHint> {
+    for ob in order.iter() {
+        let Expr::Func {
+            name, args: fargs, ..
+        } = &ob.expr
+        else {
+            continue;
+        };
+        if !matches!(name.as_str(), "vector.cosine" | "vector.dot" | "vector.l2") {
+            continue;
+        }
+        if fargs.len() != 2 {
+            continue;
+        }
+        let (col, lit) = match (
+            vector_prefilter_col(&fargs[0]),
+            vector_prefilter_lit(&fargs[1], args),
+        ) {
+            (Some(col), Some(lit)) => (col, lit),
+            _ => match (
+                vector_prefilter_col(&fargs[1]),
+                vector_prefilter_lit(&fargs[0], args),
+            ) {
+                (Some(col), Some(lit)) => (col, lit),
+                _ => continue,
+            },
+        };
+        let (_, vec, _) = embedding_ref(&lit).ok()?;
+        return Some(VectorPrefilterHint {
+            column: col,
+            query_vec: vec.to_vec(),
+        });
+    }
+    None
+}
+
+fn vector_prefilter_col(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Col { col, .. } => {
+            let (_, base) = split_qualified(col);
+            Some(base.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn vector_prefilter_lit(expr: &Expr, args: &[Lit]) -> Option<Lit> {
+    match expr {
+        Expr::Lit { lit } => Some(lit.clone()),
+        Expr::Param { param } => args.get(*param as usize).cloned(),
+        _ => None,
+    }
+}
+
+fn vector_prefilter_candidates(
+    schema: &TableSchema,
+    tdata: &TableData,
+    column_hint: &str,
+    query_vec: &[f32],
+) -> Option<Vec<usize>> {
+    let column = resolve_column(schema, column_hint)?.name.clone();
+    let bucket = embedding_lsh_bucket(query_vec);
+    let mut guard = tdata.vector_index.lock().ok()?;
+    let needs_rebuild = match guard.get(&column) {
+        Some(index) => index.built_version != schema.table_version,
+        None => true,
+    };
+    if needs_rebuild {
+        let index = build_vector_index(schema.table_version, &column, &tdata.rows);
+        guard.insert(column.clone(), index);
+    }
+    guard
+        .get(&column)
+        .and_then(|index| index.buckets.get(&bucket).cloned())
+}
+
+fn build_vector_index(table_version: u64, column: &str, rows: &[RowEntry]) -> VectorIndex {
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (idx, entry) in rows.iter().enumerate() {
+        if entry.deleted {
+            continue;
+        }
+        let Some(lit) = entry.row.get(column) else {
+            continue;
+        };
+        let (_, vec, _) = match embedding_ref(lit) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let bucket = embedding_lsh_bucket(vec);
+        buckets.entry(bucket).or_default().push(idx);
+    }
+    VectorIndex {
+        built_version: table_version,
+        buckets,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexRegistrationStatus {
+    Built,
+    Rebuilt,
+    Exists,
+}
+
+fn secondary_index_key(columns: &[String], include: &[String]) -> String {
+    format!("cols:{}|inc:{}", columns.join(","), include.join(","))
+}
+
+fn secondary_index_value_key(values: &[Lit]) -> String {
+    serde_json::to_string(values).unwrap_or_default()
+}
+
+fn build_secondary_index(
+    table_version: u64,
+    columns: &[String],
+    include: &[String],
+    rows: &[RowEntry],
+) -> SecondaryIndex {
+    let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, entry) in rows.iter().enumerate() {
+        if entry.deleted {
+            continue;
+        }
+        let mut values = Vec::with_capacity(columns.len());
+        let mut has_all = true;
+        for col in columns.iter() {
+            let Some(value) = entry.row.get(col) else {
+                has_all = false;
+                break;
+            };
+            values.push(value.clone());
+        }
+        if !has_all {
+            continue;
+        }
+        let key = secondary_index_value_key(&values);
+        keys.entry(key).or_default().push(idx);
+    }
+    SecondaryIndex {
+        built_version: table_version,
+        columns: columns.to_vec(),
+        include: include.to_vec(),
+        keys,
+    }
+}
+
+fn register_secondary_index(
+    schema: &TableSchema,
+    tdata: &TableData,
+    columns: &[String],
+    include: &[String],
+) -> anyhow::Result<IndexRegistrationStatus> {
+    let key = secondary_index_key(columns, include);
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    let status = match guard.get(&key) {
+        Some(existing) => {
+            if existing.built_version != schema.table_version {
+                IndexRegistrationStatus::Rebuilt
+            } else {
+                IndexRegistrationStatus::Exists
+            }
+        }
+        None => IndexRegistrationStatus::Built,
+    };
+    if status != IndexRegistrationStatus::Exists {
+        let index = build_secondary_index(schema.table_version, columns, include, &tdata.rows);
+        guard.insert(key, index);
+    }
+    Ok(status)
+}
+
+fn drop_secondary_index(
+    tdata: &TableData,
+    columns: &[String],
+    include: &[String],
+) -> anyhow::Result<bool> {
+    let key = secondary_index_key(columns, include);
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    Ok(guard.remove(&key).is_some())
+}
+
+fn secondary_index_candidates(
+    schema: &TableSchema,
+    tdata: &TableData,
+    filters: &HashMap<String, Lit>,
+) -> Option<Vec<usize>> {
+    let mut guard = tdata.secondary_indexes.lock().ok()?;
+    if guard.is_empty() {
+        return None;
+    }
+
+    let mut best_cols = 0usize;
+    let mut best_len = usize::MAX;
+    let mut best: Option<Vec<usize>> = None;
+
+    for index in guard.values_mut() {
+        if index.built_version != schema.table_version {
+            *index = build_secondary_index(
+                schema.table_version,
+                &index.columns,
+                &index.include,
+                &tdata.rows,
+            );
+        }
+        if index.columns.is_empty() {
+            continue;
+        }
+        if !index.columns.iter().all(|col| filters.contains_key(col)) {
+            continue;
+        }
+        let mut values = Vec::with_capacity(index.columns.len());
+        for col in index.columns.iter() {
+            let Some(value) = filters.get(col) else {
+                values.clear();
+                break;
+            };
+            values.push(value.clone());
+        }
+        if values.len() != index.columns.len() {
+            continue;
+        }
+        let key = secondary_index_value_key(&values);
+        let candidates = index.keys.get(&key).cloned().unwrap_or_default();
+        let cols_len = index.columns.len();
+        let cand_len = candidates.len();
+        if best.is_none() || cols_len > best_cols || (cols_len == best_cols && cand_len < best_len)
+        {
+            best_cols = cols_len;
+            best_len = cand_len;
+            best = Some(candidates);
+        }
+    }
+
+    best
+}
+
+fn eval_order_keys(order: &[OrderBy], ctx: &RowCtx, args: &[Lit]) -> anyhow::Result<Vec<Lit>> {
+    let empty = BTreeMap::new();
+    let mut out = Vec::with_capacity(order.len());
+    for ob in order.iter() {
+        out.push(eval_expr(&ob.expr, &empty, Some(ctx), args)?);
+    }
+    Ok(out)
+}
+
+fn compare_order(order: &[OrderBy], a: &[Lit], b: &[Lit]) -> std::cmp::Ordering {
+    for (i, ob) in order.iter().enumerate() {
+        let dir = ob.dir.clone().unwrap_or(OrderDir::Asc);
+        let va = a.get(i).cloned().unwrap_or(Lit::Null);
+        let vb = b.get(i).cloned().unwrap_or(Lit::Null);
+        let ord = cmp_lit(&va, &vb).unwrap_or(std::cmp::Ordering::Equal);
+        let ord = match dir {
+            OrderDir::Asc => ord,
+            OrderDir::Desc => ord.reverse(),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+// -----------------------------
+// Edge bundle helpers
+// -----------------------------
+
+fn normalize_edge_redaction(
+    redaction: Option<EdgeBundleRedaction>,
+) -> anyhow::Result<EdgeBundleRedaction> {
+    let mut redaction = redaction.unwrap_or(EdgeBundleRedaction {
+        mode: "none".to_string(),
+        salt: None,
+    });
+    if redaction.mode.is_empty() {
+        redaction.mode = "none".to_string();
+    }
+    match redaction.mode.as_str() {
+        "none" | "hash_pk" | "drop_pk" => Ok(redaction),
+        _ => anyhow::bail!("invalid_request: unsupported redaction mode"),
+    }
+}
+
+fn redact_edge_pk(
+    pk: &Option<Vec<Lit>>,
+    redaction: &EdgeBundleRedaction,
+) -> (Option<Vec<Lit>>, Option<String>) {
+    match redaction.mode.as_str() {
+        "hash_pk" => {
+            let hash = pk
+                .as_ref()
+                .map(|vals| hash_edge_pk(vals, redaction.salt.as_deref()));
+            (None, hash)
+        }
+        "drop_pk" => (None, None),
+        _ => (pk.clone(), None),
+    }
+}
+
+fn hash_edge_pk(pk: &[Lit], salt: Option<&str>) -> String {
+    let mut bytes = Vec::new();
+    if let Some(s) = salt {
+        bytes.extend_from_slice(s.as_bytes());
+    }
+    bytes.extend_from_slice(&serde_json::to_vec(pk).unwrap_or_default());
+    let id = value_id(&bytes);
+    hex16(&id)
+}
+
+// -----------------------------
+// DP helpers
+// -----------------------------
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Debug, Clone)]
+struct DpRng {
+    state: u64,
+}
+
+impl DpRng {
+    fn new(seed: u64) -> Self {
+        let seed = if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        };
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.state
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        let v = self.next_u64() >> 11;
+        (v as f64) * (1.0 / ((1u64 << 53) as f64))
+    }
+}
+
+fn dp_laplace_noise(rng: &mut DpRng, scale: f64) -> f64 {
+    if scale == 0.0 {
+        return 0.0;
+    }
+    let u = rng.next_f64() - 0.5;
+    if u == 0.0 {
+        return 0.0;
+    }
+    let sign = if u < 0.0 { -1.0 } else { 1.0 };
+    let mag = (1.0 - 2.0 * u.abs()).ln();
+    -scale * sign * mag
+}
+
+fn dp_gaussian_noise(rng: &mut DpRng, sigma: f64) -> f64 {
+    if sigma == 0.0 {
+        return 0.0;
+    }
+    let u1 = rng.next_f64().max(1e-12);
+    let u2 = rng.next_f64();
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
+    z * sigma
+}
+
+fn dp_noise(
+    mechanism: &str,
+    rng: &mut DpRng,
+    sensitivity: f64,
+    epsilon: f64,
+    delta: f64,
+) -> anyhow::Result<f64> {
+    if sensitivity <= 0.0 {
+        return Ok(0.0);
+    }
+    if epsilon <= 0.0 {
+        anyhow::bail!("invalid_request: epsilon must be > 0");
+    }
+    match mechanism {
+        "laplace" => Ok(dp_laplace_noise(rng, sensitivity / epsilon)),
+        "gaussian" => {
+            if delta <= 0.0 {
+                anyhow::bail!("invalid_request: gaussian requires delta");
+            }
+            let sigma = sensitivity * (2.0 * (1.25 / delta).ln()).sqrt() / epsilon;
+            Ok(dp_gaussian_noise(rng, sigma))
+        }
+        _ => anyhow::bail!("invalid_request: unknown mechanism"),
+    }
+}
+
+fn dp_refresh_budget(budget: &mut DpBudget, now_ms: u64) {
+    let Some(window) = budget.refresh_window_ms else {
+        return;
+    };
+    if window == 0 {
+        return;
+    }
+    if now_ms.saturating_sub(budget.refreshed_at_ms) >= window {
+        budget.consumed_epsilon = 0.0;
+        budget.consumed_delta = 0.0;
+        budget.refreshed_at_ms = now_ms;
+    }
+}
+
+fn dp_budget_summary(budget: &DpBudget) -> serde_json::Value {
+    let remaining_epsilon = (budget.total_epsilon - budget.consumed_epsilon).max(0.0);
+    let remaining_delta = (budget.total_delta - budget.consumed_delta).max(0.0);
+    serde_json::json!({
+        "principal": budget.principal,
+        "total_epsilon": budget.total_epsilon,
+        "total_delta": budget.total_delta,
+        "consumed_epsilon": budget.consumed_epsilon,
+        "consumed_delta": budget.consumed_delta,
+        "remaining_epsilon": remaining_epsilon,
+        "remaining_delta": remaining_delta,
+        "refresh_window_ms": budget.refresh_window_ms,
+        "refreshed_at_ms": budget.refreshed_at_ms
+    })
+}
+
+fn dp_group_key(key_vals: &[Lit]) -> String {
+    serde_json::to_string(key_vals).unwrap_or_default()
+}
+
+fn dp_query_fingerprint(params: &DpAggregateParams, mechanism: &str) -> anyhow::Result<String> {
+    let canonical = serde_json::json!({
+        "table": params.table,
+        "aggregates": params.aggregates,
+        "where": params.r#where,
+        "group_by": params.group_by,
+        "epsilon": params.epsilon,
+        "delta": params.delta,
+        "mechanism": mechanism
+    });
+    Ok(fingerprint_json(&canonical))
+}
+
+fn dp_agg_op_name(op: &DpAggOp) -> &'static str {
+    match op {
+        DpAggOp::Count => "count",
+        DpAggOp::Sum => "sum",
+        DpAggOp::Avg => "avg",
+        DpAggOp::Percentile => "percentile",
+    }
+}
+
+fn dp_agg_label(spec: &DpAggSpecResolved) -> String {
+    match spec.op {
+        DpAggOp::Count => match spec.column.as_deref() {
+            Some(col) => format!("count({col})"),
+            None => "count(*)".to_string(),
+        },
+        DpAggOp::Sum => format!("sum({})", spec.column.as_deref().unwrap_or("")),
+        DpAggOp::Avg => format!("avg({})", spec.column.as_deref().unwrap_or("")),
+        DpAggOp::Percentile => {
+            let pct = spec.percentile.unwrap_or(0.5).mul_add(100.0, 0.0).round() as u64;
+            format!("p{pct}({})", spec.column.as_deref().unwrap_or(""))
+        }
+    }
+}
+
+fn dp_default_label(op: &DpAggOp, column: Option<&str>, percentile: Option<f64>) -> String {
+    match op {
+        DpAggOp::Count => match column {
+            Some(col) => format!("count_{col}"),
+            None => "count".to_string(),
+        },
+        DpAggOp::Sum => format!("sum_{}", column.unwrap_or("")),
+        DpAggOp::Avg => format!("avg_{}", column.unwrap_or("")),
+        DpAggOp::Percentile => {
+            let pct = percentile.unwrap_or(0.5).mul_add(100.0, 0.0).round() as u64;
+            format!("p{pct}_{}", column.unwrap_or(""))
+        }
+    }
+}
+
+fn resolve_dp_aggregates(
+    schema: &TableSchema,
+    specs: &[DpAggregateSpec],
+) -> anyhow::Result<Vec<DpAggSpecResolved>> {
+    let mut out = Vec::new();
+    for spec in specs.iter() {
+        let op = spec.op.to_lowercase();
+        let column = spec
+            .column
+            .clone()
+            .and_then(|c| if c == "*" { None } else { Some(c) });
+        let op = match op.as_str() {
+            "count" => DpAggOp::Count,
+            "sum" => DpAggOp::Sum,
+            "avg" => DpAggOp::Avg,
+            "percentile" => DpAggOp::Percentile,
+            _ => anyhow::bail!("invalid_request: unknown aggregate op"),
+        };
+
+        if let Some(col) = column.as_ref() {
+            if !schema.columns.iter().any(|c| c.name == *col) {
+                anyhow::bail!("invalid_request: unknown aggregate column {col}");
+            }
+        } else if matches!(op, DpAggOp::Sum | DpAggOp::Avg | DpAggOp::Percentile) {
+            anyhow::bail!("invalid_request: aggregate requires column");
+        }
+
+        let (percentile, bounds, sensitivity) = match op {
+            DpAggOp::Count => (None, None, 1.0),
+            DpAggOp::Sum | DpAggOp::Avg | DpAggOp::Percentile => {
+                let bounds = spec
+                    .bounds
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("invalid_request: bounds are required"))?;
+                let range = dp_bounds_range(&bounds)?;
+                let percentile = if matches!(op, DpAggOp::Percentile) {
+                    let p = spec
+                        .percentile
+                        .ok_or_else(|| anyhow::anyhow!("invalid_request: percentile required"))?;
+                    Some(dp_normalize_percentile(p)?)
+                } else {
+                    None
+                };
+                (percentile, Some(bounds), range)
+            }
+        };
+
+        let label = spec
+            .r#as
+            .clone()
+            .unwrap_or_else(|| dp_default_label(&op, column.as_deref(), percentile));
+
+        out.push(DpAggSpecResolved {
+            op,
+            column,
+            percentile,
+            bounds,
+            label,
+            sensitivity,
+        });
+    }
+    Ok(out)
+}
+
+fn dp_normalize_percentile(p: f64) -> anyhow::Result<f64> {
+    let q = if p > 1.0 { p / 100.0 } else { p };
+    if !(0.0..=1.0).contains(&q) {
+        anyhow::bail!("invalid_request: percentile must be in [0,1] or [0,100]");
+    }
+    Ok(q)
+}
+
+fn dp_bounds_range(bounds: &DpBounds) -> anyhow::Result<f64> {
+    if bounds.max <= bounds.min {
+        anyhow::bail!("invalid_request: bounds.max must be > bounds.min");
+    }
+    Ok(bounds.max - bounds.min)
+}
+
+fn dp_clip_value(value: f64, bounds: &DpBounds) -> f64 {
+    if value < bounds.min {
+        bounds.min
+    } else if value > bounds.max {
+        bounds.max
+    } else {
+        value
+    }
+}
+
+fn dp_lit_to_f64(lit: &Lit) -> Option<f64> {
+    match lit {
+        Lit::I64 { v } => Some(*v as f64),
+        Lit::U64 { v } => Some(*v as f64),
+        Lit::F64 { v } => Some(*v),
+        Lit::Dec { v } => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn dp_init_acc(spec: &DpAggSpecResolved) -> DpAggAccumulator {
+    match spec.op {
+        DpAggOp::Count => DpAggAccumulator::Count(0),
+        DpAggOp::Sum => DpAggAccumulator::Sum { sum: 0.0 },
+        DpAggOp::Avg => DpAggAccumulator::Avg { sum: 0.0, count: 0 },
+        DpAggOp::Percentile => DpAggAccumulator::Percentile { values: Vec::new() },
+    }
+}
+
+fn dp_update_acc(
+    acc: &mut DpAggAccumulator,
+    spec: &DpAggSpecResolved,
+    row: &RowObject,
+) -> anyhow::Result<()> {
+    match acc {
+        DpAggAccumulator::Count(count) => {
+            if let Some(col) = spec.column.as_ref() {
+                if let Some(v) = row.get(col) {
+                    if !matches!(v, Lit::Null) {
+                        *count += 1;
+                    }
+                }
+            } else {
+                *count += 1;
+            }
+        }
+        DpAggAccumulator::Sum { sum } => {
+            let Some(col) = spec.column.as_ref() else {
+                anyhow::bail!("invalid_request: sum requires column");
+            };
+            if let Some(v) = row.get(col) {
+                if let Some(num) = dp_lit_to_f64(v) {
+                    let val = spec.bounds.as_ref().map_or(num, |b| dp_clip_value(num, b));
+                    *sum += val;
+                }
+            }
+        }
+        DpAggAccumulator::Avg { sum, count } => {
+            let Some(col) = spec.column.as_ref() else {
+                anyhow::bail!("invalid_request: avg requires column");
+            };
+            if let Some(v) = row.get(col) {
+                if let Some(num) = dp_lit_to_f64(v) {
+                    let val = spec.bounds.as_ref().map_or(num, |b| dp_clip_value(num, b));
+                    *sum += val;
+                    *count += 1;
+                }
+            }
+        }
+        DpAggAccumulator::Percentile { values } => {
+            let Some(col) = spec.column.as_ref() else {
+                anyhow::bail!("invalid_request: percentile requires column");
+            };
+            if let Some(v) = row.get(col) {
+                if let Some(num) = dp_lit_to_f64(v) {
+                    let val = spec.bounds.as_ref().map_or(num, |b| dp_clip_value(num, b));
+                    values.push(val);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dp_quantile(values: &mut [f64], q: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    let idx = ((n - 1) as f64 * q).round() as usize;
+    values.get(idx).cloned()
+}
+
+fn dp_finalize_acc(
+    spec: &DpAggSpecResolved,
+    acc: &mut DpAggAccumulator,
+    mechanism: &str,
+    epsilon: f64,
+    delta: f64,
+    rng: &mut DpRng,
+) -> anyhow::Result<Lit> {
+    match acc {
+        DpAggAccumulator::Count(count) => {
+            let noise = dp_noise(mechanism, rng, 1.0, epsilon, delta)?;
+            Ok(Lit::F64 {
+                v: *count as f64 + noise,
+            })
+        }
+        DpAggAccumulator::Sum { sum } => {
+            let noise = dp_noise(mechanism, rng, spec.sensitivity, epsilon, delta)?;
+            Ok(Lit::F64 { v: *sum + noise })
+        }
+        DpAggAccumulator::Avg { sum, count } => {
+            if *count == 0 {
+                return Ok(Lit::Null);
+            }
+            let eps_half = epsilon / 2.0;
+            let delta_half = delta / 2.0;
+            let sum_noise = dp_noise(mechanism, rng, spec.sensitivity, eps_half, delta_half)?;
+            let cnt_noise = dp_noise(mechanism, rng, 1.0, eps_half, delta_half)?;
+            let noisy_sum = *sum + sum_noise;
+            let noisy_count = *count as f64 + cnt_noise;
+            if noisy_count <= 0.0 {
+                Ok(Lit::Null)
+            } else {
+                Ok(Lit::F64 {
+                    v: noisy_sum / noisy_count,
+                })
+            }
+        }
+        DpAggAccumulator::Percentile { values } => {
+            let Some(q) = spec.percentile else {
+                return Ok(Lit::Null);
+            };
+            let base = dp_quantile(values, q);
+            match base {
+                Some(v) => {
+                    let noise = dp_noise(mechanism, rng, spec.sensitivity, epsilon, delta)?;
+                    Ok(Lit::F64 { v: v + noise })
+                }
+                None => Ok(Lit::Null),
+            }
+        }
+    }
+}
+
+fn lit_to_json_value(lit: Lit) -> anyhow::Result<serde_json::Value> {
+    serde_json::to_value(lit).map_err(|e| anyhow::anyhow!(e))
+}
+
+// -----------------------------
+// Oblivious helpers
+// -----------------------------
+
+#[derive(Debug, Clone)]
+struct ObliviousPadding {
+    target_rows: u64,
+    dummy_rows: u64,
+    dummy_value_lookups: u64,
+    shuffle: bool,
+}
+
+fn oblivious_policy_default() -> ObliviousPolicy {
+    ObliviousPolicy {
+        level: "off".to_string(),
+        pad_to_multiple: None,
+        target_rows: None,
+        dummy_value_lookups: None,
+        shuffle: None,
+    }
+}
+
+fn normalize_oblivious_policy(mut policy: ObliviousPolicy) -> anyhow::Result<ObliviousPolicy> {
+    let level = policy.level.to_lowercase();
+    if level != "off" && level != "basic" && level != "strong" {
+        anyhow::bail!("invalid_request: unknown oblivious policy level");
+    }
+    policy.level = level;
+
+    if policy.pad_to_multiple == Some(0) {
+        policy.pad_to_multiple = None;
+    }
+    if policy.target_rows == Some(0) {
+        policy.target_rows = None;
+    }
+    if policy.dummy_value_lookups == Some(0) {
+        policy.dummy_value_lookups = None;
+    }
+
+    if policy.level != "off" {
+        if policy.pad_to_multiple.is_none() && policy.target_rows.is_none() {
+            policy.pad_to_multiple = Some(32);
+        }
+        if policy.level == "strong" && policy.dummy_value_lookups.is_none() {
+            policy.dummy_value_lookups = Some(64);
+        }
+    }
+
+    Ok(policy)
+}
+
+fn compute_oblivious_padding(policy: &ObliviousPolicy, actual_rows: u64) -> ObliviousPadding {
+    let mut target_rows = actual_rows;
+
+    if let Some(multiple) = policy.pad_to_multiple {
+        if multiple > 0 && actual_rows > 0 {
+            target_rows = ((actual_rows + multiple - 1) / multiple) * multiple;
+        }
+    }
+
+    if let Some(target) = policy.target_rows {
+        if target > target_rows {
+            target_rows = target;
+        }
+    }
+
+    let dummy_rows = target_rows.saturating_sub(actual_rows);
+    let dummy_value_lookups = policy.dummy_value_lookups.unwrap_or(0);
+    let shuffle = policy.shuffle.unwrap_or(false);
+
+    ObliviousPadding {
+        target_rows,
+        dummy_rows,
+        dummy_value_lookups,
+        shuffle,
+    }
+}
+
+fn oblivious_shuffle_seed(table: &BaseTableRef, target_rows: u64) -> u64 {
+    let bytes = format!("oblivious:{}:{}:{}", table.db, table.table, target_rows).into_bytes();
+    let id = value_id(&bytes);
+    let mut seed = 0u64;
+    for (shift, b) in id[0..8].iter().enumerate() {
+        seed |= (*b as u64) << (8 * shift);
+    }
+    seed
+}
+
+fn shuffle_rows(rows: &mut [RowCtx], seed: u64) {
+    if rows.len() <= 1 {
+        return;
+    }
+    let mut rng = DpRng::new(seed);
+    for i in (1..rows.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        rows.swap(i, j);
+    }
+}
+
+// -----------------------------
+// Forensic helpers
+// -----------------------------
+
+fn forensic_genesis_hash() -> String {
+    "genesis".to_string()
+}
+
+fn forensic_index_by_id(records: &[ForensicRecord], id: u64) -> Option<usize> {
+    records.iter().position(|r| r.id == id)
+}
+
+fn forensic_record_hash(
+    prev_hash: &str,
+    id: u64,
+    ts_ms: u64,
+    db: &str,
+    table: &str,
+    op: &str,
+    pk: Option<&Vec<Lit>>,
+    change_seq: u64,
+) -> String {
+    let payload = serde_json::json!({
+        "prev_hash": prev_hash,
+        "id": id,
+        "ts_ms": ts_ms,
+        "db": db,
+        "table": table,
+        "op": op,
+        "pk": pk,
+        "change_seq": change_seq
+    });
+    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    let id = value_id(&bytes);
+    hex16(&id)
+}
+
+// -----------------------------
+// Wire encodings
+// -----------------------------
+
+fn encode_skeinpack_rows(
+    rows: &[Vec<Lit>],
+    known: &HashSet<String>,
+    dict: &mut serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut out_rows = Vec::new();
+
+    for r in rows.iter() {
+        let mut out_r = Vec::new();
+        for v in r.iter() {
+            match v {
+                Lit::Str { .. } | Lit::Json { .. } | Lit::Bytes { .. } | Lit::Uuid { .. } => {
+                    let vid = valueid_of_lit(v)?;
+                    if !known.contains(&vid) {
+                        dict.insert(vid.clone(), serde_json::to_value(v)?);
+                    }
+                    out_r.push(serde_json::json!({"vid": vid}));
+                }
+                _ => {
+                    out_r.push(serde_json::to_value(v)?);
+                }
+            }
+        }
+        out_rows.push(serde_json::Value::Array(out_r));
+    }
+
+    Ok(out_rows)
+}
+
+fn encode_skeinpack_v1(
+    cols: &[ColumnMeta],
+    rows: &[Vec<Lit>],
+    known: &HashSet<String>,
+) -> anyhow::Result<(serde_json::Value, serde_json::Value)> {
+    let mut dict = serde_json::Map::new();
+    let mut out_rows = Vec::new();
+
+    for r in rows.iter() {
+        let mut out_r = Vec::new();
+        for v in r.iter() {
+            match v {
+                Lit::Str { .. } | Lit::Json { .. } | Lit::Bytes { .. } | Lit::Uuid { .. } => {
+                    let vid = valueid_of_lit(v)?;
+                    if !known.contains(&vid) {
+                        dict.insert(vid.clone(), serde_json::to_value(v)?);
+                    }
+                    out_r.push(serde_json::json!({"vid": vid}));
+                }
+                _ => {
+                    out_r.push(serde_json::to_value(v)?);
+                }
+            }
+        }
+        out_rows.push(serde_json::Value::Array(out_r));
+    }
+
+    let packet = serde_json::json!({
+        "format": "skeinpack_v1",
+        "columns": cols,
+        "rows": out_rows,
+        "dict": serde_json::Value::Object(dict.clone())
+    });
+
+    let wire = serde_json::json!({
+        "format": "skeinpack_v1",
+        "dict_added": dict.len()
+    });
+
+    Ok((packet, wire))
+}
+
+fn wasm_batch_result(
+    columns: &[ColumnMeta],
+    rows: &[Vec<Lit>],
+) -> anyhow::Result<serde_json::Value> {
+    let batch = wasm_batch::encode_wasm_batch_v1(columns, rows)?;
+    let batch_b64 = BASE64_STANDARD.encode(&batch);
+    Ok(serde_json::json!({
+        "format": "skein.wasm.batch.v1",
+        "columns": columns,
+        "batch_b64": batch_b64
+    }))
+}
+
+// -----------------------------
+// Wasm batch encoding (skein.wasm.batch.v1)
+// -----------------------------
+
+#[allow(dead_code)]
+mod wasm_batch {
+    use super::*;
+
+    const WASM_BATCH_MAGIC_V1: u32 = 0x31424B53; // "SKB1" little-endian
+    const WASM_BATCH_VERSION_V1: u16 = 1;
+    const WASM_BATCH_HEADER_SIZE: usize = 20;
+    const WASM_BATCH_COLUMN_META_SIZE: usize = 28;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WasmBatchTypeTag {
+        Bool = 1,
+        I64 = 2,
+        U64 = 3,
+        F64 = 4,
+        Str = 5,
+        Bytes = 6,
+    }
+
+    impl WasmBatchTypeTag {
+        fn from_kind(kind: &str) -> Option<Self> {
+            match kind {
+                "bool" => Some(Self::Bool),
+                "i64" => Some(Self::I64),
+                "u64" => Some(Self::U64),
+                "f64" => Some(Self::F64),
+                "str" | "string" | "varchar" => Some(Self::Str),
+                "bytes" => Some(Self::Bytes),
+                _ => None,
+            }
+        }
+
+        fn from_lit(lit: &Lit) -> Option<Self> {
+            match lit {
+                Lit::Bool { .. } => Some(Self::Bool),
+                Lit::I64 { .. } => Some(Self::I64),
+                Lit::U64 { .. } => Some(Self::U64),
+                Lit::F64 { .. } => Some(Self::F64),
+                Lit::Str { .. } => Some(Self::Str),
+                Lit::Bytes { .. } => Some(Self::Bytes),
+                _ => None,
+            }
+        }
+
+        fn from_u32(value: u32) -> Option<Self> {
+            match value {
+                1 => Some(Self::Bool),
+                2 => Some(Self::I64),
+                3 => Some(Self::U64),
+                4 => Some(Self::F64),
+                5 => Some(Self::Str),
+                6 => Some(Self::Bytes),
+                _ => None,
+            }
+        }
+
+        fn kind(self) -> &'static str {
+            match self {
+                Self::Bool => "bool",
+                Self::I64 => "i64",
+                Self::U64 => "u64",
+                Self::F64 => "f64",
+                Self::Str => "str",
+                Self::Bytes => "bytes",
+            }
+        }
+
+        fn fixed_size_bytes(self) -> Option<usize> {
+            match self {
+                Self::Bool => Some(1),
+                Self::I64 | Self::U64 | Self::F64 => Some(8),
+                _ => None,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct WasmBatchColumnPayload {
+        tag: WasmBatchTypeTag,
+        data: Vec<u8>,
+        nulls: Option<Vec<u8>>,
+        aux: Option<Vec<u8>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct WasmBatchColumnMeta {
+        tag: WasmBatchTypeTag,
+        data_offset: usize,
+        data_len: usize,
+        nulls_offset: usize,
+        nulls_len: usize,
+        aux_offset: usize,
+        aux_len: usize,
+    }
+
+    pub(super) fn encode_wasm_batch_v1(
+        columns: &[ColumnMeta],
+        rows: &[Vec<Lit>],
+    ) -> anyhow::Result<Vec<u8>> {
+        let row_count = rows.len();
+        let col_count = columns.len();
+
+        if row_count > u32::MAX as usize || col_count > u32::MAX as usize {
+            anyhow::bail!("invalid_request: wasm batch too large");
+        }
+
+        for (idx, row) in rows.iter().enumerate() {
+            if row.len() != col_count {
+                anyhow::bail!(
+                    "invalid_request: wasm batch row {} has {} columns (expected {})",
+                    idx,
+                    row.len(),
+                    col_count
+                );
+            }
+        }
+
+        let mut payloads = Vec::with_capacity(col_count);
+        for (col_idx, meta) in columns.iter().enumerate() {
+            let tag = resolve_wasm_batch_tag(&meta.r#type.kind, rows, col_idx)?;
+            let payload = build_wasm_batch_payload(tag, rows, col_idx)?;
+            payloads.push(payload);
+        }
+
+        let header_size = WASM_BATCH_HEADER_SIZE;
+        let meta_size = col_count.saturating_mul(WASM_BATCH_COLUMN_META_SIZE);
+        let mut cursor = header_size + meta_size;
+        if cursor > u32::MAX as usize {
+            anyhow::bail!("invalid_request: wasm batch too large");
+        }
+
+        let mut metas = Vec::with_capacity(col_count);
+        for payload in payloads.iter() {
+            let data_offset = cursor;
+            cursor = cursor.saturating_add(payload.data.len());
+
+            let (nulls_offset, nulls_len) = match payload.nulls.as_ref() {
+                Some(nulls) => {
+                    let off = cursor;
+                    cursor = cursor.saturating_add(nulls.len());
+                    (off, nulls.len())
+                }
+                None => (0usize, 0usize),
+            };
+
+            let (aux_offset, aux_len) = match payload.aux.as_ref() {
+                Some(aux) => {
+                    let off = cursor;
+                    cursor = cursor.saturating_add(aux.len());
+                    (off, aux.len())
+                }
+                None => (0usize, 0usize),
+            };
+
+            if cursor > u32::MAX as usize {
+                anyhow::bail!("invalid_request: wasm batch too large");
+            }
+
+            metas.push(WasmBatchColumnMeta {
+                tag: payload.tag,
+                data_offset,
+                data_len: payload.data.len(),
+                nulls_offset,
+                nulls_len,
+                aux_offset,
+                aux_len,
+            });
+        }
+
+        let mut buf = vec![0u8; cursor];
+        write_u32_le(&mut buf, 0, WASM_BATCH_MAGIC_V1);
+        write_u16_le(&mut buf, 4, WASM_BATCH_VERSION_V1);
+        write_u16_le(&mut buf, 6, 0);
+        write_u32_le(&mut buf, 8, row_count as u32);
+        write_u32_le(&mut buf, 12, col_count as u32);
+        write_u32_le(&mut buf, 16, header_size as u32);
+
+        for (idx, meta) in metas.iter().enumerate() {
+            let base = header_size + idx * WASM_BATCH_COLUMN_META_SIZE;
+            write_u32_le(&mut buf, base, meta.tag as u32);
+            write_u32_le(&mut buf, base + 4, meta.data_offset as u32);
+            write_u32_le(&mut buf, base + 8, meta.data_len as u32);
+            write_u32_le(&mut buf, base + 12, meta.nulls_offset as u32);
+            write_u32_le(&mut buf, base + 16, meta.nulls_len as u32);
+            write_u32_le(&mut buf, base + 20, meta.aux_offset as u32);
+            write_u32_le(&mut buf, base + 24, meta.aux_len as u32);
+        }
+
+        for (payload, meta) in payloads.iter().zip(metas.iter()) {
+            if meta.data_len > 0 {
+                buf[meta.data_offset..meta.data_offset + meta.data_len]
+                    .copy_from_slice(&payload.data);
+            }
+            if let Some(nulls) = payload.nulls.as_ref() {
+                if meta.nulls_len > 0 {
+                    buf[meta.nulls_offset..meta.nulls_offset + meta.nulls_len]
+                        .copy_from_slice(nulls);
+                }
+            }
+            if let Some(aux) = payload.aux.as_ref() {
+                if meta.aux_len > 0 {
+                    buf[meta.aux_offset..meta.aux_offset + meta.aux_len].copy_from_slice(aux);
+                }
+            }
+        }
+
+        Ok(buf)
+    }
+
+    pub(super) fn decode_wasm_batch_v1(
+        bytes: &[u8],
+    ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>)> {
+        if bytes.len() < WASM_BATCH_HEADER_SIZE {
+            anyhow::bail!("invalid_request: wasm batch too short");
+        }
+
+        let magic = read_u32_le(bytes, 0)?;
+        if magic != WASM_BATCH_MAGIC_V1 {
+            anyhow::bail!("invalid_request: unsupported wasm batch magic");
+        }
+        let version = read_u16_le(bytes, 4)?;
+        if version != WASM_BATCH_VERSION_V1 {
+            anyhow::bail!("invalid_request: unsupported wasm batch version");
+        }
+
+        let row_count = read_u32_le(bytes, 8)? as usize;
+        let col_count = read_u32_le(bytes, 12)? as usize;
+        let columns_offset = read_u32_le(bytes, 16)? as usize;
+
+        let meta_size = col_count.saturating_mul(WASM_BATCH_COLUMN_META_SIZE);
+        if columns_offset.saturating_add(meta_size) > bytes.len() {
+            anyhow::bail!("invalid_request: wasm batch metadata out of bounds");
+        }
+
+        let mut column_values = Vec::with_capacity(col_count);
+        let mut column_meta = Vec::with_capacity(col_count);
+
+        for idx in 0..col_count {
+            let base = columns_offset + idx * WASM_BATCH_COLUMN_META_SIZE;
+            let tag_raw = read_u32_le(bytes, base)?;
+            let tag = WasmBatchTypeTag::from_u32(tag_raw)
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown wasm batch type tag"))?;
+            let data_offset = read_u32_le(bytes, base + 4)? as usize;
+            let data_len = read_u32_le(bytes, base + 8)? as usize;
+            let nulls_offset = read_u32_le(bytes, base + 12)? as usize;
+            let nulls_len = read_u32_le(bytes, base + 16)? as usize;
+            let aux_offset = read_u32_le(bytes, base + 20)? as usize;
+            let aux_len = read_u32_le(bytes, base + 24)? as usize;
+
+            let data_end = data_offset.saturating_add(data_len);
+            if data_end > bytes.len() {
+                anyhow::bail!("invalid_request: wasm batch data out of bounds");
+            }
+            let data = &bytes[data_offset..data_end];
+
+            let nulls = if nulls_offset == 0 || nulls_len == 0 {
+                None
+            } else {
+                let end = nulls_offset.saturating_add(nulls_len);
+                if end > bytes.len() {
+                    anyhow::bail!("invalid_request: wasm batch nulls out of bounds");
+                }
+                Some(&bytes[nulls_offset..end])
+            };
+
+            let aux = if aux_offset == 0 || aux_len == 0 {
+                None
+            } else {
+                let end = aux_offset.saturating_add(aux_len);
+                if end > bytes.len() {
+                    anyhow::bail!("invalid_request: wasm batch aux out of bounds");
+                }
+                Some(&bytes[aux_offset..end])
+            };
+
+            let values = decode_wasm_batch_column(tag, row_count, data, nulls, aux)?;
+            column_values.push(values);
+            column_meta.push(ColumnMeta {
+                name: format!("col_{}", idx),
+                r#type: TypeDesc {
+                    kind: tag.kind().to_string(),
+                    max: None,
+                    precision: None,
+                    scale: None,
+                    charset: None,
+                    collation: None,
+                    unsigned: None,
+                },
+            });
+        }
+
+        let mut rows = Vec::with_capacity(row_count);
+        for row_idx in 0..row_count {
+            let mut row = Vec::with_capacity(col_count);
+            for col_idx in 0..col_count {
+                let value = column_values
+                    .get(col_idx)
+                    .and_then(|col| col.get(row_idx))
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("invalid_request: wasm batch row out of bounds")
+                    })?;
+                row.push(value);
+            }
+            rows.push(row);
+        }
+
+        Ok((column_meta, rows))
+    }
+
+    fn resolve_wasm_batch_tag(
+        kind: &str,
+        rows: &[Vec<Lit>],
+        col_idx: usize,
+    ) -> anyhow::Result<WasmBatchTypeTag> {
+        if let Some(tag) = WasmBatchTypeTag::from_kind(kind) {
+            return Ok(tag);
+        }
+        for row in rows.iter() {
+            let lit = row
+                .get(col_idx)
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: wasm batch row missing column"))?;
+            if matches!(lit, Lit::Null) {
+                continue;
+            }
+            if let Some(tag) = WasmBatchTypeTag::from_lit(lit) {
+                return Ok(tag);
+            }
+            anyhow::bail!("invalid_request: unsupported literal in wasm batch");
+        }
+        anyhow::bail!("invalid_request: cannot infer wasm batch column type");
+    }
+
+    fn build_wasm_batch_payload(
+        tag: WasmBatchTypeTag,
+        rows: &[Vec<Lit>],
+        col_idx: usize,
+    ) -> anyhow::Result<WasmBatchColumnPayload> {
+        let row_count = rows.len();
+        let mut has_null = false;
+        let mut nulls = vec![0u8; wasm_null_bitmap_len(row_count)];
+
+        if let Some(width) = tag.fixed_size_bytes() {
+            let mut data = Vec::with_capacity(row_count.saturating_mul(width));
+            for (row_idx, row) in rows.iter().enumerate() {
+                let lit = row.get(col_idx).ok_or_else(|| {
+                    anyhow::anyhow!("invalid_request: wasm batch row missing column")
+                })?;
+                match (tag, lit) {
+                    (_, Lit::Null) => {
+                        has_null = true;
+                        data.extend(std::iter::repeat_n(0u8, width));
+                    }
+                    (WasmBatchTypeTag::Bool, Lit::Bool { v }) => {
+                        wasm_set_bit(&mut nulls, row_idx);
+                        data.push(if *v { 1 } else { 0 });
+                    }
+                    (WasmBatchTypeTag::I64, Lit::I64 { v }) => {
+                        wasm_set_bit(&mut nulls, row_idx);
+                        data.extend_from_slice(&v.to_le_bytes());
+                    }
+                    (WasmBatchTypeTag::U64, Lit::U64 { v }) => {
+                        wasm_set_bit(&mut nulls, row_idx);
+                        data.extend_from_slice(&v.to_le_bytes());
+                    }
+                    (WasmBatchTypeTag::F64, Lit::F64 { v }) => {
+                        wasm_set_bit(&mut nulls, row_idx);
+                        data.extend_from_slice(&v.to_le_bytes());
+                    }
+                    _ => {
+                        anyhow::bail!("invalid_request: type mismatch in wasm batch column");
+                    }
+                }
+            }
+
+            let nulls = if has_null { Some(nulls) } else { None };
+            return Ok(WasmBatchColumnPayload {
+                tag,
+                data,
+                nulls,
+                aux: None,
+            });
+        }
+
+        let mut data = Vec::new();
+        let mut offsets: Vec<u32> = Vec::with_capacity(row_count.saturating_add(1));
+        let mut cursor = 0usize;
+        for (row_idx, row) in rows.iter().enumerate() {
+            offsets.push(cursor as u32);
+            let lit = row
+                .get(col_idx)
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: wasm batch row missing column"))?;
+            match (tag, lit) {
+                (_, Lit::Null) => {
+                    has_null = true;
+                }
+                (WasmBatchTypeTag::Str, Lit::Str { v }) => {
+                    wasm_set_bit(&mut nulls, row_idx);
+                    data.extend_from_slice(v.as_bytes());
+                    cursor = cursor.saturating_add(v.len());
+                }
+                (WasmBatchTypeTag::Bytes, Lit::Bytes { b64 }) => {
+                    wasm_set_bit(&mut nulls, row_idx);
+                    let decoded = BASE64_STANDARD
+                        .decode(b64.as_bytes())
+                        .map_err(|_| anyhow::anyhow!("invalid_request: invalid bytes b64"))?;
+                    cursor = cursor.saturating_add(decoded.len());
+                    data.extend_from_slice(&decoded);
+                }
+                _ => {
+                    anyhow::bail!("invalid_request: type mismatch in wasm batch column");
+                }
+            }
+            if cursor > u32::MAX as usize {
+                anyhow::bail!("invalid_request: wasm batch column too large");
+            }
+        }
+        offsets.push(cursor as u32);
+
+        let mut aux = Vec::with_capacity(offsets.len().saturating_mul(4));
+        for offset in offsets {
+            aux.extend_from_slice(&offset.to_le_bytes());
+        }
+
+        let nulls = if has_null { Some(nulls) } else { None };
+        Ok(WasmBatchColumnPayload {
+            tag,
+            data,
+            nulls,
+            aux: Some(aux),
+        })
+    }
+
+    fn decode_wasm_batch_column(
+        tag: WasmBatchTypeTag,
+        row_count: usize,
+        data: &[u8],
+        nulls: Option<&[u8]>,
+        aux: Option<&[u8]>,
+    ) -> anyhow::Result<Vec<Lit>> {
+        let null_len = wasm_null_bitmap_len(row_count);
+        if let Some(bitmap) = nulls {
+            if bitmap.len() != null_len && row_count > 0 {
+                anyhow::bail!("invalid_request: wasm batch null bitmap length mismatch");
+            }
+        }
+
+        if let Some(width) = tag.fixed_size_bytes() {
+            let expected = row_count.saturating_mul(width);
+            if data.len() != expected {
+                anyhow::bail!("invalid_request: wasm batch fixed column length mismatch");
+            }
+            let mut out = Vec::with_capacity(row_count);
+            for row_idx in 0..row_count {
+                let is_non_null = wasm_is_non_null(nulls, row_idx);
+                if !is_non_null {
+                    out.push(Lit::Null);
+                    continue;
+                }
+                let offset = row_idx * width;
+                let slice = &data[offset..offset + width];
+                let lit = match tag {
+                    WasmBatchTypeTag::Bool => Lit::Bool { v: slice[0] != 0 },
+                    WasmBatchTypeTag::I64 => Lit::I64 {
+                        v: i64::from_le_bytes(slice.try_into().unwrap_or_default()),
+                    },
+                    WasmBatchTypeTag::U64 => Lit::U64 {
+                        v: u64::from_le_bytes(slice.try_into().unwrap_or_default()),
+                    },
+                    WasmBatchTypeTag::F64 => Lit::F64 {
+                        v: f64::from_le_bytes(slice.try_into().unwrap_or_default()),
+                    },
+                    _ => Lit::Null,
+                };
+                out.push(lit);
+            }
+            return Ok(out);
+        }
+
+        let Some(aux_bytes) = aux else {
+            anyhow::bail!("invalid_request: wasm batch missing varlen offsets");
+        };
+        let expected_aux = row_count.saturating_add(1).saturating_mul(4);
+        if aux_bytes.len() != expected_aux && row_count > 0 {
+            anyhow::bail!("invalid_request: wasm batch offsets length mismatch");
+        }
+
+        let mut offsets = Vec::with_capacity(row_count.saturating_add(1));
+        for chunk in aux_bytes.chunks_exact(4) {
+            let offset = u32::from_le_bytes(chunk.try_into().unwrap_or_default());
+            offsets.push(offset as usize);
+        }
+        if offsets.len() != row_count + 1 {
+            anyhow::bail!("invalid_request: wasm batch offsets length mismatch");
+        }
+
+        let mut out = Vec::with_capacity(row_count);
+        for row_idx in 0..row_count {
+            let is_non_null = wasm_is_non_null(nulls, row_idx);
+            if !is_non_null {
+                out.push(Lit::Null);
+                continue;
+            }
+            let start = offsets[row_idx];
+            let end = offsets[row_idx + 1];
+            if start > end || end > data.len() {
+                anyhow::bail!("invalid_request: wasm batch offsets out of bounds");
+            }
+            let slice = &data[start..end];
+            let lit = match tag {
+                WasmBatchTypeTag::Str => {
+                    let s = std::str::from_utf8(slice)
+                        .map_err(|_| anyhow::anyhow!("invalid_request: invalid utf8 in batch"))?;
+                    Lit::Str { v: s.to_string() }
+                }
+                WasmBatchTypeTag::Bytes => Lit::Bytes {
+                    b64: BASE64_STANDARD.encode(slice),
+                },
+                _ => Lit::Null,
+            };
+            out.push(lit);
+        }
+
+        Ok(out)
+    }
+
+    fn wasm_null_bitmap_len(rows: usize) -> usize {
+        if rows == 0 {
+            0
+        } else {
+            rows.div_ceil(8)
+        }
+    }
+
+    fn wasm_set_bit(bitmap: &mut [u8], row_idx: usize) {
+        if bitmap.is_empty() {
+            return;
+        }
+        let byte = row_idx / 8;
+        let bit = row_idx % 8;
+        if byte < bitmap.len() {
+            bitmap[byte] |= 1 << bit;
+        }
+    }
+
+    fn wasm_is_non_null(bitmap: Option<&[u8]>, row_idx: usize) -> bool {
+        let Some(bits) = bitmap else {
+            return true;
+        };
+        if bits.is_empty() {
+            return true;
+        }
+        let byte = row_idx / 8;
+        let bit = row_idx % 8;
+        if byte >= bits.len() {
+            return false;
+        }
+        (bits[byte] & (1 << bit)) != 0
+    }
+
+    fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
+        let bytes = value.to_le_bytes();
+        if offset + bytes.len() <= buf.len() {
+            buf[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        }
+    }
+
+    fn write_u32_le(buf: &mut [u8], offset: usize, value: u32) {
+        let bytes = value.to_le_bytes();
+        if offset + bytes.len() <= buf.len() {
+            buf[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        }
+    }
+
+    fn read_u16_le(buf: &[u8], offset: usize) -> anyhow::Result<u16> {
+        let end = offset.saturating_add(2);
+        if end > buf.len() {
+            anyhow::bail!("invalid_request: wasm batch header out of bounds");
+        }
+        let slice: [u8; 2] = buf[offset..end].try_into().unwrap_or_default();
+        Ok(u16::from_le_bytes(slice))
+    }
+
+    fn read_u32_le(buf: &[u8], offset: usize) -> anyhow::Result<u32> {
+        let end = offset.saturating_add(4);
+        if end > buf.len() {
+            anyhow::bail!("invalid_request: wasm batch header out of bounds");
+        }
+        let slice: [u8; 4] = buf[offset..end].try_into().unwrap_or_default();
+        Ok(u32::from_le_bytes(slice))
+    }
+}
+
+fn valueid_of_lit(lit: &Lit) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(lit)?;
+    let id = value_id(&bytes);
+    Ok(hex16(&id))
+}
+
+fn row_to_object(cols: &[ColumnMeta], row: &[Lit]) -> anyhow::Result<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    for (i, c) in cols.iter().enumerate() {
+        if let Some(v) = row.get(i) {
+            obj.insert(c.name.clone(), serde_json::to_value(v)?);
+        }
+    }
+    Ok(serde_json::Value::Object(obj))
+}
+
+fn rows_to_objects(cols: &[ColumnMeta], rows: &[Vec<Lit>]) -> anyhow::Result<serde_json::Value> {
+    let mut out = Vec::new();
+    for r in rows.iter() {
+        let mut obj = serde_json::Map::new();
+        for (i, c) in cols.iter().enumerate() {
+            if let Some(v) = r.get(i) {
+                obj.insert(c.name.clone(), serde_json::to_value(v)?);
+            }
+        }
+        out.push(serde_json::Value::Object(obj));
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+// -----------------------------
+// ETags
+// -----------------------------
+
+const CAUSALITY_FORMAT_V1: &str = "etag_chain_v1";
+
+fn build_causality_token(deps: &[CausalityDependency]) -> CausalityToken {
+    CausalityToken {
+        format: CAUSALITY_FORMAT_V1.to_string(),
+        deps: deps.to_vec(),
+    }
+}
+
+fn ensure_min_causality(
+    min: &CausalityToken,
+    current: &[CausalityDependency],
+) -> anyhow::Result<()> {
+    if min.format != CAUSALITY_FORMAT_V1 {
+        anyhow::bail!("invalid_request: unsupported causality format");
+    }
+
+    let mut current_map: HashMap<(String, bool), &CausalityDependency> = HashMap::new();
+    for dep in current {
+        let is_view = dep.view.unwrap_or(false) || dep.change_seq.is_some();
+        current_map.insert((dep.table.clone(), is_view), dep);
+    }
+
+    for dep in &min.deps {
+        let is_view = dep.view.unwrap_or(false) || dep.change_seq.is_some();
+        let Some(cur) = current_map.get(&(dep.table.clone(), is_view)) else {
+            continue;
+        };
+
+        if is_view {
+            let req = dep
+                .change_seq
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: malformed min_causality"))?;
+            let cur_seq = cur
+                .change_seq
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: malformed causality state"))?;
+            if cur_seq < req {
+                anyhow::bail!("causality_not_satisfied");
+            }
+        } else {
+            let req = dep
+                .v
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: malformed min_causality"))?;
+            let cur_v = cur
+                .v
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: malformed causality state"))?;
+            if cur_v < req {
+                anyhow::bail!("causality_not_satisfied");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn row_etag(row: &RowObject, version: u64) -> String {
+    let mut bytes = serde_json::to_vec(row).unwrap_or_default();
+    bytes.extend_from_slice(&version.to_le_bytes());
+    let id = value_id(&bytes);
+    format!("W/\"r:{}\"", hex16(&id))
+}
+
+fn build_query_etag(query: &Query, args: &[Lit], deps: &[CausalityDependency]) -> String {
+    let mut bytes = serde_json::to_vec(query).unwrap_or_default();
+    bytes.extend_from_slice(&serde_json::to_vec(args).unwrap_or_default());
+    bytes.extend_from_slice(&serde_json::to_vec(deps).unwrap_or_default());
+    let id = value_id(&bytes);
+    format!("W/\"q:{}\"", hex16(&id))
+}
+
+fn bloom_maybe_contains(bits: &[u8], m_bits: u64, k: u32, salt: Option<&str>, key: &[u8]) -> bool {
+    if m_bits == 0 || k == 0 {
+        return false;
+    }
+
+    let salt_bytes = salt.unwrap_or("").as_bytes();
+
+    for i in 0..k {
+        let mut buf = Vec::with_capacity(salt_bytes.len() + 4 + key.len());
+        buf.extend_from_slice(salt_bytes);
+        buf.extend_from_slice(&(i as u32).to_le_bytes());
+        buf.extend_from_slice(key);
+
+        let id = value_id(&buf);
+        let mut v = 0u64;
+        for (shift, b) in id[0..8].iter().enumerate() {
+            v |= (*b as u64) << (8 * shift);
+        }
+
+        let bit = (v % m_bits) as usize;
+        let byte = bit / 8;
+        let mask = 1u8 << (bit % 8);
+
+        if byte >= bits.len() {
+            return false;
+        }
+        if (bits[byte] & mask) == 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn fingerprint_json(value: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let id = value_id(&bytes);
+    hex16(&id)
+}
+
+fn hex16(id: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(32);
+    for b in id.iter() {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+// -----------------------------
+// Schema helpers
+// -----------------------------
+
+fn apply_defaults_and_autoinc(
+    schema: &mut TableSchema,
+    row: &mut RowObject,
+    last_insert_id: &mut u64,
+) -> anyhow::Result<()> {
+    for col in schema.columns.iter() {
+        if row.contains_key(&col.name) {
+            continue;
+        }
+        if col.auto_increment {
+            let next = schema.auto_inc_next.entry(col.name.clone()).or_insert(1);
+            row.insert(col.name.clone(), Lit::U64 { v: *next });
+            *last_insert_id = *next;
+            *next += 1;
+            continue;
+        }
+        if col.nullable {
+            row.insert(col.name.clone(), Lit::Null);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ValueStoreItem {
+    kind: ValueKind,
+    id: ValueId,
+    bytes: Vec<u8>,
+}
+
+fn collect_value_store_items(row: &RowObject, out: &mut Vec<ValueStoreItem>) {
+    for v in row.values() {
+        if let Some(item) = value_store_item(v) {
+            out.push(item);
+        }
+    }
+}
+
+fn record_value_store_lookups(store: &mut ValueStore, row: &RowObject) {
+    for v in row.values() {
+        if let Some(item) = value_store_item(v) {
+            let _ = store.get(&item.id);
+        }
+    }
+}
+
+fn store_value_items(store: &mut ValueStore, items: Vec<ValueStoreItem>) {
+    for item in items {
+        store.put_with_id(item.kind, item.id, item.bytes);
+    }
+}
+
+fn value_store_item(lit: &Lit) -> Option<ValueStoreItem> {
+    match lit {
+        Lit::Str { .. } | Lit::Json { .. } | Lit::Bytes { .. } | Lit::Uuid { .. } => {
+            let bytes = serde_json::to_vec(lit).ok()?;
+            let id = value_id(&bytes);
+            Some(ValueStoreItem {
+                kind: ValueKind::Cell,
+                id,
+                bytes,
+            })
+        }
+        Lit::Embedding { dims, v, model } => {
+            let bytes = embedding_bytes(*dims, v, model.as_deref())?;
+            let bucket = embedding_lsh_bucket(v);
+            let id = embedding_value_id(bucket, &bytes);
+            Some(ValueStoreItem {
+                kind: ValueKind::Embedding,
+                id,
+                bytes,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn embedding_bytes(dims: u32, v: &[f32], model: Option<&str>) -> Option<Vec<u8>> {
+    if dims == 0 || v.len() != dims as usize {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"EMB1");
+    out.extend_from_slice(&dims.to_le_bytes());
+    let model_bytes = model.unwrap_or("").as_bytes();
+    out.extend_from_slice(&encode_varu(model_bytes.len() as u64));
+    out.extend_from_slice(model_bytes);
+    for value in v.iter() {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    Some(out)
+}
+
+fn embedding_value_id(bucket: u64, bytes: &[u8]) -> ValueId {
+    let hash = value_id(bytes);
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&bucket.to_le_bytes());
+    out[8..16].copy_from_slice(&hash[0..8]);
+    out
+}
+
+fn embedding_lsh_bucket(v: &[f32]) -> u64 {
+    let mut acc = [0.0f64; 64];
+    for (idx, value) in v.iter().enumerate() {
+        let id = value_id(&(idx as u64).to_le_bytes());
+        let bits = u64_from_id(&id);
+        let weight = *value as f64;
+        for bit in 0..64 {
+            if (bits >> bit) & 1 == 1 {
+                acc[bit] += weight;
+            } else {
+                acc[bit] -= weight;
+            }
+        }
+    }
+    let mut bucket = 0u64;
+    for (bit, sum) in acc.iter().enumerate() {
+        if *sum >= 0.0 {
+            bucket |= 1u64 << bit;
+        }
+    }
+    bucket
+}
+
+fn u64_from_id(id: &ValueId) -> u64 {
+    let mut v = 0u64;
+    for (shift, b) in id[0..8].iter().enumerate() {
+        v |= (*b as u64) << (8 * shift);
+    }
+    v
+}
+
+fn embedding_ref(lit: &Lit) -> anyhow::Result<(u32, &[f32], Option<&str>)> {
+    match lit {
+        Lit::Embedding { dims, v, model } => {
+            if *dims == 0 {
+                anyhow::bail!("invalid_request: embedding dims must be > 0");
+            }
+            if v.len() != *dims as usize {
+                anyhow::bail!("invalid_request: embedding dims mismatch");
+            }
+            Ok((*dims, v.as_slice(), model.as_deref()))
+        }
+        _ => anyhow::bail!("invalid_request: embedding literal required"),
+    }
+}
+
+fn embedding_id_for_lit(lit: &Lit) -> anyhow::Result<ValueId> {
+    let (dims, v, model) = embedding_ref(lit)?;
+    let bytes = embedding_bytes(dims, v, model)
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: embedding bytes unavailable"))?;
+    let bucket = embedding_lsh_bucket(v);
+    Ok(embedding_value_id(bucket, &bytes))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VectorMetric {
+    Cosine,
+    Dot,
+    L2,
+}
+
+fn parse_vector_metric(metric: Option<&str>) -> anyhow::Result<VectorMetric> {
+    let m = metric.unwrap_or("cosine").to_lowercase();
+    match m.as_str() {
+        "cosine" => Ok(VectorMetric::Cosine),
+        "dot" => Ok(VectorMetric::Dot),
+        "l2" | "euclidean" => Ok(VectorMetric::L2),
+        _ => anyhow::bail!("invalid_request: unknown vector metric {m}"),
+    }
+}
+
+fn vector_score(metric: VectorMetric, a: &[f32], b: &[f32]) -> anyhow::Result<f64> {
+    if a.len() != b.len() {
+        anyhow::bail!("invalid_request: embedding dims mismatch");
+    }
+    match metric {
+        VectorMetric::Cosine => {
+            let mut dot = 0.0f64;
+            let mut norm_a = 0.0f64;
+            let mut norm_b = 0.0f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let xf = *x as f64;
+                let yf = *y as f64;
+                dot += xf * yf;
+                norm_a += xf * xf;
+                norm_b += yf * yf;
+            }
+            if norm_a == 0.0 || norm_b == 0.0 {
+                Ok(0.0)
+            } else {
+                Ok(dot / (norm_a.sqrt() * norm_b.sqrt()))
+            }
+        }
+        VectorMetric::Dot => {
+            let mut dot = 0.0f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                dot += (*x as f64) * (*y as f64);
+            }
+            Ok(dot)
+        }
+        VectorMetric::L2 => {
+            let mut dist2 = 0.0f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let d = (*x as f64) - (*y as f64);
+                dist2 += d * d;
+            }
+            let dist = dist2.sqrt();
+            Ok(1.0 / (1.0 + dist))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SqlAutoparamExtract {
+    normalized_sql: String,
+    literals: Vec<AiAutoparamLiteral>,
+}
+
+#[derive(Debug, Clone)]
+enum SqlTokenKind {
+    Ident(String),
+    Keyword(String),
+    Literal(Lit),
+    Operator(String),
+    Symbol(char),
+    Parameter,
+}
+
+#[derive(Debug, Clone)]
+struct SqlToken {
+    kind: SqlTokenKind,
+}
+
+fn sql_autoparam_extract(sql: &str) -> SqlAutoparamExtract {
+    let tokens = sql_tokenize(sql);
+    let normalized_sql = sql_normalize_tokens(&tokens);
+    let alias_map = sql_alias_map(&tokens);
+    let literals = sql_extract_literals(&tokens, &alias_map);
+    SqlAutoparamExtract {
+        normalized_sql,
+        literals,
+    }
+}
+
+fn sql_tokenize(sql: &str) -> Vec<SqlToken> {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let c = b as char;
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if b == b'\'' {
+            i += 1;
+            let mut buf = String::new();
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        buf.push('\'');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                buf.push(bytes[i] as char);
+                i += 1;
+            }
+            out.push(SqlToken {
+                kind: SqlTokenKind::Literal(Lit::Str { v: buf }),
+            });
+            continue;
+        }
+
+        if b == b'`' || b == b'"' {
+            let quote = b;
+            i += 1;
+            let mut buf = String::new();
+            while i < bytes.len() {
+                if bytes[i] == quote {
+                    if i + 1 < bytes.len() && bytes[i + 1] == quote {
+                        buf.push(quote as char);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                buf.push(bytes[i] as char);
+                i += 1;
+            }
+            out.push(SqlToken {
+                kind: SqlTokenKind::Ident(buf.to_ascii_lowercase()),
+            });
+            continue;
+        }
+
+        if b == b'?' {
+            out.push(SqlToken {
+                kind: SqlTokenKind::Parameter,
+            });
+            i += 1;
+            continue;
+        }
+        if b == b'$' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit() {
+            i += 1;
+            while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                i += 1;
+            }
+            out.push(SqlToken {
+                kind: SqlTokenKind::Parameter,
+            });
+            continue;
+        }
+
+        if c.is_ascii_digit()
+            || (b == b'-' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit())
+        {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'.' {
+                i += 1;
+                while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+                i += 1;
+                if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                    i += 1;
+                }
+                while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            let text = String::from_utf8_lossy(&bytes[start..i]).to_string();
+            let lit = if text.contains('.') || text.contains('e') || text.contains('E') {
+                match text.parse::<f64>() {
+                    Ok(v) => Lit::F64 { v },
+                    Err(_) => Lit::Dec { v: text.clone() },
+                }
+            } else if text.starts_with('-') {
+                match text.parse::<i64>() {
+                    Ok(v) => Lit::I64 { v },
+                    Err(_) => Lit::Dec { v: text.clone() },
+                }
+            } else {
+                match text.parse::<u64>() {
+                    Ok(v) => Lit::U64 { v },
+                    Err(_) => Lit::Dec { v: text.clone() },
+                }
+            };
+            out.push(SqlToken {
+                kind: SqlTokenKind::Literal(lit),
+            });
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let ch = bytes[i] as char;
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let word = String::from_utf8_lossy(&bytes[start..i]).to_string();
+            let lower = word.to_ascii_lowercase();
+            let token = if lower == "true" {
+                SqlTokenKind::Literal(Lit::Bool { v: true })
+            } else if lower == "false" {
+                SqlTokenKind::Literal(Lit::Bool { v: false })
+            } else if lower == "null" {
+                SqlTokenKind::Literal(Lit::Null)
+            } else if sql_is_keyword(&lower) {
+                SqlTokenKind::Keyword(lower)
+            } else {
+                SqlTokenKind::Ident(lower)
+            };
+            out.push(SqlToken { kind: token });
+            continue;
+        }
+
+        if i + 1 < bytes.len() {
+            let two = [bytes[i], bytes[i + 1]];
+            let op = match &two {
+                b"<=" => Some("<="),
+                b">=" => Some(">="),
+                b"!=" => Some("!="),
+                b"<>" => Some("<>"),
+                b"||" => Some("||"),
+                _ => None,
+            };
+            if let Some(op) = op {
+                out.push(SqlToken {
+                    kind: SqlTokenKind::Operator(op.to_string()),
+                });
+                i += 2;
+                continue;
+            }
+        }
+
+        let single_op = match c {
+            '=' | '<' | '>' | '+' | '-' | '*' | '/' | '%' => Some(c),
+            _ => None,
+        };
+        if let Some(op) = single_op {
+            out.push(SqlToken {
+                kind: SqlTokenKind::Operator(op.to_string()),
+            });
+            i += 1;
+            continue;
+        }
+
+        let symbol = match c {
+            '(' | ')' | ',' | ';' => Some(c),
+            _ => None,
+        };
+        if let Some(sym) = symbol {
+            out.push(SqlToken {
+                kind: SqlTokenKind::Symbol(sym),
+            });
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+    out
+}
+
+fn sql_is_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "select"
+            | "from"
+            | "where"
+            | "join"
+            | "inner"
+            | "left"
+            | "right"
+            | "full"
+            | "cross"
+            | "on"
+            | "as"
+            | "and"
+            | "or"
+            | "in"
+            | "not"
+            | "like"
+            | "ilike"
+            | "between"
+            | "is"
+            | "group"
+            | "by"
+            | "order"
+            | "limit"
+            | "offset"
+            | "having"
+            | "distinct"
+            | "union"
+            | "all"
+    )
+}
+
+fn sql_normalize_tokens(tokens: &[SqlToken]) -> String {
+    let mut out = Vec::new();
+    for token in tokens.iter() {
+        let text = match &token.kind {
+            SqlTokenKind::Literal(_) | SqlTokenKind::Parameter => "?".to_string(),
+            SqlTokenKind::Ident(name) => name.to_string(),
+            SqlTokenKind::Keyword(name) => name.to_string(),
+            SqlTokenKind::Operator(op) => op.to_string(),
+            SqlTokenKind::Symbol(ch) => ch.to_string(),
+        };
+        if !text.is_empty() {
+            out.push(text);
+        }
+    }
+    out.join(" ")
+}
+
+fn sql_alias_map(tokens: &[SqlToken]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if token_is_keyword(tokens.get(i), "from") || token_is_keyword(tokens.get(i), "join") {
+            let Some(table_token) = tokens.get(i + 1) else {
+                i += 1;
+                continue;
+            };
+            if token_is_symbol(Some(table_token), '(') {
+                i += 1;
+                continue;
+            }
+            let Some(table) = token_ident(Some(table_token)) else {
+                i += 1;
+                continue;
+            };
+            let table_name = base_table_name(table);
+            out.entry(table_name.clone())
+                .or_insert_with(|| table_name.clone());
+            let mut j = i + 2;
+            if token_is_keyword(tokens.get(j), "as") {
+                j += 1;
+            }
+            if let Some(alias) = token_ident(tokens.get(j)) {
+                out.insert(alias.to_string(), table_name.clone());
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn sql_extract_literals(
+    tokens: &[SqlToken],
+    alias_map: &HashMap<String, String>,
+) -> Vec<AiAutoparamLiteral> {
+    let mut out = Vec::new();
+    let mut consumed = HashSet::new();
+
+    let mut i = 0;
+    while i + 3 < tokens.len() {
+        let Some(col) = token_ident(tokens.get(i)) else {
+            i += 1;
+            continue;
+        };
+        let mut op = None;
+        let mut start = None;
+        if token_is_keyword(tokens.get(i + 1), "in") && token_is_symbol(tokens.get(i + 2), '(') {
+            op = Some("in");
+            start = Some(i + 3);
+        } else if token_is_keyword(tokens.get(i + 1), "not")
+            && token_is_keyword(tokens.get(i + 2), "in")
+            && token_is_symbol(tokens.get(i + 3), '(')
+        {
+            op = Some("not_in");
+            start = Some(i + 4);
+        }
+        if let (Some(op), Some(mut j)) = (op, start) {
+            let mut depth = 1u32;
+            while j < tokens.len() && depth > 0 {
+                if token_is_symbol(tokens.get(j), '(') {
+                    depth += 1;
+                } else if token_is_symbol(tokens.get(j), ')') {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                } else if let Some(lit) = token_literal(tokens.get(j)) {
+                    out.push(build_autoparam_literal(lit, Some(col), Some(op), alias_map));
+                    consumed.insert(j);
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+
+    let mut i = 0;
+    while i + 4 < tokens.len() {
+        let Some(col) = token_ident(tokens.get(i)) else {
+            i += 1;
+            continue;
+        };
+        if token_is_keyword(tokens.get(i + 1), "between") {
+            if let Some(lo) = token_literal(tokens.get(i + 2)) {
+                out.push(build_autoparam_literal(
+                    lo,
+                    Some(col),
+                    Some("between"),
+                    alias_map,
+                ));
+                consumed.insert(i + 2);
+            }
+            if token_is_keyword(tokens.get(i + 3), "and") {
+                if let Some(hi) = token_literal(tokens.get(i + 4)) {
+                    out.push(build_autoparam_literal(
+                        hi,
+                        Some(col),
+                        Some("between"),
+                        alias_map,
+                    ));
+                    consumed.insert(i + 4);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    for (idx, token) in tokens.iter().enumerate() {
+        if consumed.contains(&idx) {
+            continue;
+        }
+        let Some(lit) = token_literal(Some(token)) else {
+            continue;
+        };
+        let mut col = None;
+        let mut op = None;
+
+        if idx >= 2 {
+            if let Some(op_token) = token_op(tokens.get(idx - 1)) {
+                if let Some(col_token) = token_ident(tokens.get(idx - 2)) {
+                    col = Some(col_token);
+                    op = Some(op_token);
+                }
+            }
+        }
+        if col.is_none()
+            && idx >= 3
+            && token_is_keyword(tokens.get(idx - 1), "not")
+            && token_is_keyword(tokens.get(idx - 2), "is")
+        {
+            if let Some(col_token) = token_ident(tokens.get(idx - 3)) {
+                col = Some(col_token);
+                op = Some("is not");
+            }
+        }
+        if col.is_none() && idx >= 2 && token_is_keyword(tokens.get(idx - 1), "is") {
+            if let Some(col_token) = token_ident(tokens.get(idx - 2)) {
+                col = Some(col_token);
+                op = Some("is");
+            }
+        }
+        if col.is_none() && idx + 2 < tokens.len() {
+            if let Some(op_token) = token_op(tokens.get(idx + 1)) {
+                if let Some(col_token) = token_ident(tokens.get(idx + 2)) {
+                    col = Some(col_token);
+                    op = Some(op_token);
+                }
+            }
+        }
+
+        out.push(build_autoparam_literal(lit, col, op, alias_map));
+    }
+
+    out
+}
+
+fn build_autoparam_literal(
+    lit: &Lit,
+    column: Option<&str>,
+    op: Option<&str>,
+    alias_map: &HashMap<String, String>,
+) -> AiAutoparamLiteral {
+    let mut col = None;
+    let mut table = None;
+    if let Some(column) = column {
+        let (table_hint, base_col) = split_qualified(column);
+        col = Some(base_col.to_string());
+        if let Some(table_hint) = table_hint {
+            table = alias_map
+                .get(table_hint)
+                .cloned()
+                .or_else(|| Some(table_hint.to_string()));
+        } else if let Some(single) = single_table_from_alias_map(alias_map) {
+            table = Some(single);
+        }
+    }
+    AiAutoparamLiteral {
+        value: lit.clone(),
+        column: col,
+        table,
+        op: op.map(|v| v.to_string()),
+    }
+}
+
+fn split_qualified(name: &str) -> (Option<&str>, &str) {
+    if let Some((table, col)) = name.rsplit_once('.') {
+        (Some(table), col)
+    } else {
+        (None, name)
+    }
+}
+
+fn single_table_from_alias_map(alias_map: &HashMap<String, String>) -> Option<String> {
+    let mut unique = HashSet::new();
+    for table in alias_map.values() {
+        unique.insert(table.clone());
+    }
+    if unique.len() == 1 {
+        unique.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn token_is_keyword(token: Option<&SqlToken>, keyword: &str) -> bool {
+    matches!(token, Some(SqlToken { kind: SqlTokenKind::Keyword(k) }) if k == keyword)
+}
+
+fn token_ident(token: Option<&SqlToken>) -> Option<&str> {
+    match token {
+        Some(SqlToken {
+            kind: SqlTokenKind::Ident(name),
+        }) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn token_literal(token: Option<&SqlToken>) -> Option<&Lit> {
+    match token {
+        Some(SqlToken {
+            kind: SqlTokenKind::Literal(lit),
+        }) => Some(lit),
+        _ => None,
+    }
+}
+
+fn token_op(token: Option<&SqlToken>) -> Option<&str> {
+    match token {
+        Some(SqlToken {
+            kind: SqlTokenKind::Operator(op),
+        }) => Some(op.as_str()),
+        Some(SqlToken {
+            kind: SqlTokenKind::Keyword(kw),
+        }) if matches!(kw.as_str(), "in" | "like" | "ilike" | "between") => Some(kw.as_str()),
+        _ => None,
+    }
+}
+
+fn token_is_symbol(token: Option<&SqlToken>, symbol: char) -> bool {
+    matches!(token, Some(SqlToken { kind: SqlTokenKind::Symbol(s) }) if *s == symbol)
+}
+
+fn base_table_name(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).to_string()
+}
+
+fn classify_autoparam_literal(
+    engine: &Engine,
+    idx: u64,
+    lit: &AiAutoparamLiteral,
+    db: Option<&str>,
+    rules: Option<&AiAutoparamRules>,
+) -> AiAutoparamLabel {
+    let mut decision = "parameterize";
+    let mut confidence = 0.55;
+    let mut reason = Some("default parameterizable".to_string());
+
+    let (table_hint, base_col) = lit
+        .column
+        .as_deref()
+        .map(split_qualified)
+        .unwrap_or((None, ""));
+    let base_col = base_col.to_ascii_lowercase();
+    let table_hint = lit
+        .table
+        .as_deref()
+        .or(table_hint)
+        .map(|t| t.to_ascii_lowercase());
+
+    if base_col.is_empty() {
+        decision = "unknown";
+        confidence = 0.3;
+        reason = Some("missing column context".to_string());
+        return AiAutoparamLabel {
+            idx,
+            decision: decision.to_string(),
+            confidence,
+            reason,
+        };
+    }
+
+    if let Some(rules) = rules {
+        if rules
+            .parameterize_columns
+            .iter()
+            .any(|pat| match_rule(pat, table_hint.as_deref(), Some(&base_col)))
+        {
+            return AiAutoparamLabel {
+                idx,
+                decision: "parameterize".to_string(),
+                confidence: 0.95,
+                reason: Some("rule: parameterize".to_string()),
+            };
+        }
+        if rules
+            .semantic_constant_columns
+            .iter()
+            .any(|pat| match_rule(pat, table_hint.as_deref(), Some(&base_col)))
+        {
+            return AiAutoparamLabel {
+                idx,
+                decision: "semantic_constant".to_string(),
+                confidence: 0.95,
+                reason: Some("rule: semantic_constant".to_string()),
+            };
+        }
+    }
+
+    let mut schema_type = None;
+    let mut is_pk = false;
+    if let (Some(db), Some(table_hint)) = (db, table_hint.as_deref()) {
+        if let Some(table_name) = resolve_table_name(engine, db, table_hint) {
+            if let Ok(schema) = engine.get_schema(db, &table_name) {
+                is_pk = schema
+                    .primary_key
+                    .iter()
+                    .any(|col| col.eq_ignore_ascii_case(&base_col));
+                if let Some(col) = resolve_column(schema, &base_col) {
+                    schema_type = Some(col.r#type.kind.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+
+    if is_pk {
+        decision = "parameterize";
+        confidence = 0.9;
+        reason = Some("primary key column".to_string());
+    } else if let Some(kind) = schema_type.as_deref() {
+        if kind.contains("enum") || kind.contains("set") {
+            decision = "semantic_constant";
+            confidence = 0.85;
+            reason = Some("enum/set column".to_string());
+        } else if kind.contains("bool") {
+            decision = "parameterize";
+            confidence = 0.7;
+            reason = Some("boolean column".to_string());
+        } else if kind.contains("uuid") {
+            decision = "parameterize";
+            confidence = 0.8;
+            reason = Some("uuid column".to_string());
+        }
+    }
+
+    if matches!(lit.value, Lit::Bool { .. }) {
+        decision = "parameterize";
+        confidence = 0.6;
+        reason = Some("boolean literal".to_string());
+    }
+
+    if is_enum_like_column(&base_col) {
+        decision = "semantic_constant";
+        confidence = 0.75;
+        reason = Some("enum-like column".to_string());
+    } else if is_id_like_column(&base_col) {
+        decision = "parameterize";
+        confidence = 0.8;
+        reason = Some("id-like column".to_string());
+    }
+
+    AiAutoparamLabel {
+        idx,
+        decision: decision.to_string(),
+        confidence,
+        reason,
+    }
+}
+
+fn resolve_table_name(engine: &Engine, db: &str, table_hint: &str) -> Option<String> {
+    let db = engine.catalog.databases.get(db)?;
+    if db.tables.contains_key(table_hint) {
+        return Some(table_hint.to_string());
+    }
+    db.tables
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case(table_hint))
+        .cloned()
+}
+
+fn resolve_column<'a>(schema: &'a TableSchema, column: &str) -> Option<&'a ColumnSchema> {
+    schema
+        .columns
+        .iter()
+        .find(|col| col.name.eq_ignore_ascii_case(column))
+}
+
+fn match_rule(pattern: &str, table: Option<&str>, column: Option<&str>) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let (table_pat, col_pat) = if let Some((t, c)) = pattern.rsplit_once('.') {
+        (Some(t), c)
+    } else {
+        (None, pattern.as_str())
+    };
+    let column = match column {
+        Some(c) => c,
+        None => return false,
+    };
+    if let Some(table_pat) = table_pat {
+        let Some(table) = table else {
+            return false;
+        };
+        if !glob_match(table_pat, table) {
+            return false;
+        }
+    }
+    glob_match(col_pat, column)
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == text;
+    }
+    let mut remainder = text;
+    let mut first = true;
+    let mut starts_with = false;
+    let mut ends_with = false;
+    if pattern.starts_with('*') {
+        starts_with = true;
+    }
+    if pattern.ends_with('*') {
+        ends_with = true;
+    }
+    for part in pattern.split('*').filter(|p| !p.is_empty()) {
+        if first && !starts_with && !remainder.starts_with(part) {
+            return false;
+        }
+        if let Some(pos) = remainder.find(part) {
+            remainder = &remainder[pos + part.len()..];
+        } else {
+            return false;
+        }
+        first = false;
+    }
+    if !ends_with && !remainder.is_empty() {
+        return false;
+    }
+    true
+}
+
+fn build_nl_prompt(db: &str, request: &str, tables: &[AiNlPromptTable], read_only: bool) -> String {
+    let mut out = String::new();
+    out.push_str("You generate SkeinQL JSON for SkeinDB.\n");
+    out.push_str(
+        "Return a single JSON object with fields: query (required) and args (optional).\n",
+    );
+    if read_only {
+        out.push_str("Only generate read-only SELECT queries.\n");
+    }
+    out.push_str(&format!("Database: {db}\n"));
+    out.push_str(&format!("Request: {request}\n"));
+    if tables.is_empty() {
+        out.push_str("Schema: (omitted)\n");
+        return out;
+    }
+    out.push_str("Schema:\n");
+    for table in tables.iter() {
+        let mut cols = Vec::new();
+        for col in table.columns.iter() {
+            let mut label = format!("{} {}", col.name, col.r#type.kind);
+            if !col.nullable {
+                label.push_str(" not null");
+            }
+            if col.auto_increment {
+                label.push_str(" auto_increment");
+            }
+            cols.push(label);
+        }
+        let pk = if table.primary_key.is_empty() {
+            "pk: (none)".to_string()
+        } else {
+            format!("pk: {}", table.primary_key.join(", "))
+        };
+        out.push_str(&format!(
+            "- {} ({}): {}\n",
+            table.table,
+            pk,
+            cols.join(", ")
+        ));
+    }
+    out
+}
+
+fn ai_nl_rule_translate(
+    engine: &Engine,
+    db: &str,
+    request: &str,
+    tables: &[AiNlPromptTable],
+) -> Option<Query> {
+    let req = request.trim().to_ascii_lowercase();
+    let tokens: Vec<&str> = req.split_whitespace().collect();
+    let table_token = if tokens.len() == 2 && matches!(tokens[0], "list" | "show" | "all") {
+        tokens[1]
+    } else if tokens.len() == 3 && matches!(tokens[0], "list" | "show") && tokens[1] == "all" {
+        tokens[2]
+    } else {
+        return None;
+    };
+
+    let table_name = ai_nl_match_table(table_token, tables)?;
+    let schema = engine.get_schema(db, &table_name).ok()?;
+    let projection = schema
+        .columns
+        .iter()
+        .map(|col| skeindb_skeinql::types::SelectItem {
+            expr: Expr::Col {
+                col: col.name.clone(),
+                table: None,
+            },
+            r#as: None,
+        })
+        .collect::<Vec<_>>();
+
+    Some(Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection,
+                from: Some(vec![TableRef::Base(BaseTableRef {
+                    db: db.to_string(),
+                    table: table_name,
+                    r#as: None,
+                })]),
+                r#where: None,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    })
+}
+
+fn ai_nl_match_table(token: &str, tables: &[AiNlPromptTable]) -> Option<String> {
+    for table in tables.iter() {
+        let name = table.table.to_ascii_lowercase();
+        if token == name {
+            return Some(table.table.clone());
+        }
+        if token == format!("{name}s") || format!("{token}s") == name {
+            return Some(table.table.clone());
+        }
+        if token == name.trim_end_matches('s') {
+            return Some(table.table.clone());
+        }
+    }
+    None
+}
+
+fn ai_nl_preview(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+    preview_limit: Option<u64>,
+    preview_format: Option<ResultFormat>,
+) -> anyhow::Result<(Option<serde_json::Value>, Option<ResultFormat>)> {
+    let wants_preview = preview_limit.is_some() || preview_format.is_some();
+    if !wants_preview {
+        return Ok((None, None));
+    }
+    let limit = preview_limit.unwrap_or(5);
+    if limit == 0 {
+        return Ok((None, preview_format));
+    }
+    let format = preview_format.unwrap_or(ResultFormat::ObjectsJson);
+    let mut preview_query = query.clone();
+    let offset = query.limit.as_ref().and_then(|lim| lim.offset).unwrap_or(0);
+    let limit = query
+        .limit
+        .as_ref()
+        .and_then(|lim| lim.limit)
+        .map(|v| v.min(limit))
+        .unwrap_or(limit);
+    preview_query.limit = Some(LimitClause {
+        limit: Some(limit),
+        offset: Some(offset),
+    });
+
+    let (columns, rows) = execute_select(engine, &preview_query, args)?;
+    let data = match format {
+        ResultFormat::ObjectsJson => rows_to_objects(&columns, &rows)?,
+        _ => serde_json::json!({
+            "columns": columns,
+            "rows": rows,
+        }),
+    };
+    Ok((Some(data), Some(format)))
+}
+
+fn ai_nl_approval_token(query: &Query, args: &[Lit], deps: &[CausalityDependency]) -> String {
+    fingerprint_json(&serde_json::json!({
+        "query": query,
+        "args": args,
+        "deps": deps,
+    }))
+}
+
+fn render_expr_summary(expr: &Expr) -> String {
+    match expr {
+        Expr::Col { col, table } => match table {
+            Some(t) => format!("{t}.{col}"),
+            None => col.clone(),
+        },
+        Expr::Lit { lit } => render_lit_summary(lit),
+        Expr::Param { param } => format!("${param}"),
+        Expr::Op {
+            op,
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+        } => match op.as_str() {
+            "and" | "or" => {
+                let mut parts = Vec::new();
+                if let Some(xs) = args {
+                    for x in xs.iter() {
+                        parts.push(render_expr_summary(x));
+                    }
+                } else {
+                    if let Some(x) = a.as_ref() {
+                        parts.push(render_expr_summary(x));
+                    }
+                    if let Some(x) = b.as_ref() {
+                        parts.push(render_expr_summary(x));
+                    }
+                }
+                parts.join(&format!(" {} ", op))
+            }
+            "eq" => binary_expr_summary("=", a, b),
+            "ne" | "neq" => binary_expr_summary("!=", a, b),
+            "lt" => binary_expr_summary("<", a, b),
+            "lte" => binary_expr_summary("<=", a, b),
+            "gt" => binary_expr_summary(">", a, b),
+            "gte" => binary_expr_summary(">=", a, b),
+            "like" => binary_expr_summary("like", a, b),
+            "ilike" => binary_expr_summary("ilike", a, b),
+            "in" => {
+                let left = a
+                    .as_ref()
+                    .map(|expr| render_expr_summary(expr))
+                    .unwrap_or_else(|| "?".to_string());
+                let items = list
+                    .as_ref()
+                    .map(|xs| xs.iter().map(render_expr_summary).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                format!("{left} in ({})", items.join(", "))
+            }
+            "between" => {
+                let left = a
+                    .as_ref()
+                    .map(|expr| render_expr_summary(expr))
+                    .unwrap_or_else(|| "?".to_string());
+                let lo = lo
+                    .as_ref()
+                    .map(|expr| render_expr_summary(expr))
+                    .unwrap_or_else(|| "?".to_string());
+                let hi = hi
+                    .as_ref()
+                    .map(|expr| render_expr_summary(expr))
+                    .unwrap_or_else(|| "?".to_string());
+                format!("{left} between {lo} and {hi}")
+            }
+            _ => {
+                let mut parts = Vec::new();
+                if let Some(x) = a.as_ref() {
+                    parts.push(render_expr_summary(x));
+                }
+                if let Some(x) = b.as_ref() {
+                    parts.push(render_expr_summary(x));
+                }
+                if let Some(xs) = args {
+                    for x in xs.iter() {
+                        parts.push(render_expr_summary(x));
+                    }
+                }
+                format!("{}({})", op, parts.join(", "))
+            }
+        },
+        Expr::Func { name, args, .. } => {
+            let items: Vec<String> = args.iter().map(render_expr_summary).collect();
+            format!("{name}({})", items.join(", "))
+        }
+        Expr::Cast { cast } => {
+            let inner = render_expr_summary(&cast.expr);
+            format!("cast({inner} as {})", cast.to.kind)
+        }
+        Expr::Case { .. } => "case ...".to_string(),
+        Expr::Subquery { .. } => "subquery".to_string(),
+        Expr::Exists { .. } => "exists(...)".to_string(),
+    }
+}
+
+fn binary_expr_summary(op: &str, a: &Option<Box<Expr>>, b: &Option<Box<Expr>>) -> String {
+    let left = a
+        .as_ref()
+        .map(|x| render_expr_summary(x))
+        .unwrap_or_else(|| "?".to_string());
+    let right = b
+        .as_ref()
+        .map(|x| render_expr_summary(x))
+        .unwrap_or_else(|| "?".to_string());
+    format!("{left} {op} {right}")
+}
+
+fn render_lit_summary(lit: &Lit) -> String {
+    match lit {
+        Lit::Null => "null".to_string(),
+        Lit::Bool { v } => v.to_string(),
+        Lit::I64 { v } => v.to_string(),
+        Lit::U64 { v } => v.to_string(),
+        Lit::F64 { v } => v.to_string(),
+        Lit::Dec { v } => v.clone(),
+        Lit::Str { v } => format!("'{}'", v.replace('\'', "''")),
+        Lit::Bytes { .. } => "<bytes>".to_string(),
+        Lit::Json { .. } => "<json>".to_string(),
+        Lit::Embedding { .. } => "<embedding>".to_string(),
+        Lit::Date { iso } => iso.clone(),
+        Lit::Time { iso } => iso.clone(),
+        Lit::Datetime { iso } => iso.clone(),
+        Lit::Uuid { v } => v.clone(),
+    }
+}
+
+fn is_enum_like_column(column: &str) -> bool {
+    let patterns = [
+        "status", "state", "type", "kind", "category", "role", "tier", "level", "phase", "stage",
+        "class", "mode",
+    ];
+    patterns
+        .iter()
+        .any(|pat| column == *pat || column.ends_with(&format!("_{pat}")))
+}
+
+fn is_parent_like_column(column: &str) -> bool {
+    let patterns = [
+        "parent",
+        "parent_id",
+        "parent_uuid",
+        "parent_guid",
+        "parent_key",
+        "ancestor_id",
+        "ancestor",
+        "root_id",
+    ];
+    patterns
+        .iter()
+        .any(|pat| column == *pat || column.ends_with(&format!("_{pat}")))
+        || column.contains("parent_")
+}
+
+fn is_id_like_column(column: &str) -> bool {
+    if column == "id" || column.ends_with("_id") {
+        return true;
+    }
+    let patterns = ["uuid", "guid", "token", "key"];
+    patterns.iter().any(|pat| column.contains(pat))
+}
+
+fn extract_pk(schema: &TableSchema, row: &RowObject) -> anyhow::Result<Vec<Lit>> {
+    if schema.primary_key.is_empty() {
+        anyhow::bail!("table has no primary key");
+    }
+    let mut pk = Vec::new();
+    for k in schema.primary_key.iter() {
+        let Some(v) = row.get(k) else {
+            anyhow::bail!("missing pk column: {k}");
+        };
+        pk.push(v.clone());
+    }
+    Ok(pk)
+}
+
+fn ensure_pk_values(schema: &TableSchema, pk: &[Lit], row: &mut RowObject) -> anyhow::Result<()> {
+    if schema.primary_key.len() != pk.len() {
+        anyhow::bail!("invalid_request: primary key length mismatch");
+    }
+    for (col, value) in schema.primary_key.iter().zip(pk.iter()) {
+        if let Some(existing) = row.get(col) {
+            if existing != value {
+                anyhow::bail!("invalid_request: primary key mismatch for {col}");
+            }
+        } else {
+            row.insert(col.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn pk_key(pk: &[Lit]) -> String {
+    // Stable string key.
+    serde_json::to_string(pk).unwrap_or_default()
+}
+
+fn view_upsert_row(view: &mut ViewState, pk: Vec<Lit>, values: Vec<Lit>) {
+    let key = pk_key(&pk);
+    if let Some(&idx) = view.pk_index.get(&key) {
+        if let Some(row) = view.rows.get_mut(idx) {
+            row.pk = pk;
+            row.values = values;
+        }
+        return;
+    }
+    let idx = view.rows.len();
+    view.rows.push(ViewRow {
+        pk: pk.clone(),
+        values,
+    });
+    view.pk_index.insert(key, idx);
+}
+
+fn view_remove_row(view: &mut ViewState, pk: &[Lit]) -> bool {
+    let key = pk_key(pk);
+    let Some(idx) = view.pk_index.remove(&key) else {
+        return false;
+    };
+    let last_idx = view.rows.len().saturating_sub(1);
+    view.rows.swap_remove(idx);
+    if idx < last_idx {
+        let moved_key = pk_key(&view.rows[idx].pk);
+        view.pk_index.insert(moved_key, idx);
+    }
+    true
+}
+
+fn build_view_values(
+    projection: &[skeindb_skeinql::types::SelectItem],
+    ctx: &RowCtx,
+) -> anyhow::Result<Vec<Lit>> {
+    let mut out = Vec::new();
+    for item in projection.iter() {
+        out.push(eval_expr(&item.expr, &BTreeMap::new(), Some(ctx), &[])?);
+    }
+    Ok(out)
+}
+
+// -----------------------------
+// Merge helpers
+// -----------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeFn {
+    LastWriteWins,
+    Max,
+    Min,
+    Sum,
+    Concat,
+    SetUnion,
+    ObjectMerge,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeWasmPolicy {
+    Reject,
+    Allow,
+}
+
+fn merge_policy_default() -> MergePolicySpec {
+    MergePolicySpec {
+        default: MergeFunctionRef {
+            kind: "builtin".to_string(),
+            name: "last_write_wins".to_string(),
+            module: None,
+        },
+        per_column: HashMap::new(),
+    }
+}
+
+fn normalize_merge_policy(
+    mut policy: MergePolicySpec,
+    wasm: MergeWasmPolicy,
+) -> anyhow::Result<MergePolicySpec> {
+    policy.default = normalize_merge_ref(policy.default, wasm)?;
+    for func in policy.per_column.values_mut() {
+        *func = normalize_merge_ref(func.clone(), wasm)?;
+    }
+    Ok(policy)
+}
+
+fn normalize_merge_ref(
+    mut func: MergeFunctionRef,
+    wasm: MergeWasmPolicy,
+) -> anyhow::Result<MergeFunctionRef> {
+    let kind = func.kind.trim().to_lowercase();
+    func.kind = if kind.is_empty() {
+        "builtin".to_string()
+    } else {
+        kind
+    };
+    if func.kind == "builtin" {
+        func.name = func.name.trim().to_lowercase();
+        merge_fn_from_ref(&func)?;
+    } else if func.kind == "wasm" {
+        if wasm == MergeWasmPolicy::Reject {
+            anyhow::bail!("invalid_request: wasm merge functions are not supported yet");
+        }
+        let module = func.module.as_ref().map(|m| m.trim()).unwrap_or("");
+        if module.is_empty() {
+            anyhow::bail!("invalid_request: wasm merge function requires module id");
+        }
+    } else {
+        anyhow::bail!("invalid_request: unknown merge function kind");
+    }
+    Ok(func)
+}
+
+fn merge_policy_rejects(policy: &MergePolicySpec) -> bool {
+    policy.per_column.is_empty() && merge_fn_from_ref(&policy.default).ok() == Some(MergeFn::Reject)
+}
+
+fn push_merge_conflict(conflicts: &mut Vec<String>, conflict: &mut bool, kind: &str) {
+    if !conflicts.iter().any(|existing| existing == kind) {
+        conflicts.push(kind.to_string());
+    }
+    *conflict = true;
+}
+
+fn incoming_pk_conflict(schema: &TableSchema, pk: &[Lit], incoming: &RowObject) -> bool {
+    schema
+        .primary_key
+        .iter()
+        .zip(pk.iter())
+        .any(|(col, expected)| match incoming.get(col) {
+            Some(value) => value != expected,
+            None => false,
+        })
+}
+
+fn not_null_violation(schema: &TableSchema, row: &RowObject) -> Option<String> {
+    for col in &schema.columns {
+        if col.nullable {
+            continue;
+        }
+        if matches!(row.get(&col.name), Some(Lit::Null) | None) {
+            return Some(col.name.clone());
+        }
+    }
+    None
+}
+
+fn policy_contains_wasm(policy: &MergePolicySpec) -> bool {
+    if policy.default.kind == "wasm" {
+        return true;
+    }
+    policy.per_column.values().any(|func| func.kind == "wasm")
+}
+
+fn merge_rows(
+    current: &RowObject,
+    incoming: &RowObject,
+    policy: &MergePolicySpec,
+) -> anyhow::Result<RowObject> {
+    let mut keys = current
+        .keys()
+        .chain(incoming.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+
+    let mut merged = RowObject::new();
+    for key in keys.into_iter() {
+        let cur = current.get(&key);
+        let inc = incoming.get(&key);
+        match (cur, inc) {
+            (Some(c), Some(i)) => {
+                let func = policy.per_column.get(&key).unwrap_or(&policy.default);
+                merged.insert(key, merge_value(c, i, func)?);
+            }
+            (Some(c), None) => {
+                merged.insert(key, c.clone());
+            }
+            (None, Some(i)) => {
+                merged.insert(key, i.clone());
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(merged)
+}
+
+fn merge_value(current: &Lit, incoming: &Lit, func: &MergeFunctionRef) -> anyhow::Result<Lit> {
+    let merge_fn = merge_fn_from_ref(func)?;
+    let out = match merge_fn {
+        MergeFn::LastWriteWins => Some(incoming.clone()),
+        MergeFn::Reject => Some(current.clone()),
+        MergeFn::Max => merge_numeric_max(current, incoming),
+        MergeFn::Min => merge_numeric_min(current, incoming),
+        MergeFn::Sum => merge_numeric_sum(current, incoming),
+        MergeFn::Concat => merge_concat(current, incoming),
+        MergeFn::SetUnion => merge_set_union(current, incoming),
+        MergeFn::ObjectMerge => merge_object_merge(current, incoming),
+    };
+    Ok(out.unwrap_or_else(|| incoming.clone()))
+}
+
+fn merge_fn_from_ref(func: &MergeFunctionRef) -> anyhow::Result<MergeFn> {
+    if func.kind != "builtin" {
+        anyhow::bail!("invalid_request: merge function kind not supported");
+    }
+    match func.name.as_str() {
+        "last_write_wins" | "replace" => Ok(MergeFn::LastWriteWins),
+        "max" => Ok(MergeFn::Max),
+        "min" => Ok(MergeFn::Min),
+        "sum" => Ok(MergeFn::Sum),
+        "concat" => Ok(MergeFn::Concat),
+        "set_union" => Ok(MergeFn::SetUnion),
+        "object_merge" => Ok(MergeFn::ObjectMerge),
+        "reject" => Ok(MergeFn::Reject),
+        _ => anyhow::bail!("invalid_request: unknown merge function"),
+    }
+}
+
+fn merge_numeric_max(a: &Lit, b: &Lit) -> Option<Lit> {
+    match (a, b) {
+        (Lit::I64 { v: x }, Lit::I64 { v: y }) => Some(Lit::I64 { v: (*x).max(*y) }),
+        (Lit::U64 { v: x }, Lit::U64 { v: y }) => Some(Lit::U64 { v: (*x).max(*y) }),
+        (Lit::F64 { v: x }, Lit::F64 { v: y }) => Some(Lit::F64 { v: x.max(*y) }),
+        _ => merge_numeric_f64(a, b, |x, y| x.max(y)),
+    }
+}
+
+fn merge_numeric_min(a: &Lit, b: &Lit) -> Option<Lit> {
+    match (a, b) {
+        (Lit::I64 { v: x }, Lit::I64 { v: y }) => Some(Lit::I64 { v: (*x).min(*y) }),
+        (Lit::U64 { v: x }, Lit::U64 { v: y }) => Some(Lit::U64 { v: (*x).min(*y) }),
+        (Lit::F64 { v: x }, Lit::F64 { v: y }) => Some(Lit::F64 { v: x.min(*y) }),
+        _ => merge_numeric_f64(a, b, |x, y| x.min(y)),
+    }
+}
+
+fn merge_numeric_sum(a: &Lit, b: &Lit) -> Option<Lit> {
+    match (a, b) {
+        (Lit::I64 { v: x }, Lit::I64 { v: y }) => Some(Lit::I64 {
+            v: x.saturating_add(*y),
+        }),
+        (Lit::U64 { v: x }, Lit::U64 { v: y }) => Some(Lit::U64 {
+            v: x.saturating_add(*y),
+        }),
+        (Lit::F64 { v: x }, Lit::F64 { v: y }) => Some(Lit::F64 { v: x + y }),
+        _ => merge_numeric_f64(a, b, |x, y| x + y),
+    }
+}
+
+fn merge_numeric_f64(a: &Lit, b: &Lit, op: fn(f64, f64) -> f64) -> Option<Lit> {
+    let ax = lit_to_f64(a)?;
+    let bx = lit_to_f64(b)?;
+    Some(Lit::F64 { v: op(ax, bx) })
+}
+
+fn lit_to_f64(lit: &Lit) -> Option<f64> {
+    match lit {
+        Lit::I64 { v } => Some(*v as f64),
+        Lit::U64 { v } => Some(*v as f64),
+        Lit::F64 { v } => Some(*v),
+        _ => None,
+    }
+}
+
+fn merge_concat(a: &Lit, b: &Lit) -> Option<Lit> {
+    match (a, b) {
+        (Lit::Str { v: x }, Lit::Str { v: y }) => Some(Lit::Str {
+            v: format!("{}{}", x, y),
+        }),
+        (Lit::Json { v: x }, Lit::Json { v: y }) => {
+            let (Some(ax), Some(by)) = (x.as_array(), y.as_array()) else {
+                return None;
+            };
+            let mut out = ax.clone();
+            out.extend(by.clone());
+            Some(Lit::Json {
+                v: serde_json::Value::Array(out),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn merge_set_union(a: &Lit, b: &Lit) -> Option<Lit> {
+    let (Lit::Json { v: x }, Lit::Json { v: y }) = (a, b) else {
+        return None;
+    };
+    let (Some(ax), Some(by)) = (x.as_array(), y.as_array()) else {
+        return None;
+    };
+    let mut out = ax.clone();
+    for item in by.iter() {
+        if !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    Some(Lit::Json {
+        v: serde_json::Value::Array(out),
+    })
+}
+
+fn merge_object_merge(a: &Lit, b: &Lit) -> Option<Lit> {
+    let (Lit::Json { v: x }, Lit::Json { v: y }) = (a, b) else {
+        return None;
+    };
+    let (Some(ax), Some(by)) = (x.as_object(), y.as_object()) else {
+        return None;
+    };
+    let mut out = ax.clone();
+    for (k, v) in by.iter() {
+        out.insert(k.clone(), v.clone());
+    }
+    Some(Lit::Json {
+        v: serde_json::Value::Object(out),
+    })
+}
+
+fn bump_table_version(schema: &mut TableSchema) {
+    schema.table_version = schema.table_version.saturating_add(1);
+}
+
+fn next_row_version(schema: &TableSchema) -> u64 {
+    // Use table_version as a monotonic seed (not perfect, but ok for prototype).
+    schema.table_version.saturating_add(1)
+}
+
+fn apply_schema_change(
+    schema: &mut TableSchema,
+    tdata: &mut TableData,
+    change: &SchemaChangeOp,
+) -> anyhow::Result<()> {
+    match change {
+        SchemaChangeOp::AddColumn {
+            name,
+            r#type,
+            nullable,
+            auto_increment,
+            default,
+        } => {
+            if schema.columns.iter().any(|c| c.name == *name) {
+                return Ok(());
+            }
+            if !*nullable && default.is_none() {
+                anyhow::bail!("invalid_request: non-null column requires default");
+            }
+            let default_value = default.clone().unwrap_or(Lit::Null);
+            for entry in tdata.rows.iter_mut() {
+                entry
+                    .row
+                    .entry(name.clone())
+                    .or_insert_with(|| default_value.clone());
+            }
+            if *auto_increment {
+                let mut next_id = 1u64;
+                for entry in tdata.rows.iter() {
+                    if let Some(Lit::U64 { v }) = entry.row.get(name) {
+                        next_id = next_id.max(v.saturating_add(1));
+                    }
+                }
+                schema.auto_inc_next.insert(name.clone(), next_id);
+            }
+            schema.columns.push(ColumnSchema {
+                name: name.clone(),
+                r#type: r#type.clone(),
+                nullable: *nullable,
+                auto_increment: *auto_increment,
+            });
+        }
+    }
+    Ok(())
+}
+
+// -----------------------------
+// Snapshot helpers
+// -----------------------------
+
+fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+fn advisor_persist_enabled() -> bool {
+    let Ok(value) = std::env::var("SKEINDB_ADVISOR_PERSIST") else {
+        return false;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn snapshot_id(db: &str, table: &str, snapshot_ts: u64, columns: &[String]) -> String {
+    let bytes = serde_json::to_vec(&(db, table, snapshot_ts, columns)).unwrap_or_default();
+    let id = value_id(&bytes);
+    hex16(&id)
+}
+
+fn normalize_columns(columns: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for col in columns.iter() {
+        if seen.insert(col.clone()) {
+            out.push(col.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn projection_key(columns: &[String]) -> String {
+    columns.join(",")
+}
+
+fn dedup_in_order(columns: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for col in columns.iter() {
+        if seen.insert(col.clone()) {
+            out.push(col.clone());
+        }
+    }
+    out
+}
+
+fn index_pattern_key(
+    eq_cols: &[String],
+    range_cols: &[String],
+    order_cols: &[String],
+    group_cols: &[String],
+    join_cols: &[String],
+    projection_cols: &[String],
+) -> String {
+    format!(
+        "eq:{}|range:{}|order:{}|group:{}|join:{}|proj:{}",
+        eq_cols.join(","),
+        range_cols.join(","),
+        order_cols.join(","),
+        group_cols.join(","),
+        join_cols.join(","),
+        projection_cols.join(",")
+    )
+}
+
+fn pk_prefix_match(pk: &[String], candidate: &[String]) -> bool {
+    if candidate.is_empty() || pk.is_empty() || candidate.len() > pk.len() {
+        return false;
+    }
+    pk.iter().zip(candidate.iter()).all(|(a, b)| a == b)
+}
+
+fn join_selectivity_factor(schema: &TableSchema, join_cols: &[String]) -> f64 {
+    if join_cols.is_empty() {
+        return 1.0;
+    }
+    let mut factor: f64 = 1.0;
+    for col in join_cols.iter() {
+        if schema.primary_key.iter().any(|pk| pk == col) {
+            factor += 0.2;
+        } else if is_id_like_column(&col.to_ascii_lowercase()) {
+            factor += 0.1;
+        } else {
+            factor -= 0.05;
+        }
+    }
+    factor.clamp(0.6, 1.6)
+}
+
+fn advisor_suggestion_id(table: &TableKey, columns: &[String], include: &[String]) -> String {
+    let canonical = serde_json::json!({
+        "db": table.db,
+        "table": table.table,
+        "columns": columns,
+        "include": include,
+    });
+    format!("idxs_{}", fingerprint_json(&canonical))
+}
+
+fn validate_columns(schema: &TableSchema, columns: &[String]) -> anyhow::Result<()> {
+    for col in columns.iter() {
+        if !schema.columns.iter().any(|c| c.name == *col) {
+            anyhow::bail!("invalid_request: unknown column {col}");
+        }
+    }
+    Ok(())
+}
+
+fn resolve_snapshot_columns(
+    schema: &TableSchema,
+    requested: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut want = HashSet::new();
+    for col in requested.iter() {
+        want.insert(col.clone());
+    }
+    for col in want.iter() {
+        if !schema.columns.iter().any(|c| c.name == *col) {
+            anyhow::bail!("unknown column: {col}");
+        }
+    }
+    let mut out = Vec::new();
+    for col in schema.columns.iter() {
+        if want.contains(&col.name) {
+            out.push(col.name.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn snapshot_columns_match_schema(schema: &TableSchema, columns: &[String]) -> bool {
+    columns
+        .iter()
+        .all(|col| schema.columns.iter().any(|c| c.name == *col))
+}
+
+fn snapshot_values(columns: &[String], row: &RowObject) -> Vec<Lit> {
+    columns
+        .iter()
+        .map(|col| row.get(col).cloned().unwrap_or(Lit::Null))
+        .collect()
+}
+
+fn extract_pk_from_cols(pk_cols: &[String], row: &RowObject) -> anyhow::Result<Vec<Lit>> {
+    if pk_cols.is_empty() {
+        anyhow::bail!("table has no primary key");
+    }
+    let mut pk = Vec::new();
+    for col in pk_cols.iter() {
+        let Some(v) = row.get(col) else {
+            anyhow::bail!("missing pk column: {col}");
+        };
+        pk.push(v.clone());
+    }
+    Ok(pk)
+}
+
+fn remove_snapshot_row(snapshot: &mut ColumnSnapshot, pk: &[Lit]) -> bool {
+    if snapshot.rows.is_empty() {
+        return false;
+    }
+    let key = pk_key(pk);
+    let Some(idx) = snapshot.pk_index.remove(&key) else {
+        return false;
+    };
+    let last_idx = snapshot.rows.len().saturating_sub(1);
+    if idx == last_idx {
+        snapshot.rows.pop();
+        return true;
+    }
+    if let Some(moved) = snapshot.rows.pop() {
+        snapshot.rows[idx] = moved;
+        let moved_key = pk_key(&snapshot.rows[idx].pk);
+        snapshot.pk_index.insert(moved_key, idx);
+        return true;
+    }
+    false
+}
+
+fn select_eviction_index(list: &[ColumnSnapshot]) -> Option<usize> {
+    if list.is_empty() {
+        return None;
+    }
+    let mut best_idx = 0usize;
+    let mut best = (
+        list[0].valid,
+        list[0].stats.hits,
+        list[0].stats.last_used_micros,
+    );
+    for (idx, snap) in list.iter().enumerate().skip(1) {
+        let candidate = (snap.valid, snap.stats.hits, snap.stats.last_used_micros);
+        if candidate < best {
+            best = candidate;
+            best_idx = idx;
+        }
+    }
+    Some(best_idx)
+}
+
+fn query_snapshot_info(query: &Query) -> Option<QuerySnapshotInfo> {
+    if !query.with.is_empty() {
+        return None;
+    }
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    if select.group_by.is_some() || select.having.is_some() {
+        return None;
+    }
+    let from = select.from.as_ref()?;
+    if from.len() != 1 {
+        return None;
+    }
+    let TableRef::Base(base) = &from[0] else {
+        return None;
+    };
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+
+    let mut refs: Vec<(Option<String>, String)> = Vec::new();
+    let mut has_subquery = false;
+    for item in select.projection.iter() {
+        collect_expr_cols(&item.expr, &mut refs, &mut has_subquery);
+    }
+    if let Some(pred) = select.r#where.as_ref() {
+        collect_expr_cols(pred, &mut refs, &mut has_subquery);
+    }
+    for ob in query.order_by.iter() {
+        collect_expr_cols(&ob.expr, &mut refs, &mut has_subquery);
+    }
+    if has_subquery {
+        return None;
+    }
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    for (table, col) in refs.into_iter() {
+        if let Some(t) = table {
+            if t != alias {
+                return None;
+            }
+        }
+        if seen.insert(col.clone()) {
+            cols.push(col);
+        }
+    }
+    cols.sort();
+
+    Some(QuerySnapshotInfo {
+        base: base.clone(),
+        alias,
+        required_cols: cols,
+    })
+}
+
+fn query_index_infos(query: &Query) -> Vec<IndexQueryInfo> {
+    if !query.with.is_empty() {
+        return Vec::new();
+    }
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Vec::new();
+    };
+    let Some(from) = select.from.as_ref() else {
+        return Vec::new();
+    };
+    if from.is_empty() {
+        return Vec::new();
+    }
+
+    let mut alias_map: HashMap<String, BaseTableRef> = HashMap::new();
+    for tref in from.iter() {
+        if !collect_table_aliases(tref, &mut alias_map) {
+            return Vec::new();
+        }
+    }
+    if alias_map.is_empty() {
+        return Vec::new();
+    }
+
+    let single_alias = if alias_map.len() == 1 {
+        alias_map.keys().next().map(|s| s.as_str())
+    } else {
+        None
+    };
+
+    let mut infos: HashMap<String, IndexQueryInfo> = HashMap::new();
+    for (alias, base) in alias_map.iter() {
+        infos.insert(
+            alias.clone(),
+            IndexQueryInfo {
+                base: base.clone(),
+                eq_cols: Vec::new(),
+                range_cols: Vec::new(),
+                order_cols: Vec::new(),
+                group_cols: Vec::new(),
+                join_cols: Vec::new(),
+                projection_cols: Vec::new(),
+            },
+        );
+    }
+
+    for item in select.projection.iter() {
+        if let Some((alias, cols)) = expr_columns_for_alias(&item.expr, single_alias, &alias_map) {
+            if let Some(info) = infos.get_mut(&alias) {
+                info.projection_cols.extend(cols);
+            }
+        }
+    }
+
+    for ob in query.order_by.iter() {
+        if let Some((alias, cols)) = expr_columns_for_alias(&ob.expr, single_alias, &alias_map) {
+            if let Some(info) = infos.get_mut(&alias) {
+                info.order_cols.extend(cols);
+            }
+        }
+    }
+
+    if let Some(group_by) = select.group_by.as_ref() {
+        for expr in group_by.iter() {
+            if let Some((alias, cols)) = expr_columns_for_alias(expr, single_alias, &alias_map) {
+                if let Some(info) = infos.get_mut(&alias) {
+                    info.group_cols.extend(cols);
+                }
+            }
+        }
+    }
+
+    if let Some(pred) = select.r#where.as_ref() {
+        collect_predicate_usage_multi(pred, single_alias, &alias_map, &mut infos);
+    }
+    if let Some(pred) = select.having.as_ref() {
+        collect_predicate_usage_multi(pred, single_alias, &alias_map, &mut infos);
+    }
+    for tref in from.iter() {
+        collect_join_predicates(tref, single_alias, &alias_map, &mut infos);
+    }
+
+    infos.into_values().collect()
+}
+
+fn view_query_info(query: &Query) -> anyhow::Result<ViewQueryInfo> {
+    if !query.with.is_empty() {
+        anyhow::bail!("invalid_request: views do not support WITH");
+    }
+    if !query.order_by.is_empty() {
+        anyhow::bail!("invalid_request: views do not support ORDER BY");
+    }
+    if query.limit.is_some() {
+        anyhow::bail!("invalid_request: views do not support LIMIT");
+    }
+    if query.lock.is_some() {
+        anyhow::bail!("invalid_request: views do not support LOCK");
+    }
+
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        anyhow::bail!("invalid_request: views require SELECT");
+    };
+    if select.distinct.unwrap_or(false) {
+        anyhow::bail!("invalid_request: views do not support DISTINCT");
+    }
+    if select.group_by.is_some() || select.having.is_some() {
+        anyhow::bail!("invalid_request: views do not support GROUP BY or HAVING");
+    }
+
+    let from = select
+        .from
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: views require FROM"))?;
+    if from.len() != 1 {
+        anyhow::bail!("invalid_request: views require single-table FROM");
+    }
+    let TableRef::Base(base) = &from[0] else {
+        anyhow::bail!("invalid_request: views do not support joins or subqueries");
+    };
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+
+    let mut refs: Vec<(Option<String>, String)> = Vec::new();
+    let mut has_subquery = false;
+    for item in select.projection.iter() {
+        collect_expr_cols(&item.expr, &mut refs, &mut has_subquery);
+    }
+    if let Some(pred) = select.r#where.as_ref() {
+        collect_expr_cols(pred, &mut refs, &mut has_subquery);
+    }
+    if has_subquery {
+        anyhow::bail!("invalid_request: views do not support subqueries");
+    }
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    for (table, col) in refs.into_iter() {
+        if let Some(t) = table {
+            if t != alias {
+                anyhow::bail!("invalid_request: views cannot reference multiple tables");
+            }
+        }
+        if seen.insert(col.clone()) {
+            cols.push(col);
+        }
+    }
+    cols.sort();
+
+    Ok(ViewQueryInfo {
+        base: base.clone(),
+        alias,
+        projection: select.projection.clone(),
+        predicate: select.r#where.clone(),
+        required_cols: cols,
+    })
+}
+
+fn collect_expr_cols(
+    expr: &Expr,
+    out: &mut Vec<(Option<String>, String)>,
+    has_subquery: &mut bool,
+) {
+    match expr {
+        Expr::Col { col, table } => out.push((table.clone(), col.clone())),
+        Expr::Lit { .. } | Expr::Param { .. } => {}
+        Expr::Op {
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+            ..
+        } => {
+            if let Some(a) = a.as_ref() {
+                collect_expr_cols(a, out, has_subquery);
+            }
+            if let Some(b) = b.as_ref() {
+                collect_expr_cols(b, out, has_subquery);
+            }
+            if let Some(args) = args.as_ref() {
+                for arg in args.iter() {
+                    collect_expr_cols(arg, out, has_subquery);
+                }
+            }
+            if let Some(list) = list.as_ref() {
+                for arg in list.iter() {
+                    collect_expr_cols(arg, out, has_subquery);
+                }
+            }
+            if let Some(lo) = lo.as_ref() {
+                collect_expr_cols(lo, out, has_subquery);
+            }
+            if let Some(hi) = hi.as_ref() {
+                collect_expr_cols(hi, out, has_subquery);
+            }
+        }
+        Expr::Func { args, .. } => {
+            for arg in args.iter() {
+                collect_expr_cols(arg, out, has_subquery);
+            }
+        }
+        Expr::Cast { cast } => {
+            collect_expr_cols(&cast.expr, out, has_subquery);
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                collect_expr_cols(&when.r#if, out, has_subquery);
+                collect_expr_cols(&when.then, out, has_subquery);
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                collect_expr_cols(other, out, has_subquery);
+            }
+        }
+        Expr::Subquery { .. } | Expr::Exists { .. } => {
+            *has_subquery = true;
+        }
+    }
+}
+
+fn collect_table_aliases(tref: &TableRef, alias_map: &mut HashMap<String, BaseTableRef>) -> bool {
+    match tref {
+        TableRef::Base(base) => {
+            let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+            if let Some(existing) = alias_map.get(&alias) {
+                if existing.db != base.db || existing.table != base.table {
+                    return false;
+                }
+            } else {
+                alias_map.insert(alias, base.clone());
+            }
+            true
+        }
+        TableRef::Join(join) => {
+            collect_table_aliases(&join.join.left, alias_map)
+                && collect_table_aliases(&join.join.right, alias_map)
+        }
+        TableRef::Subquery(_) => false,
+    }
+}
+
+fn collect_join_predicates(
+    tref: &TableRef,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+    infos: &mut HashMap<String, IndexQueryInfo>,
+) {
+    let TableRef::Join(join) = tref else {
+        return;
+    };
+    if let Some(on) = join.join.on.as_ref() {
+        collect_predicate_usage_multi(on, single_alias, alias_map, infos);
+    }
+    collect_join_predicates(&join.join.left, single_alias, alias_map, infos);
+    collect_join_predicates(&join.join.right, single_alias, alias_map, infos);
+}
+
+fn expr_columns_for_alias(
+    expr: &Expr,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+) -> Option<(String, Vec<String>)> {
+    let mut refs: Vec<(Option<String>, String)> = Vec::new();
+    let mut has_subquery = false;
+    collect_expr_cols(expr, &mut refs, &mut has_subquery);
+    if has_subquery || refs.is_empty() {
+        return None;
+    }
+    let mut alias: Option<String> = None;
+    let mut cols = Vec::new();
+    for (table, col) in refs.into_iter() {
+        let alias_name = if let Some(table) = table {
+            if !alias_map.contains_key(&table) {
+                return None;
+            }
+            table
+        } else {
+            let single_alias = single_alias?;
+            single_alias.to_string()
+        };
+        if let Some(existing) = alias.as_ref() {
+            if existing != &alias_name {
+                return None;
+            }
+        } else {
+            alias = Some(alias_name.clone());
+        }
+        cols.push(col);
+    }
+    alias.map(|alias| (alias, cols))
+}
+
+fn collect_predicate_usage_multi(
+    expr: &Expr,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+    infos: &mut HashMap<String, IndexQueryInfo>,
+) {
+    let Expr::Op {
+        op,
+        a,
+        b,
+        args,
+        list,
+        lo,
+        hi,
+    } = expr
+    else {
+        return;
+    };
+
+    match op.as_str() {
+        "and" | "or" => {
+            if let Some(items) = args.as_ref() {
+                for item in items.iter() {
+                    collect_predicate_usage_multi(item, single_alias, alias_map, infos);
+                }
+            } else {
+                if let Some(left) = a.as_deref() {
+                    collect_predicate_usage_multi(left, single_alias, alias_map, infos);
+                }
+                if let Some(right) = b.as_deref() {
+                    collect_predicate_usage_multi(right, single_alias, alias_map, infos);
+                }
+            }
+        }
+        "eq" => {
+            collect_comparison_usage(
+                a.as_deref(),
+                b.as_deref(),
+                single_alias,
+                alias_map,
+                infos,
+                true,
+            );
+        }
+        "lt" | "le" | "gt" | "ge" => {
+            collect_comparison_usage(
+                a.as_deref(),
+                b.as_deref(),
+                single_alias,
+                alias_map,
+                infos,
+                false,
+            );
+        }
+        "in" => {
+            let Some(col) = a
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map))
+            else {
+                return;
+            };
+            let Some(items) = list.as_ref() else {
+                return;
+            };
+            if items.iter().all(expr_simple_value) {
+                push_eq(infos, &col.0, col.1);
+            }
+        }
+        "between" => {
+            let Some(col) = a
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map))
+            else {
+                return;
+            };
+            let lo_ok = lo.as_deref().is_some_and(expr_simple_value);
+            let hi_ok = hi.as_deref().is_some_and(expr_simple_value);
+            if lo_ok && hi_ok {
+                push_range(infos, &col.0, col.1);
+            }
+        }
+        "like" | "ilike" => {
+            if let Some((alias, col)) = a
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map))
+            {
+                match like_pattern_kind(b.as_deref()) {
+                    Some(LikePatternKind::Exact) => push_eq(infos, &alias, col),
+                    Some(LikePatternKind::Prefix) => push_range(infos, &alias, col),
+                    None => {}
+                }
+            } else if let Some((alias, col)) = b
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map))
+            {
+                match like_pattern_kind(a.as_deref()) {
+                    Some(LikePatternKind::Exact) => push_eq(infos, &alias, col),
+                    Some(LikePatternKind::Prefix) => push_range(infos, &alias, col),
+                    None => {}
+                }
+            }
+        }
+        "not" => {}
+        _ => {}
+    }
+}
+
+fn collect_comparison_usage(
+    a: Option<&Expr>,
+    b: Option<&Expr>,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+    infos: &mut HashMap<String, IndexQueryInfo>,
+    is_eq: bool,
+) {
+    let left = a.and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
+    let right = b.and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
+
+    if let (Some((l_alias, l_col)), Some((r_alias, r_col))) = (left.clone(), right.clone()) {
+        push_join(infos, &l_alias, l_col.clone());
+        push_join(infos, &r_alias, r_col.clone());
+        if is_eq {
+            push_eq(infos, &l_alias, l_col);
+            push_eq(infos, &r_alias, r_col);
+        } else {
+            push_range(infos, &l_alias, l_col);
+            push_range(infos, &r_alias, r_col);
+        }
+        return;
+    }
+
+    if let Some((alias, col)) = left {
+        if b.is_some_and(expr_simple_value) {
+            if is_eq {
+                push_eq(infos, &alias, col);
+            } else {
+                push_range(infos, &alias, col);
+            }
+        }
+    } else if let Some((alias, col)) = right {
+        if a.is_some_and(expr_simple_value) {
+            if is_eq {
+                push_eq(infos, &alias, col);
+            } else {
+                push_range(infos, &alias, col);
+            }
+        }
+    }
+}
+
+fn push_eq(infos: &mut HashMap<String, IndexQueryInfo>, alias: &str, col: String) {
+    if let Some(info) = infos.get_mut(alias) {
+        info.eq_cols.push(col);
+    }
+}
+
+fn push_range(infos: &mut HashMap<String, IndexQueryInfo>, alias: &str, col: String) {
+    if let Some(info) = infos.get_mut(alias) {
+        info.range_cols.push(col);
+    }
+}
+
+fn push_join(infos: &mut HashMap<String, IndexQueryInfo>, alias: &str, col: String) {
+    if let Some(info) = infos.get_mut(alias) {
+        info.join_cols.push(col);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LikePatternKind {
+    Exact,
+    Prefix,
+}
+
+fn like_pattern_kind(expr: Option<&Expr>) -> Option<LikePatternKind> {
+    let expr = expr?;
+    match expr {
+        Expr::Param { .. } => Some(LikePatternKind::Prefix),
+        Expr::Lit {
+            lit: Lit::Str { v },
+        } => like_pattern_from_str(v),
+        Expr::Lit { .. } => None,
+        _ => None,
+    }
+}
+
+fn like_pattern_from_str(pattern: &str) -> Option<LikePatternKind> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let last_idx = pattern.chars().count().saturating_sub(1);
+    let mut saw_wildcard = false;
+    for (idx, ch) in pattern.chars().enumerate() {
+        if ch == '%' || ch == '_' {
+            if idx == 0 {
+                return None;
+            }
+            if idx != last_idx {
+                return None;
+            }
+            saw_wildcard = true;
+            break;
+        }
+    }
+    if saw_wildcard {
+        Some(LikePatternKind::Prefix)
+    } else {
+        Some(LikePatternKind::Exact)
+    }
+}
+
+fn expr_column_ref(
+    expr: &Expr,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+) -> Option<(String, String)> {
+    let Expr::Col { col, table } = expr else {
+        return None;
+    };
+    let alias = if let Some(table) = table.as_ref() {
+        if !alias_map.contains_key(table) {
+            return None;
+        }
+        table.clone()
+    } else {
+        let single_alias = single_alias?;
+        single_alias.to_string()
+    };
+    Some((alias, col.clone()))
+}
+
+fn expr_simple_value(expr: &Expr) -> bool {
+    matches!(expr, Expr::Lit { .. } | Expr::Param { .. })
+}
+
+// -----------------------------
+// Migration intent inference (R17)
+// -----------------------------
+
+#[derive(Debug, Clone)]
+enum ComparisonValue {
+    Lit(Lit),
+    Param(u32),
+}
+
+#[derive(Debug, Clone)]
+struct Comparison {
+    col: String,
+    op: String,
+    value: ComparisonValue,
+}
+
+#[derive(Debug, Clone)]
+struct ColumnRef {
+    table: Option<String>,
+    col: String,
+}
+
+#[derive(Debug, Clone)]
+struct PaginationSignal {
+    table: Option<BaseTableRef>,
+    order_col: Option<String>,
+    limit: Option<u64>,
+    offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PollingSignal {
+    table: Option<BaseTableRef>,
+    column: String,
+    value: Option<Lit>,
+    order_match: bool,
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SoftDeleteSignal {
+    table: Option<BaseTableRef>,
+    column: String,
+}
+
+#[derive(Debug, Clone)]
+struct HierarchySignal {
+    table: BaseTableRef,
+    columns: Vec<String>,
+    parent_col: Option<String>,
+    id_col: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RecursiveCteSignal {
+    cte_name: String,
+    table: Option<BaseTableRef>,
+    parent_col: Option<String>,
+    id_col: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ExistsSignal {
+    outer_table: Option<BaseTableRef>,
+    inner_table: Option<BaseTableRef>,
+    inner_column: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CoalesceSignal {
+    table: Option<BaseTableRef>,
+    column: String,
+    default_value: Option<Lit>,
+    arg_count: usize,
+}
+
+fn detect_migration_intents(samples: &[MigrationIntentSample]) -> Vec<MigrationIntentSuggestion> {
+    let mut suggestions = Vec::new();
+
+    let mut pagination_evidence = Vec::new();
+    let mut pagination_offsets = Vec::new();
+    let mut pagination_best: Option<PaginationSignal> = None;
+
+    let mut polling_evidence = Vec::new();
+    let mut polling_values: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut polling_best: Option<PollingSignal> = None;
+
+    let mut soft_delete_evidence = Vec::new();
+    let mut soft_delete_best: Option<SoftDeleteSignal> = None;
+
+    let mut hierarchy_evidence = Vec::new();
+    let mut hierarchy_best: Option<HierarchySignal> = None;
+
+    let mut recursive_evidence = Vec::new();
+    let mut recursive_best: Option<RecursiveCteSignal> = None;
+
+    let mut exists_evidence = Vec::new();
+    let mut exists_best: Option<ExistsSignal> = None;
+
+    let mut coalesce_evidence = Vec::new();
+    let mut coalesce_best: Option<CoalesceSignal> = None;
+
+    for (idx, sample) in samples.iter().enumerate() {
+        if let Some(signal) = detect_pagination_signal(&sample.query) {
+            pagination_offsets.push(signal.offset);
+            let mut columns = Vec::new();
+            if let Some(col) = signal.order_col.clone() {
+                columns.push(col);
+            }
+            pagination_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal.table.clone(),
+                columns,
+                note: Some(format!("limit={:?} offset={}", signal.limit, signal.offset)),
+            });
+            let prefer_signal = match pagination_best.as_ref() {
+                None => true,
+                Some(best) => best.order_col.is_none() && signal.order_col.is_some(),
+            };
+            if prefer_signal {
+                pagination_best = Some(signal);
+            }
+        }
+
+        if let Some(signal) = detect_polling_signal(&sample.query, &sample.args) {
+            if let Some(value) = signal.value.as_ref().and_then(lit_to_f64) {
+                polling_values
+                    .entry(signal.column.clone())
+                    .or_default()
+                    .push(value);
+            }
+            polling_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal.table.clone(),
+                columns: vec![signal.column.clone()],
+                note: Some(format!(
+                    "order_match={} limit={:?}",
+                    signal.order_match, signal.limit
+                )),
+            });
+            let prefer_signal = match polling_best.as_ref() {
+                None => true,
+                Some(best) => !best.order_match && signal.order_match,
+            };
+            if prefer_signal {
+                polling_best = Some(signal);
+            }
+        }
+
+        if let Some(signal) = detect_soft_delete_signal(&sample.query, &sample.args) {
+            soft_delete_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal.table.clone(),
+                columns: vec![signal.column.clone()],
+                note: Some("soft delete predicate".to_string()),
+            });
+            if soft_delete_best.is_none() {
+                soft_delete_best = Some(signal);
+            }
+        }
+
+        for signal in detect_hierarchy_signals(&sample.query).into_iter() {
+            let mut columns = signal.columns.clone();
+            if columns.is_empty() {
+                if let Some(parent) = signal.parent_col.clone() {
+                    columns.push(parent);
+                }
+                if let Some(id_col) = signal.id_col.clone() {
+                    columns.push(id_col);
+                }
+            }
+            hierarchy_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: Some(signal.table.clone()),
+                columns,
+                note: Some("self join hierarchy".to_string()),
+            });
+            let prefer_signal = match hierarchy_best.as_ref() {
+                None => true,
+                Some(best) => best.parent_col.is_none() && signal.parent_col.is_some(),
+            };
+            if prefer_signal {
+                hierarchy_best = Some(signal);
+            }
+        }
+
+        for signal in detect_recursive_cte_signals(&sample.query).into_iter() {
+            let mut columns = Vec::new();
+            if let Some(parent) = signal.parent_col.clone() {
+                columns.push(parent);
+            }
+            if let Some(id_col) = signal.id_col.clone() {
+                columns.push(id_col);
+            }
+            recursive_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal.table.clone(),
+                columns,
+                note: Some(format!("recursive cte: {}", signal.cte_name)),
+            });
+            let prefer_signal = match recursive_best.as_ref() {
+                None => true,
+                Some(best) => best.parent_col.is_none() && signal.parent_col.is_some(),
+            };
+            if prefer_signal {
+                recursive_best = Some(signal);
+            }
+        }
+
+        for signal in detect_exists_signals(&sample.query).into_iter() {
+            let mut columns = Vec::new();
+            if let Some(col) = signal.inner_column.clone() {
+                columns.push(col);
+            }
+            exists_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal
+                    .inner_table
+                    .clone()
+                    .or_else(|| signal.outer_table.clone()),
+                columns,
+                note: Some("exists subquery".to_string()),
+            });
+            let prefer_signal = match exists_best.as_ref() {
+                None => true,
+                Some(best) => best.inner_table.is_none() && signal.inner_table.is_some(),
+            };
+            if prefer_signal {
+                exists_best = Some(signal);
+            }
+        }
+
+        for signal in detect_coalesce_signals(&sample.query).into_iter() {
+            let mut note = format!("coalesce args={}", signal.arg_count);
+            if let Some(default_value) = signal.default_value.as_ref() {
+                note.push_str(&format!(" default={}", render_lit_summary(default_value)));
+            }
+            coalesce_evidence.push(MigrationIntentEvidence {
+                query_index: idx as u64,
+                table: signal.table.clone(),
+                columns: vec![signal.column.clone()],
+                note: Some(note),
+            });
+            let prefer_signal = match coalesce_best.as_ref() {
+                None => true,
+                Some(best) => best.default_value.is_none() && signal.default_value.is_some(),
+            };
+            if prefer_signal {
+                coalesce_best = Some(signal);
+            }
+        }
+    }
+
+    if !pagination_evidence.is_empty() {
+        let distinct_offsets = pagination_offsets
+            .iter()
+            .cloned()
+            .filter(|v| *v > 0)
+            .collect::<HashSet<_>>()
+            .len();
+        let mut confidence = 0.55;
+        if pagination_best
+            .as_ref()
+            .and_then(|sig| sig.order_col.as_ref())
+            .is_some()
+        {
+            confidence += 0.2;
+        }
+        if distinct_offsets >= 2 {
+            confidence += 0.1;
+        }
+        if pagination_evidence.len() > 1 {
+            confidence += ((pagination_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        if pagination_best
+            .as_ref()
+            .map(|sig| sig.offset > 0)
+            .unwrap_or(false)
+        {
+            confidence += 0.05;
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, order_col, limit) = pagination_best
+            .as_ref()
+            .map(|sig| (sig.table.clone(), sig.order_col.clone(), sig.limit))
+            .unwrap_or((None, None, None));
+        let table_label = table_hint
+            .as_ref()
+            .map(|t| format!("{}.{}", t.db, t.table))
+            .unwrap_or_else(|| "<table>".to_string());
+        let order_label = order_col.unwrap_or_else(|| "<cursor_column>".to_string());
+        let limit_label = limit.unwrap_or(50);
+        let skeinql_snippet = format!(
+            "cursor pagination:\nquery.select {{ query: SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {} }}",
+            table_label, order_label, order_label, limit_label
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "pagination.offset_limit".to_string(),
+            confidence,
+            title: "Offset pagination detected".to_string(),
+            recommendation: "Replace LIMIT/OFFSET pagination with cursor-based pagination on a stable ordering column.".to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: pagination_evidence,
+        });
+    }
+
+    if !polling_evidence.is_empty() {
+        let mut confidence = 0.45;
+        if polling_best
+            .as_ref()
+            .map(|sig| sig.order_match)
+            .unwrap_or(false)
+        {
+            confidence += 0.2;
+        }
+        if polling_best
+            .as_ref()
+            .and_then(|sig| sig.limit)
+            .map(|limit| limit <= 100)
+            .unwrap_or(false)
+        {
+            confidence += 0.1;
+        }
+        let has_sequence = polling_values
+            .values()
+            .any(|values| has_increasing_sequence(values));
+        if has_sequence {
+            confidence += 0.2;
+        }
+        if polling_evidence.len() > 1 {
+            confidence += ((polling_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, column) = polling_best
+            .as_ref()
+            .map(|sig| (sig.table.clone(), sig.column.clone()))
+            .unwrap_or((None, "<cursor_column>".to_string()));
+        let skeinql_snippet = format!(
+            "polling detected:\ncdc.subscribe_table {{ db: \"{}\", table: \"{}\" }} then cdc.poll {{ sub_id, from_offset }} (cursor: {})",
+            table_hint
+                .as_ref()
+                .map(|t| t.db.as_str())
+                .unwrap_or("<db>"),
+            table_hint
+                .as_ref()
+                .map(|t| t.table.as_str())
+                .unwrap_or("<table>"),
+            column
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "polling.incremental".to_string(),
+            confidence,
+            title: "Incremental polling detected".to_string(),
+            recommendation:
+                "Replace polling SELECTs with CDC subscriptions to reduce load and latency."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: polling_evidence,
+        });
+    }
+
+    if !soft_delete_evidence.is_empty() {
+        let mut confidence = 0.5;
+        if soft_delete_evidence.len() > 1 {
+            confidence += ((soft_delete_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, column) = soft_delete_best
+            .as_ref()
+            .map(|sig| (sig.table.clone(), sig.column.clone()))
+            .unwrap_or((None, "<deleted_column>".to_string()));
+        let table_label = table_hint
+            .as_ref()
+            .map(|t| format!("{}.{}", t.db, t.table))
+            .unwrap_or_else(|| "<table>".to_string());
+        let skeinql_snippet = format!(
+            "soft delete filter:\nview.create {{ name: \"active_{}\", query: SELECT ... FROM {} WHERE {} IS NULL }}",
+            table_hint
+                .as_ref()
+                .map(|t| t.table.as_str())
+                .unwrap_or("table"),
+            table_label,
+            column
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "soft_delete.filter".to_string(),
+            confidence,
+            title: "Soft delete filter detected".to_string(),
+            recommendation:
+                "Consider a filtered view for active rows to centralize soft-delete logic."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: soft_delete_evidence,
+        });
+    }
+
+    if !hierarchy_evidence.is_empty() {
+        let mut confidence = 0.45;
+        if hierarchy_best
+            .as_ref()
+            .and_then(|sig| sig.parent_col.as_ref())
+            .is_some()
+        {
+            confidence += 0.15;
+        }
+        if hierarchy_best
+            .as_ref()
+            .and_then(|sig| sig.id_col.as_ref())
+            .is_some()
+        {
+            confidence += 0.1;
+        }
+        if hierarchy_evidence.len() > 1 {
+            confidence += ((hierarchy_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, parent_col, id_col) = hierarchy_best
+            .as_ref()
+            .map(|sig| {
+                let (parent_col, id_col) = hierarchy_columns_from_signal(sig);
+                (sig.table.clone(), parent_col, id_col)
+            })
+            .unwrap_or_else(|| {
+                (
+                    BaseTableRef {
+                        db: "<db>".to_string(),
+                        table: "<table>".to_string(),
+                        r#as: None,
+                    },
+                    "<parent_id>".to_string(),
+                    "<id>".to_string(),
+                )
+            });
+        let table_label = format!("{}.{}", table_hint.db, table_hint.table);
+        let skeinql_snippet = format!(
+            "hierarchy traversal:\nroots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
+            id_col,
+            table_label,
+            parent_col,
+            table_hint.db,
+            table_hint.table,
+            parent_col,
+            id_col
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "hierarchy.adjacency".to_string(),
+            confidence,
+            title: "Hierarchy self-join detected".to_string(),
+            recommendation:
+                "Consider a graph traversal or hierarchy view to model parent/child relationships."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: hierarchy_evidence,
+        });
+    }
+
+    if !recursive_evidence.is_empty() {
+        let mut confidence = 0.5;
+        if recursive_best
+            .as_ref()
+            .and_then(|sig| sig.parent_col.as_ref())
+            .is_some()
+        {
+            confidence += 0.15;
+        }
+        if recursive_best
+            .as_ref()
+            .and_then(|sig| sig.id_col.as_ref())
+            .is_some()
+        {
+            confidence += 0.1;
+        }
+        if recursive_evidence.len() > 1 {
+            confidence += ((recursive_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, parent_col, id_col) = recursive_best
+            .as_ref()
+            .map(|sig| {
+                let (parent_col, id_col) = recursive_columns_from_signal(sig);
+                (
+                    sig.table.clone().unwrap_or(BaseTableRef {
+                        db: "<db>".to_string(),
+                        table: "<table>".to_string(),
+                        r#as: None,
+                    }),
+                    parent_col,
+                    id_col,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    BaseTableRef {
+                        db: "<db>".to_string(),
+                        table: "<table>".to_string(),
+                        r#as: None,
+                    },
+                    "<parent_id>".to_string(),
+                    "<id>".to_string(),
+                )
+            });
+        let table_label = format!("{}.{}", table_hint.db, table_hint.table);
+        let skeinql_snippet = format!(
+            "hierarchy traversal:\nroots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
+            id_col,
+            table_label,
+            parent_col,
+            table_hint.db,
+            table_hint.table,
+            parent_col,
+            id_col
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "hierarchy.recursive_cte".to_string(),
+            confidence,
+            title: "Recursive hierarchy CTE detected".to_string(),
+            recommendation:
+                "Consider graph traversal helpers for recursive parent/child structures."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: recursive_evidence,
+        });
+    }
+
+    if !exists_evidence.is_empty() {
+        let mut confidence = 0.45;
+        if exists_best
+            .as_ref()
+            .and_then(|sig| sig.inner_table.as_ref())
+            .is_some()
+        {
+            confidence += 0.1;
+        }
+        if exists_best
+            .as_ref()
+            .and_then(|sig| sig.inner_column.as_ref())
+            .is_some()
+        {
+            confidence += 0.05;
+        }
+        if exists_evidence.len() > 1 {
+            confidence += ((exists_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (outer_table, inner_table, inner_column) = exists_best
+            .as_ref()
+            .map(|sig| {
+                (
+                    sig.outer_table.clone(),
+                    sig.inner_table.clone(),
+                    sig.inner_column.clone(),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let outer_label = outer_table
+            .as_ref()
+            .map(|t| format!("{}.{}", t.db, t.table))
+            .unwrap_or_else(|| "<outer_table>".to_string());
+        let inner_label = inner_table
+            .as_ref()
+            .map(|t| format!("{}.{}", t.db, t.table))
+            .unwrap_or_else(|| "<inner_table>".to_string());
+        let inner_column = inner_column.unwrap_or_else(|| "<inner_id>".to_string());
+        let skeinql_snippet = format!(
+            "membership join:\nquery.select {{ query: SELECT ... FROM {} JOIN {} ON {}.{} = {}.<outer_id> }}",
+            outer_label, inner_label, inner_label, inner_column, outer_label
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "exists.membership".to_string(),
+            confidence,
+            title: "Membership EXISTS detected".to_string(),
+            recommendation:
+                "Replace EXISTS subqueries with explicit joins or a membership view for reuse."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: exists_evidence,
+        });
+    }
+
+    if !coalesce_evidence.is_empty() {
+        let mut confidence = 0.4;
+        if coalesce_best
+            .as_ref()
+            .and_then(|sig| sig.default_value.as_ref())
+            .is_some()
+        {
+            confidence += 0.1;
+        }
+        if coalesce_evidence.len() > 1 {
+            confidence += ((coalesce_evidence.len() - 1) as f64 * 0.05).min(0.2);
+        }
+        confidence = confidence.min(1.0);
+
+        let (table_hint, column, default_value) = coalesce_best
+            .as_ref()
+            .map(|sig| {
+                (
+                    sig.table.clone(),
+                    sig.column.clone(),
+                    sig.default_value.clone(),
+                )
+            })
+            .unwrap_or((None, "<column>".to_string(), None));
+        let table_label = table_hint
+            .as_ref()
+            .map(|t| format!("{}.{}", t.db, t.table))
+            .unwrap_or_else(|| "<table>".to_string());
+        let view_name = table_hint
+            .as_ref()
+            .map(|t| format!("defaults_{}", t.table))
+            .unwrap_or_else(|| "defaults_table".to_string());
+        let default_label = default_value
+            .as_ref()
+            .map(render_lit_summary)
+            .unwrap_or_else(|| "<default>".to_string());
+        let skeinql_snippet = format!(
+            "default normalization:\nview.create {{ name: \"{}\", query: SELECT ..., coalesce({}, {}) AS {} FROM {} }}",
+            view_name, column, default_label, column, table_label
+        );
+
+        suggestions.push(MigrationIntentSuggestion {
+            intent: "defaults.coalesce".to_string(),
+            confidence,
+            title: "Coalesce defaults detected".to_string(),
+            recommendation:
+                "Consider a view to centralize default value logic for nullable columns."
+                    .to_string(),
+            skeinql_snippet: Some(skeinql_snippet),
+            evidence: coalesce_evidence,
+        });
+    }
+
+    suggestions
+}
+
+fn rewrite_preview_from_suggestion(
+    suggestion: &MigrationIntentSuggestion,
+    samples: &[MigrationIntentSample],
+) -> MigrationRewritePreview {
+    let (before, after) = rewrite_snippets_for_intent(suggestion, samples);
+    MigrationRewritePreview {
+        intent: suggestion.intent.clone(),
+        confidence: suggestion.confidence,
+        title: suggestion.title.clone(),
+        before,
+        after,
+        evidence: suggestion.evidence.clone(),
+    }
+}
+
+fn rewrite_snippets_for_intent(
+    suggestion: &MigrationIntentSuggestion,
+    samples: &[MigrationIntentSample],
+) -> (String, String) {
+    let table_ref = evidence_table_ref(&suggestion.evidence).or_else(|| {
+        sample_from_evidence(samples, &suggestion.evidence)
+            .and_then(|sample| query_single_base_table(&sample.query))
+    });
+    let mut table_label = table_ref
+        .as_ref()
+        .map(|table| format!("{}.{}", table.db, table.table))
+        .unwrap_or_else(|| "<table>".to_string());
+    let column_hint =
+        evidence_column_label(&suggestion.evidence).unwrap_or_else(|| "<column>".to_string());
+    let sample = sample_from_evidence(samples, &suggestion.evidence);
+
+    match suggestion.intent.as_str() {
+        "pagination.offset_limit" => {
+            let mut order_col = column_hint.clone();
+            let mut limit = 50u64;
+            let mut offset = 0u64;
+            if let Some(sample) = sample {
+                if let Some(signal) = detect_pagination_signal(&sample.query) {
+                    if let Some(col) = signal.order_col {
+                        order_col = col;
+                    }
+                    if let Some(sig_limit) = signal.limit {
+                        limit = sig_limit;
+                    }
+                    offset = signal.offset;
+                }
+            }
+            let before = format!(
+                "SELECT ... FROM {} ORDER BY {} LIMIT {} OFFSET {}",
+                table_label, order_col, limit, offset
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                format!(
+                    "cursor pagination:\nquery.select {{ query: SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {} }}",
+                    table_label, order_col, order_col, limit
+                )
+            });
+            (before, after)
+        }
+        "polling.incremental" => {
+            let mut column = column_hint.clone();
+            let mut limit = 100u64;
+            if let Some(sample) = sample {
+                if let Some(signal) = detect_polling_signal(&sample.query, &sample.args) {
+                    column = signal.column;
+                    if let Some(sig_limit) = signal.limit {
+                        limit = sig_limit;
+                    }
+                }
+            }
+            let before = format!(
+                "SELECT ... FROM {} WHERE {} > ? ORDER BY {} LIMIT {}",
+                table_label, column, column, limit
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                let db = table_ref
+                    .as_ref()
+                    .map(|table| table.db.as_str())
+                    .unwrap_or("<db>");
+                let table = table_ref
+                    .as_ref()
+                    .map(|table| table.table.as_str())
+                    .unwrap_or("<table>");
+                format!(
+                    "cdc.subscribe_table {{ db: \"{}\", table: \"{}\" }} then cdc.poll {{ sub_id, from_offset }}",
+                    db, table
+                )
+            });
+            (before, after)
+        }
+        "soft_delete.filter" => {
+            let mut column = column_hint.clone();
+            if let Some(sample) = sample {
+                if let Some(signal) = detect_soft_delete_signal(&sample.query, &sample.args) {
+                    column = signal.column;
+                }
+            }
+            let before = format!("SELECT ... FROM {} WHERE {} IS NULL", table_label, column);
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                format!(
+                    "view.create {{ name: \"active_<table>\", query: SELECT ... FROM {} WHERE {} IS NULL }}",
+                    table_label, column
+                )
+            });
+            (before, after)
+        }
+        "hierarchy.adjacency" => {
+            let (parent_col, id_col) = sample
+                .and_then(|sample| detect_hierarchy_signals(&sample.query).into_iter().next())
+                .map(|signal| hierarchy_columns_from_signal(&signal))
+                .unwrap_or_else(|| ("<parent_id>".to_string(), "<id>".to_string()));
+            let before = format!(
+                "SELECT ... FROM {} AS child JOIN {} AS parent ON child.{} = parent.{}",
+                table_label, table_label, parent_col, id_col
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                let db = table_ref
+                    .as_ref()
+                    .map(|table| table.db.as_str())
+                    .unwrap_or("<db>");
+                let table = table_ref
+                    .as_ref()
+                    .map(|table| table.table.as_str())
+                    .unwrap_or("<table>");
+                format!(
+                    "graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }} }}",
+                    db, table, parent_col, id_col
+                )
+            });
+            (before, after)
+        }
+        "hierarchy.recursive_cte" => {
+            let mut cte_name = "<cte>".to_string();
+            let mut parent_col = "<parent_id>".to_string();
+            let mut id_col = "<id>".to_string();
+            if let Some(sample) = sample {
+                if let Some(signal) = detect_recursive_cte_signals(&sample.query)
+                    .into_iter()
+                    .next()
+                {
+                    cte_name = signal.cte_name.clone();
+                    let (parent_hint, id_hint) = recursive_columns_from_signal(&signal);
+                    parent_col = parent_hint;
+                    id_col = id_hint;
+                    if let Some(table) = signal.table.as_ref() {
+                        table_label = format!("{}.{}", table.db, table.table);
+                    }
+                }
+            }
+            let cte_cols = format!("{}, {}", id_col, parent_col);
+            let before = format!(
+                "WITH RECURSIVE {} ({}) AS (\n  SELECT {}, {} FROM {} WHERE {} IS NULL\n  UNION ALL\n  SELECT child.{}, child.{} FROM {} AS child JOIN {} AS parent ON child.{} = parent.{}\n)\nSELECT ... FROM {}",
+                cte_name,
+                cte_cols,
+                id_col,
+                parent_col,
+                table_label,
+                parent_col,
+                id_col,
+                parent_col,
+                table_label,
+                cte_name,
+                parent_col,
+                id_col,
+                cte_name
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                let db = table_ref
+                    .as_ref()
+                    .map(|table| table.db.as_str())
+                    .unwrap_or("<db>");
+                let table = table_ref
+                    .as_ref()
+                    .map(|table| table.table.as_str())
+                    .unwrap_or("<table>");
+                format!(
+                    "roots = query.select {{ query: SELECT {} FROM {} WHERE {} IS NULL }}\npaths = graph.traverse {{ db: \"{}\", table: \"{}\", edge: {{ parent: \"{}\", id: \"{}\" }}, roots, max_depth: 10 }}",
+                    id_col, table_label, parent_col, db, table, parent_col, id_col
+                )
+            });
+            (before, after)
+        }
+        "exists.membership" => {
+            let outer_label = sample
+                .and_then(|sample| query_single_base_table(&sample.query))
+                .map(|table| format!("{}.{}", table.db, table.table))
+                .unwrap_or_else(|| "<outer_table>".to_string());
+            let inner_label = evidence_table_ref(&suggestion.evidence)
+                .map(|table| format!("{}.{}", table.db, table.table))
+                .unwrap_or_else(|| "<inner_table>".to_string());
+            let inner_column = column_hint.clone();
+            let before = format!(
+                "SELECT ... FROM {} WHERE EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.<outer_id>)",
+                outer_label, inner_label, inner_label, inner_column, outer_label
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                format!(
+                    "query.select {{ query: SELECT ... FROM {} JOIN {} ON {}.{} = {}.<outer_id> }}",
+                    outer_label, inner_label, inner_label, inner_column, outer_label
+                )
+            });
+            (before, after)
+        }
+        "defaults.coalesce" => {
+            let mut column = column_hint.clone();
+            let mut default_label = "<default>".to_string();
+            if let Some(sample) = sample {
+                if let Some(signal) = detect_coalesce_signals(&sample.query).into_iter().next() {
+                    column = signal.column;
+                    if let Some(lit) = signal.default_value {
+                        default_label = render_lit_summary(&lit);
+                    }
+                }
+            }
+            let before = format!(
+                "SELECT ..., COALESCE({}, {}) AS {} FROM {}",
+                column, default_label, column, table_label
+            );
+            let after = suggestion.skeinql_snippet.clone().unwrap_or_else(|| {
+                format!(
+                    "view.create {{ name: \"defaults_<table>\", query: SELECT ..., coalesce({}, {}) AS {} FROM {} }}",
+                    column, default_label, column, table_label
+                )
+            });
+            (before, after)
+        }
+        _ => {
+            let after = suggestion
+                .skeinql_snippet
+                .clone()
+                .unwrap_or_else(|| "no rewrite available".to_string());
+            ("unknown".to_string(), after)
+        }
+    }
+}
+
+fn evidence_table_ref(evidence: &[MigrationIntentEvidence]) -> Option<BaseTableRef> {
+    evidence
+        .iter()
+        .find_map(|entry| entry.table.as_ref().cloned())
+}
+
+fn evidence_column_label(evidence: &[MigrationIntentEvidence]) -> Option<String> {
+    evidence
+        .iter()
+        .find_map(|entry| entry.columns.first().cloned())
+}
+
+fn sample_from_evidence<'a>(
+    samples: &'a [MigrationIntentSample],
+    evidence: &[MigrationIntentEvidence],
+) -> Option<&'a MigrationIntentSample> {
+    let index = evidence.first()?.query_index as usize;
+    samples.get(index)
+}
+
+fn hierarchy_columns_from_signal(signal: &HierarchySignal) -> (String, String) {
+    let mut parent = signal.parent_col.clone();
+    let mut id_col = signal.id_col.clone();
+    if parent.is_none() || id_col.is_none() {
+        for col in signal.columns.iter() {
+            if parent.is_none() && is_parent_like_column(col) {
+                parent = Some(col.clone());
+            }
+            if id_col.is_none() && is_id_like_column(col) {
+                id_col = Some(col.clone());
+            }
+        }
+    }
+    if (parent.is_none() || id_col.is_none()) && signal.columns.len() >= 2 {
+        if parent.is_none() {
+            parent = Some(signal.columns[0].clone());
+        }
+        if id_col.is_none() {
+            id_col = Some(signal.columns[1].clone());
+        }
+    }
+    let parent = parent.unwrap_or_else(|| "<parent_id>".to_string());
+    let id_col = id_col.unwrap_or_else(|| "<id>".to_string());
+    (parent, id_col)
+}
+
+fn recursive_columns_from_signal(signal: &RecursiveCteSignal) -> (String, String) {
+    let parent = signal
+        .parent_col
+        .clone()
+        .unwrap_or_else(|| "<parent_id>".to_string());
+    let id_col = signal.id_col.clone().unwrap_or_else(|| "<id>".to_string());
+    (parent, id_col)
+}
+
+fn detect_pagination_signal(query: &Query) -> Option<PaginationSignal> {
+    let limit = query.limit.as_ref()?.limit?;
+    let offset = query.limit.as_ref()?.offset?;
+    let order_col = order_by_cols(query).first().cloned();
+    Some(PaginationSignal {
+        table: query_single_base_table(query),
+        order_col,
+        limit: Some(limit),
+        offset,
+    })
+}
+
+fn detect_polling_signal(query: &Query, args: &[Lit]) -> Option<PollingSignal> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    let predicate = select.r#where.as_ref()?;
+    let mut comparisons = Vec::new();
+    collect_comparisons(predicate, &mut comparisons);
+    let order_cols = order_by_cols(query);
+    let limit = query.limit.as_ref().and_then(|l| l.limit);
+    let offset = query.limit.as_ref().and_then(|l| l.offset).unwrap_or(0);
+
+    for comp in comparisons.into_iter() {
+        if !matches!(comp.op.as_str(), "gt" | "ge") {
+            continue;
+        }
+        let value = comparison_value_lit(&comp.value, args);
+        let order_match = order_cols.iter().any(|col| col == &comp.col);
+        if offset > 0 {
+            continue;
+        }
+        return Some(PollingSignal {
+            table: query_single_base_table(query),
+            column: comp.col,
+            value,
+            order_match,
+            limit,
+        });
+    }
+
+    None
+}
+
+fn detect_soft_delete_signal(query: &Query, args: &[Lit]) -> Option<SoftDeleteSignal> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    let predicate = select.r#where.as_ref()?;
+    let mut comparisons = Vec::new();
+    collect_comparisons(predicate, &mut comparisons);
+
+    for comp in comparisons.into_iter() {
+        if !is_soft_delete_column(&comp.col) {
+            continue;
+        }
+        match comp.op.as_str() {
+            "eq" => {
+                let value = comparison_value_lit(&comp.value, args)?;
+                if lit_is_false(&value) || matches!(value, Lit::Null) {
+                    return Some(SoftDeleteSignal {
+                        table: query_single_base_table(query),
+                        column: comp.col,
+                    });
+                }
+            }
+            "is_null" => {
+                return Some(SoftDeleteSignal {
+                    table: query_single_base_table(query),
+                    column: comp.col,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn detect_hierarchy_signals(query: &Query) -> Vec<HierarchySignal> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Vec::new();
+    };
+    let from = match select.from.as_ref() {
+        Some(from) => from,
+        None => return Vec::new(),
+    };
+
+    let mut alias_map = HashMap::new();
+    for tref in from.iter() {
+        if !collect_table_aliases(tref, &mut alias_map) {
+            return Vec::new();
+        }
+    }
+
+    let mut joins = Vec::new();
+    for tref in from.iter() {
+        collect_join_refs(tref, &mut joins);
+    }
+
+    let mut signals = Vec::new();
+    for join in joins.into_iter() {
+        let Some(left) = base_table_from_ref(&join.left) else {
+            continue;
+        };
+        let Some(right) = base_table_from_ref(&join.right) else {
+            continue;
+        };
+        if left.db != right.db || left.table != right.table {
+            continue;
+        }
+
+        let Some(on_expr) = join.on.as_ref() else {
+            continue;
+        };
+        let mut comparisons = Vec::new();
+        collect_column_comparisons(on_expr, &mut comparisons);
+
+        let mut best_parent = None;
+        let mut best_id = None;
+        let mut best_cols: Option<(String, String)> = None;
+        for (left_ref, right_ref) in comparisons.into_iter() {
+            let Some((left_alias, left_col)) = resolve_column_ref(&left_ref) else {
+                continue;
+            };
+            let Some((right_alias, right_col)) = resolve_column_ref(&right_ref) else {
+                continue;
+            };
+            if left_alias == right_alias {
+                continue;
+            }
+            let forward = alias_map.get(&left_alias) == Some(&left)
+                && alias_map.get(&right_alias) == Some(&right);
+            let swapped = alias_map.get(&left_alias) == Some(&right)
+                && alias_map.get(&right_alias) == Some(&left);
+            if !forward && !swapped {
+                continue;
+            }
+            best_cols.get_or_insert_with(|| (left_col.clone(), right_col.clone()));
+            let (parent, id_col) = classify_hierarchy_columns(&left_col, &right_col);
+            if parent.is_some() {
+                best_parent = parent;
+                best_id = id_col;
+                break;
+            }
+            if best_id.is_none() && id_col.is_some() {
+                best_id = id_col;
+            }
+        }
+
+        let columns = best_cols
+            .map(|(left_col, right_col)| vec![left_col, right_col])
+            .unwrap_or_default();
+        signals.push(HierarchySignal {
+            table: left.clone(),
+            columns,
+            parent_col: best_parent,
+            id_col: best_id,
+        });
+    }
+
+    signals
+}
+
+fn detect_recursive_cte_signals(query: &Query) -> Vec<RecursiveCteSignal> {
+    if query.with.is_empty() {
+        return Vec::new();
+    }
+    let mut signals = Vec::new();
+    for cte in query.with.iter() {
+        if !query_body_references_table(cte.query.body.as_ref(), &cte.name) {
+            continue;
+        }
+        let table = first_non_cte_table(cte.query.body.as_ref(), &cte.name);
+        let (parent_col, id_col) = infer_hierarchy_columns_from_cte(&cte.query, &cte.name);
+        signals.push(RecursiveCteSignal {
+            cte_name: cte.name.clone(),
+            table,
+            parent_col,
+            id_col,
+        });
+    }
+    signals
+}
+
+fn detect_exists_signals(query: &Query) -> Vec<ExistsSignal> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Vec::new();
+    };
+    let mut exists_exprs = Vec::new();
+    if let Some(predicate) = select.r#where.as_ref() {
+        collect_exists_exprs(predicate, &mut exists_exprs);
+    }
+    if let Some(predicate) = select.having.as_ref() {
+        collect_exists_exprs(predicate, &mut exists_exprs);
+    }
+
+    let outer_table = query_single_base_table(query);
+    exists_exprs
+        .into_iter()
+        .map(|exists| ExistsSignal {
+            outer_table: outer_table.clone(),
+            inner_table: query_single_base_table(&exists.query),
+            inner_column: exists_inner_column(&exists.query),
+        })
+        .collect()
+}
+
+fn detect_coalesce_signals(query: &Query) -> Vec<CoalesceSignal> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return Vec::new();
+    };
+    let table = query_single_base_table(query);
+    let mut signals = Vec::new();
+
+    for item in select.projection.iter() {
+        collect_coalesce_calls(&item.expr, &table, &mut signals);
+    }
+    if let Some(predicate) = select.r#where.as_ref() {
+        collect_coalesce_calls(predicate, &table, &mut signals);
+    }
+    if let Some(predicate) = select.having.as_ref() {
+        collect_coalesce_calls(predicate, &table, &mut signals);
+    }
+    for ob in query.order_by.iter() {
+        collect_coalesce_calls(&ob.expr, &table, &mut signals);
+    }
+
+    signals
+}
+
+fn query_body_references_table(body: &QueryBody, table_name: &str) -> bool {
+    let mut tables = Vec::new();
+    collect_tables_recursive(body, &mut tables);
+    tables.iter().any(|(_, table)| table == table_name)
+}
+
+fn collect_tables_recursive(body: &QueryBody, out: &mut Vec<(String, String)>) {
+    match body {
+        QueryBody::Select { select } => {
+            if let Some(from) = select.from.as_ref() {
+                for tref in from.iter() {
+                    collect_tables_recursive_from_ref(tref, out);
+                }
+            }
+        }
+        QueryBody::Setop { setop } => {
+            collect_tables_recursive(&setop.left, out);
+            collect_tables_recursive(&setop.right, out);
+        }
+    }
+}
+
+fn collect_tables_recursive_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
+    match tref {
+        TableRef::Base(base) => out.push((base.db.clone(), base.table.clone())),
+        TableRef::Join(join) => {
+            collect_tables_recursive_from_ref(&join.join.left, out);
+            collect_tables_recursive_from_ref(&join.join.right, out);
+        }
+        TableRef::Subquery(sub) => {
+            collect_tables_recursive(&sub.subquery.query.body, out);
+        }
+    }
+}
+
+fn collect_table_aliases_from_body(
+    body: &QueryBody,
+    alias_map: &mut HashMap<String, BaseTableRef>,
+) -> bool {
+    match body {
+        QueryBody::Select { select } => {
+            let mut ok = true;
+            if let Some(from) = select.from.as_ref() {
+                for tref in from.iter() {
+                    if !collect_table_aliases(tref, alias_map) {
+                        ok = false;
+                    }
+                }
+            }
+            ok
+        }
+        QueryBody::Setop { setop } => {
+            collect_table_aliases_from_body(&setop.left, alias_map)
+                && collect_table_aliases_from_body(&setop.right, alias_map)
+        }
+    }
+}
+
+fn collect_column_comparisons_from_body(body: &QueryBody, out: &mut Vec<(ColumnRef, ColumnRef)>) {
+    match body {
+        QueryBody::Select { select } => {
+            if let Some(from) = select.from.as_ref() {
+                for tref in from.iter() {
+                    collect_join_comparisons_from_ref(tref, out);
+                }
+            }
+            if let Some(predicate) = select.r#where.as_ref() {
+                collect_column_comparisons(predicate, out);
+            }
+            if let Some(predicate) = select.having.as_ref() {
+                collect_column_comparisons(predicate, out);
+            }
+        }
+        QueryBody::Setop { setop } => {
+            collect_column_comparisons_from_body(&setop.left, out);
+            collect_column_comparisons_from_body(&setop.right, out);
+        }
+    }
+}
+
+fn collect_join_comparisons_from_ref(tref: &TableRef, out: &mut Vec<(ColumnRef, ColumnRef)>) {
+    match tref {
+        TableRef::Join(join) => {
+            if let Some(on) = join.join.on.as_ref() {
+                collect_column_comparisons(on, out);
+            }
+            collect_join_comparisons_from_ref(&join.join.left, out);
+            collect_join_comparisons_from_ref(&join.join.right, out);
+        }
+        TableRef::Subquery(sub) => {
+            collect_column_comparisons_from_body(&sub.subquery.query.body, out);
+        }
+        TableRef::Base(_) => {}
+    }
+}
+
+fn collect_base_tables_from_body(body: &QueryBody, out: &mut Vec<BaseTableRef>) {
+    match body {
+        QueryBody::Select { select } => {
+            if let Some(from) = select.from.as_ref() {
+                for tref in from.iter() {
+                    collect_base_tables_from_ref(tref, out);
+                }
+            }
+        }
+        QueryBody::Setop { setop } => {
+            collect_base_tables_from_body(&setop.left, out);
+            collect_base_tables_from_body(&setop.right, out);
+        }
+    }
+}
+
+fn collect_base_tables_from_ref(tref: &TableRef, out: &mut Vec<BaseTableRef>) {
+    match tref {
+        TableRef::Base(base) => out.push(base.clone()),
+        TableRef::Join(join) => {
+            collect_base_tables_from_ref(&join.join.left, out);
+            collect_base_tables_from_ref(&join.join.right, out);
+        }
+        TableRef::Subquery(sub) => {
+            collect_base_tables_from_body(&sub.subquery.query.body, out);
+        }
+    }
+}
+
+fn first_non_cte_table(body: &QueryBody, cte_name: &str) -> Option<BaseTableRef> {
+    let mut alias_map = HashMap::new();
+    collect_table_aliases_from_body(body, &mut alias_map);
+    if let Some((_, table)) = alias_map.iter().find(|(_, table)| table.table != cte_name) {
+        return Some(table.clone());
+    }
+
+    let mut tables = Vec::new();
+    collect_base_tables_from_body(body, &mut tables);
+    tables.into_iter().find(|table| table.table != cte_name)
+}
+
+fn infer_hierarchy_columns_from_cte(
+    query: &Query,
+    cte_name: &str,
+) -> (Option<String>, Option<String>) {
+    let mut alias_map = HashMap::new();
+    collect_table_aliases_from_body(query.body.as_ref(), &mut alias_map);
+    let mut base_aliases = HashSet::new();
+    for (alias, table) in alias_map.iter() {
+        if table.table != cte_name {
+            base_aliases.insert(alias.clone());
+        }
+    }
+
+    let mut comparisons = Vec::new();
+    collect_column_comparisons_from_body(query.body.as_ref(), &mut comparisons);
+
+    let mut parent = None;
+    let mut id_col = None;
+    let consider = |col: &ColumnRef, parent: &mut Option<String>, id_col: &mut Option<String>| {
+        if parent.is_none() && is_parent_like_column(&col.col) {
+            *parent = Some(col.col.clone());
+        }
+        if id_col.is_none() && is_id_like_column(&col.col) {
+            *id_col = Some(col.col.clone());
+        }
+    };
+
+    if !base_aliases.is_empty() {
+        for (left, right) in comparisons.iter() {
+            if let Some(table) = left.table.as_ref() {
+                if base_aliases.contains(table) {
+                    consider(left, &mut parent, &mut id_col);
+                }
+            }
+            if let Some(table) = right.table.as_ref() {
+                if base_aliases.contains(table) {
+                    consider(right, &mut parent, &mut id_col);
+                }
+            }
+        }
+    }
+
+    if parent.is_none() || id_col.is_none() {
+        for (left, right) in comparisons.iter() {
+            consider(left, &mut parent, &mut id_col);
+            consider(right, &mut parent, &mut id_col);
+        }
+    }
+
+    (parent, id_col)
+}
+
+fn collect_comparisons(expr: &Expr, out: &mut Vec<Comparison>) {
+    match expr {
+        Expr::Op {
+            op,
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+        } => match op.as_str() {
+            "and" | "or" => {
+                if let Some(items) = args.as_ref() {
+                    for item in items.iter() {
+                        collect_comparisons(item, out);
+                    }
+                } else {
+                    if let Some(left) = a.as_deref() {
+                        collect_comparisons(left, out);
+                    }
+                    if let Some(right) = b.as_deref() {
+                        collect_comparisons(right, out);
+                    }
+                }
+            }
+            "eq" | "gt" | "ge" | "lt" | "le" => {
+                if let (Some(left), Some(right)) = (a.as_deref(), b.as_deref()) {
+                    if let Some((col, value)) = extract_col_value(left, right) {
+                        out.push(Comparison {
+                            col,
+                            op: op.clone(),
+                            value,
+                        });
+                    } else if let Some((col, value)) = extract_col_value(right, left) {
+                        out.push(Comparison {
+                            col,
+                            op: op.clone(),
+                            value,
+                        });
+                    }
+                }
+            }
+            "between" => {
+                if let (Some(expr), Some(lo), Some(hi)) =
+                    (a.as_deref(), lo.as_deref(), hi.as_deref())
+                {
+                    if let Some((col, value)) = extract_col_value(expr, lo) {
+                        out.push(Comparison {
+                            col,
+                            op: "ge".to_string(),
+                            value,
+                        });
+                    }
+                    if let Some((col, value)) = extract_col_value(expr, hi) {
+                        out.push(Comparison {
+                            col,
+                            op: "le".to_string(),
+                            value,
+                        });
+                    }
+                }
+            }
+            "is_null" => {
+                if let Some(Expr::Col { col, .. }) = a.as_deref() {
+                    out.push(Comparison {
+                        col: col.clone(),
+                        op: op.clone(),
+                        value: ComparisonValue::Lit(Lit::Null),
+                    });
+                }
+            }
+            _ => {
+                if let Some(expr) = a.as_deref() {
+                    collect_comparisons(expr, out);
+                }
+                if let Some(expr) = b.as_deref() {
+                    collect_comparisons(expr, out);
+                }
+                if let Some(items) = args.as_ref() {
+                    for item in items.iter() {
+                        collect_comparisons(item, out);
+                    }
+                }
+                if let Some(items) = list.as_ref() {
+                    for item in items.iter() {
+                        collect_comparisons(item, out);
+                    }
+                }
+                if let Some(expr) = lo.as_deref() {
+                    collect_comparisons(expr, out);
+                }
+                if let Some(expr) = hi.as_deref() {
+                    collect_comparisons(expr, out);
+                }
+            }
+        },
+        Expr::Func { args, .. } => {
+            for item in args.iter() {
+                collect_comparisons(item, out);
+            }
+        }
+        Expr::Cast { cast } => {
+            collect_comparisons(&cast.expr, out);
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                collect_comparisons(&when.r#if, out);
+                collect_comparisons(&when.then, out);
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                collect_comparisons(other, out);
+            }
+        }
+        Expr::Subquery { .. }
+        | Expr::Exists { .. }
+        | Expr::Col { .. }
+        | Expr::Lit { .. }
+        | Expr::Param { .. } => {}
+    }
+}
+
+fn collect_column_comparisons(expr: &Expr, out: &mut Vec<(ColumnRef, ColumnRef)>) {
+    match expr {
+        Expr::Op {
+            op,
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+        } => match op.as_str() {
+            "and" | "or" => {
+                if let Some(items) = args.as_ref() {
+                    for item in items.iter() {
+                        collect_column_comparisons(item, out);
+                    }
+                } else {
+                    if let Some(left) = a.as_deref() {
+                        collect_column_comparisons(left, out);
+                    }
+                    if let Some(right) = b.as_deref() {
+                        collect_column_comparisons(right, out);
+                    }
+                }
+            }
+            "eq" => {
+                if let (Some(left), Some(right)) = (a.as_deref(), b.as_deref()) {
+                    if let (Some(left_col), Some(right_col)) =
+                        (column_ref_from_expr(left), column_ref_from_expr(right))
+                    {
+                        out.push((left_col, right_col));
+                    }
+                }
+            }
+            _ => {
+                if let Some(expr) = a.as_deref() {
+                    collect_column_comparisons(expr, out);
+                }
+                if let Some(expr) = b.as_deref() {
+                    collect_column_comparisons(expr, out);
+                }
+                if let Some(items) = args.as_ref() {
+                    for item in items.iter() {
+                        collect_column_comparisons(item, out);
+                    }
+                }
+                if let Some(items) = list.as_ref() {
+                    for item in items.iter() {
+                        collect_column_comparisons(item, out);
+                    }
+                }
+                if let Some(expr) = lo.as_deref() {
+                    collect_column_comparisons(expr, out);
+                }
+                if let Some(expr) = hi.as_deref() {
+                    collect_column_comparisons(expr, out);
+                }
+            }
+        },
+        Expr::Func { args, .. } => {
+            for item in args.iter() {
+                collect_column_comparisons(item, out);
+            }
+        }
+        Expr::Cast { cast } => {
+            collect_column_comparisons(&cast.expr, out);
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                collect_column_comparisons(&when.r#if, out);
+                collect_column_comparisons(&when.then, out);
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                collect_column_comparisons(other, out);
+            }
+        }
+        Expr::Subquery { .. }
+        | Expr::Exists { .. }
+        | Expr::Col { .. }
+        | Expr::Lit { .. }
+        | Expr::Param { .. } => {}
+    }
+}
+
+fn column_ref_from_expr(expr: &Expr) -> Option<ColumnRef> {
+    match expr {
+        Expr::Col { col, table } => Some(ColumnRef {
+            table: table.clone(),
+            col: col.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn collect_join_refs(tref: &TableRef, out: &mut Vec<JoinRef>) {
+    let TableRef::Join(join) = tref else {
+        return;
+    };
+    out.push(join.join.clone());
+    collect_join_refs(&join.join.left, out);
+    collect_join_refs(&join.join.right, out);
+}
+
+fn base_table_from_ref(tref: &TableRef) -> Option<BaseTableRef> {
+    match tref {
+        TableRef::Base(base) => Some(base.clone()),
+        _ => None,
+    }
+}
+
+fn resolve_column_ref(col: &ColumnRef) -> Option<(String, String)> {
+    let alias = col.table.clone()?;
+    Some((alias, col.col.clone()))
+}
+
+fn classify_hierarchy_columns(left: &str, right: &str) -> (Option<String>, Option<String>) {
+    if is_parent_like_column(left) && is_id_like_column(right) {
+        return (Some(left.to_string()), Some(right.to_string()));
+    }
+    if is_parent_like_column(right) && is_id_like_column(left) {
+        return (Some(right.to_string()), Some(left.to_string()));
+    }
+    if is_parent_like_column(left) {
+        return (Some(left.to_string()), None);
+    }
+    if is_parent_like_column(right) {
+        return (Some(right.to_string()), None);
+    }
+    if is_id_like_column(left) {
+        return (None, Some(left.to_string()));
+    }
+    if is_id_like_column(right) {
+        return (None, Some(right.to_string()));
+    }
+    (None, None)
+}
+
+fn collect_exists_exprs(expr: &Expr, out: &mut Vec<ExistsExpr>) {
+    match expr {
+        Expr::Exists { exists } => {
+            out.push(exists.clone());
+        }
+        Expr::Op {
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+            ..
+        } => {
+            if let Some(left) = a.as_deref() {
+                collect_exists_exprs(left, out);
+            }
+            if let Some(right) = b.as_deref() {
+                collect_exists_exprs(right, out);
+            }
+            if let Some(items) = args.as_ref() {
+                for item in items.iter() {
+                    collect_exists_exprs(item, out);
+                }
+            }
+            if let Some(items) = list.as_ref() {
+                for item in items.iter() {
+                    collect_exists_exprs(item, out);
+                }
+            }
+            if let Some(expr) = lo.as_deref() {
+                collect_exists_exprs(expr, out);
+            }
+            if let Some(expr) = hi.as_deref() {
+                collect_exists_exprs(expr, out);
+            }
+        }
+        Expr::Func { args, .. } => {
+            for arg in args.iter() {
+                collect_exists_exprs(arg, out);
+            }
+        }
+        Expr::Cast { cast } => {
+            collect_exists_exprs(&cast.expr, out);
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                collect_exists_exprs(&when.r#if, out);
+                collect_exists_exprs(&when.then, out);
+            }
+            if let Some(other) = case_.r#else.as_deref() {
+                collect_exists_exprs(other, out);
+            }
+        }
+        Expr::Subquery { .. } => {}
+        Expr::Col { .. } | Expr::Lit { .. } | Expr::Param { .. } => {}
+    }
+}
+
+fn collect_coalesce_calls(
+    expr: &Expr,
+    table: &Option<BaseTableRef>,
+    out: &mut Vec<CoalesceSignal>,
+) {
+    match expr {
+        Expr::Func { name, args, .. } => {
+            if is_coalesce_name(name) {
+                if let Some(signal) = coalesce_signal_from_args(args, table) {
+                    out.push(signal);
+                }
+            }
+            for arg in args.iter() {
+                collect_coalesce_calls(arg, table, out);
+            }
+        }
+        Expr::Op {
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+            ..
+        } => {
+            if let Some(left) = a.as_deref() {
+                collect_coalesce_calls(left, table, out);
+            }
+            if let Some(right) = b.as_deref() {
+                collect_coalesce_calls(right, table, out);
+            }
+            if let Some(items) = args.as_ref() {
+                for item in items.iter() {
+                    collect_coalesce_calls(item, table, out);
+                }
+            }
+            if let Some(items) = list.as_ref() {
+                for item in items.iter() {
+                    collect_coalesce_calls(item, table, out);
+                }
+            }
+            if let Some(expr) = lo.as_deref() {
+                collect_coalesce_calls(expr, table, out);
+            }
+            if let Some(expr) = hi.as_deref() {
+                collect_coalesce_calls(expr, table, out);
+            }
+        }
+        Expr::Cast { cast } => {
+            collect_coalesce_calls(&cast.expr, table, out);
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                collect_coalesce_calls(&when.r#if, table, out);
+                collect_coalesce_calls(&when.then, table, out);
+            }
+            if let Some(other) = case_.r#else.as_deref() {
+                collect_coalesce_calls(other, table, out);
+            }
+        }
+        Expr::Subquery { .. } | Expr::Exists { .. } => {}
+        Expr::Col { .. } | Expr::Lit { .. } | Expr::Param { .. } => {}
+    }
+}
+
+fn coalesce_signal_from_args(
+    args: &[Expr],
+    table: &Option<BaseTableRef>,
+) -> Option<CoalesceSignal> {
+    if args.len() < 2 {
+        return None;
+    }
+    let column = match &args[0] {
+        Expr::Col { col, .. } => col.clone(),
+        _ => return None,
+    };
+    let default_value = match &args[1] {
+        Expr::Lit { lit } => Some(lit.clone()),
+        _ => None,
+    };
+    Some(CoalesceSignal {
+        table: table.clone(),
+        column,
+        default_value,
+        arg_count: args.len(),
+    })
+}
+
+fn is_coalesce_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "coalesce" | "ifnull" | "nvl")
+}
+
+fn exists_inner_column(query: &Query) -> Option<String> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    if let Some(predicate) = select.r#where.as_ref() {
+        if let Some(col) = first_column_in_expr(predicate) {
+            return Some(col);
+        }
+    }
+    if let Some(predicate) = select.having.as_ref() {
+        if let Some(col) = first_column_in_expr(predicate) {
+            return Some(col);
+        }
+    }
+    for item in select.projection.iter() {
+        if let Some(col) = first_column_in_expr(&item.expr) {
+            return Some(col);
+        }
+    }
+    None
+}
+
+fn first_column_in_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Col { col, .. } => Some(col.clone()),
+        Expr::Op {
+            a,
+            b,
+            args,
+            list,
+            lo,
+            hi,
+            ..
+        } => {
+            if let Some(left) = a.as_deref() {
+                if let Some(col) = first_column_in_expr(left) {
+                    return Some(col);
+                }
+            }
+            if let Some(right) = b.as_deref() {
+                if let Some(col) = first_column_in_expr(right) {
+                    return Some(col);
+                }
+            }
+            if let Some(items) = args.as_ref() {
+                for item in items.iter() {
+                    if let Some(col) = first_column_in_expr(item) {
+                        return Some(col);
+                    }
+                }
+            }
+            if let Some(items) = list.as_ref() {
+                for item in items.iter() {
+                    if let Some(col) = first_column_in_expr(item) {
+                        return Some(col);
+                    }
+                }
+            }
+            if let Some(expr) = lo.as_deref() {
+                if let Some(col) = first_column_in_expr(expr) {
+                    return Some(col);
+                }
+            }
+            if let Some(expr) = hi.as_deref() {
+                if let Some(col) = first_column_in_expr(expr) {
+                    return Some(col);
+                }
+            }
+            None
+        }
+        Expr::Func { args, .. } => {
+            for arg in args.iter() {
+                if let Some(col) = first_column_in_expr(arg) {
+                    return Some(col);
+                }
+            }
+            None
+        }
+        Expr::Cast { cast } => first_column_in_expr(&cast.expr),
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                if let Some(col) = first_column_in_expr(&when.r#if) {
+                    return Some(col);
+                }
+                if let Some(col) = first_column_in_expr(&when.then) {
+                    return Some(col);
+                }
+            }
+            case_.r#else.as_deref().and_then(first_column_in_expr)
+        }
+        Expr::Subquery { .. } | Expr::Exists { .. } => None,
+        Expr::Lit { .. } | Expr::Param { .. } => None,
+    }
+}
+
+fn extract_col_value(left: &Expr, right: &Expr) -> Option<(String, ComparisonValue)> {
+    let Expr::Col { col, .. } = left else {
+        return None;
+    };
+    let value = match right {
+        Expr::Lit { lit } => ComparisonValue::Lit(lit.clone()),
+        Expr::Param { param } => ComparisonValue::Param(*param),
+        _ => return None,
+    };
+    Some((col.clone(), value))
+}
+
+fn comparison_value_lit(value: &ComparisonValue, args: &[Lit]) -> Option<Lit> {
+    match value {
+        ComparisonValue::Lit(lit) => Some(lit.clone()),
+        ComparisonValue::Param(param) => args.get(*param as usize).cloned(),
+    }
+}
+
+fn order_by_cols(query: &Query) -> Vec<String> {
+    let mut out = Vec::new();
+    for ob in query.order_by.iter() {
+        if let Expr::Col { col, .. } = &ob.expr {
+            out.push(col.clone());
+        }
+    }
+    out
+}
+
+fn query_single_base_table(query: &Query) -> Option<BaseTableRef> {
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    let from = select.from.as_ref()?;
+    if from.len() != 1 {
+        return None;
+    }
+    match &from[0] {
+        TableRef::Base(base) => Some(base.clone()),
+        _ => None,
+    }
+}
+
+fn is_soft_delete_column(column: &str) -> bool {
+    let col = column.to_ascii_lowercase();
+    matches!(
+        col.as_str(),
+        "deleted" | "is_deleted" | "deleted_at" | "deleted_on" | "deleted_at_ms" | "deleted_on_ms"
+    ) || col.ends_with("_deleted")
+        || col.ends_with("_deleted_at")
+        || col.ends_with("_deleted_on")
+        || col.ends_with("_deleted_at_ms")
+        || col.ends_with("_deleted_on_ms")
+}
+
+fn lit_is_false(lit: &Lit) -> bool {
+    matches!(lit, Lit::Bool { v: false })
+        || matches!(lit, Lit::I64 { v: 0 })
+        || matches!(lit, Lit::U64 { v: 0 })
+        || matches!(lit, Lit::Str { v } if v == "false" || v == "0")
+}
+
+fn has_increasing_sequence(values: &[f64]) -> bool {
+    if values.len() < 2 {
+        return false;
+    }
+    let mut prev = values[0];
+    for v in values.iter().skip(1) {
+        if *v <= prev {
+            return false;
+        }
+        prev = *v;
+    }
+    true
+}
+
+fn expr_const_value(expr: &Expr, args: &[Lit]) -> Option<Lit> {
+    match expr {
+        Expr::Lit { lit } => Some(lit.clone()),
+        Expr::Param { param } => args.get(*param as usize).cloned(),
+        _ => None,
+    }
+}
+
+fn collect_index_eq_filters(
+    expr: &Expr,
+    single_alias: Option<&str>,
+    alias_map: &HashMap<String, BaseTableRef>,
+    args: &[Lit],
+    out: &mut Vec<(String, Lit)>,
+) -> bool {
+    let Expr::Op {
+        op,
+        a,
+        b,
+        args: vargs,
+        ..
+    } = expr
+    else {
+        return true;
+    };
+
+    match op.as_str() {
+        "and" => {
+            if let Some(items) = vargs.as_ref() {
+                for item in items.iter() {
+                    if !collect_index_eq_filters(item, single_alias, alias_map, args, out) {
+                        return false;
+                    }
+                }
+            } else {
+                if let Some(left) = a.as_deref() {
+                    if !collect_index_eq_filters(left, single_alias, alias_map, args, out) {
+                        return false;
+                    }
+                }
+                if let Some(right) = b.as_deref() {
+                    if !collect_index_eq_filters(right, single_alias, alias_map, args, out) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        "or" | "not" => false,
+        "eq" => {
+            let left = a
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
+            let right = b
+                .as_deref()
+                .and_then(|expr| expr_column_ref(expr, single_alias, alias_map));
+            if let (Some((_alias, col)), Some(value)) = (
+                left,
+                b.as_deref().and_then(|expr| expr_const_value(expr, args)),
+            ) {
+                out.push((col, value));
+            } else if let (Some((_alias, col)), Some(value)) = (
+                right,
+                a.as_deref().and_then(|expr| expr_const_value(expr, args)),
+            ) {
+                out.push((col, value));
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+// -----------------------------
+// Dependency extraction
+// -----------------------------
+
+fn collect_tables(query: &Query, out: &mut Vec<(String, String)>) {
+    match query.body.as_ref() {
+        QueryBody::Select { select } => {
+            if let Some(from) = &select.from {
+                for tref in from.iter() {
+                    collect_tables_from_ref(tref, out);
+                }
+            }
+        }
+        QueryBody::Setop { .. } => {}
+    }
+}
+
+fn collect_tables_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
+    match tref {
+        TableRef::Base(b) => out.push((b.db.clone(), b.table.clone())),
+        TableRef::Join(j) => {
+            collect_tables_from_ref(&j.join.left, out);
+            collect_tables_from_ref(&j.join.right, out);
+        }
+        TableRef::Subquery(_) => {}
+    }
+}
+
+// -----------------------------
+// JSON helpers
+// -----------------------------
+
+fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(value)?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use skeindb_skeinql::methods::{
+        AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
+        AdvisorIndexSynthesizeParams, EdgeBundleWindow, MigrationIntentReportParams,
+        MigrationIntentSample, WasmPlanCompileParams,
+    };
+    use skeindb_skeinql::types::{
+        Cte, ExistsExpr, JoinRef, JoinTableRef, JoinType, LimitClause, SelectItem, SetOp, SetOpKind,
+    };
+
+    fn type_desc(kind: &str) -> TypeDesc {
+        TypeDesc {
+            kind: kind.to_string(),
+            max: None,
+            precision: None,
+            scale: None,
+            charset: None,
+            collation: None,
+            unsigned: None,
+        }
+    }
+
+    fn row(entries: &[(&str, Lit)]) -> RowObject {
+        let mut out = RowObject::new();
+        for (k, v) in entries.iter() {
+            out.insert((*k).to_string(), v.clone());
+        }
+        out
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let unique = format!(
+            "skeindb_test_{}_{}_{}",
+            label,
+            std::process::id(),
+            now_micros()
+        );
+        dir.push(unique);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn eq_expr(left: Expr, right: Expr) -> Expr {
+        Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(left)),
+            b: Some(Box::new(right)),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        }
+    }
+
+    fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+        let mut buf = [0u8; 4];
+        if offset + 4 <= bytes.len() {
+            buf.copy_from_slice(&bytes[offset..offset + 4]);
+        }
+        u32::from_le_bytes(buf)
+    }
+
+    fn base_query(db: &str, table: &str, projection: Vec<Expr>, predicate: Option<Expr>) -> Query {
+        let items = projection
+            .into_iter()
+            .map(|expr| skeindb_skeinql::types::SelectItem { expr, r#as: None })
+            .collect::<Vec<_>>();
+        Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: items,
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: db.to_string(),
+                        table: table.to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: predicate,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        }
+    }
+
+    fn recursive_cte_query() -> Query {
+        let anchor = SelectBody {
+            distinct: None,
+            projection: vec![SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("c".to_string()),
+                },
+                r#as: None,
+            }],
+            from: Some(vec![TableRef::Base(BaseTableRef {
+                db: "app".to_string(),
+                table: "categories".to_string(),
+                r#as: Some("c".to_string()),
+            })]),
+            r#where: None,
+            group_by: None,
+            having: None,
+        };
+
+        let join_on = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "parent_id".to_string(),
+                table: Some("child".to_string()),
+            })),
+            b: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: Some("parent".to_string()),
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let recursive = SelectBody {
+            distinct: None,
+            projection: vec![SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("child".to_string()),
+                },
+                r#as: None,
+            }],
+            from: Some(vec![TableRef::Join(JoinTableRef {
+                join: JoinRef {
+                    join_type: JoinType::Inner,
+                    left: Box::new(TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "categories".to_string(),
+                        r#as: Some("child".to_string()),
+                    })),
+                    right: Box::new(TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "tree".to_string(),
+                        r#as: Some("parent".to_string()),
+                    })),
+                    on: Some(join_on),
+                },
+            })]),
+            r#where: None,
+            group_by: None,
+            having: None,
+        };
+
+        let cte_query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Setop {
+                setop: SetOp {
+                    kind: SetOpKind::Union,
+                    all: true,
+                    left: Box::new(QueryBody::Select {
+                        select: Box::new(anchor),
+                    }),
+                    right: Box::new(QueryBody::Select {
+                        select: Box::new(recursive),
+                    }),
+                },
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        Query {
+            with: vec![Cte {
+                name: "tree".to_string(),
+                query: cte_query,
+            }],
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Col {
+                            col: "id".to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "tree".to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        }
+    }
+
+    #[test]
+    fn wasm_batch_roundtrip_fixed_and_varlen() -> anyhow::Result<()> {
+        let columns = vec![
+            ColumnMeta {
+                name: "flag".to_string(),
+                r#type: type_desc("bool"),
+            },
+            ColumnMeta {
+                name: "delta".to_string(),
+                r#type: type_desc("i64"),
+            },
+            ColumnMeta {
+                name: "count".to_string(),
+                r#type: type_desc("u64"),
+            },
+            ColumnMeta {
+                name: "ratio".to_string(),
+                r#type: type_desc("f64"),
+            },
+            ColumnMeta {
+                name: "label".to_string(),
+                r#type: type_desc("str"),
+            },
+            ColumnMeta {
+                name: "blob".to_string(),
+                r#type: type_desc("bytes"),
+            },
+        ];
+
+        let rows = vec![
+            vec![
+                Lit::Bool { v: true },
+                Lit::I64 { v: -7 },
+                Lit::U64 { v: 42 },
+                Lit::F64 { v: 3.25 },
+                Lit::Str {
+                    v: "alpha".to_string(),
+                },
+                Lit::Bytes {
+                    b64: "YWJj".to_string(),
+                },
+            ],
+            vec![
+                Lit::Null,
+                Lit::I64 { v: 0 },
+                Lit::U64 { v: 0 },
+                Lit::F64 { v: -0.5 },
+                Lit::Str { v: "".to_string() },
+                Lit::Null,
+            ],
+        ];
+
+        let encoded = wasm_batch::encode_wasm_batch_v1(&columns, &rows)?;
+        let (_decoded_cols, decoded_rows) = wasm_batch::decode_wasm_batch_v1(&encoded)?;
+        assert_eq!(decoded_rows, rows);
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_batch_infers_unknown_column_type() -> anyhow::Result<()> {
+        let columns = vec![ColumnMeta {
+            name: "id".to_string(),
+            r#type: type_desc("unknown"),
+        }];
+        let rows = vec![vec![Lit::U64 { v: 7 }]];
+        let encoded = wasm_batch::encode_wasm_batch_v1(&columns, &rows)?;
+        let (decoded_cols, decoded_rows) = wasm_batch::decode_wasm_batch_v1(&encoded)?;
+        assert_eq!(decoded_rows, rows);
+        assert_eq!(decoded_cols[0].r#type.kind, "u64");
+        Ok(())
+    }
+
+    #[test]
+    fn query_patch_wasm_batch() -> anyhow::Result<()> {
+        let dir = temp_dir("patch_wasm_batch");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::U64 { v: 3 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::U64 { v: 8 })]),
+            ],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "score".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+
+        let base = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            true,
+            None,
+            None,
+            None,
+            false,
+        )?;
+        let base_etag = base.etag.clone().expect("etag");
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                ("score", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let patch = engine.query_patch(
+            &query,
+            &[],
+            ResultFormat::WasmBatchV1,
+            Some(&base_etag),
+            None,
+            None,
+            false,
+            false,
+        )?;
+        let data = patch
+            .data
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let added = data
+            .get("added")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0]["row_idx"].as_u64(), Some(0));
+
+        let batch = data
+            .get("added_batch")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            batch.get("format").and_then(|v| v.as_str()),
+            Some("skein.wasm.batch.v1")
+        );
+        let batch_b64 = batch
+            .get("batch_b64")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let bytes = BASE64_STANDARD.decode(batch_b64.as_bytes())?;
+        assert!(bytes.len() >= 20);
+        assert_eq!(read_u32_le(&bytes, 0), 0x31424B53);
+        assert_eq!(read_u32_le(&bytes, 8), 1);
+        assert_eq!(read_u32_le(&bytes, 12), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_build_and_query_select() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_build");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Tokyo".to_string(),
+                    },
+                ),
+            ]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["id".to_string(), "city".to_string()]),
+            now_micros(),
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            )),
+        );
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Tokyo".to_string()
+            }]
+        );
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert!(hits > 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn index_advisor_synthesizes_candidate() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+                ("created_at", Lit::U64 { v: 10 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ava".to_string(),
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+                ("created_at", Lit::U64 { v: 11 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Bo".to_string(),
+                    },
+                ),
+            ]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+
+        let (_cols, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "Oslo".to_string(),
+            }],
+        )?;
+        assert_eq!(rows.len(), 2);
+
+        let result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        assert!(!result.suggestions.is_empty());
+        let suggestion = &result.suggestions[0];
+        assert!(suggestion.id.is_some());
+        assert_eq!(
+            suggestion.columns,
+            vec!["city".to_string(), "created_at".to_string()]
+        );
+        assert!(suggestion.include.contains(&"name".to_string()));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn index_advisor_join_patterns() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_join");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "cities",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "country".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("city_id", Lit::U64 { v: 10 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("city_id", Lit::U64 { v: 11 })]),
+            ],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "cities".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 10 }),
+                    (
+                        "country",
+                        Lit::Str {
+                            v: "NO".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 11 }),
+                    (
+                        "country",
+                        Lit::Str {
+                            v: "SE".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        skeindb_skeinql::types::SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: Some("u".to_string()),
+                            },
+                            r#as: None,
+                        },
+                        skeindb_skeinql::types::SelectItem {
+                            expr: Expr::Col {
+                                col: "country".to_string(),
+                                table: Some("c".to_string()),
+                            },
+                            r#as: None,
+                        },
+                    ],
+                    from: Some(vec![TableRef::Join(skeindb_skeinql::types::JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Inner,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "users".to_string(),
+                                r#as: Some("u".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "cities".to_string(),
+                                r#as: Some("c".to_string()),
+                            })),
+                            on: Some(eq_expr(
+                                Expr::Col {
+                                    col: "city_id".to_string(),
+                                    table: Some("u".to_string()),
+                                },
+                                Expr::Col {
+                                    col: "id".to_string(),
+                                    table: Some("c".to_string()),
+                                },
+                            )),
+                        },
+                    })]),
+                    r#where: Some(eq_expr(
+                        Expr::Col {
+                            col: "country".to_string(),
+                            table: Some("c".to_string()),
+                        },
+                        Expr::Param { param: 0 },
+                    )),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: vec![OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("u".to_string()),
+                },
+                dir: None,
+            }],
+            limit: None,
+            lock: None,
+        };
+
+        let (_cols, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "NO".to_string(),
+            }],
+        )?;
+        assert_eq!(rows.len(), 1);
+
+        let users_result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        let users_suggestion = users_result
+            .suggestions
+            .iter()
+            .find(|s| s.columns == vec!["city_id".to_string(), "id".to_string()])
+            .expect("missing users suggestion");
+        assert!(users_suggestion.score > users_suggestion.rows_scanned as f64);
+
+        let cities_result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "cities".to_string(),
+                r#as: None,
+            },
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        let cities_suggestion = cities_result
+            .suggestions
+            .iter()
+            .find(|s| s.columns == vec!["country".to_string(), "id".to_string()])
+            .expect("missing cities suggestion");
+        assert!(cities_suggestion.score > cities_suggestion.rows_scanned as f64);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn index_advisor_extracts_group_and_like() {
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![skeindb_skeinql::types::SelectItem {
+                        expr: Expr::Col {
+                            col: "city".to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "users".to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: Some(Expr::Op {
+                        op: "like".to_string(),
+                        a: Some(Box::new(Expr::Col {
+                            col: "name".to_string(),
+                            table: None,
+                        })),
+                        b: Some(Box::new(Expr::Lit {
+                            lit: Lit::Str {
+                                v: "Al%".to_string(),
+                            },
+                        })),
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    }),
+                    group_by: Some(vec![Expr::Col {
+                        col: "city".to_string(),
+                        table: None,
+                    }]),
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let infos = query_index_infos(&query);
+        assert_eq!(infos.len(), 1);
+        let info = &infos[0];
+        assert!(info.group_cols.contains(&"city".to_string()));
+        assert!(info.range_cols.contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn index_advisor_history_records_actions() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_history");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: Some("apply".to_string()),
+        })?;
+        assert!(apply.accepted);
+
+        let dismiss = engine.advisor_index_dismiss(AdvisorIndexDismissParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: Some("dismiss".to_string()),
+        })?;
+        assert!(dismiss.dismissed);
+
+        let history = engine.advisor_history(AdvisorHistoryParams {
+            table: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            }),
+            limit: Some(10),
+        })?;
+        assert_eq!(history.entries.len(), 2);
+        assert!(history.entries.iter().any(|e| e.action == "apply"));
+        assert!(history.entries.iter().any(|e| e.action == "dismiss"));
+        let metrics = engine.advisor_metrics_snapshot();
+        assert_eq!(metrics.applied_total, 1);
+        assert_eq!(metrics.rejected_total, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_index_apply_builds_secondary_index() -> anyhow::Result<()> {
+        let dir = temp_dir("index_apply_builds");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: None,
+        })?;
+        assert!(apply.accepted);
+
+        let (schema, tdata) = engine.get_table(&BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        })?;
+        let mut filters = HashMap::new();
+        filters.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
+        assert_eq!(candidates.len(), 2);
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        let (schema, tdata) = engine.get_table(&BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        })?;
+        let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
+        assert_eq!(candidates.len(), 3);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_intent_report_detects_pagination() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_pagination");
+        let engine = Engine::open(&dir)?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        query.limit = Some(LimitClause {
+            limit: Some(10),
+            offset: Some(20),
+        });
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "pagination.offset_limit"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_rewrite_preview_pagination() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_rewrite_preview");
+        let engine = Engine::open(&dir)?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        query.limit = Some(LimitClause {
+            limit: Some(10),
+            offset: Some(20),
+        });
+
+        let preview = engine.migration_rewrite_preview(MigrationRewritePreviewParams {
+            samples: Some(vec![MigrationIntentSample {
+                query,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(5),
+            window_ms: None,
+        })?;
+
+        let rewrite = preview
+            .rewrites
+            .iter()
+            .find(|item| item.intent == "pagination.offset_limit")
+            .expect("missing pagination rewrite");
+        assert!(rewrite.before.contains("app.users"));
+        assert!(rewrite.before.contains("LIMIT 10 OFFSET 20"));
+        assert!(rewrite.after.contains("cursor pagination"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_rewrite_preview_exists() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_rewrite_exists");
+        let engine = Engine::open(&dir)?;
+
+        let inner_pred = eq_expr(
+            Expr::Col {
+                col: "user_id".to_string(),
+                table: None,
+            },
+            Expr::Param { param: 0 },
+        );
+        let inner_query = base_query(
+            "app",
+            "orders",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(inner_pred),
+        );
+        let exists_expr = Expr::Exists {
+            exists: ExistsExpr {
+                query: inner_query,
+                negated: None,
+            },
+        };
+        let exists_query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(exists_expr),
+        );
+
+        let preview = engine.migration_rewrite_preview(MigrationRewritePreviewParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: exists_query,
+                args: vec![Lit::U64 { v: 42 }],
+                at_ms: None,
+            }]),
+            limit: Some(5),
+            window_ms: None,
+        })?;
+
+        let rewrite = preview
+            .rewrites
+            .iter()
+            .find(|item| item.intent == "exists.membership")
+            .expect("missing exists rewrite");
+        assert!(rewrite.before.contains("EXISTS"));
+        assert!(rewrite.after.contains("JOIN"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_intent_report_detects_hierarchy_self_join() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_hierarchy");
+        let engine = Engine::open(&dir)?;
+
+        let join_on = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "parent_id".to_string(),
+                table: Some("child".to_string()),
+            })),
+            b: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: Some("parent".to_string()),
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let join_query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Col {
+                            col: "id".to_string(),
+                            table: Some("child".to_string()),
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Inner,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "categories".to_string(),
+                                r#as: Some("child".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "categories".to_string(),
+                                r#as: Some("parent".to_string()),
+                            })),
+                            on: Some(join_on),
+                        },
+                    })]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: join_query,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "hierarchy.adjacency"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_intent_report_detects_recursive_cte() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_recursive_cte");
+        let engine = Engine::open(&dir)?;
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: recursive_cte_query(),
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "hierarchy.recursive_cte"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_rewrite_preview_hierarchy() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_rewrite_hierarchy");
+        let engine = Engine::open(&dir)?;
+
+        let join_on = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "parent_id".to_string(),
+                table: Some("child".to_string()),
+            })),
+            b: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: Some("parent".to_string()),
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let join_query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Col {
+                            col: "id".to_string(),
+                            table: Some("child".to_string()),
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Inner,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "categories".to_string(),
+                                r#as: Some("child".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "categories".to_string(),
+                                r#as: Some("parent".to_string()),
+                            })),
+                            on: Some(join_on),
+                        },
+                    })]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let preview = engine.migration_rewrite_preview(MigrationRewritePreviewParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: join_query,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(5),
+            window_ms: None,
+        })?;
+
+        let rewrite = preview
+            .rewrites
+            .iter()
+            .find(|item| item.intent == "hierarchy.adjacency")
+            .expect("missing hierarchy rewrite");
+        assert!(rewrite.before.contains("JOIN"));
+        assert!(rewrite.after.contains("roots ="));
+        assert!(rewrite.after.contains("max_depth"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_rewrite_preview_recursive_cte() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_rewrite_recursive");
+        let engine = Engine::open(&dir)?;
+
+        let preview = engine.migration_rewrite_preview(MigrationRewritePreviewParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: recursive_cte_query(),
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(5),
+            window_ms: None,
+        })?;
+
+        let rewrite = preview
+            .rewrites
+            .iter()
+            .find(|item| item.intent == "hierarchy.recursive_cte")
+            .expect("missing recursive cte rewrite");
+        assert!(rewrite.before.contains("WITH RECURSIVE"));
+        assert!(rewrite.before.contains("UNION ALL"));
+        assert!(rewrite.before.contains("categories"));
+        assert!(rewrite.before.contains("parent_id"));
+        assert!(rewrite.after.contains("graph.traverse"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_intent_report_detects_polling_and_soft_delete() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_polling");
+        let engine = Engine::open(&dir)?;
+
+        let poll_pred = Expr::Op {
+            op: "gt".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "updated_at".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Param { param: 0 })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let mut poll_query = base_query(
+            "app",
+            "events",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(poll_pred),
+        );
+        poll_query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "updated_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        poll_query.limit = Some(LimitClause {
+            limit: Some(50),
+            offset: None,
+        });
+
+        let soft_pred = Expr::Op {
+            op: "is_null".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "deleted_at".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let soft_query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(soft_pred),
+        );
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![
+                MigrationIntentSample {
+                    query: poll_query.clone(),
+                    args: vec![Lit::U64 { v: 10 }],
+                    at_ms: None,
+                },
+                MigrationIntentSample {
+                    query: poll_query,
+                    args: vec![Lit::U64 { v: 20 }],
+                    at_ms: None,
+                },
+                MigrationIntentSample {
+                    query: soft_query,
+                    args: Vec::new(),
+                    at_ms: None,
+                },
+            ]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "polling.incremental"));
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "soft_delete.filter"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_intent_report_detects_exists_and_coalesce() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_exists_coalesce");
+        let engine = Engine::open(&dir)?;
+
+        let inner_pred = eq_expr(
+            Expr::Col {
+                col: "user_id".to_string(),
+                table: None,
+            },
+            Expr::Param { param: 0 },
+        );
+        let inner_query = base_query(
+            "app",
+            "orders",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(inner_pred),
+        );
+        let exists_expr = Expr::Exists {
+            exists: ExistsExpr {
+                query: inner_query,
+                negated: None,
+            },
+        };
+        let exists_query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(exists_expr),
+        );
+
+        let coalesce_expr = Expr::Func {
+            name: "coalesce".to_string(),
+            args: vec![
+                Expr::Col {
+                    col: "status".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "active".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        let coalesce_query = base_query("app", "users", vec![coalesce_expr], None);
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![
+                MigrationIntentSample {
+                    query: exists_query,
+                    args: vec![Lit::U64 { v: 42 }],
+                    at_ms: None,
+                },
+                MigrationIntentSample {
+                    query: coalesce_query,
+                    args: Vec::new(),
+                    at_ms: None,
+                },
+            ]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "exists.membership"));
+        assert!(report
+            .suggestions
+            .iter()
+            .any(|s| s.intent == "defaults.coalesce"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn min_causality_rejects_future_version() -> anyhow::Result<()> {
+        let dir = temp_dir("min_causality_rejects");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+
+        let token = CausalityToken {
+            format: CAUSALITY_FORMAT_V1.to_string(),
+            deps: vec![CausalityDependency {
+                table: "app.users".to_string(),
+                v: Some(999),
+                view: None,
+                change_seq: None,
+                stale: None,
+            }],
+        };
+
+        let err = engine
+            .query_select(
+                &query,
+                &[],
+                ResultFormat::ObjectsJson,
+                false,
+                None,
+                Some(&token),
+                None,
+                false,
+            )
+            .expect_err("expected causality enforcement error");
+        assert!(err.to_string().contains("causality_not_satisfied"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn edge_bundle_redaction_hashes_pk() -> anyhow::Result<()> {
+        let dir = temp_dir("edge_bundle_redaction");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 7 })])],
+            None,
+        )?;
+
+        let params = EdgeBundleRequestParams {
+            windows: vec![EdgeBundleWindow {
+                table: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                from_seq: Some(0),
+                to_seq: None,
+                max_events: None,
+            }],
+            redaction: Some(EdgeBundleRedaction {
+                mode: "hash_pk".to_string(),
+                salt: Some("salt".to_string()),
+            }),
+            bundle_id: Some("bundle_test".to_string()),
+        };
+
+        let result = engine.edge_bundle_request(params)?;
+        assert_eq!(result.bundle.records.len(), 1);
+        let rec = &result.bundle.records[0];
+        assert!(rec.pk.is_none());
+        assert!(rec.pk_hash.is_some());
+        assert_eq!(result.bundle.coverage[0].redaction_mode, "hash_pk");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn schema_evolution_add_column_and_conflict() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_evolution");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+
+        let change = SchemaProposeChangeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("str"),
+                nullable: true,
+                auto_increment: false,
+                default: Some(Lit::Str {
+                    v: "eu".to_string(),
+                }),
+            }],
+            message: None,
+        };
+        let res = engine.schema_propose_change(change)?;
+        assert_eq!(res.status, "pending");
+
+        let conflict = SchemaProposeChangeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("u64"),
+                nullable: true,
+                auto_increment: false,
+                default: None,
+            }],
+            message: None,
+        };
+        let conflict_res = engine.schema_propose_change(conflict)?;
+
+        let status = engine.schema_merge_status(SchemaMergeStatusParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+        })?;
+        assert!(status.merge_plan.contains(&res.change_id));
+        assert!(status
+            .conflicts
+            .iter()
+            .any(|c| c.change_id == conflict_res.change_id));
+
+        let applied = engine.schema_apply_merge(SchemaApplyMergeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            change_ids: Some(vec![res.change_id.clone()]),
+        })?;
+        assert_eq!(applied.applied, vec![res.change_id]);
+        assert_eq!(applied.new_version, 2);
+
+        let schema = engine.get_schema("app", "users")?;
+        assert!(schema.columns.iter().any(|c| c.name == "region"));
+
+        let row = engine
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("region"),
+            Some(&Lit::Str {
+                v: "eu".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_orders_by_vector_similarity() -> anyhow::Result<()> {
+        let dir = temp_dir("vector_order");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "docs",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "embedding".to_string(),
+                    r#type: type_desc("embedding"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "public".to_string(),
+                    },
+                ),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "public".to_string(),
+                    },
+                ),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![0.8, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "private".to_string(),
+                    },
+                ),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![-1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+        ];
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "docs".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        let mut query = base_query(
+            "app",
+            "docs",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "status".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "public".to_string(),
+                    },
+                },
+            )),
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Func {
+                name: "vector.cosine".to_string(),
+                args: vec![
+                    Expr::Col {
+                        col: "embedding".to_string(),
+                        table: None,
+                    },
+                    Expr::Lit {
+                        lit: Lit::Embedding {
+                            dims: 3,
+                            v: vec![1.0, 0.0, 0.0],
+                            model: None,
+                        },
+                    },
+                ],
+                distinct: None,
+            },
+            dir: Some(OrderDir::Desc),
+        }];
+        query.limit = Some(LimitClause {
+            limit: Some(1),
+            offset: Some(0),
+        });
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec![Lit::U64 { v: 1 }]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn vector_prefilter_candidates_match_bucket() -> anyhow::Result<()> {
+        let dir = temp_dir("vector_prefilter");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "docs",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "embedding".to_string(),
+                    r#type: type_desc("embedding"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![0.8, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "embedding",
+                    Lit::Embedding {
+                        dims: 3,
+                        v: vec![-1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                ),
+            ]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "docs".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        let (schema, tdata) = engine.get_table(&BaseTableRef {
+            db: "app".to_string(),
+            table: "docs".to_string(),
+            r#as: None,
+        })?;
+        let query_vec = vec![1.0, 0.0, 0.0];
+        let candidates =
+            vector_prefilter_candidates(schema, tdata, "embedding", &query_vec).unwrap();
+        let bucket = embedding_lsh_bucket(&query_vec);
+        let mut expected = Vec::new();
+        for (idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get("embedding") else {
+                continue;
+            };
+            let (_, vec, _) = embedding_ref(lit)?;
+            if embedding_lsh_bucket(vec) == bucket {
+                expected.push(idx);
+            }
+        }
+        assert_eq!(candidates, expected);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn sql_autoparam_extract_normalizes() -> anyhow::Result<()> {
+        let extract =
+            sql_autoparam_extract("SELECT * FROM users WHERE status = 'active' AND id = 42");
+        assert_eq!(
+            extract.normalized_sql,
+            "select * from users where status = ? and id = ?"
+        );
+        assert_eq!(extract.literals.len(), 2);
+        assert_eq!(extract.literals[0].column.as_deref(), Some("status"));
+        assert_eq!(extract.literals[0].table.as_deref(), Some("users"));
+        assert_eq!(extract.literals[1].column.as_deref(), Some("id"));
+        assert_eq!(extract.literals[1].table.as_deref(), Some("users"));
+        Ok(())
+    }
+
+    #[test]
+    fn ai_nl_translate_packages_schema() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_nl_translate");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let result = engine.ai_nl_translate(AiNlTranslateParams {
+            db: "app".to_string(),
+            request: "list users".to_string(),
+            tables: None,
+            read_only: None,
+            include_schema: None,
+            max_tables: None,
+        })?;
+
+        assert_eq!(result.package.db, "app");
+        assert_eq!(result.package.tables.len(), 1);
+        assert_eq!(result.package.tables[0].table, "users");
+        assert!(result.package.prompt.contains("users"));
+        assert!(result.query.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn ai_nl_explain_preview() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_nl_explain");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let result = engine.ai_nl_explain(AiNlExplainParams {
+            query,
+            args: None,
+            preview_limit: Some(1),
+            preview_format: Some(ResultFormat::ObjectsJson),
+        })?;
+
+        assert!(result.summary.contains("app.users"));
+        assert_eq!(result.tables, vec!["app.users".to_string()]);
+        assert!(result.preview.is_some());
+        assert!(!result.approval_token.is_empty());
+
+        let exec = engine.ai_nl_execute(AiNlExecuteParams {
+            query: base_query(
+                "app",
+                "users",
+                vec![Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                }],
+                None,
+            ),
+            args: None,
+            approval_token: result.approval_token.clone(),
+            result_format: Some(ResultFormat::ObjectsJson),
+            want_etag: None,
+            if_none_match: None,
+            min_causality: None,
+        })?;
+        assert!(exec.data.is_some());
+
+        let err = engine
+            .ai_nl_execute(AiNlExecuteParams {
+                query: base_query(
+                    "app",
+                    "users",
+                    vec![Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    }],
+                    None,
+                ),
+                args: None,
+                approval_token: "bad".to_string(),
+                result_format: Some(ResultFormat::ObjectsJson),
+                want_etag: None,
+                if_none_match: None,
+                min_causality: None,
+            })
+            .err();
+        assert!(err.is_some());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_incremental_refresh() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_refresh");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Madrid".to_string(),
+                    },
+                ),
+            ]),
+            row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Rome".to_string(),
+                    },
+                ),
+            ]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["id".to_string(), "city".to_string()]),
+            now_micros(),
+        )?;
+
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        let mut set = RowObject::new();
+        set.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Berlin".to_string(),
+            },
+        );
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Berlin".to_string()
+            }]
+        );
+
+        let delete_pred = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        engine.data_delete(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &delete_pred,
+            None,
+            &[],
+        )?;
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let snapshot_rows = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .rows
+            .len();
+        assert_eq!(snapshot_rows, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn pattern_tracker_and_cost_model() {
+        let mut manager = SnapshotManager {
+            cost_model: SnapshotCostModel {
+                build_cost_per_cell: 0.2,
+                row_scan_cost_per_cell: 1.0,
+                snapshot_scan_cost_per_cell: 0.1,
+                min_benefit: 0.0,
+            },
+            controller: AdaptiveSnapshotController {
+                min_queries: 2,
+                min_rows: 1,
+                recency_window_micros: u64::MAX,
+                max_snapshots_per_table: 4,
+            },
+            ..SnapshotManager::default()
+        };
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        manager.record_query(&key, vec!["city".to_string()], 200, 10);
+        manager.record_query(&key, vec!["city".to_string()], 200, 20);
+
+        let plan = manager.next_plan(&key, &vec!["id".to_string()], 200, 3, 1, 30);
+        assert!(plan.is_some());
+        let plan = plan.unwrap();
+        assert_eq!(plan.columns, vec!["city".to_string()]);
+        assert!(plan.benefit >= 0.0);
+    }
+
+    #[test]
+    fn dp_budget_consumption_and_exhaustion() -> anyhow::Result<()> {
+        let dir = temp_dir("dp_budget");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "value".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[("id", Lit::U64 { v: 1 }), ("value", Lit::F64 { v: 3.0 })]),
+            row(&[("id", Lit::U64 { v: 2 }), ("value", Lit::F64 { v: 7.0 })]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.dp_budget_set(DpBudgetSetParams {
+            principal: "analyst".to_string(),
+            total_epsilon: 1.0,
+            total_delta: 1e-6,
+            refresh_window_ms: None,
+        })?;
+
+        let _ = engine.dp_aggregate(DpAggregateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            aggregates: vec![
+                DpAggregateSpec {
+                    op: "count".to_string(),
+                    column: None,
+                    percentile: None,
+                    bounds: None,
+                    r#as: None,
+                },
+                DpAggregateSpec {
+                    op: "sum".to_string(),
+                    column: Some("value".to_string()),
+                    percentile: None,
+                    bounds: Some(DpBounds {
+                        min: 0.0,
+                        max: 10.0,
+                    }),
+                    r#as: None,
+                },
+            ],
+            r#where: None,
+            group_by: Vec::new(),
+            epsilon: 0.6,
+            delta: Some(1e-6),
+            mechanism: Some("laplace".to_string()),
+            principal: Some("analyst".to_string()),
+            seed: Some(11),
+        })?;
+
+        let budgets = engine.dp_budget_get(DpBudgetGetParams {
+            principal: Some("analyst".to_string()),
+            include_usage: Some(false),
+        })?;
+        let consumed = budgets.budgets[0]["consumed_epsilon"]
+            .as_f64()
+            .unwrap_or_default();
+        assert!((consumed - 0.6).abs() < 1e-6);
+
+        let err = engine
+            .dp_aggregate(DpAggregateParams {
+                table: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                aggregates: vec![DpAggregateSpec {
+                    op: "count".to_string(),
+                    column: None,
+                    percentile: None,
+                    bounds: None,
+                    r#as: None,
+                }],
+                r#where: None,
+                group_by: Vec::new(),
+                epsilon: 0.6,
+                delta: Some(1e-6),
+                mechanism: Some("laplace".to_string()),
+                principal: Some("analyst".to_string()),
+                seed: Some(22),
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "dp_budget_exhausted");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn dp_aggregate_deterministic_noise() -> anyhow::Result<()> {
+        let dir = temp_dir("dp_noise");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "metrics",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::F64 { v: 4.0 })]),
+            row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::F64 { v: 6.0 })]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        let res = engine.dp_aggregate(DpAggregateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            aggregates: vec![
+                DpAggregateSpec {
+                    op: "count".to_string(),
+                    column: None,
+                    percentile: None,
+                    bounds: None,
+                    r#as: None,
+                },
+                DpAggregateSpec {
+                    op: "sum".to_string(),
+                    column: Some("score".to_string()),
+                    percentile: None,
+                    bounds: Some(DpBounds {
+                        min: 0.0,
+                        max: 10.0,
+                    }),
+                    r#as: None,
+                },
+            ],
+            r#where: None,
+            group_by: Vec::new(),
+            epsilon: 1.0,
+            delta: None,
+            mechanism: Some("laplace".to_string()),
+            principal: None,
+            seed: Some(123),
+        })?;
+
+        let mut rng = DpRng::new(123);
+        let count_noise = dp_laplace_noise(&mut rng, 1.0 / 0.5);
+        let sum_noise = dp_laplace_noise(&mut rng, 10.0 / 0.5);
+        let expected_count = 2.0 + count_noise;
+        let expected_sum = 10.0 + sum_noise;
+
+        let row = &res.rows[0];
+        let count_lit: Lit = serde_json::from_value(row[0].clone())?;
+        let sum_lit: Lit = serde_json::from_value(row[1].clone())?;
+        match count_lit {
+            Lit::F64 { v } => assert!((v - expected_count).abs() < 1e-6),
+            _ => panic!("expected count as f64"),
+        }
+        match sum_lit {
+            Lit::F64 { v } => assert!((v - expected_sum).abs() < 1e-6),
+            _ => panic!("expected sum as f64"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn oblivious_policy_explain_padding() -> anyhow::Result<()> {
+        let dir = temp_dir("oblivious_explain");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[("id", Lit::U64 { v: 1 })]),
+            row(&[("id", Lit::U64 { v: 2 })]),
+            row(&[("id", Lit::U64 { v: 3 })]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.oblivious_policy_set(ObliviousPolicySetParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            policy: ObliviousPolicy {
+                level: "basic".to_string(),
+                pad_to_multiple: Some(4),
+                target_rows: None,
+                dummy_value_lookups: Some(2),
+                shuffle: Some(false),
+            },
+        })?;
+
+        let explain = engine.oblivious_explain(ObliviousExplainParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+        })?;
+        assert_eq!(explain.plan["target_rows"].as_u64(), Some(4));
+        assert_eq!(explain.plan["dummy_rows"].as_u64(), Some(1));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn oblivious_scan_keeps_results() -> anyhow::Result<()> {
+        let dir = temp_dir("oblivious_scan");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[("id", Lit::U64 { v: 1 })]),
+            row(&[("id", Lit::U64 { v: 2 })]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.oblivious_policy_set(ObliviousPolicySetParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            policy: ObliviousPolicy {
+                level: "basic".to_string(),
+                pad_to_multiple: Some(8),
+                target_rows: None,
+                dummy_value_lookups: Some(1),
+                shuffle: Some(false),
+            },
+        })?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn forensic_chain_verify_and_detect_tamper() -> anyhow::Result<()> {
+        let dir = temp_dir("forensic_chain");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "audit",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = vec![
+            row(&[("id", Lit::U64 { v: 1 })]),
+            row(&[("id", Lit::U64 { v: 2 })]),
+        ];
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "audit".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        let result = engine.forensic_query(ForensicQueryParams {
+            table: None,
+            op: None,
+            from_id: None,
+            to_id: None,
+            limit: None,
+        })?;
+        let verify = engine.forensic_verify(ForensicVerifyParams {
+            records: result.records.clone(),
+            start_hash: result.proof["preceding_hash"]
+                .as_str()
+                .map(|s| s.to_string()),
+        })?;
+        assert!(verify.ok);
+
+        let mut tampered = result.records;
+        if let Some(first) = tampered.first_mut() {
+            if let Some(op) = first.get_mut("op") {
+                *op = serde_json::Value::String("tampered".to_string());
+            }
+        }
+        let verify = engine.forensic_verify(ForensicVerifyParams {
+            records: tampered,
+            start_hash: None,
+        })?;
+        assert!(!verify.ok);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_resolves_conflict() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let current = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert("count".to_string(), Lit::U64 { v: 10 });
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        engine.merge_register(MergeRegisterParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            policy: MergePolicySpec {
+                default: MergeFunctionRef {
+                    kind: "builtin".to_string(),
+                    name: "last_write_wins".to_string(),
+                    module: None,
+                },
+                per_column: vec![(
+                    "count".to_string(),
+                    MergeFunctionRef {
+                        kind: "builtin".to_string(),
+                        name: "sum".to_string(),
+                        module: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        })?;
+
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: row(&[("count", Lit::U64 { v: 3 })]),
+            expected_etag: Some(current.etag),
+            min_causality: None,
+            policy: None,
+        })?;
+
+        assert!(result.applied);
+        assert!(result.conflict);
+        assert_eq!(
+            result.merged.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(13)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_respects_min_causality() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply_causality");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let schema = engine.get_schema("app", "counters")?;
+        let stale = CausalityToken {
+            format: CAUSALITY_FORMAT_V1.to_string(),
+            deps: vec![CausalityDependency {
+                table: "app.counters".to_string(),
+                v: Some(schema.table_version + 1),
+                view: None,
+                change_seq: None,
+                stale: None,
+            }],
+        };
+
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: row(&[("count", Lit::U64 { v: 2 })]),
+            expected_etag: None,
+            min_causality: Some(stale),
+            policy: None,
+        })?;
+
+        assert!(!result.applied);
+        assert!(result.conflict);
+        assert!(result.conflicts.iter().any(|c| c == "dependency"));
+
+        let current = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            current.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(5)
+        );
+
+        let schema = engine.get_schema("app", "counters")?;
+        let ok = CausalityToken {
+            format: CAUSALITY_FORMAT_V1.to_string(),
+            deps: vec![CausalityDependency {
+                table: "app.counters".to_string(),
+                v: Some(schema.table_version),
+                view: None,
+                change_seq: None,
+                stale: None,
+            }],
+        };
+
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: row(&[("count", Lit::U64 { v: 2 })]),
+            expected_etag: None,
+            min_causality: Some(ok),
+            policy: None,
+        })?;
+
+        assert!(result.applied);
+        assert!(!result.conflicts.iter().any(|c| c == "dependency"));
+
+        let updated = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            updated.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(2)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_pk_mismatch_conflict() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply_pk_mismatch");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: row(&[("id", Lit::U64 { v: 2 }), ("count", Lit::U64 { v: 3 })]),
+            expected_etag: None,
+            min_causality: None,
+            policy: None,
+        })?;
+
+        assert!(!result.applied);
+        assert!(result.conflict);
+        assert!(result.conflicts.iter().any(|c| c == "constraint"));
+
+        let current = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            current.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(5)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_non_null_conflict_on_insert() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply_non_null");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: RowObject::new(),
+            expected_etag: None,
+            min_causality: None,
+            policy: None,
+        })?;
+
+        assert!(!result.applied);
+        assert!(result.conflict);
+        assert!(result.conflicts.iter().any(|c| c == "constraint"));
+
+        let err = engine
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "counters".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )
+            .expect_err("expected not_found");
+        assert!(err.to_string().contains("not_found"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_wasm_registry_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_wasm_registry");
+        let mut engine = Engine::open(&dir)?;
+
+        let wasm_b64 = BASE64_STANDARD.encode(b"wasm");
+        let result = engine.merge_wasm_register(MergeWasmRegisterParams {
+            module_id: "merge_sum".to_string(),
+            wasm_b64,
+            capabilities: MergeWasmCapabilities {
+                values_only: true,
+                deterministic: true,
+                max_fuel: 1000,
+                max_memory_bytes: 1024 * 1024,
+                max_output_bytes: 4096,
+            },
+            name: Some("sum merge".to_string()),
+            overwrite: None,
+        })?;
+        assert!(result.ok);
+
+        let list = engine.merge_wasm_list()?;
+        assert_eq!(list.modules.len(), 1);
+        assert_eq!(list.modules[0].module_id, "merge_sum");
+
+        let dropped = engine.merge_wasm_drop(MergeWasmDropParams {
+            module_id: "merge_sum".to_string(),
+        })?;
+        assert!(dropped.ok);
+
+        let list = engine.merge_wasm_list()?;
+        assert!(list.modules.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_wasm_registry_persists() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_wasm_registry_persist");
+        {
+            let mut engine = Engine::open(&dir)?;
+            let wasm_b64 = BASE64_STANDARD.encode(b"wasm");
+            engine.merge_wasm_register(MergeWasmRegisterParams {
+                module_id: "merge_sum".to_string(),
+                wasm_b64,
+                capabilities: MergeWasmCapabilities {
+                    values_only: true,
+                    deterministic: true,
+                    max_fuel: 1000,
+                    max_memory_bytes: 1024,
+                    max_output_bytes: 4096,
+                },
+                name: None,
+                overwrite: None,
+            })?;
+        }
+
+        let engine = Engine::open(&dir)?;
+        let list = engine.merge_wasm_list()?;
+        assert_eq!(list.modules.len(), 1);
+        assert_eq!(list.modules[0].module_id, "merge_sum");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_wasm_policy_not_supported() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply_wasm");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let wasm_b64 = BASE64_STANDARD.encode(b"wasm");
+        engine.merge_wasm_register(MergeWasmRegisterParams {
+            module_id: "merge_sum".to_string(),
+            wasm_b64,
+            capabilities: MergeWasmCapabilities {
+                values_only: true,
+                deterministic: true,
+                max_fuel: 1000,
+                max_memory_bytes: 1024,
+                max_output_bytes: 4096,
+            },
+            name: None,
+            overwrite: None,
+        })?;
+
+        engine.merge_register(MergeRegisterParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            policy: MergePolicySpec {
+                default: MergeFunctionRef {
+                    kind: "wasm".to_string(),
+                    name: "merge_sum".to_string(),
+                    module: Some("merge_sum".to_string()),
+                },
+                per_column: HashMap::new(),
+            },
+        })?;
+
+        let err = engine
+            .merge_apply(MergeApplyParams {
+                table: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "counters".to_string(),
+                    r#as: None,
+                },
+                pk: vec![Lit::U64 { v: 1 }],
+                incoming: row(&[("count", Lit::U64 { v: 2 })]),
+                expected_etag: None,
+                min_causality: None,
+                policy: None,
+            })
+            .expect_err("expected not_supported");
+        assert!(err.to_string().contains("not_supported"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_plan_compile_and_run() -> anyhow::Result<()> {
+        let dir = temp_dir("wasm_plan_compile_run");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::U64 { v: 3 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::U64 { v: 8 })]),
+            ],
+            None,
+        )?;
+
+        let predicate = Expr::Op {
+            op: "gt".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "score".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Param { param: 0 })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "score".to_string(),
+                    table: None,
+                },
+            ],
+            Some(predicate),
+        );
+
+        let compiled = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query,
+            abi: None,
+            target: None,
+        })?;
+
+        let result = engine.wasm_plan_run(
+            &compiled.artifact_b64,
+            &[Lit::U64 { v: 7 }],
+            ResultFormat::ObjectsJson,
+            true,
+            None,
+            None,
+            None,
+            false,
+        )?;
+
+        assert!(result.etag.is_some());
+        let data = result.data.expect("missing data");
+        let rows = data.as_array().cloned().unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"]["v"].as_u64(), Some(2));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_plan_compile_rejects_order_by() -> anyhow::Result<()> {
+        let dir = temp_dir("wasm_plan_compile_rejects_order_by");
+        let engine = Engine::open(&dir)?;
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let err = engine
+            .wasm_plan_compile(WasmPlanCompileParams {
+                query,
+                abi: None,
+                target: None,
+            })
+            .expect_err("expected invalid_request");
+        assert!(err.to_string().contains("order_by"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn data_insert_non_null_rejects_missing() -> anyhow::Result<()> {
+        let dir = temp_dir("data_insert_non_null");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let err = engine
+            .data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "counters".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[("id", Lit::U64 { v: 1 })])],
+                None,
+            )
+            .expect_err("expected not-null error");
+        assert!(err
+            .to_string()
+            .contains("null value for non-null column count"));
+
+        let err = engine
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "counters".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )
+            .expect_err("expected not_found");
+        assert!(err.to_string().contains("not_found"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn data_update_non_null_rejects_null() -> anyhow::Result<()> {
+        let dir = temp_dir("data_update_non_null");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert("count".to_string(), Lit::Null);
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        let err = engine
+            .data_update(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "counters".to_string(),
+                    r#as: None,
+                },
+                &predicate,
+                &set,
+                None,
+                None,
+                &[],
+            )
+            .expect_err("expected not-null error");
+        assert!(err
+            .to_string()
+            .contains("null value for non-null column count"));
+
+        let current = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            current.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(5)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_incremental_refresh_updates_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("view_refresh");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 20 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+            ],
+            Some(Expr::Op {
+                op: "gt".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "score".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 10 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query,
+            if_not_exists: None,
+        })?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["rows"].as_u64(), Some(1));
+
+        let mut set = RowObject::new();
+        set.insert("score".to_string(), Lit::U64 { v: 15 });
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        engine.view_refresh(ViewRefreshParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            mode: Some("incremental".to_string()),
+        })?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["rows"].as_u64(), Some(2));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+}
