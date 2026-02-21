@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R18 — Reproducible Performance Regression Testing · SkeinDB</title>
+  <meta name="description" content="Extended replay bundles for deterministic performance reproducibility. SkeinDB Research Track R18.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="area-devtools">
+
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../docs.html">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<section class="hero">
+  <a class="hero-back" href="../index.html#research">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    All Research Tracks
+  </a>
+  <div class="hero-badge">R18 · Developer Experience &amp; Tooling</div>
+  <h1>Reproducible Performance Regression Testing</h1>
+  <p class="abstract">SkeinDB's replay bundles enable reproducing correctness bugs, but performance issues are harder to reproduce. Performance depends on state not captured in traditional replay: compaction state, cache contents, concurrent load. Extending replay bundles to capture performance-relevant state enables reproducible performance regression testing — critical for database development confidence.</p>
+</section>
+
+<div class="content">
+
+  <div class="status-bar">
+    <span class="status-dot proposal"></span>
+    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+  </div>
+
+  <div class="novelty-card">
+    <h2>🔬 What's Novel <span class="badge">Paper-Worthy</span></h2>
+    <ul>
+      <li><strong>Extended replay bundle format</strong> capturing performance-critical state for reproducibility</li>
+      <li>Deterministic replay framework for database performance testing with state reconstruction</li>
+      <li>Methodology for capturing and reconstructing performance-critical state (LSM levels, cache, concurrency)</li>
+      <li>Performance regression detection framework comparing production and test latency distributions</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔧</span> Technical Approach</h2>
+    <div class="phase">
+      <h3>Phase 1 — State Identification</h3>
+      <p>Identify performance-critical state beyond WAL: LSM level structure, block cache contents, connection pool state, and compaction queue depth. Determine minimal state for reproducibility.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 2 — Bundle Extension</h3>
+      <p>Extended replay bundle format with: LSM metadata snapshot, cache state approximation (LRU ordering, hot keys), and timing annotations on WAL records for pacing.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3 — Deterministic Replay</h3>
+      <p>Reconstruct storage state from bundle, warm cache according to captured LRU ordering, and replay queries with timing annotations to reproduce concurrency patterns.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 4 — Regression Detection</h3>
+      <p>Capture bundles from production, replay in test environments with different code versions, compare latency distributions (p50, p99, p999), and alert on statistically significant deviations.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🧪</span> Hypotheses</h2>
+    <div class="hypo">
+      <span class="hypo-id">H1</span>
+      <p>Performance-critical state (compaction level, cache hotness, concurrent operations) can be captured in extended replay bundles with manageable overhead.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H2</span>
+      <p>Deterministic replay reproduces performance characteristics within acceptable variance for regression detection.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H3</span>
+      <p>Performance replay enables root cause analysis for production performance regressions that are otherwise unreproducible.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔗</span> SkeinDB Integration</h2>
+    <div class="integration">
+      <div class="int-chip">Replay Bundles</div>
+      <div class="int-chip">Hash-Chained WAL</div>
+      <div class="int-chip">LSM / Compaction</div>
+      <div class="int-chip">Observability</div>
+      <div class="int-chip">Block Cache</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">📚</span> Key References</h2>
+    <ul class="ref-list">
+      <li>Curtsinger &amp; Berger — <em>"STABILIZER: Statistically Sound Performance Evaluation"</em> (2013)</li>
+      <li>Tene et al. — <em>"jHiccup: A Tool for Measuring and Visualizing JVM Pauses"</em> (2013)</li>
+    </ul>
+  </div>
+
+  <div class="nav-tracks">
+    <a class="nav-track" href="r17.html">← R17 — Migration Intent Inference</a>
+    <a class="nav-track next" href="r19.html">R19 — Wasm Query Operators →</a>
+  </div>
+</div>
+
+<footer>
+  <p>SkeinDB — Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Michél Nguyen</a> · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a></p>
+</footer>
+
+</body>
+</html>

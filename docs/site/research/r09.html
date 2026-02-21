@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R09 — HTTP/3 and QUIC-Native Database Protocol · SkeinDB</title>
+  <meta name="description" content="First database protocol designed natively for HTTP/3 and QUIC. SkeinDB Research Track R09.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="area-web">
+
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../docs.html">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<section class="hero">
+  <a class="hero-back" href="../index.html#research">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    All Research Tracks
+  </a>
+  <div class="hero-badge">R09 · Web-Native &amp; Modern Applications</div>
+  <h1>HTTP/3 and QUIC-Native Database Protocol</h1>
+  <p class="abstract">Modern web infrastructure increasingly uses HTTP/3 with QUIC — multiplexed streams, 0-RTT connection resumption, better handling of network changes. A QUIC-native database protocol provides multiplexed queries without head-of-line blocking, prepared query handles surviving connection migration, and native CDN edge integration for cache-aware query delivery.</p>
+</section>
+
+<div class="content">
+
+  <div class="status-bar">
+    <span class="status-dot scaffold"></span>
+    <span class="status-text"><strong>Prototype Scaffold</strong> — See docs/TRANSPORT_QUIC.md + crates/skeindb/src/quic.rs</span>
+  </div>
+
+  <div class="novelty-card">
+    <h2>🔬 What's Novel <span class="badge">Paper-Worthy</span></h2>
+    <ul>
+      <li><strong>First database protocol</strong> designed natively for HTTP/3 and QUIC multiplexed streams</li>
+      <li>Integration of prepared query handles with QUIC 0-RTT for single-flight query execution</li>
+      <li>Query-level connection migration for mobile and edge scenarios without losing cursor state</li>
+      <li>Framework for CDN-integrated database query caching using ETag validation at the edge</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔧</span> Technical Approach</h2>
+    <div class="phase">
+      <h3>Phase 1 — Protocol Design</h3>
+      <p>SkeinQL-over-QUIC: each query dispatched on a separate QUIC stream. Frame types for query submission, streaming results, prepared query handles, and ETag validation requests.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 2 — 0-RTT Integration</h3>
+      <p>First-flight data includes prepared query invocation. Replay protection for write safety — distinguish idempotent reads (safe for 0-RTT) from state-changing writes (require handshake).</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3 — Connection Migration</h3>
+      <p>Stateful query handling surviving QUIC connection migration. Query state (cursor position, transaction context) bound to connection ID and transferred seamlessly during migration events.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 4 — CDN Integration</h3>
+      <p>Edge caching where CDN nodes validate ETags and serve cached results without contacting the origin. CDN-aware query routing and cache warming strategies.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🧪</span> Hypotheses</h2>
+    <div class="hypo">
+      <span class="hypo-id">H1</span>
+      <p>QUIC multiplexing eliminates head-of-line blocking, measurably improving p99 latency for concurrent database queries.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H2</span>
+      <p>0-RTT with prepared query handles reduces connection establishment overhead for serverless and edge deployment patterns.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H3</span>
+      <p>QUIC connection migration enables seamless query continuation across network changes on mobile devices.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔗</span> SkeinDB Integration</h2>
+    <div class="integration">
+      <div class="int-chip">Quinn (QUIC)</div>
+      <div class="int-chip">SkeinQL RPC</div>
+      <div class="int-chip">ETag Validators</div>
+      <div class="int-chip">HTTP Transport</div>
+      <div class="int-chip">CDN Edge Layer</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">📚</span> Key References</h2>
+    <ul class="ref-list">
+      <li>Iyengar &amp; Thomson — <em>"QUIC: A UDP-Based Multiplexed and Secure Transport"</em> (RFC 9000, 2021)</li>
+      <li>Bishop — <em>"HTTP/3"</em> (RFC 9114, 2022)</li>
+    </ul>
+  </div>
+
+  <div class="nav-tracks">
+    <a class="nav-track" href="r08.html">← R08 — Incremental View Maintenance</a>
+    <a class="nav-track next" href="r10.html">R10 — Vector Embeddings →</a>
+  </div>
+</div>
+
+<footer>
+  <p>SkeinDB — Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Michél Nguyen</a> · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a></p>
+</footer>
+
+</body>
+</html>

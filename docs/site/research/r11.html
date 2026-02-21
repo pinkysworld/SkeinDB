@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R11 — LLM-Assisted Query Autoparameterization · SkeinDB</title>
+  <meta name="description" content="First application of LLMs to query parameterization classification. SkeinDB Research Track R11.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="area-ai">
+
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../docs.html">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<section class="hero">
+  <a class="hero-back" href="../index.html#research">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    All Research Tracks
+  </a>
+  <div class="hero-badge">R11 · AI/ML Integration</div>
+  <h1>LLM-Assisted Query Autoparameterization</h1>
+  <p class="abstract">SkeinDB's autoparameterization extracts literals into parameters, but some "literals" are semantically fixed (status codes, enum values, type discriminators). Language models, trained on code and SQL, can classify which literals should be parameterized vs. semantically fixed — improving plan cache hit rates while avoiding semantic errors.</p>
+</section>
+
+<div class="content">
+
+  <div class="status-bar">
+    <span class="status-dot proposal"></span>
+    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+  </div>
+
+  <div class="novelty-card">
+    <h2>🔬 What's Novel <span class="badge">Paper-Worthy</span></h2>
+    <ul>
+      <li><strong>First application</strong> of LLMs to query parameterization classification in databases</li>
+      <li>Labeled dataset of parameterizable vs. semantic-constant literals for training/evaluation</li>
+      <li>Integration framework for LLM-assisted query processing within a database engine</li>
+      <li>Analysis of accuracy-latency-cost tradeoffs for LLM-based classification vs. rule-based approaches</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔧</span> Technical Approach</h2>
+    <div class="phase">
+      <h3>Phase 1 — Dataset Construction</h3>
+      <p>Collect query corpuses from open-source applications. Manually label each literal as "parameterizable" (user-supplied value) or "semantic constant" (enum, status code, discriminator).</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 2 — LLM Classification</h3>
+      <p>Evaluate zero-shot (GPT-4/Claude), few-shot, and fine-tuned smaller models. Input context includes query text, schema definition, column names, and value statistics.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3 — Integration</h3>
+      <p>Classify literals in the MySQL compatibility layer. Cache classification results per query fingerprint. Fall back to rule-based classification when LLM confidence is low.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 4 — Feedback Loop</h3>
+      <p>Plan cache misses trigger reclassification with additional context. Over time, the system builds a corpus of per-application parameterization knowledge.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🧪</span> Hypotheses</h2>
+    <div class="hypo">
+      <span class="hypo-id">H1</span>
+      <p>LLMs can classify literals with high accuracy based on context (column names, query structure, and value patterns).</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H2</span>
+      <p>Semantic parameterization achieves higher plan cache hit rates than purely syntactic parameterization.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H3</span>
+      <p>Fine-tuned small models perform with acceptable latency for online classification in the query path.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔗</span> SkeinDB Integration</h2>
+    <div class="integration">
+      <div class="int-chip">MySQL Compat Layer</div>
+      <div class="int-chip">Query Plan Cache</div>
+      <div class="int-chip">SkeinQL RPC</div>
+      <div class="int-chip">Autoparameterization</div>
+      <div class="int-chip">Telemetry</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">📚</span> Key References</h2>
+    <ul class="ref-list">
+      <li>Trummer — <em>"From BERT to GPT-3 Codex: Harnessing LLMs for Text-to-SQL"</em> (2022)</li>
+      <li>Zhou et al. — <em>"SQL-PaLM: Improved Large Language Model Adaptation for Text-to-SQL"</em> (2023)</li>
+    </ul>
+  </div>
+
+  <div class="nav-tracks">
+    <a class="nav-track" href="r10.html">← R10 — Vector Embeddings</a>
+    <a class="nav-track next" href="r12.html">R12 — NL → SkeinQL Translation →</a>
+  </div>
+</div>
+
+<footer>
+  <p>SkeinDB — Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Michél Nguyen</a> · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a></p>
+</footer>
+
+</body>
+</html>

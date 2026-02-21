@@ -201,8 +201,10 @@
       display: flex; align-items: center; gap: 10px;
       background: var(--bg-card); border: 1px solid var(--border);
       border-radius: var(--radius-sm); padding: .75rem 1rem;
-      transition: border-color .2s;
+      transition: border-color .2s, transform .15s;
+      text-decoration: none; color: inherit;
     }
+    .track:hover { transform: translateY(-1px); }
     .track:hover { border-color: var(--green); }
     .track-id {
       font-family: 'JetBrains Mono', monospace;
@@ -291,6 +293,7 @@
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
       <a href="#research">Research</a>
+      <a href="docs.html">Docs</a>
       <a href="#quickstart">Quick Start</a>
       <a href="#paper">Paper</a>
     </div>
@@ -414,26 +417,26 @@
     <p>Each track has implemented RPC methods, a dedicated admin panel, and automated test coverage.</p>
   </div>
   <div class="tracks-grid">
-    <div class="track"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></div>
-    <div class="track"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></div>
-    <div class="track"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></div>
-    <div class="track"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></div>
-    <div class="track"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></div>
-    <div class="track"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></div>
-    <div class="track"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></div>
-    <div class="track"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></div>
-    <div class="track"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></div>
-    <div class="track"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></div>
-    <div class="track"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></div>
-    <div class="track"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></div>
-    <div class="track"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></div>
-    <div class="track"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></div>
-    <div class="track"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></div>
-    <div class="track"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></div>
-    <div class="track"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></div>
-    <div class="track"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></div>
-    <div class="track"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></div>
-    <div class="track"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></div>
+    <a class="track" href="research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
+    <a class="track" href="research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
+    <a class="track" href="research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
+    <a class="track" href="research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
+    <a class="track" href="research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
+    <a class="track" href="research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
+    <a class="track" href="research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
+    <a class="track" href="research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
+    <a class="track" href="research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
+    <a class="track" href="research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
+    <a class="track" href="research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
+    <a class="track" href="research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
+    <a class="track" href="research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
+    <a class="track" href="research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
+    <a class="track" href="research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
+    <a class="track" href="research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
+    <a class="track" href="research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
+    <a class="track" href="research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
+    <a class="track" href="research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
+    <a class="track" href="research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
   </div>
 </section>
 
@@ -493,7 +496,7 @@
         SkeinDB addresses the divide between production database systems and research prototypes through a novel single-binary architecture that co-hosts a MySQL-compatible SQL layer, a typed RPC control surface (SkeinQL), and 20 experimental research features within one executable process. The paper presents four dimensions of contribution: cell-interned MVCC storage, persistent cluster control-plane, 20 research tracks with working implementations, and comprehensive web administration.
       </p>
       <br>
-      <a href="../papers/SkeinDB_IJRCOM_Submission.md" class="btn btn-secondary" style="display:inline-flex">Read Full Paper</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" class="btn btn-secondary" style="display:inline-flex" target="_blank" rel="noopener">Read Full Paper</a>
     </div>
     <div class="paper-stats">
       <div class="paper-stat">
