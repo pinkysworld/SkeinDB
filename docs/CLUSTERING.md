@@ -1,7 +1,7 @@
 # Clustering and Scale-Out (SkeinCluster)
 
-Status: Draft v0.1 (design + backlog)
-Last updated: 2026-01-17
+Status: Prototype v0.2 (control-plane + replication transport + shard placement)
+Last updated: 2026-02-21
 
 This document defines SkeinDB's approach to clustering.
 
@@ -139,6 +139,23 @@ For sharding:
 - `cluster.shard.move`
 - `cluster.shard.rebalance`
 
+Implemented in this build:
+- `cluster.status`
+- `cluster.nodes`
+- `cluster.join_token.create`
+- `cluster.node.join`
+- `cluster.node.remove`
+- `cluster.replica.promote`
+- `cluster.shard.create`
+- `cluster.shard.move`
+- `cluster.shard.rebalance`
+
+Replication transport implemented:
+- primary node enforces write ownership per shard/global primary
+- successful write RPCs are fanned out to replica nodes over HTTP RPC
+- replica applies replicated writes using `x-skeindb-replication: 1`
+- replication counters are exposed in `cluster.status` and `stats.snapshot.cluster`
+
 ---
 
 ## 6) UI requirements (SkeinAdmin)
@@ -155,11 +172,11 @@ Cluster settings section should include:
 
 ## 7) Backlog
 
-- CL01: node_id + cluster_id plumbing
-- CL02: WAL streaming protocol + replica applier
-- CL03: CAS object fetch protocol (ValueID pull)
-- CL04: replica read-only serving + lag metrics
-- CL05: join token + node join/leave
-- CL06: UI cluster page (SkeinAdmin)
-- CL07: sharding metadata + router prototype
-- CL08: shard move and rebalance (v1)
+- [x] CL01: node_id + cluster_id plumbing
+- [ ] CL02: WAL streaming protocol + replica applier (full LSN stream)
+- [ ] CL03: CAS object fetch protocol (ValueID pull)
+- [x] CL04: replica read-only serving + lag metrics (RPC + stats snapshot exposure)
+- [x] CL05: join token + node join/leave
+- [x] CL06: UI cluster page (SkeinAdmin)
+- [x] CL07: sharding metadata + router prototype (write ownership + shard primary checks)
+- [x] CL08: shard move and rebalance (v1)

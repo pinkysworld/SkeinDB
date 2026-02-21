@@ -1636,6 +1636,191 @@ pub struct ViewExplainDepsResult {
 }
 
 // --------------------------------
+// cluster.* (research / experimental)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterStatusResult {
+    pub enabled: bool,
+    pub cluster_id: String,
+    pub local_node_id: String,
+    pub primary_node_id: String,
+    pub local_role: String,
+    pub nodes: Vec<ClusterNodeInfo>,
+    pub shards: Vec<ClusterShardInfo>,
+    pub replication: ClusterReplicationInfo,
+    pub methods: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodesResult {
+    pub nodes: Vec<ClusterNodeInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeInfo {
+    pub node_id: String,
+    pub rpc_url: String,
+    pub role: String,
+    pub status: String,
+    pub joined_at_ms: u64,
+    pub last_seen_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterJoinTokenCreateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterJoinTokenCreateResult {
+    pub token: String,
+    pub expires_at_ms: u64,
+    pub role: String,
+    pub max_uses: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeJoinParams {
+    pub token: String,
+    pub node_id: String,
+    pub rpc_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeJoinResult {
+    pub ok: bool,
+    pub cluster_id: String,
+    pub node: ClusterNodeInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeRemoveParams {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeRemoveResult {
+    pub ok: bool,
+    pub removed: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_primary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterReplicaPromoteParams {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterReplicaPromoteResult {
+    pub ok: bool,
+    pub primary_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardCreateParams {
+    pub db: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardMoveParams {
+    pub shard_id: String,
+    pub to_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardRebalanceParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_moves: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardInfo {
+    pub shard_id: String,
+    pub db: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    pub primary_node_id: String,
+    #[serde(default)]
+    pub replicas: Vec<String>,
+    pub slots: u32,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardCreateResult {
+    pub ok: bool,
+    pub shard: ClusterShardInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardMoveResult {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub shard: ClusterShardInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardRebalanceResult {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub moves: Vec<ClusterShardMovePlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardMovePlan {
+    pub shard_id: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterReplicationInfo {
+    pub shipped_ops: u64,
+    pub applied_ops: u64,
+    pub failed_ops: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub last_updated_ms: u64,
+}
+
+// --------------------------------
 // cdc.* (selected)
 // --------------------------------
 

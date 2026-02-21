@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-01-31
+Last updated: 2026-02-21
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -30,6 +30,8 @@ The repository is written so you can:
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
+- **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
+- **SkeinAdmin control panel:** phpMyAdmin-like workspace + cluster + settings management.
 
 ---
 
@@ -77,7 +79,7 @@ crates/
   skeindb-core/     # stable primitives (ValueIDs, hashes, canonicalization)
   skeindb-skeinql/  # SkeinQL types + JSON-RPC method schemas
 web/
-  admin/            # embedded management UI (static)
+  skeinadmin/       # embedded management UI (admin + console routes)
 openapi/
   skeinql.yaml      # minimal API sketch
 docs/               # specs, research notes, and operator docs
@@ -93,6 +95,7 @@ This repo contains both:
 
 For what is implemented vs planned, see the docs and the backlog:
 - `docs/PROJECT_BACKLOG.md`
+- `docs/RESEARCH_AGENDA.md`
 
 ---
 

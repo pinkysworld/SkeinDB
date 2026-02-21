@@ -2012,7 +2012,49 @@ Control-plane method families for operations and adoption:
 - advisor: `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, `advisor.history`, `advisor.migration_hints` (MySQL -> SkeinQL)
 - migration: `migration.intent_report`, `migration.rewrite_preview`
 - admin: `admin.users.*`, `admin.roles.*`
-- cluster: `cluster.list`, `cluster.add_node`, `cluster.remove_node`
+- cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`
+
+#### cluster.status (experimental)
+Return control-plane state, nodes, shards, and replication counters.
+
+Params:
+
+```json
+{}
+```
+
+Result (example):
+
+```json
+{
+  "enabled": true,
+  "cluster_id": "cluster-1760000000000",
+  "local_node_id": "node-127-0-0-1-9090",
+  "primary_node_id": "node-127-0-0-1-9090",
+  "local_role": "primary",
+  "nodes": [],
+  "shards": [],
+  "replication": {"shipped_ops":0,"applied_ops":0,"failed_ops":0,"last_updated_ms":0},
+  "methods": ["cluster.status","cluster.nodes","cluster.join_token.create"]
+}
+```
+
+#### cluster.node.join (experimental)
+Join a node to the cluster using a short-lived token.
+
+Params:
+
+```json
+{
+  "token": "join_...",
+  "node_id": "replica-a",
+  "rpc_url": "http://127.0.0.1:8081",
+  "role": "replica"
+}
+```
+
+#### cluster.shard.create / cluster.shard.move / cluster.shard.rebalance (experimental)
+Manage shard placement for table-level write ownership and replica fanout.
 
 ---
 

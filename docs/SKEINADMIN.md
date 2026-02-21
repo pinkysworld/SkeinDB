@@ -1,15 +1,18 @@
 # SkeinAdmin (Standalone Management Console)
 
-Status: Draft v0.1 (spec + backlog)
-Last updated: 2026-01-17
+Status: Implemented embedded admin panel + active roadmap
+Last updated: 2026-02-21
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary (similar in spirit to phpMyAdmin),
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
 **multiple SkeinDB servers or clusters** from one UI.
 
-SkeinDB may still ship a minimal embedded console for first-run workflows, but SkeinAdmin is the
-"full" administrative UI.
+SkeinDB now ships an embedded SkeinAdmin build at:
+- `/admin` for full control-plane administration
+- `/console` for SQL/workspace-first operation
+
+The same UI bundle powers both routes, with mode-aware navigation and controls.
 
 ---
 

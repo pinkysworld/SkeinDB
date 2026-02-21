@@ -12,7 +12,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # HTTP server + SkeinQL RPC
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 axum = "0.7"
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -20,6 +20,7 @@ sysinfo = "0.30"
 quinn = "0.10"
 rustls = "0.21"
 rustls-pemfile = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 skeindb-core = { path = "../skeindb-core" }
 skeindb-ir = { path = "../skeindb-ir" }

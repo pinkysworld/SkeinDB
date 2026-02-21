@@ -80,7 +80,7 @@ Each task should include tests.
 - [ ] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
 - [ ] T121: SkeinAdmin pages: schema/data/sql workspace
 - [ ] T122: SkeinAdmin security: token UI + role-aware navigation
-- [ ] T123: SkeinAdmin cluster page (cluster.*) + actions
+- [x] T123: SkeinAdmin cluster page (cluster.*) + actions
 - [ ] T124: SkeinAdmin observability page (stats.*)
 
 ## Phase 13 - Observability and server load statistics
@@ -90,12 +90,12 @@ Each task should include tests.
 - [ ] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction
 
 ## Phase 14 - Cluster management and scale-out
-- [ ] T140: Node identity (node_id) + cluster config model
-- [ ] T141: WAL streaming replication protocol (primary -> replica)
+- [x] T140: Node identity (node_id) + cluster config model
+- [x] T141: Replication transport protocol (primary -> replica fanout over SkeinQL RPC)
 - [ ] T142: CAS object pull protocol (replica fetch missing ValueIDs)
 - [ ] T143: Read-only replica serving + router (read balancing)
-- [ ] T144: cluster.* SkeinQL endpoints + join tokens + promote replica
-- [ ] T145: Sharding metadata + router prototype (single-shard txns)
+- [x] T144: cluster.* SkeinQL endpoints + join tokens + promote replica
+- [x] T145: Sharding metadata + router prototype (single-shard txns)
 
 ## Phase 15 - Additional performance improvements
 - [ ] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)

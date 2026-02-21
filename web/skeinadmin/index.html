@@ -7,223 +7,1272 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Space+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
     <style>
       :root {
         color-scheme: light;
-        --bg: #f6f0e9;
-        --panel: #fffaf2;
-        --ink: #1c1712;
-        --muted: #6f6256;
-        --line: #e7dccd;
-        --accent: #c45f1c;
-        --accent-2: #2b7a78;
-        --shadow: rgba(22, 16, 10, 0.08);
+        --bg: #eef2f7;
+        --panel: #ffffff;
+        --panel-2: #f7f9fc;
+        --ink: #1c2733;
+        --muted: #5b6572;
+        --line: #d7dde6;
+        --accent: #2b6cb0;
+        --accent-2: #2f855a;
+        --accent-3: #b7791f;
+        --shadow: 0 18px 40px rgba(26, 36, 52, 0.12);
       }
 
       * { box-sizing: border-box; }
       body {
-        font-family: "Space Grotesk", "Segoe UI", sans-serif;
         margin: 0;
-        background: radial-gradient(1200px 800px at 20% -10%, #fff4df 0%, rgba(255, 244, 223, 0) 60%),
-          linear-gradient(180deg, #f6f0e9 0%, #efe5d7 100%);
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(900px 600px at 10% -20%, rgba(207, 225, 255, 0.6) 0%, rgba(207, 225, 255, 0) 60%),
+          radial-gradient(900px 600px at 90% 0%, rgba(255, 239, 213, 0.6) 0%, rgba(255, 239, 213, 0) 60%),
+          linear-gradient(180deg, #f7f9fc 0%, #e9edf5 100%);
         color: var(--ink);
       }
-      body::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        background: radial-gradient(600px 300px at 90% 10%, rgba(196, 95, 28, 0.12), transparent 60%);
-        opacity: 0.9;
+
+      body[data-mode="console"] .nav-item[data-scope="admin"] {
+        display: none;
       }
-      header {
-        padding: 16px 20px;
-        border-bottom: 1px solid var(--line);
+
+      body[data-mode="console"] .tab-btn[data-scope="admin"] {
+        display: none;
+      }
+
+      body[data-mode="console"] .admin-only {
+        display: none !important;
+      }
+
+      body[data-mode="console"] .panel[data-panel="overview"] {
+        display: none;
+      }
+
+      .app-shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        background: linear-gradient(180deg, #ffffff 0%, #f1f4f9 100%);
+        border-right: 1px solid var(--line);
+        padding: 20px 16px;
         display: flex;
-        gap: 12px;
-        align-items: center;
-        background: rgba(255, 250, 242, 0.9);
+        flex-direction: column;
+        gap: 18px;
         position: sticky;
         top: 0;
-        z-index: 2;
-        backdrop-filter: blur(6px);
+        height: 100vh;
       }
-      header h1 { font-size: 18px; margin: 0; letter-spacing: 0.04em; text-transform: uppercase; }
-      header span { color: var(--muted); font-size: 12px; }
 
-      main { padding: 20px; display: grid; gap: 20px; }
-      .section {
-        display: grid;
-        gap: 16px;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      }
-      .card {
-        border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 16px;
-        background: var(--panel);
-        box-shadow: 0 12px 24px var(--shadow);
-        animation: rise 0.7s ease both;
-      }
-      .card.wide { grid-column: span 2; }
-      .card h2 { font-size: 15px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-      .field { margin-bottom: 12px; }
-      label { display: block; font-size: 12px; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-      input, textarea, select {
-        width: 100%;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: #fffdf8;
-        color: var(--ink);
-        font-family: "Space Grotesk", "Segoe UI", sans-serif;
-      }
-      textarea { min-height: 90px; resize: vertical; }
-      select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) calc(50% + 2px), calc(100% - 12px) calc(50% + 2px); background-size: 6px 6px; background-repeat: no-repeat; }
-      .row { display: flex; gap: 12px; flex-wrap: wrap; }
-      .row .field { flex: 1; min-width: 140px; }
-      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
-      button {
-        padding: 9px 12px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: #fff6e9;
-        cursor: pointer;
-        color: var(--ink);
+      .brand-title {
+        font-size: 18px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
         font-weight: 600;
-        letter-spacing: 0.02em;
-        transition: transform 0.15s ease, box-shadow 0.15s ease;
       }
-      button:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(196, 95, 28, 0.2); }
-      button.primary { background: var(--accent); color: #fffaf2; border-color: var(--accent); }
-      button.secondary { background: var(--accent-2); color: #f6fffe; border-color: var(--accent-2); }
-      pre {
-        background: #fdf6ea;
-        padding: 12px;
-        border-radius: 12px;
-        overflow: auto;
-        font-family: "Space Mono", ui-monospace, monospace;
+
+      .brand-sub {
         font-size: 12px;
-        border: 1px solid var(--line);
+        color: var(--muted);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        margin-top: 4px;
       }
-      .toggle {
+
+      .nav {
         display: flex;
-        align-items: center;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .nav-item {
+        border: 1px solid transparent;
+        background: transparent;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-weight: 600;
+        text-align: left;
+        cursor: pointer;
+        color: var(--muted);
+        transition: all 0.15s ease;
+      }
+
+      .nav-item:hover {
+        background: rgba(43, 108, 176, 0.08);
+        color: var(--ink);
+      }
+
+      .nav-item.active {
+        background: #ffffff;
+        border-color: var(--line);
+        color: var(--ink);
+        box-shadow: var(--shadow);
+      }
+
+      .sidebar-footer {
+        margin-top: auto;
+        display: grid;
         gap: 8px;
         font-size: 12px;
         color: var(--muted);
       }
-      .toggle input { width: auto; }
-      .grid-two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-      .report-list { display: grid; gap: 12px; }
+
+      .sidebar-section {
+        display: grid;
+        gap: 8px;
+      }
+
+      .sidebar-title {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .tree {
+        display: grid;
+        gap: 6px;
+        max-height: 240px;
+        overflow: auto;
+        padding-right: 4px;
+      }
+
+      .tree details summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      .tree .tree-table {
+        margin-left: 12px;
+        display: grid;
+        gap: 4px;
+      }
+
+      .tree button {
+        text-align: left;
+        width: 100%;
+        background: #ffffff;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      .pill.ok { color: #1b6a3a; border-color: rgba(27, 106, 58, 0.2); }
+      .pill.warn { color: #8a4e14; border-color: rgba(138, 78, 20, 0.2); }
+      .pill.error { color: #a33b2b; border-color: rgba(163, 59, 43, 0.2); }
+
+      .main {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+
+      .topbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(6px);
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+
+      .topbar h1 {
+        margin: 0 0 4px 0;
+        font-size: 20px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .topbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: flex-end;
+        margin-left: auto;
+      }
+
+      .topbar-meta {
+        display: grid;
+        gap: 6px;
+        min-width: 200px;
+      }
+
+      .top-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 12px 24px;
+        border-bottom: 1px solid var(--line);
+        background: #f7f9fc;
+      }
+
+      .tab-btn {
+        border: 1px solid transparent;
+        background: transparent;
+        padding: 8px 12px;
+        border-radius: 10px;
+        font-weight: 600;
+        cursor: pointer;
+        color: var(--muted);
+      }
+
+      .tab-btn.active {
+        background: #ffffff;
+        border-color: var(--line);
+        color: var(--ink);
+        box-shadow: var(--shadow);
+      }
+
+      .context-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 24px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.85);
+      }
+
+      .context-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        font-size: 12px;
+      }
+
+      .context-label {
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 10px;
+        color: var(--muted);
+      }
+
+      .context-value {
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      .context-hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .panel {
+        display: none;
+        padding: 20px 24px 32px;
+        animation: fadeUp 0.45s ease both;
+      }
+
+      .panel.active {
+        display: block;
+      }
+
+      .panel-grid {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: var(--shadow);
+      }
+
+      .card.wide { grid-column: span 2; }
+      .card.full { grid-column: 1 / -1; }
+
+      .card h2 {
+        margin: 0 0 12px 0;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+      }
+
+      .field { margin-bottom: 12px; }
+      label {
+        display: block;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+      input, textarea, select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: #ffffff;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+      }
+      textarea {
+        min-height: 100px;
+        resize: vertical;
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: 12px;
+      }
+      select {
+        appearance: none;
+        background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+          linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+        background-position: calc(100% - 18px) calc(50% + 2px), calc(100% - 12px) calc(50% + 2px);
+        background-size: 6px 6px;
+        background-repeat: no-repeat;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .row .field { flex: 1; min-width: 140px; }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        padding: 9px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: #f3f6fb;
+        color: var(--ink);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 18px rgba(43, 108, 176, 0.18);
+      }
+      button.primary {
+        background: var(--accent);
+        color: #ffffff;
+        border-color: var(--accent);
+      }
+      button.secondary {
+        background: var(--accent-2);
+        color: #f0fff4;
+        border-color: var(--accent-2);
+      }
+      button.ghost {
+        background: transparent;
+        border-style: dashed;
+      }
+
+      pre {
+        background: #f5f7fb;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px;
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        margin: 0;
+      }
+
+      .table-wrap {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #ffffff;
+        overflow: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      th, td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      thead th {
+        background: #f1f5fb;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+
+      tbody tr:hover {
+        background: #f4f8ff;
+      }
+
+      .breadcrumb {
+        display: inline-flex;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 12px;
+      }
+      .stat {
+        padding: 10px;
+        border-radius: 12px;
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+      }
+      .stat-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+      }
+      .stat-value {
+        font-size: 16px;
+        font-weight: 600;
+        margin-top: 6px;
+      }
+
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+
+      .list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .list button {
+        text-align: left;
+        background: #ffffff;
+      }
+
+      .callout {
+        border: 1px solid rgba(43, 108, 176, 0.2);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(43, 108, 176, 0.08);
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .steps {
+        margin: 0;
+        padding-left: 18px;
+        display: grid;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .feature-grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      .feature-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px;
+        background: #ffffff;
+        display: grid;
+        gap: 8px;
+      }
+
+      .feature-title {
+        font-weight: 600;
+        font-size: 13px;
+      }
+
+      details.help {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: var(--panel-2);
+      }
+
+      details.help summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      details.help .help-body {
+        margin-top: 8px;
+        display: grid;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
       .rewrite-item {
         border: 1px dashed var(--line);
         border-radius: 14px;
         padding: 12px;
-        background: #fffdf8;
+        background: #ffffff;
       }
-      .rewrite-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-      .rewrite-title { font-size: 14px; font-weight: 600; margin: 0; }
-      .rewrite-meta { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
-      .rewrite-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .rewrite-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .rewrite-title {
+        font-weight: 600;
+      }
+      .rewrite-meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .rewrite-tags {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+        flex-wrap: wrap;
+      }
       .tag {
         font-size: 10px;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         padding: 2px 8px;
         border-radius: 999px;
-        border: 1px solid rgba(196, 95, 28, 0.25);
-        background: rgba(196, 95, 28, 0.1);
+        border: 1px solid rgba(43, 108, 176, 0.25);
+        background: rgba(43, 108, 176, 0.1);
         color: var(--accent);
       }
       .tag.secondary {
-        border-color: rgba(43, 122, 120, 0.25);
-        background: rgba(43, 122, 120, 0.1);
+        border-color: rgba(47, 133, 90, 0.25);
+        background: rgba(47, 133, 90, 0.1);
         color: var(--accent-2);
       }
-      .rewrite-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 8px; }
+      .rewrite-grid {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        margin-top: 8px;
+      }
       .rewrite-block {
-        background: #fdf6ea;
+        background: #f5f7fb;
         border: 1px solid var(--line);
         border-radius: 10px;
         padding: 8px;
-        font-family: "Space Mono", ui-monospace, monospace;
+        font-family: "IBM Plex Mono", ui-monospace, monospace;
         font-size: 11px;
         white-space: pre-wrap;
       }
-      .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
-      @keyframes rise {
-        from { opacity: 0; transform: translateY(8px); }
+      @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(6px); }
         to { opacity: 1; transform: translateY(0); }
+      }
+
+      @media (max-width: 980px) {
+        .app-shell { grid-template-columns: 1fr; }
+        .sidebar {
+          position: static;
+          height: auto;
+          border-right: none;
+          border-bottom: 1px solid var(--line);
+        }
+        .nav { flex-direction: row; flex-wrap: wrap; }
+        .panel { padding: 16px; }
+        .card.wide { grid-column: 1 / -1; }
       }
     </style>
   </head>
-  <body>
-    <header>
-      <h1>SkeinAdmin</h1>
-      <span style="color:#666; font-size: 12px;">Standalone console (placeholder scaffold)</span>
-    </header>
-    <main>
-      <section class="section">
-        <div class="card">
-          <h2>Connect</h2>
-          <div class="field">
-            <label>Base URL (SkeinDB HTTP)</label>
-            <input id="baseUrl" placeholder="http://localhost:8080" value="http://localhost:8080" />
-          </div>
-          <div class="field">
-            <label>Bearer Token (optional)</label>
-            <input id="token" placeholder="" />
-          </div>
+  <body data-app="skeinadmin" data-mode="admin">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <div class="brand-title">SkeinAdmin</div>
+          <div class="brand-sub">SkeinDB control plane</div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-panel="overview" data-scope="admin">Overview</button>
+          <button class="nav-item" data-panel="workspace">Console</button>
+          <button class="nav-item" data-panel="schema">Schema</button>
+          <button class="nav-item" data-panel="data">Data</button>
+          <button class="nav-item" data-panel="cluster">Cluster</button>
+          <button class="nav-item" data-panel="settings">Settings</button>
+          <button class="nav-item" data-panel="migration" data-scope="admin">Migration</button>
+          <button class="nav-item" data-panel="nl" data-scope="admin">NL Lab</button>
+          <button class="nav-item" data-panel="rpc" data-scope="admin">RPC Explorer</button>
+        </nav>
+        <div class="sidebar-section">
+          <div class="sidebar-title">Databases</div>
+          <input id="dbSearch" placeholder="Filter databases" />
+          <div class="tree" id="dbTree">Connect to load databases.</div>
           <div class="actions">
-            <button id="btnPing">system.ping</button>
-            <button id="btnVersion">system.version</button>
-            <button id="btnStats">stats.snapshot</button>
-            <button id="btnCluster">cluster.status</button>
-            <button id="btnAdvisor">advisor.index_suggestions</button>
+            <button id="btnReloadTree" class="ghost">Reload Tree</button>
           </div>
         </div>
-
-        <div class="card wide">
-          <h2>System Response</h2>
-          <pre id="out">Ready.</pre>
+        <div class="sidebar-footer">
+          <div class="pill" id="connStatus">Disconnected</div>
+          <div>/console opens the workspace view.</div>
         </div>
-      </section>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Admin Overview</h1>
+            <p class="subtitle" id="pageSubtitle">Single-binary admin console. Use RPC Explorer for full control.</p>
+          </div>
+          <div class="topbar-actions">
+            <div class="field inline">
+              <label>Base URL</label>
+              <input id="baseUrl" placeholder="http://localhost:8080" />
+            </div>
+            <div class="field inline">
+              <label>Token</label>
+              <input id="token" placeholder="Bearer token (optional)" />
+            </div>
+            <div class="actions">
+              <button id="btnConnect" class="primary">Connect</button>
+              <button id="btnDisconnect" class="ghost">Disconnect</button>
+              <button id="btnPing" class="primary">Ping</button>
+              <button id="btnVersion" class="admin-only">Version</button>
+              <button id="btnStats" class="admin-only">Stats</button>
+              <button id="btnCapabilities" class="admin-only">Capabilities</button>
+              <button id="btnCluster" class="admin-only">Transport</button>
+              <button id="btnAdvisor" class="admin-only">Index Advisor</button>
+            </div>
+            <div class="topbar-meta">
+              <div class="pill" id="connBadge">Disconnected</div>
+              <div class="hint" id="connSummary">Connect to see live status.</div>
+            </div>
+          </div>
+        </header>
 
-      <section class="section">
-        <div class="card wide">
-          <h2>NL Query (Experimental)</h2>
-          <div class="grid-two">
-            <div>
+        <nav class="top-tabs">
+          <button class="tab-btn active" data-panel="overview" data-scope="admin">Overview</button>
+          <button class="tab-btn" data-panel="workspace">SQL</button>
+          <button class="tab-btn" data-panel="schema">Structure</button>
+          <button class="tab-btn" data-panel="data">Browse</button>
+          <button class="tab-btn" data-panel="cluster">Cluster</button>
+          <button class="tab-btn" data-panel="settings">Settings</button>
+          <button class="tab-btn" data-panel="migration" data-scope="admin">Migration</button>
+          <button class="tab-btn" data-panel="nl" data-scope="admin">NL Lab</button>
+          <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
+        </nav>
+
+        <div class="context-bar">
+          <div class="context-item"><span class="context-label">Server</span><span class="context-value" id="contextServer">--</span></div>
+          <div class="context-item"><span class="context-label">Database</span><span class="context-value" id="contextDb">--</span></div>
+          <div class="context-item"><span class="context-label">Table</span><span class="context-value" id="contextTable">--</span></div>
+          <div class="context-hint" id="contextHint">Connect and pick a database to start browsing.</div>
+        </div>
+
+        <section class="panel active" data-panel="overview">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Getting Started (phpMyAdmin-style flow)</h2>
+              <ol class="steps">
+                <li>Enter the server Base URL and optional token, then press Connect.</li>
+                <li>Pick a database and table from the left tree. The context bar updates as you click.</li>
+                <li>Use the SQL, Structure, Browse, and RPC tabs to manage every SkeinDB feature.</li>
+              </ol>
+              <div class="callout">Tip: If a feature does not have a dedicated panel yet, open RPC Explorer and call the method directly.</div>
+            </div>
+
+            <div class="card">
+              <h2>Runtime Status</h2>
+              <div class="stat-grid">
+                <div class="stat">
+                  <div class="stat-label">Uptime</div>
+                  <div class="stat-value" id="statUptime">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">CPU</div>
+                  <div class="stat-value" id="statCpu">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">RSS</div>
+                  <div class="stat-value" id="statRss">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">QPS/TPS</div>
+                  <div class="stat-value" id="statQps">--</div>
+                </div>
+              </div>
+              <div class="hint">Run Stats to refresh live telemetry.</div>
+            </div>
+
+            <div class="card">
+              <h2>Server Info</h2>
+              <div class="stat-grid">
+                <div class="stat">
+                  <div class="stat-label">Version</div>
+                  <div class="stat-value" id="infoVersion">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">SkeinQL</div>
+                  <div class="stat-value" id="infoSkeinql">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">Transport</div>
+                  <div class="stat-value" id="infoTransport">--</div>
+                </div>
+                <div class="stat">
+                  <div class="stat-label">Ping</div>
+                  <div class="stat-value" id="infoPing">--</div>
+                </div>
+              </div>
+              <div class="hint">Ping and Version update these fields.</div>
+            </div>
+
+            <div class="card">
+              <h2>Capabilities</h2>
+              <pre id="capabilitiesOut">Run Capabilities to load server features.</pre>
+            </div>
+
+            <div class="card">
+              <h2>Connection Profiles</h2>
+              <details class="help" open>
+                <summary>Why profiles?</summary>
+                <div class="help-body">
+                  Save multiple servers (dev, staging, prod) and switch with one click. Profiles only store URL and token.
+                </div>
+              </details>
               <div class="field">
-                <label>Database</label>
-                <input id="nlDb" placeholder="app" value="app" />
+                <label>Profile name</label>
+                <input id="profileName" placeholder="local-dev" />
+              </div>
+              <div class="actions">
+                <button id="btnSaveProfile" class="secondary">Save Profile</button>
+                <button id="btnDeleteProfile" class="ghost">Delete Profile</button>
+              </div>
+              <div class="field">
+                <label>Profiles</label>
+                <select id="profileSelect"></select>
+              </div>
+              <div class="hint">Select a profile to load its URL/token, then press Connect.</div>
+            </div>
+
+            <div class="card">
+              <h2>Admin Shortcuts</h2>
+              <div class="actions">
+                <button id="btnJumpConsole">Open Console</button>
+                <button id="btnJumpSchema">Schema Browser</button>
+                <button id="btnJumpData">Data Editor</button>
+                <button id="btnJumpCluster">Cluster</button>
+              </div>
+              <div class="hint">phpMyAdmin-style entry points to the most used tools.</div>
+            </div>
+
+            <div class="card wide">
+              <h2>Feature Control Center</h2>
+              <div class="feature-grid">
+                <div class="feature-card">
+                  <div class="feature-title">Schema & Structure</div>
+                  <div class="hint">Create databases, manage tables, and review structure.</div>
+                  <button class="panel-link" data-panel-link="schema">Open Structure</button>
+                </div>
+                <div class="feature-card">
+                  <div class="feature-title">Browse & Data Editor</div>
+                  <div class="hint">Browse rows, insert, update, delete, and run queries.</div>
+                  <button class="panel-link" data-panel-link="data">Open Browse</button>
+                </div>
+                <div class="feature-card">
+                  <div class="feature-title">SQL & SkeinQL</div>
+                  <div class="hint">Use SQL for compatibility or SkeinQL for full power.</div>
+                  <button class="panel-link" data-panel-link="workspace">Open SQL</button>
+                </div>
+                <div class="feature-card">
+                  <div class="feature-title">Security, Forensics, CDC</div>
+                  <div class="hint">Use RPC Explorer to reach advanced methods (audit, forensic, CDC).</div>
+                  <button class="panel-link" data-panel-link="rpc">Open RPC Explorer</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card wide">
+              <h2>Latest Response</h2>
+              <pre id="out">Ready.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="workspace">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Workspace Guide</h2>
+              <details class="help" open>
+                <summary>How to use the console</summary>
+                <div class="help-body">
+                  <div>Use SQL for compatibility, but SkeinQL is the primary API.</div>
+                  <div>Pick a database/table on the left to prefill fields.</div>
+                  <div>Use the SkeinQL runner for prepared statements, patching, and wasm formats.</div>
+                </div>
+              </details>
+            </div>
+
+            <div class="card wide">
+              <h2>SQL Workspace (phpMyAdmin style)</h2>
+              <div class="field">
+                <label>SQL Statement</label>
+                <textarea id="sqlText" placeholder="SELECT * FROM demo.users LIMIT 10;"></textarea>
+              </div>
+              <div class="actions">
+                <button id="btnSqlExec" class="primary">Run SQL</button>
+                <button id="btnSqlExplain" class="ghost">Explain</button>
+              </div>
+              <div class="hint">SQL execution depends on the compatibility layer. Use the SkeinQL runner below for guaranteed coverage.</div>
+              <pre id="sqlOut">Waiting for SQL execution.</pre>
+            </div>
+
+            <div class="card wide">
+              <h2>SkeinQL Query Runner</h2>
+              <div class="row">
+                <div class="field">
+                  <label>Method</label>
+                  <select id="skeinMethod">
+                    <option value="query.select">query.select</option>
+                    <option value="query.patch">query.patch</option>
+                    <option value="query.prepare">query.prepare</option>
+                    <option value="query.execute_prepared">query.execute_prepared</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Result format</label>
+                  <select id="skeinFormat">
+                    <option value="rows_json">rows_json</option>
+                    <option value="objects_json">objects_json</option>
+                    <option value="wasm_batch_v1">wasm_batch_v1</option>
+                    <option value="skeinpack_v1">skeinpack_v1</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Prepared query id</label>
+                  <input id="skeinQueryId" placeholder="query_id for execute_prepared" />
+                </div>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Base ETag (query.patch)</label>
+                  <input id="skeinBaseEtag" placeholder="etag for patch" />
+                </div>
+                <div class="field">
+                  <label>Include full snapshot</label>
+                  <select id="skeinIncludeFull">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label>Query JSON</label>
+                <textarea id="skeinQuery" placeholder='{"schema":"demo","table":"users","select":[{"col":"id"}]}'></textarea>
+              </div>
+              <div class="field">
+                <label>Args (JSON array)</label>
+                <textarea id="skeinArgs" placeholder='[{"t":"i64","v":1}]'></textarea>
+              </div>
+              <div class="actions">
+                <button id="btnSkeinRun" class="primary">Run SkeinQL</button>
+              </div>
+              <pre id="skeinOut">Ready for query execution.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="schema">
+          <div class="panel-grid">
+            <div class="card">
+              <h2>Schema Browser</h2>
+              <details class="help" open>
+                <summary>Structure workflow</summary>
+                <div class="help-body">
+                  <div>1) List databases, then click one to load its tables.</div>
+                  <div>2) Click a table to populate the editor and structure view.</div>
+                  <div>3) Use create/merge tools to update schema safely.</div>
+                </div>
+              </details>
+              <div class="actions">
+                <button id="btnSchemaListDb" class="primary">List Databases</button>
+                <button id="btnSchemaListTables">List Tables</button>
+              </div>
+              <div class="hint">Click a database or table to load it into the editor.</div>
+              <div class="row">
+                <div class="field">
+                  <label>Databases</label>
+                  <div class="list" id="dbList">--</div>
+                </div>
+                <div class="field">
+                  <label>Tables</label>
+                  <div class="list" id="tableList">--</div>
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnBrowseTable" class="secondary">Browse Table in Console</button>
+              </div>
+            </div>
+
+            <div class="card wide">
+              <h2>Schema Operations</h2>
+              <div class="row">
+                <div class="field">
+                  <label>Database</label>
+                  <input id="schemaDb" placeholder="demo" />
+                </div>
+                <div class="field">
+                  <label>Table</label>
+                  <input id="schemaTable" placeholder="users" />
+                </div>
+              </div>
+              <div class="field">
+                <label>Columns (JSON array)</label>
+                <textarea id="schemaColumns" placeholder='[{"name":"id","type":"i64"},{"name":"name","type":"string"}]'></textarea>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Primary key (comma separated)</label>
+                  <input id="schemaPk" placeholder="id" />
+                </div>
+                <div class="field">
+                  <label>IF NOT EXISTS</label>
+                  <select id="schemaIfNotExists">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnSchemaCreateDb">Create Database</button>
+                <button id="btnSchemaDescribe">Describe Table</button>
+                <button id="btnSchemaCreateTable" class="primary">Create Table</button>
+              </div>
+              <div class="hint">Use schema.propose_change and schema.apply_merge in RPC Explorer for advanced migrations.</div>
+              <pre id="schemaOut">Waiting for schema operations.</pre>
+            </div>
+
+            <div class="card wide">
+              <h2>Table Structure</h2>
+              <div class="breadcrumb" id="structureBreadcrumb">No table selected.</div>
+              <div class="table-wrap">
+                <table id="structureTable"></table>
+              </div>
+              <pre id="structureOut">Select a table to view columns.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="data">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Data Operations</h2>
+              <details class="help" open>
+                <summary>Browse and edit like phpMyAdmin</summary>
+                <div class="help-body">
+                  <div>Use Browse to preview rows. Use Insert, Update, Delete for changes.</div>
+                  <div>All fields expect SkeinQL literals (Lit). JSON helpers are in the placeholders.</div>
+                  <div>Need advanced filtering? Use query.select in the console or RPC Explorer.</div>
+                </div>
+              </details>
+              <div class="row">
+                <div class="field">
+                  <label>Database</label>
+                  <input id="dataDb" placeholder="demo" />
+                </div>
+                <div class="field">
+                  <label>Table</label>
+                  <input id="dataTable" placeholder="users" />
+                </div>
+                <div class="field">
+                  <label>Limit</label>
+                  <input id="dataLimit" type="number" min="0" placeholder="optional" />
+                </div>
+              </div>
+              <div class="field">
+                <label>PK (JSON array of Lit)</label>
+                <textarea id="dataPk" placeholder='[{"t":"i64","v":1}]'></textarea>
+              </div>
+              <div class="field">
+                <label>Rows (JSON array of RowObject)</label>
+                <textarea id="dataRows" placeholder='[{"id":{"t":"i64","v":1},"name":{"t":"string","v":"Ada"}}]'></textarea>
+              </div>
+              <div class="field">
+                <label>Where (Expr JSON)</label>
+                <textarea id="dataWhere" placeholder='{"op":"=","left":{"col":"id"},"right":{"lit":{"t":"i64","v":1}}}'></textarea>
+              </div>
+              <div class="field">
+                <label>Set (RowObject JSON)</label>
+                <textarea id="dataSet" placeholder='{"name":{"t":"string","v":"Ada Lovelace"}}'></textarea>
+              </div>
+              <div class="actions">
+                <button id="btnDataGet">data.get</button>
+                <button id="btnDataInsert" class="primary">data.insert</button>
+                <button id="btnDataUpdate">data.update</button>
+                <button id="btnDataDelete">data.delete</button>
+                <button id="btnBrowse" class="secondary">Browse Table</button>
+              </div>
+              <div class="hint">Use the left tree to keep Database/Table in sync.</div>
+              <pre id="dataOut">Waiting for data operations.</pre>
+            </div>
+
+            <div class="card wide">
+              <h2>Browse Results</h2>
+              <div class="row">
+                <div class="field">
+                  <label>Browse limit</label>
+                  <input id="dataBrowseLimit" type="number" min="1" value="50" />
+                </div>
+                <div class="field">
+                  <label>Order by (column)</label>
+                  <input id="dataBrowseOrder" placeholder="optional" />
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table id="browseTable"></table>
+              </div>
+              <pre id="browseOut">No data loaded.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="cluster">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Cluster & Transport</h2>
+              <details class="help" open>
+                <summary>Cluster management guide</summary>
+                <div class="help-body">
+                  <div>This panel is now wired to real cluster.* control-plane methods.</div>
+                  <div>Typical flow: create join token -> join node -> create shard -> promote/move/rebalance.</div>
+                  <div>All actions persist to `cluster.state.v1` in server settings.</div>
+                </div>
+              </details>
+              <div class="actions">
+                <button id="btnClusterStatus" class="primary">Cluster Status</button>
+                <button id="btnClusterNodes">List Nodes</button>
+                <button id="btnClusterTransport">Transport Capabilities</button>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Join token ttl (ms)</label>
+                  <input id="clusterJoinTtl" type="number" min="1000" value="600000" />
+                </div>
+                <div class="field">
+                  <label>Join role</label>
+                  <select id="clusterJoinRole">
+                    <option value="replica">replica</option>
+                    <option value="primary">primary</option>
+                  </select>
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnClusterCreateToken" class="secondary">Create Join Token</button>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Join token</label>
+                  <input id="clusterJoinToken" placeholder="join token from primary" />
+                </div>
+                <div class="field">
+                  <label>Node id</label>
+                  <input id="clusterNodeId" placeholder="node-replica-1" />
+                </div>
+                <div class="field">
+                  <label>Node rpc url</label>
+                  <input id="clusterNodeUrl" placeholder="http://127.0.0.1:8081" />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnClusterJoinNode">Join Node</button>
+                <button id="btnClusterRemoveNode">Remove Node</button>
+                <button id="btnClusterPromote">Promote Replica</button>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Shard id</label>
+                  <input id="clusterShardId" placeholder="optional for create / required for move" />
+                </div>
+                <div class="field">
+                  <label>DB</label>
+                  <input id="clusterShardDb" placeholder="app" />
+                </div>
+                <div class="field">
+                  <label>Table</label>
+                  <input id="clusterShardTable" placeholder="users" />
+                </div>
+              </div>
+              <div class="row">
+                <div class="field">
+                  <label>Shard primary node</label>
+                  <input id="clusterShardPrimary" placeholder="optional node id" />
+                </div>
+                <div class="field">
+                  <label>Shard replicas (JSON array)</label>
+                  <input id="clusterShardReplicas" placeholder='["replica-a"]' />
+                </div>
+                <div class="field">
+                  <label>Move target node</label>
+                  <input id="clusterMoveTarget" placeholder="node id" />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnClusterShardCreate">Create Shard</button>
+                <button id="btnClusterShardMove">Move Shard</button>
+                <button id="btnClusterShardRebalance">Rebalance Shards</button>
+              </div>
+              <div class="hint">Use this panel to control join/leave, promotions, replication topology, and shard placement.</div>
+              <pre id="clusterOut">Waiting for cluster capabilities.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="settings">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Settings Manager</h2>
+              <details class="help" open>
+                <summary>All settings from the web panel</summary>
+                <div class="help-body">
+                  <div>Get or set any server setting using settings.get/settings.set.</div>
+                  <div>Cluster metadata is stored in <code>cluster.state.v1</code>.</div>
+                </div>
+              </details>
+              <div class="row">
+                <div class="field">
+                  <label>Key</label>
+                  <input id="settingsKey" placeholder="cluster.state.v1" />
+                </div>
+                <div class="field">
+                  <label>Value (JSON)</label>
+                  <input id="settingsValue" placeholder='{"enabled":true}' />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnSettingsGet" class="primary">Get Setting</button>
+                <button id="btnSettingsSet">Set Setting</button>
+                <button id="btnSettingsClusterPreset" class="secondary">Load Cluster Keys</button>
+              </div>
+              <pre id="settingsOut">No settings request yet.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="migration">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>Migration Assistant (Experimental)</h2>
+              <details class="help" open>
+                <summary>How to use migration insights</summary>
+                <div class="help-body">
+                  <div>Provide sample queries or leave blank to use in-memory history.</div>
+                  <div>Rewrite preview suggests compatibility rewrites for SkeinDB migration.</div>
+                  <div>Export reports to share with your team.</div>
+                </div>
+              </details>
+              <div class="row">
+                <div class="field">
+                  <label>Samples (JSON array, optional)</label>
+                  <textarea id="migSamples" placeholder="[]"></textarea>
+                  <div class="hint">Leave empty to use in-memory query history.</div>
+                </div>
+                <div class="field">
+                  <label>Limit</label>
+                  <input id="migLimit" type="number" min="1" value="10" />
+                </div>
+                <div class="field">
+                  <label>Window ms</label>
+                  <input id="migWindow" type="number" min="0" placeholder="60000" />
+                </div>
+              </div>
+              <div class="actions">
+                <button id="btnMigrationPreview" class="primary">Rewrite Preview</button>
+                <button id="btnMigrationIntent" class="secondary">Intent Report</button>
+                <button id="btnMigrationDownloadJson">Download JSON</button>
+                <button id="btnMigrationDownloadMd">Download Markdown</button>
+                <button id="btnMigrationDownloadHtml">Download HTML</button>
+                <button id="btnMigrationCopyMd">Copy Markdown</button>
+              </div>
+              <div class="field">
+                <label>Rewrite Report</label>
+                <div id="migrationReport" class="list">No rewrites yet.</div>
+              </div>
+              <pre id="migrationOut">Waiting for migration analysis.</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="nl">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>NL Query (Experimental)</h2>
+              <details class="help" open>
+                <summary>Natural language workflow</summary>
+                <div class="help-body">
+                  <div>Translate natural language to SkeinQL, then explain before executing.</div>
+                  <div>Approval tokens are required for execution to keep AI usage safe.</div>
+                </div>
+              </details>
+              <div class="row">
+                <div class="field">
+                  <label>Database</label>
+                  <input id="nlDb" placeholder="app" value="app" />
+                </div>
+                <div class="field">
+                  <label>Tables (comma separated)</label>
+                  <input id="nlTables" placeholder="users, orders" />
+                </div>
+                <div class="field">
+                  <label>Max tables</label>
+                  <input id="nlMaxTables" type="number" min="1" value="16" />
+                </div>
               </div>
               <div class="field">
                 <label>Natural language request</label>
                 <textarea id="nlRequest" placeholder="list users who signed up this week"></textarea>
               </div>
-              <div class="field">
-                <label>Tables (comma-separated)</label>
-                <input id="nlTables" placeholder="users, orders" />
-              </div>
               <div class="row">
-                <label class="toggle"><input type="checkbox" id="nlIncludeSchema" checked /> Include schema</label>
-                <label class="toggle"><input type="checkbox" id="nlReadOnly" checked /> Read-only</label>
-              </div>
-              <div class="field">
-                <label>Max tables</label>
-                <input id="nlMaxTables" type="number" min="1" value="16" />
+                <label class="pill"><input type="checkbox" id="nlIncludeSchema" checked /> Include schema</label>
+                <label class="pill"><input type="checkbox" id="nlReadOnly" checked /> Read-only</label>
               </div>
               <div class="actions">
                 <button id="btnNlTranslate" class="primary">Translate</button>
               </div>
             </div>
-            <div>
+
+            <div class="card wide">
+              <h2>NL Execution</h2>
               <div class="field">
                 <label>Query JSON</label>
                 <textarea id="nlQuery" placeholder='{"body":{"select":{...}}}'></textarea>
@@ -244,73 +1293,64 @@
                     <option value="rows_json">rows_json</option>
                   </select>
                 </div>
-              </div>
-              <div class="field">
-                <label>Approval token</label>
-                <input id="nlApproval" placeholder="Paste from ai.nl.explain" />
+                <div class="field">
+                  <label>Approval token</label>
+                  <input id="nlApproval" placeholder="Paste from ai.nl.explain" />
+                </div>
               </div>
               <div class="actions">
                 <button id="btnNlExplain" class="secondary">Explain</button>
                 <button id="btnNlExecute">Execute</button>
               </div>
+              <pre id="nlOut">Waiting for NL requests.</pre>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div class="card">
-          <h2>NL Output</h2>
-          <pre id="nlOut">Waiting for NL requests.</pre>
-        </div>
-      </section>
-
-      <section class="section">
-        <div class="card wide">
-          <h2>Migration Assistant (Experimental)</h2>
-          <div class="grid-two">
-            <div>
-              <div class="field">
-                <label>Samples (JSON array, optional)</label>
-                <textarea id="migSamples" placeholder="[]"></textarea>
-                <div class="hint">Leave empty to use in-memory query history.</div>
-              </div>
+        <section class="panel" data-panel="rpc">
+          <div class="panel-grid">
+            <div class="card wide">
+              <h2>RPC Explorer</h2>
+              <details class="help" open>
+                <summary>Full feature access</summary>
+                <div class="help-body">
+                  <div>All SkeinDB capabilities are reachable via RPC. Use this panel to call any method.</div>
+                  <div>Load system.capabilities to populate the method list and templates.</div>
+                </div>
+              </details>
               <div class="row">
                 <div class="field">
-                  <label>Limit</label>
-                  <input id="migLimit" type="number" min="1" value="10" />
+                  <label>Method</label>
+                  <select id="rpcMethod"></select>
                 </div>
                 <div class="field">
-                  <label>Window ms</label>
-                  <input id="migWindow" type="number" min="0" placeholder="60000" />
+                  <label>Template</label>
+                  <select id="rpcTemplate"></select>
+                </div>
+                <div class="field">
+                  <label>Search methods</label>
+                  <input id="methodSearch" placeholder="filter methods" />
                 </div>
               </div>
               <div class="actions">
-                <button id="btnMigrationPreview" class="primary">Rewrite Preview</button>
-                <button id="btnMigrationIntent" class="secondary">Intent Report</button>
-                <button id="btnMigrationDownloadJson">Download JSON</button>
-                <button id="btnMigrationDownloadMd">Download Markdown</button>
-                <button id="btnMigrationDownloadHtml">Download HTML</button>
-                <button id="btnMigrationCopyMd">Copy Markdown</button>
+                <button id="btnRpcLoadTemplate" class="secondary">Load Template</button>
+                <button id="btnRpcSend" class="primary">Send RPC</button>
               </div>
-            </div>
-            <div>
               <div class="field">
-                <label>Rewrite Report</label>
-                <div id="migrationReport" class="report-list">No rewrites yet.</div>
+                <label>Params (JSON)</label>
+                <textarea id="rpcParams" placeholder='{"db":"demo"}'></textarea>
               </div>
+              <pre id="rpcOut">Ready for RPC calls.</pre>
+            </div>
+
+            <div class="card">
+              <h2>Method Library</h2>
+              <div class="list" id="methodList">Load capabilities to populate methods.</div>
             </div>
           </div>
-        </div>
-
-        <div class="card">
-          <h2>Migration Output</h2>
-          <pre id="migrationOut">Waiting for migration analysis.</pre>
-        </div>
-      </section>
-
-      <p style="margin-top:8px; color:var(--muted); font-size: 13px;">
-        This is a minimal placeholder. The full SkeinAdmin feature set is specified in <code>docs/SKEINADMIN.md</code>.
-      </p>
-    </main>
+        </section>
+      </main>
+    </div>
 
     <script type="module" src="./src/main.js"></script>
   </body>

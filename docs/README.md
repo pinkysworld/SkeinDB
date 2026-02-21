@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-01-31
+Last updated: 2026-02-21
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -37,7 +37,9 @@ The repo is intentionally written so you can read it in two ways:
    - `TELEMETRY_AND_MIGRATION.md` (compatibility telemetry + migration hints)
 
 6) **Research roadmap**
+   - `RESEARCH_AGENDA.md` (20-track status matrix + priorities)
    - `research_agenda/` (prioritized research directions)
+   - `papers/SkeinDB_IJRCOM_Submission.md` (submission-ready manuscript draft)
 
 ## Contributing docs
 

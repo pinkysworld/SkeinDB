@@ -2,14 +2,17 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
 use axum::{
     extract::Path,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -23,18 +26,20 @@ use skeindb_skeinql::{
         AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
         AdvisorIndexSynthesizeParams, AiAutoparamAnalyzeParams, AiAutoparamClassifyParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcPollParams,
-        CdcSubscribeTableParams, DataDeleteParams, DataGetParams, DataInsertParams,
-        DataUpdateParams, DpAggregateParams, DpAuditLogParams, DpBudgetGetParams,
-        DpBudgetSetParams, EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
-        ForensicExportParams, ForensicQueryParams, ForensicVerifyParams, MergeApplyParams,
-        MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams, MergeWasmRegisterParams,
-        MigrationIntentReportParams, MigrationRewritePreviewParams, ObliviousExplainParams,
-        ObliviousPolicyGetParams, ObliviousPolicySetParams, QueryExecutePreparedParams,
-        QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo,
-        SchemaMergeStatusParams, SchemaProposeChangeParams, VectorIndexStatusParams,
-        VectorInsertParams, VectorSearchParams, ViewCreateParams, ViewDropParams,
-        ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams,
-        WasmPlanRunParams,
+        CdcSubscribeTableParams, ClusterJoinTokenCreateParams, ClusterNodeJoinParams,
+        ClusterNodeRemoveParams, ClusterNodesParams, ClusterReplicaPromoteParams,
+        ClusterShardCreateParams, ClusterShardMoveParams, ClusterShardRebalanceParams,
+        DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
+        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, EdgeBundleApplyParams,
+        EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
+        ForensicVerifyParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
+        MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
+        MigrationRewritePreviewParams, ObliviousExplainParams, ObliviousPolicyGetParams,
+        ObliviousPolicySetParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
+        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        SchemaProposeChangeParams, VectorIndexStatusParams, VectorInsertParams, VectorSearchParams,
+        ViewCreateParams, ViewDropParams, ViewExplainDepsParams, ViewRefreshParams,
+        ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
     },
     types::{Lit, Query, QueryCache, ResultFormat, WireHints},
     RpcError, RpcRequest, RpcResponse, SKEINQL_VERSION,
@@ -44,6 +49,29 @@ use crate::engine::{ColumnSchema, Engine, Subscriptions};
 use crate::quic;
 
 use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
+
+const REPLICATION_HEADER: &str = "x-skeindb-replication";
+const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
+const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
+static CLUSTER_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const ADMIN_INDEX_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../web/skeinadmin/index.html"
+));
+const ADMIN_MAIN_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../web/skeinadmin/src/main.js"
+));
+
+fn admin_index_html() -> &'static str {
+    ADMIN_INDEX_HTML
+}
+
+fn admin_main_js() -> &'static str {
+    ADMIN_MAIN_JS
+}
 
 #[derive(Debug, Clone)]
 pub struct ServeOpts {
@@ -67,13 +95,175 @@ struct TransportCapabilities {
 pub(crate) struct AppState {
     started: Instant,
     data_dir: PathBuf,
+    local_rpc_url: String,
     settings: Arc<Mutex<serde_json::Map<String, Value>>>,
+    cluster: Arc<Mutex<ClusterStateModel>>,
     counters: Arc<Mutex<Counters>>,
 
     engine: Arc<RwLock<Engine>>,
     subs: Arc<Mutex<Subscriptions>>,
     coalesce: Arc<QueryCoalescer>,
     transport: TransportCapabilities,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterNode {
+    node_id: String,
+    rpc_url: String,
+    role: String,
+    status: String,
+    joined_at_ms: u64,
+    last_seen_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterJoinToken {
+    token: String,
+    role: String,
+    expires_at_ms: u64,
+    max_uses: u32,
+    used: u32,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterShard {
+    shard_id: String,
+    db: String,
+    table: Option<String>,
+    primary_node_id: String,
+    replicas: Vec<String>,
+    slots: u32,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterReplicationState {
+    shipped_ops: u64,
+    applied_ops: u64,
+    failed_ops: u64,
+    last_error: Option<String>,
+    last_updated_ms: u64,
+}
+
+impl Default for ClusterReplicationState {
+    fn default() -> Self {
+        Self {
+            shipped_ops: 0,
+            applied_ops: 0,
+            failed_ops: 0,
+            last_error: None,
+            last_updated_ms: now_unix_ms_u64(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClusterStateModel {
+    enabled: bool,
+    cluster_id: String,
+    local_node_id: String,
+    primary_node_id: String,
+    nodes: Vec<ClusterNode>,
+    join_tokens: Vec<ClusterJoinToken>,
+    shards: Vec<ClusterShard>,
+    replication: ClusterReplicationState,
+}
+
+impl ClusterStateModel {
+    fn bootstrap(local_node_id: String, local_rpc_url: String) -> Self {
+        let ts = now_unix_ms_u64();
+        let cluster_id = format!("cluster-{}", ts);
+        let local = ClusterNode {
+            node_id: local_node_id.clone(),
+            rpc_url: local_rpc_url,
+            role: "primary".to_string(),
+            status: "online".to_string(),
+            joined_at_ms: ts,
+            last_seen_ms: ts,
+        };
+        Self {
+            enabled: false,
+            cluster_id,
+            local_node_id: local_node_id.clone(),
+            primary_node_id: local_node_id,
+            nodes: vec![local],
+            join_tokens: Vec::new(),
+            shards: Vec::new(),
+            replication: ClusterReplicationState::default(),
+        }
+    }
+
+    fn local_role(&self) -> String {
+        self.nodes
+            .iter()
+            .find(|n| n.node_id == self.local_node_id)
+            .map(|n| n.role.clone())
+            .unwrap_or_else(|| {
+                if self.local_node_id == self.primary_node_id {
+                    "primary".to_string()
+                } else {
+                    "replica".to_string()
+                }
+            })
+    }
+
+    fn primary_rpc_url(&self) -> Option<String> {
+        self.nodes
+            .iter()
+            .find(|n| n.node_id == self.primary_node_id)
+            .map(|n| n.rpc_url.clone())
+    }
+
+    fn cleanup_join_tokens(&mut self, now_ms: u64) {
+        self.join_tokens.retain(|t| t.expires_at_ms > now_ms);
+    }
+
+    fn nodes_for_replication(&self, db: Option<&str>, table: Option<&str>) -> Vec<ClusterNode> {
+        let shard_match = match (db, table) {
+            (Some(db), Some(table)) => self
+                .shards
+                .iter()
+                .find(|s| s.db == db && s.table.as_deref() == Some(table)),
+            _ => None,
+        };
+
+        let mut node_ids: HashSet<String> = HashSet::new();
+        if let Some(shard) = shard_match {
+            for id in shard.replicas.iter() {
+                node_ids.insert(id.clone());
+            }
+        } else {
+            for node in self.nodes.iter() {
+                if node.role == "replica" && node.status == "online" {
+                    node_ids.insert(node.node_id.clone());
+                }
+            }
+        }
+
+        self.nodes
+            .iter()
+            .filter(|node| {
+                node_ids.contains(&node.node_id)
+                    && node.node_id != self.local_node_id
+                    && node.status == "online"
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn shard_primary_for(&self, db: Option<&str>, table: Option<&str>) -> String {
+        if let (Some(db), Some(table)) = (db, table) {
+            if let Some(shard) = self
+                .shards
+                .iter()
+                .find(|s| s.db == db && s.table.as_deref() == Some(table))
+            {
+                return shard.primary_node_id.clone();
+            }
+        }
+        self.primary_node_id.clone()
+    }
 }
 
 #[derive(Default)]
@@ -127,6 +317,17 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
 
     let engine = Engine::open(&data_dir)?;
+    let advertised_host = if opts.bind == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        opts.bind.clone()
+    };
+    let local_rpc_url = format!("http://{}:{}", advertised_host, opts.http_port);
+    let local_node_id = format!(
+        "node-{}-{}",
+        advertised_host.replace('.', "-"),
+        opts.cluster_port
+    );
     let transport = TransportCapabilities {
         http: true,
         quic: opts.quic_port.is_some(),
@@ -135,7 +336,12 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let state = AppState {
         started: Instant::now(),
         data_dir,
+        local_rpc_url: local_rpc_url.clone(),
         settings: Arc::new(Mutex::new(serde_json::Map::new())),
+        cluster: Arc::new(Mutex::new(ClusterStateModel::bootstrap(
+            local_node_id,
+            local_rpc_url,
+        ))),
         counters: Arc::new(Mutex::new(Counters::default())),
         engine: Arc::new(RwLock::new(engine)),
         subs: Arc::new(Mutex::new(Subscriptions::default())),
@@ -145,6 +351,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
 
     // Load persisted settings if present.
     load_settings(&state).ok();
+    load_cluster_state(&state).ok();
 
     let app_state = state.clone();
     let app = Router::new()
@@ -153,8 +360,19 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/console", get(console_handler))
+        .route("/console/", get(console_handler))
+        .route("/console/src/main.js", get(console_main_js_handler))
         .route("/admin", get(admin_handler))
-        .with_state(state);
+        .route("/admin/", get(admin_handler))
+        .route("/admin/src/main.js", get(admin_main_js_handler))
+        .route("/src/main.js", get(admin_main_js_handler))
+        .with_state(state)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(Any),
+        );
 
     let quic_handle = if let Some(quic_port) = opts.quic_port {
         let cert_path = opts
@@ -216,262 +434,24 @@ async fn health_handler() -> impl IntoResponse {
 }
 
 async fn console_handler() -> impl IntoResponse {
-    Html(
-        r#"<!doctype html>
-<html><head><meta charset='utf-8'><title>SkeinDB Console</title>
-<style>
-  #rewrites { margin-top: 12px; }
-  .rewrite-card { border: 1px solid #ccc; padding: 8px; margin: 8px 0; }
-  .rewrite-title { font-weight: 600; margin-bottom: 4px; }
-  .rewrite-meta { color: #555; font-size: 0.9em; margin-bottom: 6px; }
-  .rewrite-evidence { margin: 6px 0; color: #555; font-size: 0.9em; }
-  .rewrite-evidence summary { cursor: pointer; }
-  .rewrite-evidence ul { margin: 4px 0 0 16px; padding: 0; }
-  details pre { background: #f7f7f7; padding: 6px; white-space: pre-wrap; }
-</style></head>
-<body>
-  <h1>SkeinDB Console (placeholder)</h1>
-  <p>This is an embedded placeholder UI. Use <code>/api/v1/rpc</code> for SkeinQL.</p>
-  <button id='ping'>Ping</button>
-  <h2>Migration rewrites</h2>
-  <label>Samples (JSON array)</label><br/>
-  <textarea id='samples' rows='6' cols='60' placeholder='[]'></textarea><br/>
-  <label>Limit</label>
-  <input id='limit' type='number' min='1' value='5'/>
-  <label>Window ms</label>
-  <input id='window_ms' type='number' min='0' placeholder='60000'/>
-  <button id='preview'>Rewrite preview</button>
-  <button id='download_md'>Download Markdown</button>
-  <button id='download_html'>Download HTML</button>
-  <div id='rewrites'></div>
-  <pre id='out'></pre>
-  <script>
-    let lastRewrites = [];
-    async function call(method, params) {
-      const res = await fetch('/api/v1/rpc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({skeinql:'1.0', id:'ui', method, params})});
-      return res.json();
-    }
-    function setOut(obj) {
-      document.getElementById('out').textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
-    }
-    function parseSamples() {
-      const raw = document.getElementById('samples').value.trim();
-      if (!raw) return undefined;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
-        throw new Error('samples must be a JSON array');
-      }
-      return parsed;
-    }
-    function formatEvidenceText(ev) {
-      if (!ev || typeof ev !== 'object') {
-        return String(ev);
-      }
-      const parts = [];
-      if (ev.query_index !== undefined) {
-        parts.push('query[' + ev.query_index + ']');
-      }
-      if (ev.table && ev.table.db && ev.table.table) {
-        parts.push('table=' + ev.table.db + '.' + ev.table.table);
-      }
-      if (Array.isArray(ev.columns) && ev.columns.length) {
-        parts.push('columns=' + ev.columns.join(', '));
-      }
-      if (ev.note) {
-        parts.push(ev.note);
-      }
-      return parts.join(' | ') || 'evidence';
-    }
-    function buildMarkdown(rewrites) {
-      let out = '# SkeinDB Migration Rewrite Report\\n\\n';
-      if (!rewrites.length) {
-        out += 'No rewrites found.\\n';
-        return out;
-      }
-      rewrites.forEach((item, idx) => {
-        const title = item.title || item.intent || ('Rewrite ' + (idx + 1));
-        out += '## ' + title + '\\n\\n';
-        out += '- Intent: ' + (item.intent || 'unknown') + '\\n';
-        out += '- Confidence: ' + Math.round((item.confidence || 0) * 100) + '%\\n';
-        if (Array.isArray(item.evidence) && item.evidence.length) {
-          out += '- Evidence:\\n';
-          item.evidence.forEach((ev) => {
-            out += '  - ' + formatEvidenceText(ev) + '\\n';
-          });
-        }
-        out += '\\n';
-        out += 'Before:\\n```sql\\n' + (item.before || '') + '\\n```\\n\\n';
-        out += 'After:\\n```\\n' + (item.after || '') + '\\n```\\n\\n';
-      });
-      return out;
-    }
-    function escapeHtml(value) {
-      return String(value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-    function buildHtml(rewrites) {
-      let out = '<!doctype html><html><head><meta charset="utf-8"><title>SkeinDB Migration Rewrite Report</title></head><body>';
-      out += '<h1>SkeinDB Migration Rewrite Report</h1>';
-      if (!rewrites.length) {
-        out += '<p>No rewrites found.</p></body></html>';
-        return out;
-      }
-      rewrites.forEach((item, idx) => {
-        const title = item.title || item.intent || ('Rewrite ' + (idx + 1));
-        out += '<h2>' + escapeHtml(title) + '</h2>';
-        out += '<p>Intent: ' + escapeHtml(item.intent || 'unknown') + '</p>';
-        out += '<p>Confidence: ' + escapeHtml(Math.round((item.confidence || 0) * 100) + '%') + '</p>';
-        if (Array.isArray(item.evidence) && item.evidence.length) {
-          out += '<p>Evidence:</p><ul>';
-          item.evidence.forEach((ev) => {
-            out += '<li>' + escapeHtml(formatEvidenceText(ev)) + '</li>';
-          });
-          out += '</ul>';
-        }
-        out += '<h3>Before</h3><pre>' + escapeHtml(item.before || '') + '</pre>';
-        out += '<h3>After</h3><pre>' + escapeHtml(item.after || '') + '</pre>';
-      });
-      out += '</body></html>';
-      return out;
-    }
-    function download(content, filename, type) {
-      const blob = new Blob([content], {type});
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-    }
-    function buildDetails(label, content) {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = label;
-      details.appendChild(summary);
-      const pre = document.createElement('pre');
-      pre.textContent = content;
-      details.appendChild(pre);
-      return details;
-    }
-    function buildEvidenceList(evidence) {
-      if (!Array.isArray(evidence) || !evidence.length) {
-        return null;
-      }
-      const details = document.createElement('details');
-      details.className = 'rewrite-evidence';
-      const summary = document.createElement('summary');
-      summary.textContent = 'Evidence (' + evidence.length + ')';
-      details.appendChild(summary);
-      const list = document.createElement('ul');
-      evidence.forEach((ev) => {
-        const li = document.createElement('li');
-        li.textContent = formatEvidenceText(ev);
-        list.appendChild(li);
-      });
-      details.appendChild(list);
-      return details;
-    }
-    function renderRewrites(rewrites) {
-      const container = document.getElementById('rewrites');
-      container.textContent = '';
-      if (!rewrites.length) {
-        container.textContent = 'No rewrites found.';
-        return;
-      }
-      rewrites.forEach((item, idx) => {
-        const card = document.createElement('div');
-        card.className = 'rewrite-card';
-        const title = document.createElement('div');
-        title.className = 'rewrite-title';
-        title.textContent = item.title || item.intent || ('Rewrite ' + (idx + 1));
-        card.appendChild(title);
-        const meta = document.createElement('div');
-        meta.className = 'rewrite-meta';
-        const confidence = Math.round((item.confidence || 0) * 100);
-        meta.textContent = 'Intent: ' + (item.intent || 'unknown') + ' | Confidence: ' + confidence + '%';
-        card.appendChild(meta);
-        const evidenceBlock = buildEvidenceList(item.evidence);
-        if (evidenceBlock) {
-          card.appendChild(evidenceBlock);
-        }
-        card.appendChild(buildDetails('Before', item.before || ''));
-        card.appendChild(buildDetails('After', item.after || ''));
-        container.appendChild(card);
-      });
-    }
-    document.getElementById('ping').onclick = async () => {
-      const r = await call('system.ping', {});
-      setOut(r);
-    };
-    document.getElementById('preview').onclick = async () => {
-      try {
-        const limit = parseInt(document.getElementById('limit').value, 10);
-        const windowMs = parseInt(document.getElementById('window_ms').value, 10);
-        const params = {};
-        const samples = parseSamples();
-        if (samples) params.samples = samples;
-        if (!Number.isNaN(limit)) params.limit = limit;
-        if (!Number.isNaN(windowMs)) params.window_ms = windowMs;
-        const r = await call('migration.rewrite_preview', params);
-        lastRewrites = (r.result && r.result.rewrites) ? r.result.rewrites : [];
-        if (r.ok) {
-          renderRewrites(lastRewrites);
-          setOut('Loaded ' + lastRewrites.length + ' rewrite(s).');
-        } else {
-          renderRewrites([]);
-          setOut(r);
-        }
-      } catch (err) {
-        renderRewrites([]);
-        setOut({error: String(err)});
-      }
-    };
-    document.getElementById('download_md').onclick = () => {
-      if (!lastRewrites.length) {
-        setOut({error: 'Run rewrite preview first.'});
-        return;
-      }
-      download(buildMarkdown(lastRewrites), 'skeindb-migration-rewrites.md', 'text/markdown');
-    };
-    document.getElementById('download_html').onclick = () => {
-      if (!lastRewrites.length) {
-        setOut({error: 'Run rewrite preview first.'});
-        return;
-      }
-      download(buildHtml(lastRewrites), 'skeindb-migration-rewrites.html', 'text/html');
-    };
-  </script>
-</body></html>"#,
-    )
+    Html(admin_index_html())
 }
 
 async fn admin_handler() -> impl IntoResponse {
-    Html(
-        r#"<!doctype html>
-<html><head><meta charset='utf-8'><title>SkeinAdmin</title></head>
-<body>
-  <h1>SkeinAdmin (placeholder)</h1>
-  <p>Planned: phpMyAdmin-like standalone admin UI.</p>
-  <p>Try the stats snapshot:</p>
-  <button id='stats'>Load stats</button>
-  <pre id='out'></pre>
-  <script>
-    async function call(method, params) {
-      const res = await fetch('/api/v1/rpc', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({skeinql:'1.0', id:'ui', method, params})});
-      return res.json();
-    }
-    document.getElementById('stats').onclick = async () => {
-      const r = await call('stats.snapshot', {});
-      document.getElementById('out').textContent = JSON.stringify(r, null, 2);
-    };
-  </script>
-</body></html>"#,
+    Html(admin_index_html())
+}
+
+async fn admin_main_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        admin_main_js(),
+    )
+}
+
+async fn console_main_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        admin_main_js(),
     )
 }
 
@@ -746,6 +726,11 @@ pub(crate) async fn handle_rpc(
     }
 
     let method = req.method.clone();
+    let params = req.params.clone();
+    let is_replication_request = headers
+        .and_then(|map| map.get(REPLICATION_HEADER).and_then(|v| v.to_str().ok()))
+        .map(|v| v == "1")
+        .unwrap_or(false);
     if policy.read_only && !is_read_only_method(&method) {
         if req.id.is_none() {
             return RpcOutcome {
@@ -762,7 +747,22 @@ pub(crate) async fn handle_rpc(
             response: Some(resp),
         };
     }
-    let params = req.params.clone();
+    if let Err(err) =
+        enforce_cluster_write_guard(state, &method, params.as_ref(), is_replication_request)
+    {
+        if req.id.is_none() {
+            return RpcOutcome {
+                status: StatusCode::NO_CONTENT,
+                response: None,
+            };
+        }
+        let resp: RpcResponse = RpcResponse::err(req.id.clone(), err);
+        return RpcOutcome {
+            status: StatusCode::OK,
+            response: Some(resp),
+        };
+    }
+
     let result: Result<Value, RpcError> =
         (async {
             match method.as_str() {
@@ -780,6 +780,61 @@ pub(crate) async fn handle_rpc(
             "stats.snapshot" => Ok(stats_snapshot(state)),
             "settings.get" => handle_settings_get(state, params.clone()),
             "settings.set" => handle_settings_set(state, params.clone()),
+            // --------------------
+            // cluster.*
+            // --------------------
+            "cluster.status" => cluster_status(state),
+            "cluster.nodes" => {
+                let p = if params.is_some() {
+                    Some(parse_params::<ClusterNodesParams>(params.clone())?)
+                } else {
+                    None
+                };
+                cluster_nodes(state, p)
+            }
+            "cluster.join_token.create" => {
+                let p = if params.is_some() {
+                    parse_params::<ClusterJoinTokenCreateParams>(params.clone())?
+                } else {
+                    ClusterJoinTokenCreateParams {
+                        ttl_ms: None,
+                        role: None,
+                        max_uses: None,
+                    }
+                };
+                cluster_join_token_create(state, p)
+            }
+            "cluster.node.join" => {
+                let p: ClusterNodeJoinParams = parse_params(params.clone())?;
+                cluster_node_join(state, p)
+            }
+            "cluster.node.remove" => {
+                let p: ClusterNodeRemoveParams = parse_params(params.clone())?;
+                cluster_node_remove(state, p)
+            }
+            "cluster.replica.promote" => {
+                let p: ClusterReplicaPromoteParams = parse_params(params.clone())?;
+                cluster_replica_promote(state, p)
+            }
+            "cluster.shard.create" => {
+                let p: ClusterShardCreateParams = parse_params(params.clone())?;
+                cluster_shard_create(state, p)
+            }
+            "cluster.shard.move" => {
+                let p: ClusterShardMoveParams = parse_params(params.clone())?;
+                cluster_shard_move(state, p)
+            }
+            "cluster.shard.rebalance" => {
+                let p = if params.is_some() {
+                    parse_params::<ClusterShardRebalanceParams>(params.clone())?
+                } else {
+                    ClusterShardRebalanceParams {
+                        max_moves: None,
+                        dry_run: None,
+                    }
+                };
+                cluster_shard_rebalance(state, p)
+            }
             // --------------------
             // schema.*
             // --------------------
@@ -1497,6 +1552,14 @@ pub(crate) async fn handle_rpc(
         })
         .await;
 
+    if result.is_ok() && should_replicate_method(&method) && !is_replication_request {
+        if let Some(params_obj) = params.clone() {
+            if let Err(err) = replicate_write_to_cluster(state, &method, params_obj).await {
+                tracing::warn!(method = %method, error = %err, "cluster replication fanout failed");
+            }
+        }
+    }
+
     // Notification: no response body.
     if req.id.is_none() {
         return RpcOutcome {
@@ -1526,12 +1589,587 @@ async fn rpc_handler(
         .into_response()
 }
 
+fn should_guard_cluster_write(method: &str) -> bool {
+    if matches!(method, "cluster.status" | "cluster.nodes") {
+        return false;
+    }
+    method.starts_with("cluster.") || !is_read_only_method(method)
+}
+
+fn should_replicate_method(method: &str) -> bool {
+    matches!(
+        method,
+        "schema.create_database"
+            | "schema.create_table"
+            | "schema.apply_merge"
+            | "data.insert"
+            | "data.update"
+            | "data.delete"
+            | "vector.insert"
+            | "merge.register"
+            | "merge.apply"
+            | "merge.wasm.register"
+            | "merge.wasm.drop"
+            | "view.create"
+            | "view.drop"
+            | "view.refresh"
+            | "edge.bundle.apply"
+    )
+}
+
+fn write_target_from_params(
+    method: &str,
+    params: Option<&Value>,
+) -> (Option<String>, Option<String>) {
+    let Some(params) = params else {
+        return (None, None);
+    };
+    let s = |path: &[&str]| -> Option<String> {
+        let mut cur = params;
+        for part in path {
+            cur = cur.get(*part)?;
+        }
+        cur.as_str().map(|v| v.to_string())
+    };
+    match method {
+        "schema.create_database" => (s(&["db"]), None),
+        "schema.create_table" => (s(&["db"]), s(&["table"])),
+        "schema.apply_merge" => (s(&["table", "db"]), s(&["table", "table"])),
+        "data.insert" => (s(&["into", "db"]), s(&["into", "table"])),
+        "data.update" | "data.delete" => (s(&["table", "db"]), s(&["table", "table"])),
+        "vector.insert" => (s(&["table", "db"]), s(&["table", "table"])),
+        "merge.apply" => (s(&["table", "db"]), s(&["table", "table"])),
+        "view.create" | "view.drop" | "view.refresh" => (s(&["view", "db"]), s(&["view", "table"])),
+        _ => (None, None),
+    }
+}
+
+fn enforce_cluster_write_guard(
+    state: &AppState,
+    method: &str,
+    params: Option<&Value>,
+    is_replication_request: bool,
+) -> Result<(), RpcError> {
+    if is_replication_request || !should_guard_cluster_write(method) {
+        return Ok(());
+    }
+    let (db, table) = write_target_from_params(method, params);
+    let cluster = state.cluster.lock().unwrap();
+    if !cluster.enabled {
+        return Ok(());
+    }
+    let target_primary = cluster.shard_primary_for(db.as_deref(), table.as_deref());
+    if target_primary == cluster.local_node_id {
+        return Ok(());
+    }
+    let primary_url = cluster
+        .nodes
+        .iter()
+        .find(|n| n.node_id == target_primary)
+        .map(|n| n.rpc_url.clone())
+        .or_else(|| cluster.primary_rpc_url())
+        .unwrap_or_else(|| "unknown".to_string());
+    Err(RpcError::new(
+        "forbidden",
+        format!(
+            "write routed to primary node '{}' at {} for this shard",
+            target_primary, primary_url
+        ),
+    ))
+}
+
+async fn replicate_write_to_cluster(
+    state: &AppState,
+    method: &str,
+    params: Value,
+) -> anyhow::Result<()> {
+    let now = now_unix_ms_u64();
+    let (db, table) = write_target_from_params(method, Some(&params));
+    let (targets, enabled) = {
+        let mut cluster = state.cluster.lock().unwrap();
+        let enabled = cluster.enabled;
+        cluster.replication.last_updated_ms = now;
+        (
+            cluster.nodes_for_replication(db.as_deref(), table.as_deref()),
+            enabled,
+        )
+    };
+    if !enabled || targets.is_empty() {
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    let auth_token = std::env::var("SKEINDB_TOKEN").ok();
+    let payload = serde_json::json!({
+        "skeinql": SKEINQL_VERSION,
+        "method": method,
+        "params": params,
+    });
+
+    let mut shipped = 0u64;
+    let mut failed = 0u64;
+    let mut last_error: Option<String> = None;
+    for node in targets {
+        let url = format!("{}/api/v1/rpc", node.rpc_url.trim_end_matches('/'));
+        let mut req = client
+            .post(&url)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .header(REPLICATION_HEADER, "1")
+            .json(&payload);
+        if let Some(token) = auth_token.as_ref() {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await;
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                shipped += 1;
+            }
+            Ok(resp) => {
+                failed += 1;
+                let msg = format!("{} => {}", url, resp.status());
+                last_error = Some(msg.clone());
+                tracing::warn!(method = %method, peer = %url, status = %resp.status(), "replication request failed");
+            }
+            Err(err) => {
+                failed += 1;
+                let msg = format!("{} => {}", url, err);
+                last_error = Some(msg.clone());
+                tracing::warn!(method = %method, peer = %url, error = %err, "replication transport error");
+            }
+        }
+    }
+
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.replication.shipped_ops = cluster.replication.shipped_ops.saturating_add(shipped);
+        cluster.replication.failed_ops = cluster.replication.failed_ops.saturating_add(failed);
+        if failed > 0 {
+            cluster.replication.last_error = last_error;
+        }
+        cluster.replication.last_updated_ms = now_unix_ms_u64();
+    }
+    persist_cluster_state(state).ok();
+    Ok(())
+}
+
+fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
+    let cluster = state.cluster.lock().unwrap().clone();
+    let methods = vec![
+        "cluster.status",
+        "cluster.nodes",
+        "cluster.join_token.create",
+        "cluster.node.join",
+        "cluster.node.remove",
+        "cluster.replica.promote",
+        "cluster.shard.create",
+        "cluster.shard.move",
+        "cluster.shard.rebalance",
+    ];
+    Ok(serde_json::json!({
+        "enabled": cluster.enabled,
+        "cluster_id": cluster.cluster_id,
+        "local_node_id": cluster.local_node_id,
+        "primary_node_id": cluster.primary_node_id,
+        "local_role": cluster.local_role(),
+        "nodes": cluster.nodes,
+        "shards": cluster.shards,
+        "replication": cluster.replication,
+        "methods": methods,
+    }))
+}
+
+fn cluster_nodes(state: &AppState, params: Option<ClusterNodesParams>) -> Result<Value, RpcError> {
+    let cluster = state.cluster.lock().unwrap();
+    let role = params.and_then(|p| p.role);
+    let nodes: Vec<_> = cluster
+        .nodes
+        .iter()
+        .filter(|n| {
+            if let Some(ref r) = role {
+                &n.role == r
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+    Ok(serde_json::json!({ "nodes": nodes }))
+}
+
+fn cluster_join_token_create(
+    state: &AppState,
+    params: ClusterJoinTokenCreateParams,
+) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let ttl = params
+        .ttl_ms
+        .unwrap_or(CLUSTER_DEFAULT_JOIN_TTL_MS)
+        .max(1000);
+    let role = params.role.unwrap_or_else(|| "replica".to_string());
+    let max_uses = params.max_uses.unwrap_or(1).max(1);
+    let seq = CLUSTER_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let token = format!("join_{}_{}", now, seq);
+
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.enabled = true;
+        cluster.cleanup_join_tokens(now);
+        cluster.join_tokens.push(ClusterJoinToken {
+            token: token.clone(),
+            role: role.clone(),
+            expires_at_ms: now.saturating_add(ttl),
+            max_uses,
+            used: 0,
+            created_at_ms: now,
+        });
+    }
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({
+        "token": token,
+        "expires_at_ms": now.saturating_add(ttl),
+        "role": role,
+        "max_uses": max_uses
+    }))
+}
+
+fn cluster_node_join(state: &AppState, params: ClusterNodeJoinParams) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let node = {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.enabled = true;
+        cluster.cleanup_join_tokens(now);
+
+        let token = cluster
+            .join_tokens
+            .iter_mut()
+            .find(|t| t.token == params.token)
+            .ok_or_else(|| RpcError::new("forbidden", "invalid or expired join token"))?;
+        if token.expires_at_ms <= now {
+            return Err(RpcError::new("forbidden", "join token expired"));
+        }
+        if token.used >= token.max_uses {
+            return Err(RpcError::new("forbidden", "join token exhausted"));
+        }
+        token.used += 1;
+
+        let role = params.role.unwrap_or_else(|| token.role.clone());
+        if let Some(existing) = cluster
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == params.node_id)
+        {
+            existing.rpc_url = params.rpc_url.clone();
+            existing.role = role.clone();
+            existing.status = "online".to_string();
+            existing.last_seen_ms = now;
+            existing.clone()
+        } else {
+            let node = ClusterNode {
+                node_id: params.node_id.clone(),
+                rpc_url: params.rpc_url.clone(),
+                role: role.clone(),
+                status: "online".to_string(),
+                joined_at_ms: now,
+                last_seen_ms: now,
+            };
+            cluster.nodes.push(node.clone());
+            node
+        }
+    };
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    let cluster = state.cluster.lock().unwrap();
+    Ok(serde_json::json!({
+        "ok": true,
+        "cluster_id": cluster.cluster_id,
+        "node": node
+    }))
+}
+
+fn cluster_node_remove(
+    state: &AppState,
+    params: ClusterNodeRemoveParams,
+) -> Result<Value, RpcError> {
+    let mut new_primary = None;
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        let local_node_id = cluster.local_node_id.clone();
+        if params.node_id == cluster.local_node_id && !params.force.unwrap_or(false) {
+            return Err(RpcError::new(
+                "forbidden",
+                "cannot remove local node without force=true",
+            ));
+        }
+        if !cluster.nodes.iter().any(|n| n.node_id == params.node_id) {
+            return Err(RpcError::new("not_found", "node not found"));
+        }
+        cluster.nodes.retain(|n| n.node_id != params.node_id);
+        for shard in cluster.shards.iter_mut() {
+            shard.replicas.retain(|id| id != &params.node_id);
+            if shard.primary_node_id == params.node_id {
+                if let Some(next) = shard.replicas.first().cloned() {
+                    shard.primary_node_id = next;
+                    shard.replicas.remove(0);
+                } else {
+                    shard.primary_node_id = local_node_id.clone();
+                }
+                shard.updated_at_ms = now_unix_ms_u64();
+            }
+        }
+
+        if cluster.primary_node_id == params.node_id {
+            if let Some(next_id) = cluster.nodes.first().map(|n| n.node_id.clone()) {
+                cluster.primary_node_id = next_id.clone();
+                new_primary = Some(next_id);
+            } else {
+                cluster.primary_node_id = local_node_id.clone();
+                new_primary = Some(local_node_id.clone());
+                cluster.nodes.push(ClusterNode {
+                    node_id: local_node_id,
+                    rpc_url: state.local_rpc_url.clone(),
+                    role: "primary".to_string(),
+                    status: "online".to_string(),
+                    joined_at_ms: now_unix_ms_u64(),
+                    last_seen_ms: now_unix_ms_u64(),
+                });
+            }
+        }
+    }
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "removed": params.node_id,
+        "new_primary": new_primary,
+    }))
+}
+
+fn cluster_replica_promote(
+    state: &AppState,
+    params: ClusterReplicaPromoteParams,
+) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        if !cluster.nodes.iter().any(|n| n.node_id == params.node_id) {
+            return Err(RpcError::new("not_found", "node not found"));
+        }
+        if let Some(shard_id) = params.shard_id.as_ref() {
+            let shard = cluster
+                .shards
+                .iter_mut()
+                .find(|s| s.shard_id == *shard_id)
+                .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+            let old_primary = shard.primary_node_id.clone();
+            shard.primary_node_id = params.node_id.clone();
+            shard.replicas.retain(|n| n != &params.node_id);
+            if old_primary != params.node_id && !shard.replicas.contains(&old_primary) {
+                shard.replicas.push(old_primary);
+            }
+            shard.updated_at_ms = now;
+        } else {
+            let old_primary = cluster.primary_node_id.clone();
+            cluster.primary_node_id = params.node_id.clone();
+            for node in cluster.nodes.iter_mut() {
+                if node.node_id == params.node_id {
+                    node.role = "primary".to_string();
+                } else if node.node_id == old_primary {
+                    node.role = "replica".to_string();
+                }
+                node.last_seen_ms = now;
+            }
+        }
+    }
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "primary_node_id": params.node_id,
+        "shard_id": params.shard_id
+    }))
+}
+
+fn cluster_shard_create(
+    state: &AppState,
+    params: ClusterShardCreateParams,
+) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let shard = {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.enabled = true;
+        let shard_id = params.shard_id.clone().unwrap_or_else(|| {
+            format!(
+                "shard_{}_{}",
+                params.db,
+                CLUSTER_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+        if cluster.shards.iter().any(|s| s.shard_id == shard_id) {
+            return Err(RpcError::new("conflict", "shard already exists"));
+        }
+        let primary = params
+            .primary_node_id
+            .clone()
+            .unwrap_or_else(|| cluster.primary_node_id.clone());
+        if !cluster.nodes.iter().any(|n| n.node_id == primary) {
+            return Err(RpcError::new("not_found", "primary node not found"));
+        }
+        let mut replicas = params.replicas.unwrap_or_else(|| {
+            cluster
+                .nodes
+                .iter()
+                .filter(|n| n.role == "replica")
+                .map(|n| n.node_id.clone())
+                .collect::<Vec<_>>()
+        });
+        replicas.retain(|n| n != &primary);
+        let shard = ClusterShard {
+            shard_id,
+            db: params.db,
+            table: params.table,
+            primary_node_id: primary,
+            replicas,
+            slots: params.slots.unwrap_or(128).max(1),
+            updated_at_ms: now,
+        };
+        cluster.shards.push(shard.clone());
+        shard
+    };
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({"ok": true, "shard": shard}))
+}
+
+fn cluster_shard_move(state: &AppState, params: ClusterShardMoveParams) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let moved = {
+        let mut cluster = state.cluster.lock().unwrap();
+        if !cluster.nodes.iter().any(|n| n.node_id == params.to_node_id) {
+            return Err(RpcError::new("not_found", "destination node not found"));
+        }
+        let shard = cluster
+            .shards
+            .iter_mut()
+            .find(|s| s.shard_id == params.shard_id)
+            .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+        let mut preview = shard.clone();
+        let old_primary = preview.primary_node_id.clone();
+        preview.primary_node_id = params.to_node_id.clone();
+        preview.replicas.retain(|n| n != &params.to_node_id);
+        if old_primary != params.to_node_id && !preview.replicas.contains(&old_primary) {
+            preview.replicas.push(old_primary);
+        }
+        preview.updated_at_ms = now;
+        if !params.dry_run.unwrap_or(false) {
+            *shard = preview.clone();
+        }
+        preview
+    };
+    if !params.dry_run.unwrap_or(false) {
+        persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "dry_run": params.dry_run.unwrap_or(false),
+        "shard": moved
+    }))
+}
+
+fn cluster_shard_rebalance(
+    state: &AppState,
+    params: ClusterShardRebalanceParams,
+) -> Result<Value, RpcError> {
+    let max_moves = params.max_moves.unwrap_or(8).max(1) as usize;
+    let dry_run = params.dry_run.unwrap_or(false);
+    let mut plans = Vec::new();
+    {
+        let cluster = state.cluster.lock().unwrap();
+        let active_nodes: Vec<String> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.status == "online")
+            .map(|n| n.node_id.clone())
+            .collect();
+        if active_nodes.len() < 2 || cluster.shards.len() < 2 {
+            return Ok(serde_json::json!({"ok": true, "dry_run": dry_run, "moves": plans}));
+        }
+
+        let mut loads: HashMap<String, usize> =
+            active_nodes.iter().map(|n| (n.clone(), 0usize)).collect();
+        for shard in cluster.shards.iter() {
+            *loads.entry(shard.primary_node_id.clone()).or_insert(0) += 1;
+        }
+
+        for _ in 0..max_moves {
+            let mut order = loads.iter().collect::<Vec<_>>();
+            order.sort_by_key(|(_, c)| **c);
+            let (min_node, min_load) = order.first().map(|(n, c)| ((*n).clone(), **c)).unwrap();
+            let (max_node, max_load) = order.last().map(|(n, c)| ((*n).clone(), **c)).unwrap();
+            if max_load <= min_load + 1 {
+                break;
+            }
+            if let Some(shard) = cluster
+                .shards
+                .iter()
+                .find(|s| s.primary_node_id == max_node)
+            {
+                plans.push(serde_json::json!({
+                    "shard_id": shard.shard_id,
+                    "from_node_id": max_node,
+                    "to_node_id": min_node,
+                }));
+                if let Some(v) = loads.get_mut(&max_node) {
+                    *v = v.saturating_sub(1);
+                }
+                if let Some(v) = loads.get_mut(&min_node) {
+                    *v += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    if !dry_run && !plans.is_empty() {
+        let mut cluster = state.cluster.lock().unwrap();
+        for plan in plans.iter() {
+            let shard_id = plan
+                .get("shard_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let to_node = plan
+                .get("to_node_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if let Some(shard) = cluster.shards.iter_mut().find(|s| s.shard_id == shard_id) {
+                let old = shard.primary_node_id.clone();
+                shard.primary_node_id = to_node.to_string();
+                shard.replicas.retain(|n| n != to_node);
+                if !shard.replicas.contains(&old) {
+                    shard.replicas.push(old);
+                }
+                shard.updated_at_ms = now_unix_ms_u64();
+            }
+        }
+        drop(cluster);
+        persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "dry_run": dry_run,
+        "moves": plans,
+    }))
+}
+
 fn now_unix_ms() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn now_unix_ms_u64() -> u64 {
+    now_unix_ms() as u64
 }
 
 fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
@@ -1581,6 +2219,8 @@ fn is_read_only_method(method: &str) -> bool {
             | "transport.capabilities"
             | "stats.snapshot"
             | "settings.get"
+            | "cluster.status"
+            | "cluster.nodes"
             | "schema.list_databases"
             | "schema.list_tables"
             | "schema.describe_table"
@@ -1623,6 +2263,82 @@ fn transport_capabilities(state: &AppState) -> Value {
 }
 
 fn system_capabilities(state: &AppState) -> Value {
+    let methods = vec![
+        "system.ping",
+        "system.version",
+        "system.capabilities",
+        "transport.capabilities",
+        "stats.snapshot",
+        "settings.get",
+        "settings.set",
+        "cluster.status",
+        "cluster.nodes",
+        "cluster.join_token.create",
+        "cluster.node.join",
+        "cluster.node.remove",
+        "cluster.replica.promote",
+        "cluster.shard.create",
+        "cluster.shard.move",
+        "cluster.shard.rebalance",
+        "schema.list_databases",
+        "schema.create_database",
+        "schema.list_tables",
+        "schema.create_table",
+        "schema.describe_table",
+        "schema.propose_change",
+        "schema.merge_status",
+        "schema.apply_merge",
+        "advisor.index_synthesize",
+        "advisor.apply_index",
+        "advisor.dismiss",
+        "advisor.history",
+        "migration.intent_report",
+        "migration.rewrite_preview",
+        "data.get",
+        "data.insert",
+        "data.update",
+        "data.delete",
+        "vector.insert",
+        "vector.search",
+        "vector.index.status",
+        "ai.autoparam.classify",
+        "ai.autoparam.analyze",
+        "ai.nl.translate",
+        "ai.nl.explain",
+        "ai.nl.execute",
+        "query.prepare",
+        "query.execute_prepared",
+        "query.select",
+        "query.patch",
+        "dp.aggregate",
+        "dp.budget.set",
+        "dp.budget.get",
+        "dp.audit.log",
+        "oblivious.policy.set",
+        "oblivious.policy.get",
+        "oblivious.explain",
+        "forensic.query",
+        "forensic.verify",
+        "forensic.export",
+        "edge.bundle.request",
+        "edge.bundle.apply",
+        "edge.bundle.status",
+        "merge.register",
+        "merge.apply",
+        "merge.simulate",
+        "merge.wasm.register",
+        "merge.wasm.list",
+        "merge.wasm.drop",
+        "wasm.plan.compile",
+        "wasm.plan.run",
+        "view.create",
+        "view.drop",
+        "view.refresh",
+        "view.status",
+        "view.explain_deps",
+        "cdc.subscribe_table",
+        "cdc.poll",
+    ];
     serde_json::json!({
         "mysql_compat": false,
         "skeinql": true,
@@ -1633,7 +2349,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "merge_wasm_registry": true,
         "column_snapshots": true,
         "audit_wal": false,
-        "cluster": false,
+        "cluster": true,
         "dp": true,
         "oblivious": true,
         "forensic": true,
@@ -1641,73 +2357,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "views": true,
         "wire": {"skeinpack_v1": true},
         "transport": transport_capabilities(state),
-        "methods": [
-            "system.ping",
-            "system.version",
-            "system.capabilities",
-            "transport.capabilities",
-            "stats.snapshot",
-            "settings.get",
-            "settings.set",
-            "schema.list_databases",
-            "schema.create_database",
-            "schema.list_tables",
-            "schema.create_table",
-            "schema.describe_table",
-            "schema.propose_change",
-            "schema.merge_status",
-            "schema.apply_merge",
-            "advisor.index_synthesize",
-            "advisor.apply_index",
-            "advisor.dismiss",
-            "advisor.history",
-            "migration.intent_report",
-            "migration.rewrite_preview",
-            "data.get",
-            "data.insert",
-            "data.update",
-            "data.delete",
-            "vector.insert",
-            "vector.search",
-            "vector.index.status",
-            "ai.autoparam.classify",
-            "ai.autoparam.analyze",
-            "ai.nl.translate",
-            "ai.nl.explain",
-            "ai.nl.execute",
-            "query.prepare",
-            "query.execute_prepared",
-            "query.select",
-            "query.patch",
-            "dp.aggregate",
-            "dp.budget.set",
-            "dp.budget.get",
-            "dp.audit.log",
-            "oblivious.policy.set",
-            "oblivious.policy.get",
-            "oblivious.explain",
-            "forensic.query",
-            "forensic.verify",
-            "forensic.export",
-            "edge.bundle.request",
-            "edge.bundle.apply",
-            "edge.bundle.status",
-            "merge.register",
-            "merge.apply",
-            "merge.simulate",
-            "merge.wasm.register",
-            "merge.wasm.list",
-            "merge.wasm.drop",
-            "wasm.plan.compile",
-            "wasm.plan.run",
-            "view.create",
-            "view.drop",
-            "view.refresh",
-            "view.status",
-            "view.explain_deps",
-            "cdc.subscribe_table",
-            "cdc.poll"
-        ]
+        "methods": methods
     })
 }
 
@@ -1732,6 +2382,7 @@ fn stats_snapshot(state: &AppState) -> Value {
     };
 
     let uptime_s = state.started.elapsed().as_secs();
+    let cluster = state.cluster.lock().unwrap();
 
     serde_json::json!({
         "uptime_s": uptime_s,
@@ -1740,7 +2391,15 @@ fn stats_snapshot(state: &AppState) -> Value {
         "tps": 0,
         "process": {"cpu_pct": cpu_pct, "rss_bytes": rss_bytes},
         "storage": {"wal_bytes": 0, "dedup_ratio": 1.0},
-        "background": {"compaction": "idle", "snapshots": "idle"}
+        "background": {"compaction": "idle", "snapshots": "idle"},
+        "cluster": {
+            "enabled": cluster.enabled,
+            "local_node_id": cluster.local_node_id,
+            "primary_node_id": cluster.primary_node_id,
+            "nodes": cluster.nodes.len(),
+            "shards": cluster.shards.len(),
+            "replication": cluster.replication
+        }
     })
 }
 
@@ -1775,6 +2434,23 @@ fn handle_settings_set(state: &AppState, params: Option<Value>) -> Result<Value,
         }
     }
 
+    if let Some(v) = obj.get(CLUSTER_STATE_KEY) {
+        let parsed: ClusterStateModel = serde_json::from_value(v.clone()).map_err(|e| {
+            RpcError::new("invalid_request", format!("invalid cluster state: {}", e))
+        })?;
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            *cluster = parsed;
+        }
+    } else if let Some(v) = obj.get("cluster.enabled").and_then(|v| v.as_bool()) {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.enabled = v;
+    }
+
+    if let Err(e) = persist_cluster_state(state) {
+        tracing::warn!(error = %e, "failed to persist cluster state");
+    }
+
     // Persist best-effort.
     if let Err(e) = save_settings(state) {
         tracing::warn!(error = %e, "failed to persist settings");
@@ -1801,6 +2477,65 @@ fn load_settings(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn load_cluster_state(state: &AppState) -> anyhow::Result<()> {
+    let loaded = {
+        let settings = state.settings.lock().unwrap();
+        settings.get(CLUSTER_STATE_KEY).cloned()
+    };
+    if let Some(v) = loaded {
+        if let Ok(parsed) = serde_json::from_value::<ClusterStateModel>(v) {
+            let mut cluster = state.cluster.lock().unwrap();
+            *cluster = parsed;
+        }
+    }
+
+    let now = now_unix_ms_u64();
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.cleanup_join_tokens(now);
+        let local_node_id = cluster.local_node_id.clone();
+        let primary_node_id = cluster.primary_node_id.clone();
+        if let Some(local) = cluster
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == local_node_id)
+        {
+            local.rpc_url = state.local_rpc_url.clone();
+            local.status = "online".to_string();
+            local.last_seen_ms = now;
+        } else {
+            cluster.nodes.push(ClusterNode {
+                node_id: local_node_id.clone(),
+                rpc_url: state.local_rpc_url.clone(),
+                role: if local_node_id == primary_node_id {
+                    "primary".to_string()
+                } else {
+                    "replica".to_string()
+                },
+                status: "online".to_string(),
+                joined_at_ms: now,
+                last_seen_ms: now,
+            });
+        }
+    }
+    persist_cluster_state(state)?;
+    Ok(())
+}
+
+fn persist_cluster_state(state: &AppState) -> anyhow::Result<()> {
+    let (cluster_value, enabled) = {
+        let cluster = state.cluster.lock().unwrap();
+        (serde_json::to_value(&*cluster)?, cluster.enabled)
+    };
+    {
+        let mut settings = state.settings.lock().unwrap();
+        settings.insert(CLUSTER_STATE_KEY.to_string(), cluster_value);
+        settings.insert("cluster.enabled".to_string(), Value::Bool(enabled));
+    }
+    save_settings(state)?;
+    Ok(())
+}
+
 fn save_settings(state: &AppState) -> anyhow::Result<()> {
     let path = settings_path(state);
     let settings = state.settings.lock().unwrap();
@@ -1822,6 +2557,17 @@ mod tests {
     };
     use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn embedded_admin_assets_present() {
+        let html = admin_index_html();
+        assert!(html.contains("SkeinAdmin"));
+        assert!(html.contains("Feature Control Center"));
+        assert!(html.contains("RPC Explorer"));
+        assert!(html.contains("src/main.js"));
+        let js = admin_main_js();
+        assert!(js.contains("system.capabilities"));
+    }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
         skeindb_skeinql::types::TypeDesc {
@@ -1936,10 +2682,17 @@ mod tests {
     }
 
     fn build_state(dir: PathBuf, engine: Engine) -> AppState {
+        let local_rpc_url = "http://127.0.0.1:8080".to_string();
+        let local_node_id = "node-test".to_string();
         AppState {
             started: Instant::now(),
             data_dir: dir,
+            local_rpc_url: local_rpc_url.clone(),
             settings: Arc::new(Mutex::new(serde_json::Map::new())),
+            cluster: Arc::new(Mutex::new(ClusterStateModel::bootstrap(
+                local_node_id,
+                local_rpc_url,
+            ))),
             counters: Arc::new(Mutex::new(Counters::default())),
             engine: Arc::new(RwLock::new(engine)),
             subs: Arc::new(Mutex::new(Subscriptions::default())),
@@ -3494,6 +4247,201 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(rows.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_control_plane_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_control");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "cluster.status", json!({})).await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        let resp = call_rpc(&state, "cluster.join_token.create", json!({})).await;
+        assert!(resp.ok);
+        let token = resp.result.expect("missing result")["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!token.is_empty());
+
+        let resp = call_rpc(
+            &state,
+            "cluster.node.join",
+            json!({
+                "token": token,
+                "node_id": "replica-a",
+                "rpc_url": "http://127.0.0.1:19081",
+                "role": "replica"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "cluster.nodes",
+            json!({
+                "role": "replica"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let replicas = resp.result.expect("missing result")["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(replicas.len(), 1);
+
+        let resp = call_rpc(
+            &state,
+            "cluster.shard.create",
+            json!({
+                "db": "app",
+                "table": "users",
+                "replicas": ["replica-a"]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let shard_id = resp.result.expect("missing result")["shard"]["shard_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!shard_id.is_empty());
+
+        let resp = call_rpc(
+            &state,
+            "cluster.shard.move",
+            json!({
+                "shard_id": shard_id,
+                "to_node_id": "replica-a",
+                "dry_run": true
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("dry_run"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let resp = call_rpc(
+            &state,
+            "cluster.replica.promote",
+            json!({
+                "node_id": "replica-a"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "cluster.node.remove",
+            json!({
+                "node_id": "replica-a"
+            }),
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code.as_str()),
+            Some("forbidden")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_write_guard_blocks_non_primary() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_guard");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let token = call_rpc(&state, "cluster.join_token.create", json!({}))
+            .await
+            .result
+            .expect("join token result")["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!token.is_empty());
+
+        let resp = call_rpc(
+            &state,
+            "cluster.node.join",
+            json!({
+                "token": token,
+                "node_id": "primary-2",
+                "rpc_url": "http://127.0.0.1:19082",
+                "role": "primary"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "cluster.replica.promote",
+            json!({
+                "node_id": "primary-2"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "schema.create_database",
+            json!({
+                "db": "blocked"
+            }),
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code.as_str()),
+            Some("forbidden")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_state_persists_in_settings_file() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_persist");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "cluster.join_token.create", json!({})).await;
+        assert!(resp.ok);
+
+        let settings_bytes = std::fs::read(settings_path(&state))?;
+        let settings_json: Value = serde_json::from_slice(&settings_bytes)?;
+        assert!(settings_json.get(CLUSTER_STATE_KEY).is_some());
+        assert_eq!(
+            settings_json
+                .get("cluster.enabled")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

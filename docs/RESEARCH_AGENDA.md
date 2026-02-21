@@ -31,6 +31,33 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
+## Implementation status snapshot (2026-02-21)
+
+All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
+
+| ID | Status | Primary implementation surface |
+|---|---|---|
+| R01 | Implemented (prototype) | Learned index scaffolding + tests (`docs/LEARNED_INDEXES.md`, `crates/skeindb-core/tests/valuestore.rs`) |
+| R02 | Implemented (prototype) | Hybrid row+column snapshot surfaces (`docs/COLUMN_SNAPSHOTS.md`, engine snapshot paths) |
+| R03 | Implemented (prototype) | Delta-chained values + compaction (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
+| R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
+| R05 | Implemented (prototype) | Oblivious execution policy/explain (`oblivious.*`) + server tests |
+| R06 | Implemented (prototype) | Forensic WAL query/verify/export (`forensic.*`) + tamper checks |
+| R07 | Implemented (prototype) | Merge policies + wasm merge registry (`merge.*`) + conflict tests |
+| R08 | Implemented (prototype) | Incremental view APIs (`view.*`) + dependency refresh tests |
+| R09 | Implemented | QUIC-native SkeinQL transport + `tests/quic_rpc.rs` |
+| R10 | Implemented (prototype) | Vector ingest/search/index status (`vector.*`) + ANN tests |
+| R11 | Implemented (prototype) | Autoparameterization analysis/classification (`ai.autoparam.*`) |
+| R12 | Implemented (prototype) | Natural language translate/explain/execute flow (`ai.nl.*`) |
+| R13 | Implemented (prototype) | ETag validators + min-causality controls (`query.select` + `If-None-Match`) |
+| R14 | Implemented (prototype) | Replay bundle/time-travel export surfaces (`docs/TIME_TRAVEL_REPLAY.md`) |
+| R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, merge/apply APIs) |
+| R16 | Implemented (prototype) | Index advisor synthesis/apply/history (`advisor.*`) |
+| R17 | Implemented (prototype) | Compatibility intent inference + rewrite preview (`migration.*`) |
+| R18 | Implemented (prototype) | Reproducible replay/report tooling (`docs/TIME_TRAVEL_REPLAY.md`) |
+| R19 | Implemented (prototype) | Wasm-native plan compile/run + batch ABI (`wasm.plan.*`) |
+| R20 | Implemented (prototype) | Energy-aware compaction policy scaffolds (`docs/COMPACTION_SCHEDULER.md`) |
+
 ## Priority Matrix (from agenda)
 
 | ID | Proposal | Novelty | Feasibility | Alignment | Impact | Priority |

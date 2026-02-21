@@ -38,7 +38,7 @@ enum Commands {
         #[arg(long, default_value_t = 8080)]
         http: u16,
 
-        /// Cluster port (replication / node-to-node RPC). Unused until clustering is implemented.
+        /// Cluster port (replication / node-to-node RPC metadata and node identity seed).
         #[arg(long, default_value_t = 9090)]
         cluster_port: u16,
 
