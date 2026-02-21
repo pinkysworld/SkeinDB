@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -41,7 +41,10 @@ use skeindb_skeinql::{
         ViewCreateParams, ViewDropParams, ViewExplainDepsParams, ViewRefreshParams,
         ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
     },
-    types::{Lit, Query, QueryCache, ResultFormat, WireHints},
+    types::{
+        BaseTableRef, Expr, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache,
+        ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
+    },
     RpcError, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
 
@@ -727,11 +730,12 @@ pub(crate) async fn handle_rpc(
 
     let method = req.method.clone();
     let params = req.params.clone();
+    let sql_read_only = method.as_str() == "sql.exec" && sql_exec_is_read_only(params.as_ref());
     let is_replication_request = headers
         .and_then(|map| map.get(REPLICATION_HEADER).and_then(|v| v.to_str().ok()))
         .map(|v| v == "1")
         .unwrap_or(false);
-    if policy.read_only && !is_read_only_method(&method) {
+    if policy.read_only && !is_read_only_method(&method) && !sql_read_only {
         if req.id.is_none() {
             return RpcOutcome {
                 status: StatusCode::NO_CONTENT,
@@ -766,793 +770,841 @@ pub(crate) async fn handle_rpc(
     let result: Result<Value, RpcError> =
         (async {
             match method.as_str() {
-            "system.ping" => Ok(serde_json::json!({
-                "pong": true,
-                "time_unix_ms": now_unix_ms(),
-            })),
-            "system.version" => Ok(serde_json::json!({
-                "name": "skeindb",
-                "version": env!("CARGO_PKG_VERSION"),
-                "skeinql": SKEINQL_VERSION,
-            })),
-            "system.capabilities" => Ok(system_capabilities(state)),
-            "transport.capabilities" => Ok(transport_capabilities(state)),
-            "stats.snapshot" => Ok(stats_snapshot(state)),
-            "settings.get" => handle_settings_get(state, params.clone()),
-            "settings.set" => handle_settings_set(state, params.clone()),
-            // --------------------
-            // cluster.*
-            // --------------------
-            "cluster.status" => cluster_status(state),
-            "cluster.nodes" => {
-                let p = if params.is_some() {
-                    Some(parse_params::<ClusterNodesParams>(params.clone())?)
-                } else {
-                    None
-                };
-                cluster_nodes(state, p)
-            }
-            "cluster.join_token.create" => {
-                let p = if params.is_some() {
-                    parse_params::<ClusterJoinTokenCreateParams>(params.clone())?
-                } else {
-                    ClusterJoinTokenCreateParams {
-                        ttl_ms: None,
-                        role: None,
-                        max_uses: None,
+                "system.ping" => Ok(serde_json::json!({
+                    "pong": true,
+                    "time_unix_ms": now_unix_ms(),
+                })),
+                "system.version" => Ok(serde_json::json!({
+                    "name": "skeindb",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "skeinql": SKEINQL_VERSION,
+                })),
+                "system.capabilities" => Ok(system_capabilities(state)),
+                "transport.capabilities" => Ok(transport_capabilities(state)),
+                "stats.snapshot" => Ok(stats_snapshot(state)),
+                "settings.get" => handle_settings_get(state, params.clone()),
+                "settings.set" => handle_settings_set(state, params.clone()),
+                // --------------------
+                // cluster.*
+                // --------------------
+                "cluster.status" => cluster_status(state),
+                "cluster.nodes" => {
+                    let p = if params.is_some() {
+                        Some(parse_params::<ClusterNodesParams>(params.clone())?)
+                    } else {
+                        None
+                    };
+                    cluster_nodes(state, p)
+                }
+                "cluster.join_token.create" => {
+                    let p = if params.is_some() {
+                        parse_params::<ClusterJoinTokenCreateParams>(params.clone())?
+                    } else {
+                        ClusterJoinTokenCreateParams {
+                            ttl_ms: None,
+                            role: None,
+                            max_uses: None,
+                        }
+                    };
+                    cluster_join_token_create(state, p)
+                }
+                "cluster.node.join" => {
+                    let p: ClusterNodeJoinParams = parse_params(params.clone())?;
+                    cluster_node_join(state, p)
+                }
+                "cluster.node.remove" => {
+                    let p: ClusterNodeRemoveParams = parse_params(params.clone())?;
+                    cluster_node_remove(state, p)
+                }
+                "cluster.replica.promote" => {
+                    let p: ClusterReplicaPromoteParams = parse_params(params.clone())?;
+                    cluster_replica_promote(state, p)
+                }
+                "cluster.shard.create" => {
+                    let p: ClusterShardCreateParams = parse_params(params.clone())?;
+                    cluster_shard_create(state, p)
+                }
+                "cluster.shard.move" => {
+                    let p: ClusterShardMoveParams = parse_params(params.clone())?;
+                    cluster_shard_move(state, p)
+                }
+                "cluster.shard.rebalance" => {
+                    let p = if params.is_some() {
+                        parse_params::<ClusterShardRebalanceParams>(params.clone())?
+                    } else {
+                        ClusterShardRebalanceParams {
+                            max_moves: None,
+                            dry_run: None,
+                        }
+                    };
+                    cluster_shard_rebalance(state, p)
+                }
+                // --------------------
+                // schema.*
+                // --------------------
+                "schema.list_databases" => {
+                    let eng = state.engine.read().await;
+                    Ok(serde_json::json!({"databases": eng.list_databases()}))
+                }
+                "schema.create_database" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
                     }
-                };
-                cluster_join_token_create(state, p)
-            }
-            "cluster.node.join" => {
-                let p: ClusterNodeJoinParams = parse_params(params.clone())?;
-                cluster_node_join(state, p)
-            }
-            "cluster.node.remove" => {
-                let p: ClusterNodeRemoveParams = parse_params(params.clone())?;
-                cluster_node_remove(state, p)
-            }
-            "cluster.replica.promote" => {
-                let p: ClusterReplicaPromoteParams = parse_params(params.clone())?;
-                cluster_replica_promote(state, p)
-            }
-            "cluster.shard.create" => {
-                let p: ClusterShardCreateParams = parse_params(params.clone())?;
-                cluster_shard_create(state, p)
-            }
-            "cluster.shard.move" => {
-                let p: ClusterShardMoveParams = parse_params(params.clone())?;
-                cluster_shard_move(state, p)
-            }
-            "cluster.shard.rebalance" => {
-                let p = if params.is_some() {
-                    parse_params::<ClusterShardRebalanceParams>(params.clone())?
-                } else {
-                    ClusterShardRebalanceParams {
-                        max_moves: None,
-                        dry_run: None,
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.create_database(&p.db).map_err(to_rpc_error)?;
+                    Ok(serde_json::json!({"ok": true}))
+                }
+                "schema.list_tables" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
                     }
-                };
-                cluster_shard_rebalance(state, p)
-            }
-            // --------------------
-            // schema.*
-            // --------------------
-            "schema.list_databases" => {
-                let eng = state.engine.read().await;
-                Ok(serde_json::json!({"databases": eng.list_databases()}))
-            }
-            "schema.create_database" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    db: String,
+                    let p: P = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let tables = eng.list_tables(&p.db).map_err(to_rpc_error)?;
+                    Ok(serde_json::json!({"tables": tables}))
                 }
-                let p: P = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                eng.create_database(&p.db).map_err(to_rpc_error)?;
-                Ok(serde_json::json!({"ok": true}))
-            }
-            "schema.list_tables" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    db: String,
-                }
-                let p: P = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let tables = eng.list_tables(&p.db).map_err(to_rpc_error)?;
-                Ok(serde_json::json!({"tables": tables}))
-            }
-            "schema.create_table" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    db: String,
-                    table: String,
-                    columns: Vec<SchemaColumnInfo>,
-                    #[serde(default)]
-                    primary_key: Vec<String>,
-                    #[serde(default)]
-                    if_not_exists: bool,
-                    #[serde(default)]
-                    compat_mysql: Option<Value>,
-                }
-                let p: P = parse_params(params.clone())?;
-                let cols: Vec<ColumnSchema> = p
-                    .columns
-                    .iter()
-                    .map(|c| ColumnSchema {
-                        name: c.name.clone(),
-                        r#type: c.r#type.clone(),
-                        nullable: c.nullable,
-                        auto_increment: c.auto_increment,
-                    })
-                    .collect();
-                let mut eng = state.engine.write().await;
-                eng.create_table(
-                    &p.db,
-                    &p.table,
-                    cols,
-                    p.primary_key,
-                    p.if_not_exists,
-                    p.compat_mysql,
-                )
-                .map_err(to_rpc_error)?;
-                Ok(serde_json::json!({"ok": true}))
-            }
-            "schema.describe_table" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    db: String,
-                    table: String,
-                }
-                let p: P = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let v = eng.describe_table(&p.db, &p.table).map_err(to_rpc_error)?;
-                Ok(v)
-            }
-            "schema.propose_change" => {
-                let p: SchemaProposeChangeParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.schema_propose_change(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "schema.merge_status" => {
-                let p: SchemaMergeStatusParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.schema_merge_status(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "schema.apply_merge" => {
-                let p: SchemaApplyMergeParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.schema_apply_merge(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "advisor.index_synthesize" => {
-                let p: AdvisorIndexSynthesizeParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.advisor_index_synthesize(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "advisor.apply_index" => {
-                let p: AdvisorIndexApplyParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.advisor_index_apply(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "advisor.dismiss" => {
-                let p: AdvisorIndexDismissParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.advisor_index_dismiss(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "advisor.history" => {
-                let p: AdvisorHistoryParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.advisor_history(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "migration.intent_report" => {
-                let p: MigrationIntentReportParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.migration_intent_report(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "migration.rewrite_preview" => {
-                let p: MigrationRewritePreviewParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.migration_rewrite_preview(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-
-            // --------------------
-            // data.*
-            // --------------------
-            "data.get" => {
-                let p: DataGetParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.data_get(&p.table, p.pk).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "data.insert" => {
-                let p: DataInsertParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng
-                    .data_insert(&p.into, p.rows, p.returning)
-                    .map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "data.update" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    #[serde(flatten)]
-                    inner: DataUpdateParams,
-                    #[serde(default)]
-                    args: Vec<Lit>,
-                }
-                let p: P = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng
-                    .data_update(
-                        &p.inner.table,
-                        &p.inner.r#where,
-                        &p.inner.set,
-                        p.inner.limit,
-                        p.inner.if_match.as_deref(),
-                        &p.args,
+                "schema.create_table" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
+                        table: String,
+                        columns: Vec<SchemaColumnInfo>,
+                        #[serde(default)]
+                        primary_key: Vec<String>,
+                        #[serde(default)]
+                        if_not_exists: bool,
+                        #[serde(default)]
+                        compat_mysql: Option<Value>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let cols: Vec<ColumnSchema> = p
+                        .columns
+                        .iter()
+                        .map(|c| ColumnSchema {
+                            name: c.name.clone(),
+                            r#type: c.r#type.clone(),
+                            nullable: c.nullable,
+                            auto_increment: c.auto_increment,
+                        })
+                        .collect();
+                    let mut eng = state.engine.write().await;
+                    eng.create_table(
+                        &p.db,
+                        &p.table,
+                        cols,
+                        p.primary_key,
+                        p.if_not_exists,
+                        p.compat_mysql,
                     )
                     .map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "data.delete" => {
-                #[derive(serde::Deserialize)]
-                struct P {
-                    #[serde(flatten)]
-                    inner: DataDeleteParams,
-                    #[serde(default)]
-                    args: Vec<Lit>,
+                    Ok(serde_json::json!({"ok": true}))
                 }
-                let p: P = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng
-                    .data_delete(&p.inner.table, &p.inner.r#where, p.inner.limit, &p.args)
-                    .map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-
-        // --------------------
-        // query.*
-        // --------------------
-        "query.prepare" => {
-            let p: QueryPrepareParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let pq = eng.query_prepare(p.query).map_err(to_rpc_error)?;
-            Ok(serde_json::json!({"query_id": pq.id, "canonical": pq.canonical_json}))
-        }
-        "query.execute_prepared" => {
-            let p: QueryExecutePreparedParams = parse_params(params.clone())?;
-
-            let query = {
-                let eng = state.engine.read().await;
-                let Some(pq) = eng.get_prepared(&p.query_id) else {
-                    return Err(RpcError::new("not_found", "unknown query_id"));
-                };
-                pq.query.clone()
-            };
-
-            let mut known: HashSet<String> = HashSet::new();
-            let mut use_skeinpack = false;
-
-            if let Some(rf) = p.result_format.as_ref() {
-                if matches!(rf, ResultFormat::SkeinpackV1) {
-                    use_skeinpack = true;
-                }
-            }
-
-            if let Some(w) = p.wire.as_ref() {
-                if let Some(fmt) = w.format.as_deref() {
-                    if fmt == "skeinpack_v1" {
-                        use_skeinpack = true;
+                "schema.describe_table" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
+                        table: String,
                     }
+                    let p: P = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let v = eng.describe_table(&p.db, &p.table).map_err(to_rpc_error)?;
+                    Ok(v)
                 }
-                if let Some(kv) = w.known_valueids.as_ref() {
-                    if let Some(arr) = kv.as_array() {
-                        for s in arr.iter().filter_map(|v| v.as_str()) {
-                            known.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-
-            let eng = state.engine.read().await;
-            let r = eng
-                .query_select(
-                    &query,
-                    &p.args,
-                    p.result_format.unwrap_or(ResultFormat::RowsJson),
-                    true,
-                    p.if_none_match.as_deref(),
-                    p.min_causality.as_ref(),
-                    if known.is_empty() { None } else { Some(&known) },
-                    use_skeinpack,
-                )
-                .map_err(to_rpc_error)?;
-
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "query.select" => {
-            #[derive(serde::Deserialize)]
-            struct P {
-                query: Query,
-                #[serde(default)]
-                args: Vec<Lit>,
-                #[serde(default)]
-                result_format: Option<ResultFormat>,
-                #[serde(default)]
-                cache: Option<QueryCache>,
-                #[serde(default)]
-                wire: Option<WireHints>,
-            }
-            let p: P = parse_params(params.clone())?;
-            let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
-            let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
-            let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
-
-            let mut known: HashSet<String> = HashSet::new();
-            let mut use_skeinpack = false;
-            if let Some(rf) = p.result_format.as_ref() {
-                if matches!(rf, ResultFormat::SkeinpackV1) {
-                    use_skeinpack = true;
-                }
-            }
-            if let Some(w) = p.wire.as_ref() {
-                if let Some(fmt) = w.format.as_deref() {
-                    if fmt == "skeinpack_v1" {
-                        use_skeinpack = true;
-                    }
-                }
-                if let Some(kv) = w.known_valueids.as_ref() {
-                    if let Some(arr) = kv.as_array() {
-                        for s in arr.iter().filter_map(|v| v.as_str()) {
-                            known.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-
-            let eng = state.engine.read().await;
-            let r = eng
-                .query_select(
-                    &p.query,
-                    &p.args,
-                    p.result_format.unwrap_or(ResultFormat::RowsJson),
-                    want_etag,
-                    if_none_match,
-                    min_causality,
-                    if known.is_empty() { None } else { Some(&known) },
-                    use_skeinpack,
-                )
-                .map_err(to_rpc_error)?;
-
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "query.patch" => {
-            let p: QueryPatchParams = parse_params(params.clone())?;
-
-            let mut known: HashSet<String> = HashSet::new();
-            let mut use_skeinpack = false;
-
-            if let Some(rf) = p.result_format.as_ref() {
-                if matches!(rf, ResultFormat::SkeinpackV1) {
-                    use_skeinpack = true;
-                }
-            }
-
-            if let Some(w) = p.wire.as_ref() {
-                if let Some(fmt) = w.format.as_deref() {
-                    if fmt == "skeinpack_v1" {
-                        use_skeinpack = true;
-                    }
-                }
-                if let Some(kv) = w.known_valueids.as_ref() {
-                    if let Some(arr) = kv.as_array() {
-                        for s in arr.iter().filter_map(|v| v.as_str()) {
-                            known.insert(s.to_string());
-                        }
-                    }
-                }
-            }
-
-            let include_full = p.include_full.unwrap_or(true);
-            let fmt = p.result_format.unwrap_or(ResultFormat::RowsJson);
-
-            // Patch coalescing: for high fan-out read workloads, many clients often ask
-            // for the same (base_etag -> current) patch at the same time.
-            //
-            // We only coalesce strict-mode JSON patches (no per-client dict state).
-            let can_coalesce = p.base_etag.is_some()
-                && p.client_state.is_none()
-                && !(matches!(fmt, ResultFormat::SkeinpackV1) && use_skeinpack);
-
-            if can_coalesce {
-                let key = format!(
-                    "patch:{}:{:?}:{}",
-                    p.base_etag.as_deref().unwrap_or(""),
-                    fmt,
-                    include_full
-                );
-                let (in_flight, is_leader) = state.coalesce.get_or_create(&key);
-
-                if !is_leader {
-                    let res = loop {
-                        if let Some(res) = in_flight.result.lock().unwrap().clone() {
-                            break res;
-                        }
-                        in_flight.notify.notified().await;
-                    };
-                    let r = res.map_err(|s| RpcError::new("internal", s))?;
+                "schema.propose_change" => {
+                    let p: SchemaProposeChangeParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.schema_propose_change(p).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
-                } else {
-                    let res: Result<crate::engine::QuerySelectResult, String> = {
-                        let eng = state.engine.read().await;
-                        eng.query_patch(
-                            &p.query,
+                }
+                "schema.merge_status" => {
+                    let p: SchemaMergeStatusParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.schema_merge_status(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "schema.apply_merge" => {
+                    let p: SchemaApplyMergeParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.schema_apply_merge(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "advisor.index_synthesize" => {
+                    let p: AdvisorIndexSynthesizeParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.advisor_index_synthesize(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "advisor.apply_index" => {
+                    let p: AdvisorIndexApplyParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.advisor_index_apply(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "advisor.dismiss" => {
+                    let p: AdvisorIndexDismissParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.advisor_index_dismiss(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "advisor.history" => {
+                    let p: AdvisorHistoryParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.advisor_history(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "migration.intent_report" => {
+                    let p: MigrationIntentReportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.migration_intent_report(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "migration.rewrite_preview" => {
+                    let p: MigrationRewritePreviewParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.migration_rewrite_preview(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // data.*
+                // --------------------
+                "data.get" => {
+                    let p: DataGetParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.data_get(&p.table, p.pk).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "data.insert" => {
+                    let p: DataInsertParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng
+                        .data_insert(&p.into, p.rows, p.returning)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "data.update" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        #[serde(flatten)]
+                        inner: DataUpdateParams,
+                        #[serde(default)]
+                        args: Vec<Lit>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng
+                        .data_update(
+                            &p.inner.table,
+                            &p.inner.r#where,
+                            &p.inner.set,
+                            p.inner.limit,
+                            p.inner.if_match.as_deref(),
                             &p.args,
-                            fmt,
-                            p.base_etag.as_deref(),
-                            p.client_state.as_ref(),
-                            if known.is_empty() { None } else { Some(&known) },
-                            use_skeinpack,
-                            include_full,
                         )
-                        .map_err(|e| e.to_string())
-                    };
-
-                    *in_flight.result.lock().unwrap() = Some(res.clone());
-                    in_flight.notify.notify_waiters();
-                    state.coalesce.finish(&key);
-
-                    let r = res.map_err(|s| RpcError::new("internal", s))?;
+                        .map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
-            } else {
-                let eng = state.engine.read().await;
-                let r = eng
-                    .query_patch(
-                        &p.query,
-                        &p.args,
-                        fmt,
-                        p.base_etag.as_deref(),
-                        p.client_state.as_ref(),
-                        if known.is_empty() { None } else { Some(&known) },
-                        use_skeinpack,
-                        include_full,
-                    )
-                    .map_err(to_rpc_error)?;
-
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-        }
-
-        // --------------------
-        // vector.* (research)
-        // --------------------
-        "vector.insert" => {
-            let p: VectorInsertParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.vector_insert(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "vector.search" => {
-            let p: VectorSearchParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.vector_search(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "vector.index.status" => {
-            let p: VectorIndexStatusParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.vector_index_status(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // ai.* (research)
-        // --------------------
-        "ai.autoparam.classify" => {
-            let p: AiAutoparamClassifyParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.ai_autoparam_classify(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "ai.autoparam.analyze" => {
-            let p: AiAutoparamAnalyzeParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.ai_autoparam_analyze(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "ai.nl.translate" => {
-            let p: AiNlTranslateParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.ai_nl_translate(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "ai.nl.explain" => {
-            let p: AiNlExplainParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.ai_nl_explain(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "ai.nl.execute" => {
-            let p: AiNlExecuteParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.ai_nl_execute(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // dp.* (research)
-        // --------------------
-        "dp.aggregate" => {
-            let p: DpAggregateParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.dp_aggregate(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "dp.budget.set" => {
-            let p: DpBudgetSetParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.dp_budget_set(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "dp.budget.get" => {
-            let p: DpBudgetGetParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.dp_budget_get(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "dp.audit.log" => {
-            let p: DpAuditLogParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.dp_audit_log(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // oblivious.* (research)
-        // --------------------
-        "oblivious.policy.set" => {
-            let p: ObliviousPolicySetParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.oblivious_policy_set(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "oblivious.policy.get" => {
-            let p: ObliviousPolicyGetParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.oblivious_policy_get(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "oblivious.explain" => {
-            let p: ObliviousExplainParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.oblivious_explain(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // forensic.* (research)
-        // --------------------
-        "forensic.query" => {
-            let p: ForensicQueryParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.forensic_query(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "forensic.verify" => {
-            let p: ForensicVerifyParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.forensic_verify(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "forensic.export" => {
-            let p: ForensicExportParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.forensic_export(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // edge.* (research)
-        // --------------------
-        "edge.bundle.request" => {
-            let p: EdgeBundleRequestParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.edge_bundle_request(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "edge.bundle.apply" => {
-            let p: EdgeBundleApplyParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.edge_bundle_apply(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "edge.bundle.status" => {
-            let p: EdgeBundleStatusParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.edge_bundle_status(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // merge.* (research)
-        // --------------------
-            "merge.register" => {
-                let p: MergeRegisterParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.merge_register(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "merge.apply" => {
-                let p: MergeApplyParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.merge_apply(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "merge.simulate" => {
-                let p: MergeSimulateParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.merge_simulate(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "merge.wasm.register" => {
-                let p: MergeWasmRegisterParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.merge_wasm_register(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "merge.wasm.list" => {
-                let eng = state.engine.read().await;
-                let r = eng.merge_wasm_list().map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "merge.wasm.drop" => {
-                let p: MergeWasmDropParams = parse_params(params.clone())?;
-                let mut eng = state.engine.write().await;
-                let r = eng.merge_wasm_drop(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "wasm.plan.compile" => {
-                let p: WasmPlanCompileParams = parse_params(params.clone())?;
-                let eng = state.engine.read().await;
-                let r = eng.wasm_plan_compile(p).map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-            }
-            "wasm.plan.run" => {
-                let p: WasmPlanRunParams = parse_params(params.clone())?;
-                let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
-                let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
-                let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
-
-                let mut known: HashSet<String> = HashSet::new();
-                let mut use_skeinpack = false;
-                if let Some(rf) = p.result_format.as_ref() {
-                    if matches!(rf, ResultFormat::SkeinpackV1) {
-                        use_skeinpack = true;
+                "data.delete" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        #[serde(flatten)]
+                        inner: DataDeleteParams,
+                        #[serde(default)]
+                        args: Vec<Lit>,
                     }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng
+                        .data_delete(&p.inner.table, &p.inner.r#where, p.inner.limit, &p.args)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
-                if let Some(w) = p.wire.as_ref() {
-                    if let Some(fmt) = w.format.as_deref() {
-                        if fmt == "skeinpack_v1" {
+
+                // --------------------
+                // query.*
+                // --------------------
+                "query.prepare" => {
+                    let p: QueryPrepareParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let pq = eng.query_prepare(p.query).map_err(to_rpc_error)?;
+                    Ok(serde_json::json!({"query_id": pq.id, "canonical": pq.canonical_json}))
+                }
+                "query.execute_prepared" => {
+                    let p: QueryExecutePreparedParams = parse_params(params.clone())?;
+
+                    let query = {
+                        let eng = state.engine.read().await;
+                        let Some(pq) = eng.get_prepared(&p.query_id) else {
+                            return Err(RpcError::new("not_found", "unknown query_id"));
+                        };
+                        pq.query.clone()
+                    };
+
+                    let mut known: HashSet<String> = HashSet::new();
+                    let mut use_skeinpack = false;
+
+                    if let Some(rf) = p.result_format.as_ref() {
+                        if matches!(rf, ResultFormat::SkeinpackV1) {
                             use_skeinpack = true;
                         }
                     }
-                    if let Some(kv) = w.known_valueids.as_ref() {
-                        if let Some(arr) = kv.as_array() {
-                            for s in arr.iter().filter_map(|v| v.as_str()) {
-                                known.insert(s.to_string());
+
+                    if let Some(w) = p.wire.as_ref() {
+                        if let Some(fmt) = w.format.as_deref() {
+                            if fmt == "skeinpack_v1" {
+                                use_skeinpack = true;
+                            }
+                        }
+                        if let Some(kv) = w.known_valueids.as_ref() {
+                            if let Some(arr) = kv.as_array() {
+                                for s in arr.iter().filter_map(|v| v.as_str()) {
+                                    known.insert(s.to_string());
+                                }
                             }
                         }
                     }
+
+                    let eng = state.engine.read().await;
+                    let r = eng
+                        .query_select(
+                            &query,
+                            &p.args,
+                            p.result_format.unwrap_or(ResultFormat::RowsJson),
+                            true,
+                            p.if_none_match.as_deref(),
+                            p.min_causality.as_ref(),
+                            if known.is_empty() { None } else { Some(&known) },
+                            use_skeinpack,
+                        )
+                        .map_err(to_rpc_error)?;
+
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "query.select" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        query: Query,
+                        #[serde(default)]
+                        args: Vec<Lit>,
+                        #[serde(default)]
+                        result_format: Option<ResultFormat>,
+                        #[serde(default)]
+                        cache: Option<QueryCache>,
+                        #[serde(default)]
+                        wire: Option<WireHints>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
+                    let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
+                    let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
+
+                    let mut known: HashSet<String> = HashSet::new();
+                    let mut use_skeinpack = false;
+                    if let Some(rf) = p.result_format.as_ref() {
+                        if matches!(rf, ResultFormat::SkeinpackV1) {
+                            use_skeinpack = true;
+                        }
+                    }
+                    if let Some(w) = p.wire.as_ref() {
+                        if let Some(fmt) = w.format.as_deref() {
+                            if fmt == "skeinpack_v1" {
+                                use_skeinpack = true;
+                            }
+                        }
+                        if let Some(kv) = w.known_valueids.as_ref() {
+                            if let Some(arr) = kv.as_array() {
+                                for s in arr.iter().filter_map(|v| v.as_str()) {
+                                    known.insert(s.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    let eng = state.engine.read().await;
+                    let r = eng
+                        .query_select(
+                            &p.query,
+                            &p.args,
+                            p.result_format.unwrap_or(ResultFormat::RowsJson),
+                            want_etag,
+                            if_none_match,
+                            min_causality,
+                            if known.is_empty() { None } else { Some(&known) },
+                            use_skeinpack,
+                        )
+                        .map_err(to_rpc_error)?;
+
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "query.patch" => {
+                    let p: QueryPatchParams = parse_params(params.clone())?;
+
+                    let mut known: HashSet<String> = HashSet::new();
+                    let mut use_skeinpack = false;
+
+                    if let Some(rf) = p.result_format.as_ref() {
+                        if matches!(rf, ResultFormat::SkeinpackV1) {
+                            use_skeinpack = true;
+                        }
+                    }
+
+                    if let Some(w) = p.wire.as_ref() {
+                        if let Some(fmt) = w.format.as_deref() {
+                            if fmt == "skeinpack_v1" {
+                                use_skeinpack = true;
+                            }
+                        }
+                        if let Some(kv) = w.known_valueids.as_ref() {
+                            if let Some(arr) = kv.as_array() {
+                                for s in arr.iter().filter_map(|v| v.as_str()) {
+                                    known.insert(s.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    let include_full = p.include_full.unwrap_or(true);
+                    let fmt = p.result_format.unwrap_or(ResultFormat::RowsJson);
+
+                    // Patch coalescing: for high fan-out read workloads, many clients often ask
+                    // for the same (base_etag -> current) patch at the same time.
+                    //
+                    // We only coalesce strict-mode JSON patches (no per-client dict state).
+                    let can_coalesce = p.base_etag.is_some()
+                        && p.client_state.is_none()
+                        && !(matches!(fmt, ResultFormat::SkeinpackV1) && use_skeinpack);
+
+                    if can_coalesce {
+                        let key = format!(
+                            "patch:{}:{:?}:{}",
+                            p.base_etag.as_deref().unwrap_or(""),
+                            fmt,
+                            include_full
+                        );
+                        let (in_flight, is_leader) = state.coalesce.get_or_create(&key);
+
+                        if !is_leader {
+                            let res = loop {
+                                if let Some(res) = in_flight.result.lock().unwrap().clone() {
+                                    break res;
+                                }
+                                in_flight.notify.notified().await;
+                            };
+                            let r = res.map_err(|s| RpcError::new("internal", s))?;
+                            Ok(serde_json::to_value(r)
+                                .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                        } else {
+                            let res: Result<crate::engine::QuerySelectResult, String> = {
+                                let eng = state.engine.read().await;
+                                eng.query_patch(
+                                    &p.query,
+                                    &p.args,
+                                    fmt,
+                                    p.base_etag.as_deref(),
+                                    p.client_state.as_ref(),
+                                    if known.is_empty() { None } else { Some(&known) },
+                                    use_skeinpack,
+                                    include_full,
+                                )
+                                .map_err(|e| e.to_string())
+                            };
+
+                            *in_flight.result.lock().unwrap() = Some(res.clone());
+                            in_flight.notify.notify_waiters();
+                            state.coalesce.finish(&key);
+
+                            let r = res.map_err(|s| RpcError::new("internal", s))?;
+                            Ok(serde_json::to_value(r)
+                                .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                        }
+                    } else {
+                        let eng = state.engine.read().await;
+                        let r = eng
+                            .query_patch(
+                                &p.query,
+                                &p.args,
+                                fmt,
+                                p.base_etag.as_deref(),
+                                p.client_state.as_ref(),
+                                if known.is_empty() { None } else { Some(&known) },
+                                use_skeinpack,
+                                include_full,
+                            )
+                            .map_err(to_rpc_error)?;
+
+                        Ok(serde_json::to_value(r)
+                            .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                    }
                 }
 
-                let eng = state.engine.read().await;
-                let r = eng
-                    .wasm_plan_run(
-                        &p.artifact_b64,
-                        &p.args,
-                        p.result_format
-                            .clone()
-                            .unwrap_or(ResultFormat::RowsJson),
-                        want_etag,
-                        if_none_match,
-                        min_causality,
-                        if known.is_empty() { None } else { Some(&known) },
-                        use_skeinpack,
-                    )
-                    .map_err(to_rpc_error)?;
-                Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
+                // --------------------
+                // vector.* (research)
+                // --------------------
+                "vector.insert" => {
+                    let p: VectorInsertParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.vector_insert(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "vector.search" => {
+                    let p: VectorSearchParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.vector_search(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "vector.index.status" => {
+                    let p: VectorIndexStatusParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.vector_index_status(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // ai.* (research)
+                // --------------------
+                "ai.autoparam.classify" => {
+                    let p: AiAutoparamClassifyParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_classify(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.autoparam.analyze" => {
+                    let p: AiAutoparamAnalyzeParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_analyze(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.nl.translate" => {
+                    let p: AiNlTranslateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_nl_translate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.nl.explain" => {
+                    let p: AiNlExplainParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_nl_explain(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.nl.execute" => {
+                    let p: AiNlExecuteParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_nl_execute(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // dp.* (research)
+                // --------------------
+                "dp.aggregate" => {
+                    let p: DpAggregateParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.dp_aggregate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "dp.budget.set" => {
+                    let p: DpBudgetSetParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.dp_budget_set(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "dp.budget.get" => {
+                    let p: DpBudgetGetParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.dp_budget_get(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "dp.audit.log" => {
+                    let p: DpAuditLogParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.dp_audit_log(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // oblivious.* (research)
+                // --------------------
+                "oblivious.policy.set" => {
+                    let p: ObliviousPolicySetParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.oblivious_policy_set(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "oblivious.policy.get" => {
+                    let p: ObliviousPolicyGetParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.oblivious_policy_get(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "oblivious.explain" => {
+                    let p: ObliviousExplainParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.oblivious_explain(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // forensic.* (research)
+                // --------------------
+                "forensic.query" => {
+                    let p: ForensicQueryParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.forensic_query(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "forensic.verify" => {
+                    let p: ForensicVerifyParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.forensic_verify(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "forensic.export" => {
+                    let p: ForensicExportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.forensic_export(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // edge.* (research)
+                // --------------------
+                "edge.bundle.request" => {
+                    let p: EdgeBundleRequestParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.edge_bundle_request(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "edge.bundle.apply" => {
+                    let p: EdgeBundleApplyParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.edge_bundle_apply(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "edge.bundle.status" => {
+                    let p: EdgeBundleStatusParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.edge_bundle_status(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // merge.* (research)
+                // --------------------
+                "merge.register" => {
+                    let p: MergeRegisterParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.merge_register(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "merge.apply" => {
+                    let p: MergeApplyParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.merge_apply(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "merge.simulate" => {
+                    let p: MergeSimulateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.merge_simulate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "merge.wasm.register" => {
+                    let p: MergeWasmRegisterParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.merge_wasm_register(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "merge.wasm.list" => {
+                    let eng = state.engine.read().await;
+                    let r = eng.merge_wasm_list().map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "merge.wasm.drop" => {
+                    let p: MergeWasmDropParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.merge_wasm_drop(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "wasm.plan.compile" => {
+                    let p: WasmPlanCompileParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.wasm_plan_compile(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "wasm.plan.run" => {
+                    let p: WasmPlanRunParams = parse_params(params.clone())?;
+                    let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
+                    let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
+                    let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
+
+                    let mut known: HashSet<String> = HashSet::new();
+                    let mut use_skeinpack = false;
+                    if let Some(rf) = p.result_format.as_ref() {
+                        if matches!(rf, ResultFormat::SkeinpackV1) {
+                            use_skeinpack = true;
+                        }
+                    }
+                    if let Some(w) = p.wire.as_ref() {
+                        if let Some(fmt) = w.format.as_deref() {
+                            if fmt == "skeinpack_v1" {
+                                use_skeinpack = true;
+                            }
+                        }
+                        if let Some(kv) = w.known_valueids.as_ref() {
+                            if let Some(arr) = kv.as_array() {
+                                for s in arr.iter().filter_map(|v| v.as_str()) {
+                                    known.insert(s.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    let eng = state.engine.read().await;
+                    let r = eng
+                        .wasm_plan_run(
+                            &p.artifact_b64,
+                            &p.args,
+                            p.result_format.clone().unwrap_or(ResultFormat::RowsJson),
+                            want_etag,
+                            if_none_match,
+                            min_causality,
+                            if known.is_empty() { None } else { Some(&known) },
+                            use_skeinpack,
+                        )
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // view.* (research)
+                // --------------------
+                "view.create" => {
+                    let p: ViewCreateParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.view_create(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "view.drop" => {
+                    let p: ViewDropParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.view_drop(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "view.refresh" => {
+                    let p: ViewRefreshParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.view_refresh(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "view.status" => {
+                    let p: ViewStatusParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.view_status(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "view.explain_deps" => {
+                    let p: ViewExplainDepsParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.view_explain_deps(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // cdc.* (polling)
+                // --------------------
+                "cdc.subscribe_table" => {
+                    let p: CdcSubscribeTableParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng
+                        .cdc_subscribe_table(&mut subs, &p.db, &p.table)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "cdc.poll" => {
+                    let p: CdcPollParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let subs = state.subs.lock().unwrap();
+                    let lim = p.limit.unwrap_or(200);
+                    let r = eng
+                        .cdc_poll(&subs, &p.sub_id, p.from_offset, lim)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // sql.* (compatibility helpers)
+                // --------------------
+                "sql.exec" => {
+                    let p: SqlExecParams = parse_params(params.clone())?;
+                    sql_exec(state, p).await
+                }
+                _ => Err(RpcError::new(
+                    "not_supported",
+                    format!("Method '{}' is not supported in this build", method),
+                )),
             }
-
-        // --------------------
-        // view.* (research)
-        // --------------------
-        "view.create" => {
-            let p: ViewCreateParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.view_create(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "view.drop" => {
-            let p: ViewDropParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.view_drop(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "view.refresh" => {
-            let p: ViewRefreshParams = parse_params(params.clone())?;
-            let mut eng = state.engine.write().await;
-            let r = eng.view_refresh(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "view.status" => {
-            let p: ViewStatusParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.view_status(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "view.explain_deps" => {
-            let p: ViewExplainDepsParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let r = eng.view_explain_deps(p).map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // cdc.* (polling)
-        // --------------------
-        "cdc.subscribe_table" => {
-            let p: CdcSubscribeTableParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let mut subs = state.subs.lock().unwrap();
-            let r = eng
-                .cdc_subscribe_table(&mut subs, &p.db, &p.table)
-                .map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-        "cdc.poll" => {
-            let p: CdcPollParams = parse_params(params.clone())?;
-            let eng = state.engine.read().await;
-            let subs = state.subs.lock().unwrap();
-            let lim = p.limit.unwrap_or(200);
-            let r = eng
-                .cdc_poll(&subs, &p.sub_id, p.from_offset, lim)
-                .map_err(to_rpc_error)?;
-            Ok(serde_json::to_value(r).map_err(|e| RpcError::new("internal", e.to_string()))?)
-        }
-
-        // --------------------
-        // sql.* (stub)
-        // --------------------
-        "sql.exec" => Err(RpcError::new(
-            "not_supported",
-            "SQL execution is not implemented in this prototype. Use query.select or data.*",
-        )),
-            _ => Err(RpcError::new(
-                "not_supported",
-                format!("Method '{}' is not supported in this build", method),
-            )),
-        }
         })
         .await;
 
-    if result.is_ok() && should_replicate_method(&method) && !is_replication_request {
+    if result.is_ok()
+        && should_replicate_method(&method, params.as_ref())
+        && !is_replication_request
+    {
         if let Some(params_obj) = params.clone() {
             if let Err(err) = replicate_write_to_cluster(state, &method, params_obj).await {
                 tracing::warn!(method = %method, error = %err, "cluster replication fanout failed");
@@ -1596,7 +1648,10 @@ fn should_guard_cluster_write(method: &str) -> bool {
     method.starts_with("cluster.") || !is_read_only_method(method)
 }
 
-fn should_replicate_method(method: &str) -> bool {
+fn should_replicate_method(method: &str, params: Option<&Value>) -> bool {
+    if method == "sql.exec" {
+        return !sql_exec_is_read_only(params);
+    }
     matches!(
         method,
         "schema.create_database"
@@ -1640,6 +1695,7 @@ fn write_target_from_params(
         "vector.insert" => (s(&["table", "db"]), s(&["table", "table"])),
         "merge.apply" => (s(&["table", "db"]), s(&["table", "table"])),
         "view.create" | "view.drop" | "view.refresh" => (s(&["view", "db"]), s(&["view", "table"])),
+        "sql.exec" => sql_exec_write_target(params),
         _ => (None, None),
     }
 }
@@ -1651,6 +1707,9 @@ fn enforce_cluster_write_guard(
     is_replication_request: bool,
 ) -> Result<(), RpcError> {
     if is_replication_request || !should_guard_cluster_write(method) {
+        return Ok(());
+    }
+    if method == "sql.exec" && sql_exec_is_read_only(params) {
         return Ok(());
     }
     let (db, table) = write_target_from_params(method, params);
@@ -2172,6 +2231,78 @@ fn now_unix_ms_u64() -> u64 {
     now_unix_ms() as u64
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SqlExecParams {
+    sql: String,
+    #[serde(default)]
+    explain: bool,
+    #[serde(default)]
+    default_db: Option<String>,
+    #[serde(default)]
+    result_format: Option<ResultFormat>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlVerb {
+    Select,
+    ShowDatabases,
+    ShowTables,
+    ShowColumns,
+    Use,
+    CreateDatabase,
+    CreateTable,
+    Insert,
+    Update,
+    Delete,
+    Unsupported,
+}
+
+#[derive(Debug, Clone)]
+enum SqlPlan {
+    Select {
+        table: BaseTableRef,
+        projection: Vec<SelectItem>,
+        where_expr: Option<Expr>,
+        order_by: Vec<OrderBy>,
+        limit: Option<LimitClause>,
+    },
+    ShowDatabases,
+    ShowTables {
+        db: String,
+    },
+    ShowColumns {
+        table: BaseTableRef,
+    },
+    UseDb {
+        db: String,
+    },
+    CreateDatabase {
+        db: String,
+        if_not_exists: bool,
+    },
+    CreateTable {
+        table: BaseTableRef,
+        columns: Vec<SchemaColumnInfo>,
+        primary_key: Vec<String>,
+        if_not_exists: bool,
+    },
+    Insert {
+        table: BaseTableRef,
+        rows: Vec<BTreeMap<String, Lit>>,
+    },
+    Update {
+        table: BaseTableRef,
+        set: BTreeMap<String, Lit>,
+        where_expr: Expr,
+        limit: Option<u64>,
+    },
+    Delete {
+        table: BaseTableRef,
+        where_expr: Expr,
+        limit: Option<u64>,
+    },
+}
+
 fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
     let v = params.ok_or_else(|| RpcError::new("invalid_request", "missing params"))?;
     serde_json::from_value(v).map_err(|e| RpcError::new("invalid_request", e.to_string()))
@@ -2206,6 +2337,1300 @@ fn to_rpc_error(e: anyhow::Error) -> RpcError {
             } else {
                 RpcError::new("internal", msg)
             }
+        }
+    }
+}
+
+fn sql_exec_is_read_only(params: Option<&Value>) -> bool {
+    let Some(params) = params.and_then(|v| v.as_object()) else {
+        return false;
+    };
+    if params
+        .get("explain")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let sql = params
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    matches!(
+        sql_detect_verb(sql),
+        SqlVerb::Select
+            | SqlVerb::ShowDatabases
+            | SqlVerb::ShowTables
+            | SqlVerb::ShowColumns
+            | SqlVerb::Use
+    )
+}
+
+fn sql_detect_verb(sql: &str) -> SqlVerb {
+    let s = sql.trim().trim_end_matches(';').trim_start();
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("select ") {
+        SqlVerb::Select
+    } else if lower.starts_with("show databases") {
+        SqlVerb::ShowDatabases
+    } else if lower.starts_with("show tables") {
+        SqlVerb::ShowTables
+    } else if lower.starts_with("show columns ") || lower.starts_with("show full columns ") {
+        SqlVerb::ShowColumns
+    } else if lower.starts_with("use ") {
+        SqlVerb::Use
+    } else if lower.starts_with("create database ") {
+        SqlVerb::CreateDatabase
+    } else if lower.starts_with("create table ") {
+        SqlVerb::CreateTable
+    } else if lower.starts_with("insert into ") {
+        SqlVerb::Insert
+    } else if lower.starts_with("update ") {
+        SqlVerb::Update
+    } else if lower.starts_with("delete from ") {
+        SqlVerb::Delete
+    } else {
+        SqlVerb::Unsupported
+    }
+}
+
+fn clean_sql_ident(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn is_sql_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn find_keyword_top_level(haystack: &str, keyword: &str) -> Option<usize> {
+    let needle = keyword.as_bytes();
+    if needle.is_empty() {
+        return None;
+    }
+    let bytes = haystack.as_bytes();
+    let lower = haystack.to_ascii_lowercase().into_bytes();
+    let mut i = 0usize;
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + needle.len() <= lower.len()
+            && &lower[i..i + needle.len()] == needle
+            && (i == 0 || !is_sql_ident_char(lower[i - 1]))
+            && (i + needle.len() == lower.len() || !is_sql_ident_char(lower[i + needle.len()]))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_csv_top_level(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                let part = input[start..i].trim();
+                if !part.is_empty() {
+                    out.push(part.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = input[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn split_top_level_and(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut rest = input.trim();
+    while let Some(idx) = find_keyword_top_level(rest, "and") {
+        let left = rest[..idx].trim();
+        if !left.is_empty() {
+            parts.push(left.to_string());
+        }
+        rest = rest[idx + 3..].trim();
+    }
+    if !rest.is_empty() {
+        parts.push(rest.to_string());
+    }
+    parts
+}
+
+fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef, RpcError> {
+    let cleaned = clean_sql_ident(name);
+    if cleaned.is_empty() {
+        return Err(RpcError::new("invalid_request", "missing table name"));
+    }
+    if let Some((db, table)) = cleaned.split_once('.') {
+        return Ok(BaseTableRef {
+            db: clean_sql_ident(db),
+            table: clean_sql_ident(table),
+            r#as: None,
+        });
+    }
+    let db = default_db
+        .map(clean_sql_ident)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                "table name must include db.table or provide default_db",
+            )
+        })?;
+    Ok(BaseTableRef {
+        db,
+        table: cleaned,
+        r#as: None,
+    })
+}
+
+fn parse_sql_lit(raw: &str) -> Result<Lit, RpcError> {
+    let s = raw.trim();
+    if s.eq_ignore_ascii_case("null") {
+        return Ok(Lit::Null);
+    }
+    if s.eq_ignore_ascii_case("true") {
+        return Ok(Lit::Bool { v: true });
+    }
+    if s.eq_ignore_ascii_case("false") {
+        return Ok(Lit::Bool { v: false });
+    }
+    if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
+        let inner = &s[1..s.len() - 1];
+        return Ok(Lit::Str {
+            v: inner.replace("''", "'"),
+        });
+    }
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        return Ok(Lit::Str {
+            v: s[1..s.len() - 1].to_string(),
+        });
+    }
+    if let Ok(v) = s.parse::<i64>() {
+        return Ok(Lit::I64 { v });
+    }
+    if let Ok(v) = s.parse::<f64>() {
+        return Ok(Lit::F64 { v });
+    }
+    Ok(Lit::Str { v: s.to_string() })
+}
+
+fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
+    let bytes = clause.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            for (token, op) in [
+                (">=", "ge"),
+                ("<=", "le"),
+                ("<>", "ne"),
+                ("!=", "ne"),
+                ("=", "eq"),
+                (">", "gt"),
+                ("<", "lt"),
+            ] {
+                if clause[i..].starts_with(token) {
+                    let left = clause[..i].trim();
+                    let right = clause[i + token.len()..].trim();
+                    if left.is_empty() || right.is_empty() {
+                        return Err(RpcError::new(
+                            "invalid_request",
+                            format!("invalid predicate '{}'", clause),
+                        ));
+                    }
+                    let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
+                    return Ok(Expr::Op {
+                        op: op.to_string(),
+                        a: Some(Box::new(Expr::Col { col, table: None })),
+                        b: Some(Box::new(Expr::Lit {
+                            lit: parse_sql_lit(right)?,
+                        })),
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    });
+                }
+            }
+        }
+        i += 1;
+    }
+    Err(RpcError::new(
+        "not_supported",
+        format!(
+            "only simple comparisons are supported in WHERE: '{}'",
+            clause
+        ),
+    ))
+}
+
+fn parse_where_expr(where_sql: &str) -> Result<Option<Expr>, RpcError> {
+    let where_sql = where_sql.trim();
+    if where_sql.is_empty() {
+        return Ok(None);
+    }
+    let parts = split_top_level_and(where_sql);
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    let mut expr = parse_condition_expr(&parts[0])?;
+    for part in parts.iter().skip(1) {
+        let rhs = parse_condition_expr(part)?;
+        expr = Expr::Op {
+            op: "and".to_string(),
+            a: Some(Box::new(expr)),
+            b: Some(Box::new(rhs)),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+    }
+    Ok(Some(expr))
+}
+
+fn parse_order_by(order_sql: &str) -> Result<Vec<OrderBy>, RpcError> {
+    let mut out = Vec::new();
+    for part in split_csv_top_level(order_sql) {
+        let mut toks = part.split_whitespace();
+        let Some(col_tok) = toks.next() else {
+            continue;
+        };
+        let col = clean_sql_ident(col_tok.rsplit('.').next().unwrap_or(col_tok));
+        if col.is_empty() {
+            continue;
+        }
+        let dir = match toks.next().map(|t| t.to_ascii_lowercase()) {
+            Some(d) if d == "desc" => Some(OrderDir::Desc),
+            Some(d) if d == "asc" => Some(OrderDir::Asc),
+            Some(other) => {
+                return Err(RpcError::new(
+                    "not_supported",
+                    format!("unsupported ORDER BY direction '{}'", other),
+                ))
+            }
+            None => Some(OrderDir::Asc),
+        };
+        out.push(OrderBy {
+            expr: Expr::Col { col, table: None },
+            dir,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_limit_clause(
+    limit_sql: Option<&str>,
+    offset_sql: Option<&str>,
+) -> Result<Option<LimitClause>, RpcError> {
+    let limit =
+        match limit_sql {
+            Some(raw) => Some(raw.trim().parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "LIMIT must be an unsigned integer")
+            })?),
+            None => None,
+        };
+    let offset =
+        match offset_sql {
+            Some(raw) => Some(raw.trim().parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "OFFSET must be an unsigned integer")
+            })?),
+            None => None,
+        };
+    if limit.is_none() && offset.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(LimitClause { limit, offset }))
+    }
+}
+
+fn parse_select_projection_item(raw: &str) -> Result<SelectItem, RpcError> {
+    let mut expr_raw = raw.trim();
+    let mut alias = None;
+    if let Some(idx) = find_keyword_top_level(expr_raw, "as") {
+        let left = expr_raw[..idx].trim();
+        let right = expr_raw[idx + 2..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            expr_raw = left;
+            alias = Some(clean_sql_ident(right));
+        }
+    }
+    let expr = if expr_raw == "*" {
+        return Err(RpcError::new(
+            "not_supported",
+            "wildcard projection is resolved separately",
+        ));
+    } else if let Ok(lit) = parse_sql_lit(expr_raw) {
+        // parse_sql_lit returns Str for bare identifiers, so handle identifiers first.
+        if expr_raw.starts_with('\'')
+            || expr_raw.starts_with('"')
+            || expr_raw.eq_ignore_ascii_case("null")
+            || expr_raw.eq_ignore_ascii_case("true")
+            || expr_raw.eq_ignore_ascii_case("false")
+            || expr_raw.parse::<i64>().is_ok()
+            || expr_raw.parse::<f64>().is_ok()
+        {
+            Expr::Lit { lit }
+        } else {
+            let col = clean_sql_ident(expr_raw.rsplit('.').next().unwrap_or(expr_raw));
+            if col.is_empty() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    format!("invalid SELECT projection '{}'", raw),
+                ));
+            }
+            Expr::Col { col, table: None }
+        }
+    } else {
+        return Err(RpcError::new(
+            "not_supported",
+            format!("unsupported SELECT projection '{}'", raw),
+        ));
+    };
+    Ok(SelectItem { expr, r#as: alias })
+}
+
+fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut rest = sql.trim();
+    rest = rest
+        .strip_prefix("SELECT ")
+        .or_else(|| rest.strip_prefix("select "))
+        .ok_or_else(|| RpcError::new("invalid_request", "invalid SELECT statement"))?;
+    let from_idx = find_keyword_top_level(rest, "from");
+    if from_idx.is_none() {
+        let mut projection = Vec::new();
+        for part in split_csv_top_level(rest) {
+            projection.push(parse_select_projection_item(&part)?);
+        }
+        return Ok(SqlPlan::Select {
+            table: BaseTableRef {
+                db: String::new(),
+                table: String::new(),
+                r#as: None,
+            },
+            projection,
+            where_expr: None,
+            order_by: Vec::new(),
+            limit: None,
+        });
+    }
+    let from_idx = from_idx.unwrap_or_default();
+    let projection_sql = rest[..from_idx].trim();
+    let mut rem = rest[from_idx + 4..].trim();
+
+    let next_idx = ["where", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|k| find_keyword_top_level(rem, k))
+        .min()
+        .unwrap_or(rem.len());
+    let table_sql = rem[..next_idx].trim();
+    rem = rem[next_idx..].trim();
+    let table = parse_table_ref(table_sql, default_db)?;
+
+    let mut where_sql = None::<String>;
+    let mut order_sql = None::<String>;
+    let mut limit_sql = None::<String>;
+    let mut offset_sql = None::<String>;
+
+    while !rem.is_empty() {
+        if rem.to_ascii_lowercase().starts_with("where ") {
+            let tail = rem[5..].trim_start();
+            let next = ["order by", "limit", "offset"]
+                .iter()
+                .filter_map(|k| find_keyword_top_level(tail, k))
+                .min()
+                .unwrap_or(tail.len());
+            where_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("order by ") {
+            let tail = rem[8..].trim_start();
+            let next = ["limit", "offset"]
+                .iter()
+                .filter_map(|k| find_keyword_top_level(tail, k))
+                .min()
+                .unwrap_or(tail.len());
+            order_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("limit ") {
+            let tail = rem[5..].trim_start();
+            let next = ["offset"]
+                .iter()
+                .filter_map(|k| find_keyword_top_level(tail, k))
+                .min()
+                .unwrap_or(tail.len());
+            limit_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("offset ") {
+            let tail = rem[6..].trim_start();
+            offset_sql = Some(tail.trim().to_string());
+            rem = "";
+            continue;
+        }
+        return Err(RpcError::new(
+            "not_supported",
+            format!("unsupported SELECT clause '{}'", rem),
+        ));
+    }
+
+    let projection = if projection_sql == "*" {
+        Vec::new()
+    } else {
+        let mut out = Vec::new();
+        for part in split_csv_top_level(projection_sql) {
+            out.push(parse_select_projection_item(&part)?);
+        }
+        out
+    };
+
+    Ok(SqlPlan::Select {
+        table,
+        projection,
+        where_expr: parse_where_expr(where_sql.as_deref().unwrap_or_default())?,
+        order_by: parse_order_by(order_sql.as_deref().unwrap_or_default())?,
+        limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref())?,
+    })
+}
+
+fn parse_show_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let lower = sql.to_ascii_lowercase();
+    if lower.starts_with("show databases") {
+        return Ok(SqlPlan::ShowDatabases);
+    }
+    if lower.starts_with("show tables") {
+        let tail = sql[11..].trim();
+        if tail.is_empty() {
+            let db = default_db
+                .map(clean_sql_ident)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    RpcError::new(
+                        "invalid_request",
+                        "SHOW TABLES requires FROM <db> or default_db",
+                    )
+                })?;
+            return Ok(SqlPlan::ShowTables { db });
+        }
+        let tail_l = tail.to_ascii_lowercase();
+        if tail_l.starts_with("from ") || tail_l.starts_with("in ") {
+            let db = clean_sql_ident(tail[4..].trim());
+            return Ok(SqlPlan::ShowTables { db });
+        }
+        return Err(RpcError::new(
+            "not_supported",
+            "SHOW TABLES supports only SHOW TABLES [FROM|IN] <db>",
+        ));
+    }
+    if lower.starts_with("show columns from ") || lower.starts_with("show full columns from ") {
+        let start = if lower.starts_with("show full columns from ") {
+            22
+        } else {
+            18
+        };
+        let tail = sql[start..].trim();
+        let from_idx = find_keyword_top_level(tail, "from");
+        let (table_name, db_name) = if let Some(idx) = from_idx {
+            (
+                tail[..idx].trim(),
+                Some(clean_sql_ident(tail[idx + 4..].trim())),
+            )
+        } else {
+            (tail, default_db.map(clean_sql_ident))
+        };
+        let table_ref = parse_table_ref(table_name, db_name.as_deref())?;
+        return Ok(SqlPlan::ShowColumns { table: table_ref });
+    }
+    Err(RpcError::new("not_supported", "unsupported SHOW statement"))
+}
+
+fn parse_use_plan(sql: &str) -> Result<SqlPlan, RpcError> {
+    let db = clean_sql_ident(sql[3..].trim());
+    if db.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "USE requires a database name",
+        ));
+    }
+    Ok(SqlPlan::UseDb { db })
+}
+
+fn parse_create_database_plan(sql: &str) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[15..].trim();
+    let mut if_not_exists = false;
+    let lower = tail.to_ascii_lowercase();
+    if lower.starts_with("if not exists ") {
+        if_not_exists = true;
+        tail = tail[14..].trim();
+    }
+    let db = clean_sql_ident(tail);
+    if db.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CREATE DATABASE requires a name",
+        ));
+    }
+    Ok(SqlPlan::CreateDatabase { db, if_not_exists })
+}
+
+fn sql_type_to_desc(token: &str, unsigned: bool) -> TypeDesc {
+    let base = token
+        .split('(')
+        .next()
+        .unwrap_or(token)
+        .trim()
+        .to_ascii_lowercase();
+    let max = token
+        .split_once('(')
+        .and_then(|(_, rhs)| rhs.split_once(')'))
+        .and_then(|(inner, _)| inner.trim().parse::<u64>().ok());
+    let kind = match base.as_str() {
+        "bigint" | "int" | "integer" | "smallint" | "tinyint" => {
+            if unsigned {
+                "u64"
+            } else {
+                "i64"
+            }
+        }
+        "double" | "float" | "real" | "decimal" => "f64",
+        "datetime" | "timestamp" => "datetime",
+        "date" => "date",
+        "time" => "time",
+        "json" => "json",
+        "blob" | "binary" | "varbinary" => "bytes",
+        "bool" | "boolean" => "bool",
+        _ => "string",
+    };
+    TypeDesc {
+        kind: kind.to_string(),
+        max,
+        precision: None,
+        scale: None,
+        charset: None,
+        collation: None,
+        unsigned: if unsigned { Some(true) } else { None },
+    }
+}
+
+fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[12..].trim();
+    let mut if_not_exists = false;
+    let lower = tail.to_ascii_lowercase();
+    if lower.starts_with("if not exists ") {
+        if_not_exists = true;
+        tail = tail[14..].trim();
+    }
+    let Some(open_idx) = tail.find('(') else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CREATE TABLE requires column definitions",
+        ));
+    };
+    let table_name = tail[..open_idx].trim();
+    let table = parse_table_ref(table_name, default_db)?;
+    let close_idx = tail.rfind(')').ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "CREATE TABLE missing closing ')' for column definitions",
+        )
+    })?;
+    let defs = &tail[open_idx + 1..close_idx];
+    let mut columns = Vec::new();
+    let mut primary_key = Vec::new();
+    for part in split_csv_top_level(defs) {
+        let p = part.trim();
+        let p_lower = p.to_ascii_lowercase();
+        if p_lower.starts_with("primary key") {
+            if let Some(start) = p.find('(') {
+                if let Some(end) = p.rfind(')') {
+                    for key in split_csv_top_level(&p[start + 1..end]) {
+                        let col = clean_sql_ident(&key);
+                        if !col.is_empty() {
+                            primary_key.push(col);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if p_lower.starts_with("key ")
+            || p_lower.starts_with("unique key")
+            || p_lower.starts_with("index ")
+            || p_lower.starts_with("constraint ")
+        {
+            continue;
+        }
+        let toks: Vec<&str> = p.split_whitespace().collect();
+        if toks.len() < 2 {
+            return Err(RpcError::new(
+                "invalid_request",
+                format!("invalid column definition '{}'", p),
+            ));
+        }
+        let name = clean_sql_ident(toks[0]);
+        let type_tok = toks[1];
+        let unsigned = toks.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
+        let nullable = !p_lower.contains("not null");
+        let auto_increment = p_lower.contains("auto_increment");
+        columns.push(SchemaColumnInfo {
+            name,
+            r#type: sql_type_to_desc(type_tok, unsigned),
+            nullable,
+            auto_increment,
+        });
+    }
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CREATE TABLE must define at least one column",
+        ));
+    }
+    Ok(SqlPlan::CreateTable {
+        table,
+        columns,
+        primary_key,
+        if_not_exists,
+    })
+}
+
+fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let lower = sql.to_ascii_lowercase();
+    if find_keyword_top_level(&lower, "on duplicate key").is_some() {
+        return Err(RpcError::new(
+            "not_supported",
+            "ON DUPLICATE KEY UPDATE is not supported in sql.exec yet",
+        ));
+    }
+    let tail = sql[11..].trim();
+    let values_idx = find_keyword_top_level(tail, "values").ok_or_else(|| {
+        RpcError::new("invalid_request", "INSERT currently requires VALUES syntax")
+    })?;
+    let head = tail[..values_idx].trim();
+    let values_sql = tail[values_idx + 6..].trim();
+
+    let open_idx = head.find('(').ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "INSERT requires explicit column list, e.g. INSERT INTO t (c) VALUES (...)",
+        )
+    })?;
+    let close_idx = head
+        .rfind(')')
+        .ok_or_else(|| RpcError::new("invalid_request", "INSERT column list is malformed"))?;
+    let table_name = head[..open_idx].trim();
+    let table = parse_table_ref(table_name, default_db)?;
+    let cols: Vec<String> = split_csv_top_level(&head[open_idx + 1..close_idx])
+        .into_iter()
+        .map(|c| clean_sql_ident(&c))
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cols.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "INSERT column list is empty",
+        ));
+    }
+
+    let mut tuples = Vec::new();
+    let bytes = values_sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] != b'(' {
+            return Err(RpcError::new(
+                "invalid_request",
+                "INSERT VALUES must contain tuples like (...), (...)",
+            ));
+        }
+        let start = i + 1;
+        let mut depth = 1u32;
+        i += 1;
+        let mut quote = 0u8;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quote != 0 {
+                if b == quote {
+                    if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2;
+                        continue;
+                    }
+                    quote = 0;
+                }
+                i += 1;
+                continue;
+            }
+            match b {
+                b'\'' | b'"' => quote = b,
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return Err(RpcError::new(
+                "invalid_request",
+                "INSERT tuple is not closed",
+            ));
+        }
+        tuples.push(values_sql[start..i].to_string());
+        i += 1;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+    }
+    let mut rows = Vec::new();
+    for tuple in tuples {
+        let values = split_csv_top_level(&tuple);
+        if values.len() != cols.len() {
+            return Err(RpcError::new(
+                "invalid_request",
+                "INSERT values count does not match column list",
+            ));
+        }
+        let mut row = BTreeMap::new();
+        for (col, val) in cols.iter().zip(values.iter()) {
+            row.insert(col.clone(), parse_sql_lit(val)?);
+        }
+        rows.push(row);
+    }
+    Ok(SqlPlan::Insert { table, rows })
+}
+
+fn parse_update_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let tail = sql[6..].trim();
+    let set_idx = find_keyword_top_level(tail, "set")
+        .ok_or_else(|| RpcError::new("invalid_request", "UPDATE requires SET clause"))?;
+    let table = parse_table_ref(tail[..set_idx].trim(), default_db)?;
+    let mut rem = tail[set_idx + 3..].trim();
+
+    let where_idx = find_keyword_top_level(rem, "where");
+    let limit_idx = find_keyword_top_level(rem, "limit");
+    let set_end = [where_idx, limit_idx]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rem.len());
+    let set_sql = rem[..set_end].trim();
+    rem = rem[set_end..].trim();
+
+    let mut set = BTreeMap::new();
+    for assign in split_csv_top_level(set_sql) {
+        let Some(eq_idx) = assign.find('=') else {
+            return Err(RpcError::new(
+                "invalid_request",
+                format!("invalid assignment '{}'", assign),
+            ));
+        };
+        let col = clean_sql_ident(assign[..eq_idx].trim());
+        let val = assign[eq_idx + 1..].trim();
+        set.insert(col, parse_sql_lit(val)?);
+    }
+    let mut where_sql = None::<String>;
+    let mut limit = None::<u64>;
+    while !rem.is_empty() {
+        if rem.to_ascii_lowercase().starts_with("where ") {
+            let tail = rem[5..].trim_start();
+            let next = find_keyword_top_level(tail, "limit").unwrap_or(tail.len());
+            where_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("limit ") {
+            let tail = rem[5..].trim_start();
+            limit = Some(tail.trim().parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "LIMIT must be an unsigned integer")
+            })?);
+            rem = "";
+            continue;
+        }
+        return Err(RpcError::new(
+            "not_supported",
+            format!("unsupported UPDATE clause '{}'", rem),
+        ));
+    }
+    let where_expr =
+        parse_where_expr(where_sql.as_deref().unwrap_or_default())?.unwrap_or(Expr::Lit {
+            lit: Lit::Bool { v: true },
+        });
+    Ok(SqlPlan::Update {
+        table,
+        set,
+        where_expr,
+        limit,
+    })
+}
+
+fn parse_delete_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut rem = sql[11..].trim();
+    let next = [
+        find_keyword_top_level(rem, "where"),
+        find_keyword_top_level(rem, "limit"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(rem.len());
+    let table = parse_table_ref(rem[..next].trim(), default_db)?;
+    rem = rem[next..].trim();
+    let mut where_sql = None::<String>;
+    let mut limit = None::<u64>;
+    while !rem.is_empty() {
+        if rem.to_ascii_lowercase().starts_with("where ") {
+            let tail = rem[5..].trim_start();
+            let next = find_keyword_top_level(tail, "limit").unwrap_or(tail.len());
+            where_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("limit ") {
+            let tail = rem[5..].trim_start();
+            limit = Some(tail.trim().parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "LIMIT must be an unsigned integer")
+            })?);
+            rem = "";
+            continue;
+        }
+        return Err(RpcError::new(
+            "not_supported",
+            format!("unsupported DELETE clause '{}'", rem),
+        ));
+    }
+    let where_expr =
+        parse_where_expr(where_sql.as_deref().unwrap_or_default())?.unwrap_or(Expr::Lit {
+            lit: Lit::Bool { v: true },
+        });
+    Ok(SqlPlan::Delete {
+        table,
+        where_expr,
+        limit,
+    })
+}
+
+fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let normalized = sql.trim().trim_end_matches(';').trim();
+    if normalized.is_empty() {
+        return Err(RpcError::new("invalid_request", "sql is empty"));
+    }
+    match sql_detect_verb(normalized) {
+        SqlVerb::Select => parse_select_plan(normalized, default_db),
+        SqlVerb::ShowDatabases | SqlVerb::ShowTables | SqlVerb::ShowColumns => {
+            parse_show_plan(normalized, default_db)
+        }
+        SqlVerb::Use => parse_use_plan(normalized),
+        SqlVerb::CreateDatabase => parse_create_database_plan(normalized),
+        SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
+        SqlVerb::Insert => parse_insert_plan(normalized, default_db),
+        SqlVerb::Update => parse_update_plan(normalized, default_db),
+        SqlVerb::Delete => parse_delete_plan(normalized, default_db),
+        SqlVerb::Unsupported => Err(RpcError::new(
+            "not_supported",
+            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/INSERT/UPDATE/DELETE",
+        )),
+    }
+}
+
+fn sql_plan_name(plan: &SqlPlan) -> &'static str {
+    match plan {
+        SqlPlan::Select { .. } => "select",
+        SqlPlan::ShowDatabases => "show_databases",
+        SqlPlan::ShowTables { .. } => "show_tables",
+        SqlPlan::ShowColumns { .. } => "show_columns",
+        SqlPlan::UseDb { .. } => "use",
+        SqlPlan::CreateDatabase { .. } => "create_database",
+        SqlPlan::CreateTable { .. } => "create_table",
+        SqlPlan::Insert { .. } => "insert",
+        SqlPlan::Update { .. } => "update",
+        SqlPlan::Delete { .. } => "delete",
+    }
+}
+
+fn sql_plan_read_only(plan: &SqlPlan) -> bool {
+    matches!(
+        plan,
+        SqlPlan::Select { .. }
+            | SqlPlan::ShowDatabases
+            | SqlPlan::ShowTables { .. }
+            | SqlPlan::ShowColumns { .. }
+            | SqlPlan::UseDb { .. }
+    )
+}
+
+fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
+    let Some(obj) = params.as_object() else {
+        return (None, None);
+    };
+    let sql = obj.get("sql").and_then(|v| v.as_str()).unwrap_or_default();
+    let default_db = obj.get("default_db").and_then(|v| v.as_str());
+    match parse_sql_plan(sql, default_db) {
+        Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
+        Ok(SqlPlan::CreateTable { table, .. })
+        | Ok(SqlPlan::Insert { table, .. })
+        | Ok(SqlPlan::Update { table, .. })
+        | Ok(SqlPlan::Delete { table, .. }) => (Some(table.db), Some(table.table)),
+        _ => (None, None),
+    }
+}
+
+async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
+    let plan = parse_sql_plan(&params.sql, params.default_db.as_deref())?;
+    if params.explain {
+        return Ok(serde_json::json!({
+            "statement": sql_plan_name(&plan),
+            "read_only": sql_plan_read_only(&plan),
+            "plan": sql_plan_name(&plan)
+        }));
+    }
+    match plan {
+        SqlPlan::Select {
+            table,
+            mut projection,
+            where_expr,
+            order_by,
+            limit,
+        } => {
+            // SELECT without FROM for simple literals (e.g. SELECT 1)
+            if table.db.is_empty() && table.table.is_empty() {
+                let mut columns = Vec::new();
+                let mut row = Vec::new();
+                for (idx, item) in projection.iter().enumerate() {
+                    let name = item
+                        .r#as
+                        .clone()
+                        .unwrap_or_else(|| format!("expr{}", idx + 1));
+                    columns.push(serde_json::json!({ "name": name }));
+                    let lit = match &item.expr {
+                        Expr::Lit { lit } => lit.clone(),
+                        _ => {
+                            return Err(RpcError::new(
+                                "not_supported",
+                                "SELECT without FROM supports only literal expressions",
+                            ))
+                        }
+                    };
+                    row.push(serde_json::to_value(lit).unwrap_or(Value::Null));
+                }
+                return Ok(serde_json::json!({
+                    "statement": "select",
+                    "read_only": true,
+                    "result": {
+                        "data": {
+                            "columns": columns,
+                            "rows": [row]
+                        }
+                    }
+                }));
+            }
+
+            let eng = state.engine.read().await;
+            if projection.is_empty() {
+                let desc = eng
+                    .describe_table(&table.db, &table.table)
+                    .map_err(to_rpc_error)?;
+                let names: Vec<String> = desc
+                    .get("columns")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect();
+                if names.is_empty() {
+                    return Err(RpcError::new("invalid_request", "table has no columns"));
+                }
+                projection = names
+                    .into_iter()
+                    .map(|name| SelectItem {
+                        expr: Expr::Col {
+                            col: name,
+                            table: None,
+                        },
+                        r#as: None,
+                    })
+                    .collect();
+            }
+            let query = Query {
+                with: Vec::new(),
+                body: Box::new(QueryBody::Select {
+                    select: Box::new(SelectBody {
+                        distinct: None,
+                        projection,
+                        from: Some(vec![TableRef::Base(table.clone())]),
+                        r#where: where_expr,
+                        group_by: None,
+                        having: None,
+                    }),
+                }),
+                order_by,
+                limit,
+                lock: None,
+            };
+            let fmt = params.result_format.unwrap_or(ResultFormat::RowsJson);
+            let result = eng
+                .query_select(&query, &[], fmt, false, None, None, None, false)
+                .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "select",
+                "read_only": true,
+                "query": query,
+                "result": result
+            }))
+        }
+        SqlPlan::ShowDatabases => {
+            let eng = state.engine.read().await;
+            let dbs = eng.list_databases();
+            let rows: Vec<Vec<Value>> = dbs.into_iter().map(|db| vec![Value::String(db)]).collect();
+            Ok(serde_json::json!({
+                "statement": "show_databases",
+                "read_only": true,
+                "result": {
+                    "data": {
+                        "columns": [{"name":"Database"}],
+                        "rows": rows
+                    }
+                }
+            }))
+        }
+        SqlPlan::ShowTables { db } => {
+            let eng = state.engine.read().await;
+            let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+            let rows: Vec<Vec<Value>> = tables
+                .into_iter()
+                .map(|table| vec![Value::String(table)])
+                .collect();
+            Ok(serde_json::json!({
+                "statement": "show_tables",
+                "read_only": true,
+                "db": db,
+                "result": {
+                    "data": {
+                        "columns": [{"name":"Table"}],
+                        "rows": rows
+                    }
+                }
+            }))
+        }
+        SqlPlan::ShowColumns { table } => {
+            let eng = state.engine.read().await;
+            let desc = eng
+                .describe_table(&table.db, &table.table)
+                .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "show_columns",
+                "read_only": true,
+                "table": table,
+                "result": desc
+            }))
+        }
+        SqlPlan::UseDb { db } => Ok(serde_json::json!({
+            "statement": "use",
+            "read_only": true,
+            "default_db": db,
+            "ok": true,
+            "hint": "sql.exec is stateless; client should remember default_db for later calls"
+        })),
+        SqlPlan::CreateDatabase { db, if_not_exists } => {
+            let mut eng = state.engine.write().await;
+            if if_not_exists && eng.list_databases().iter().any(|d| d == &db) {
+                return Ok(serde_json::json!({
+                    "statement": "create_database",
+                    "ok": true,
+                    "db": db,
+                    "if_not_exists": true,
+                    "skipped": true
+                }));
+            }
+            eng.create_database(&db).map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "create_database",
+                "ok": true,
+                "db": db,
+                "if_not_exists": if_not_exists
+            }))
+        }
+        SqlPlan::CreateTable {
+            table,
+            columns,
+            primary_key,
+            if_not_exists,
+        } => {
+            let cols: Vec<ColumnSchema> = columns
+                .iter()
+                .map(|c| ColumnSchema {
+                    name: c.name.clone(),
+                    r#type: c.r#type.clone(),
+                    nullable: c.nullable,
+                    auto_increment: c.auto_increment,
+                })
+                .collect();
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                &table.db,
+                &table.table,
+                cols,
+                primary_key,
+                if_not_exists,
+                None,
+            )
+            .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "create_table",
+                "ok": true,
+                "table": table,
+                "if_not_exists": if_not_exists
+            }))
+        }
+        SqlPlan::Insert { table, rows } => {
+            let mut eng = state.engine.write().await;
+            let r = eng.data_insert(&table, rows, None).map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "insert",
+                "ok": true,
+                "table": table,
+                "write": r
+            }))
+        }
+        SqlPlan::Update {
+            table,
+            set,
+            where_expr,
+            limit,
+        } => {
+            let mut eng = state.engine.write().await;
+            let r = eng
+                .data_update(&table, &where_expr, &set, limit, None, &[])
+                .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "update",
+                "ok": true,
+                "table": table,
+                "write": r
+            }))
+        }
+        SqlPlan::Delete {
+            table,
+            where_expr,
+            limit,
+        } => {
+            let mut eng = state.engine.write().await;
+            let r = eng
+                .data_delete(&table, &where_expr, limit, &[])
+                .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "delete",
+                "ok": true,
+                "table": table,
+                "write": r
+            }))
         }
     }
 }
@@ -2294,6 +3719,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "advisor.history",
         "migration.intent_report",
         "migration.rewrite_preview",
+        "sql.exec",
         "data.get",
         "data.insert",
         "data.update",
@@ -2562,7 +3988,7 @@ mod tests {
     fn embedded_admin_assets_present() {
         let html = admin_index_html();
         assert!(html.contains("SkeinAdmin"));
-        assert!(html.contains("Feature Control Center"));
+        assert!(html.contains("Feature Center"));
         assert!(html.contains("RPC Explorer"));
         assert!(html.contains("src/main.js"));
         let js = admin_main_js();
@@ -4253,6 +5679,237 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_toolbar_methods_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("toolbar_methods");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let ping = call_rpc(&state, "system.ping", json!({})).await;
+        assert!(ping.ok);
+        assert_eq!(
+            ping.result
+                .as_ref()
+                .and_then(|v| v.get("pong"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let version = call_rpc(&state, "system.version", json!({})).await;
+        assert!(version.ok);
+        assert!(version
+            .result
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .is_some());
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        assert!(stats
+            .result
+            .as_ref()
+            .and_then(|v| v.get("process"))
+            .is_some());
+
+        let caps = call_rpc(&state, "system.capabilities", json!({})).await;
+        assert!(caps.ok);
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "sql.exec"))
+            .unwrap_or(false));
+
+        let transport = call_rpc(&state, "transport.capabilities", json!({})).await;
+        assert!(transport.ok);
+        assert_eq!(
+            transport
+                .result
+                .as_ref()
+                .and_then(|v| v.get("http"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_roundtrip_crud_show_and_use() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE DATABASE app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "USE app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("default_db"))
+                .and_then(|v| v.as_str()),
+            Some("app")
+        );
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE users (id bigint, name text, PRIMARY KEY (id))",
+                "default_db": "app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace')",
+                "default_db": "app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id, name FROM users WHERE id = 1",
+                "default_db": "app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let rows = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "UPDATE users SET name = 'Ada Lovelace' WHERE id = 1 LIMIT 1",
+                "default_db": "app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "DELETE FROM users WHERE id = 2 LIMIT 1",
+                "default_db": "app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SHOW TABLES FROM app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let table_rows = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(table_rows.iter().any(|row| row
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            == Some("users")));
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SHOW COLUMNS FROM users FROM app"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let columns = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("columns"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(columns
+            .iter()
+            .any(|c| c.get("name").and_then(|v| v.as_str()) == Some("id")));
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM users LIMIT 1",
+                "default_db": "app",
+                "explain": true
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("statement"))
+                .and_then(|v| v.as_str()),
+            Some("select")
+        );
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("read_only"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cluster_control_plane_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("cluster_control");
         let engine = Engine::open(&dir)?;
@@ -4355,6 +6012,30 @@ mod tests {
             "cluster.node.remove",
             json!({
                 "node_id": "replica-a"
+            }),
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.error.as_ref().map(|e| e.code.as_str()),
+            Some("forbidden")
+        );
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT 1"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE DATABASE blocked_via_sql"
             }),
         )
         .await;
