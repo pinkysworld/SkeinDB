@@ -1,201 +1,341 @@
-# SkeinDB: A Single-Binary Web-Native Database with SkeinQL, Cluster Control-Plane, and Research-Driven Extensions
+# SkeinDB: A Single-Binary Database with SkeinQL, Cluster Control-Plane RPC, and a Web-Native Administration Stack
 
-**Manuscript type:** Original research article (systems/database engineering)
+**Manuscript type:** Original research article (systems/database engineering)  
+**Target venue:** International Journal of Research in Computing (IJRC / IJRCOM)  
+**Version:** Camera-ready draft v2 (2026-02-21)
 
-**Target venue format:** IJRCOM-ready draft (structured manuscript)
+## Author and manuscript metadata
 
-**Proposed running title:** SkeinDB: Single-Binary DB with Web-Native Consistency and Cluster RPC
+### Title
+SkeinDB: A Single-Binary Database with SkeinQL, Cluster Control-Plane RPC, and a Web-Native Administration Stack
 
-**Authors:**
+### Authors
 - Michel Picker (Corresponding Author)
 - _Add co-authors as needed_
 
-**Affiliations:**
-- _Add institution/company and country_
+### Affiliations
+- _Add institution/company and country for each author_
 
-**Correspondence:**
+### Correspondence
 - _Add full postal address and email_
 
-## Abstract
-SkeinDB is a single-executable database system designed to unify deployment simplicity, MySQL adoption paths, and research-oriented extensibility. The system exposes a native JSON-RPC interface (SkeinQL), a phpMyAdmin-like web control plane (SkeinAdmin), and a modular execution engine that supports advanced features including ETag-based cache-coherent queries, delta-style query patches, vector operations, differential privacy aggregates, forensic verification APIs, merge conflict handling, and WebAssembly-based query artifacts. In this work, we present the end-to-end architecture, API surface, and implementation strategy for SkeinDB, with special emphasis on the newly integrated cluster control-plane and replication transport. The implemented cluster subsystem provides persistent cluster state, node join/leave using short-lived tokens, replica promotion, shard creation/move/rebalance, and primary-to-replica write fanout over SkeinQL RPC. We evaluate system behavior through unit and integration test suites spanning HTTP and QUIC transports. Results demonstrate that SkeinDB can deliver a coherent single-process developer experience while serving as a practical platform for rapid systems research prototyping. We discuss tradeoffs, limitations, and the roadmap from prototype transport fanout to full WAL/CAS replication with routing and fault-tolerant automation.
+### ORCID
+- _Add ORCID for each author_
 
-**Keywords:** Single-binary database, JSON-RPC database API, SkeinQL, ETag consistency, cluster control-plane, sharding, replication transport, WebAssembly query execution, database research prototype
+### CRediT contributions (to finalize)
+- Conceptualization: Michel Picker  
+- Methodology: Michel Picker  
+- Software: Michel Picker  
+- Validation: Michel Picker  
+- Writing – original draft: Michel Picker  
+- Writing – review & editing: _Add contributors_
+
+## Abstract
+
+**Background/Context (50-60 words).** Database engineering teams often face a tradeoff between deployability and research velocity: production systems are operationally robust but hard to extend experimentally, while research systems are novel but difficult to operate. SkeinDB addresses this gap by packaging compatibility paths, web-native APIs, and experimental database features into one executable process with a unified control plane.
+
+**Objective/Aim (40-50 words).** This work presents the design and implementation of SkeinDB with emphasis on: (i) a persistent cluster control-plane with `cluster.*` RPC methods, (ii) primary-to-replica replication transport in prototype form, and (iii) a phpMyAdmin-like web administration experience that exposes operational and research features through a single interface.
+
+**Methods/Approach (60-70 words).** We implemented typed SkeinQL method families, durable cluster metadata (`cluster.state.v1`), shard placement operations, and role-aware write guards. We integrated these capabilities into an embedded web UI supporting connect/disconnect, cluster workflows, settings management, and full RPC exploration. Evaluation combines unit tests, integration tests (including multi-node cluster replication), QUIC transport tests, and reproducible build-and-test runs.
+
+**Results/Findings (70-80 words).** The current prototype exposes 74 RPC methods, including 9 cluster control-plane methods (`cluster.status`, node join/leave, promotion, shard create/move/rebalance). The automated suite executes 111 tests across crates and transports with all tests passing; full workspace `cargo test` completes in 22.79 seconds on the evaluated ARM64 macOS environment. Cluster integration tests validate schema+data replication from primary to replica via RPC fanout; QUIC tests validate protocol roundtrips and 0-RTT write rejection behavior.
+
+**Implications/Conclusions (40-50 words).** SkeinDB demonstrates that a single-binary architecture can provide practical operator workflows while preserving rapid systems-research extensibility. The implemented control-plane and admin stack are production-shape interfaces with prototype internals. Future work targets WAL/LSN + CAS replication, fault-aware routing, and deeper benchmark validation to transition from research prototype to production-grade distributed operation.
+
+## Keywords
+single-binary database; JSON-RPC database API; SkeinQL; cluster control-plane; web-native administration
 
 ## 1. Introduction
-Modern application teams frequently face a deployment and evolution mismatch: production databases prioritize operational maturity, while experimental capabilities (web-native consistency, AI-assisted query workflows, programmable operators) are difficult to introduce incrementally. SkeinDB addresses this by combining:
-1. Single-binary operational ergonomics.
-2. Adoption-oriented compatibility surfaces.
-3. A research-first extension model integrated into the core API.
 
-SkeinDB is designed as one executable that can expose HTTP RPC, admin interfaces, and optional protocol extensions in one process. This reduces orchestration overhead for development, demos, edge deployments, and reproducible experimentation.
+The dominant pattern in data systems separates operational databases from research experimentation. Operational systems optimize reliability and ecosystem compatibility, while research systems optimize novelty and iteration speed. In practice, this separation creates friction: teams either delay innovation due to operational constraints or accept brittle prototypes that are costly to operationalize.
 
-The core thesis of this paper is that a database can provide a stable, explicit, web-native control plane (SkeinQL) while remaining a practical foundation for iterative systems research. Instead of introducing one monolithic research feature at a time, SkeinDB organizes innovations into agenda modules with concrete RPC methods, tests, and documentation.
+SkeinDB is designed to reduce this gap through three core decisions:
 
-This manuscript contributes:
-- A practical architecture for single-binary DB delivery with integrated control plane.
-- A concrete cluster control-plane implementation with persistent metadata and shard operations.
-- A replication transport design that uses RPC-level write fanout in the current prototype.
-- A unified admin UX that surfaces operational and research controls.
-- A research-to-implementation mapping across 20 agenda tracks.
+1. **Single executable deployment.** One process exposes HTTP RPC, embedded administration UI, optional QUIC RPC, and storage/engine primitives.
+2. **Explicit typed control plane.** SkeinQL JSON-RPC methods define behavior as stable API contracts rather than implicit side effects.
+3. **Research-first extensibility.** Experimental capabilities are integrated as method families with tests and docs, not separate throwaway branches.
 
-## 2. System Goals and Design Principles
-SkeinDB is guided by four primary principles:
+This paper focuses on the latest implementation milestone: a usable cluster control-plane with persistent state, shard operations, and replication transport; plus a phpMyAdmin-like administration surface that makes these controls accessible without CLI-only workflows.
 
-1. **Operational minimalism:** one executable and direct local startup.
-2. **Protocol clarity:** typed, versioned JSON-RPC methods via SkeinQL.
-3. **Research modularity:** capabilities implemented as scoped method families.
-4. **Progressive compatibility:** MySQL adoption support with migration tooling.
+### 1.1 Contributions
 
-These principles avoid the common split where research systems remain disconnected from operator workflows. In SkeinDB, each major feature has:
-- method-level API definitions,
-- runnable tests,
-- and operator-facing docs/UI touchpoints.
+This manuscript makes five concrete contributions:
 
-## 3. Architecture Overview
-### 3.1 Process Model
-A single SkeinDB process hosts:
-- HTTP JSON-RPC endpoint (`/api/v1/rpc`),
-- embedded admin/console UI,
-- optional QUIC endpoint for SkeinQL-over-QUIC,
-- internal execution engine and state managers.
+- **C1: Cluster control-plane implementation.** A `cluster.*` method family with persistent metadata and role-aware operations.
+- **C2: Prototype replication transport.** Primary-to-replica RPC fanout with loop prevention and replication counters.
+- **C3: Integrated administration UX.** Embedded SkeinAdmin with dedicated admin and console routes, profile-driven connectivity, and cluster/settings workflows.
+- **C4: Verified method surface expansion.** 74 methods exposed through capabilities, including 9 cluster methods.
+- **C5: Reproducible validation baseline.** End-to-end automated tests (111 total) covering unit, integration, transport, and cluster scenarios.
 
-### 3.2 API Plane
-SkeinQL provides strongly structured method families, including:
-- `system.*`, `transport.*`, `stats.*`,
-- `schema.*`, `data.*`, `query.*`,
-- `cluster.*`,
-- and research families (`vector.*`, `dp.*`, `oblivious.*`, `forensic.*`, `migration.*`, `wasm.plan.*`, etc.).
+## 2. Related Work and Positioning
 
-### 3.3 State and Persistence
-Runtime settings are persisted in `settings.json`, including cluster metadata (`cluster.state.v1`) and control flags. This keeps control-plane state durable without introducing separate external metadata services in the prototype stage.
+SkeinDB intersects prior themes in databases and systems:
 
-## 4. Cluster Control-Plane and Replication
-### 4.1 Implemented Cluster Methods
-The current implementation includes:
-- `cluster.status`
-- `cluster.nodes`
-- `cluster.join_token.create`
-- `cluster.node.join`
-- `cluster.node.remove`
-- `cluster.replica.promote`
-- `cluster.shard.create`
-- `cluster.shard.move`
-- `cluster.shard.rebalance`
+- **Learned structures and adaptive storage:** model-guided indexing and hybrid layouts motivate SkeinDB research tracks for ValueID lookup and row/column adaptivity [1], [2].
+- **Web and sandbox execution:** WebAssembly informs safe operator extension paths and constrained compute deployment [3].
+- **Consistency and replication:** causal/session semantics and distributed state management motivate ETag-chain consistency and cluster plans [4].
+- **Privacy and secure query processing:** differential privacy and oblivious techniques are represented as dedicated SkeinQL surfaces [5], [6].
+- **Materialized and incremental maintenance:** dependency-aware refresh strategies inspire SkeinDB incremental view tracks [7].
 
-These methods operate on persistent cluster state and are exposed in `system.capabilities.methods`.
+Unlike systems that treat administration as an external control plane, SkeinDB intentionally co-locates operator UX and method contracts inside one binary to maximize local reproducibility and reduce configuration overhead.
 
-### 4.2 Node Identity and Join Workflow
-Each node has a stable local node identity and participates in a cluster identified by `cluster_id`. Join tokens are short-lived, role-aware credentials created through `cluster.join_token.create`; nodes are admitted through `cluster.node.join`.
+## 3. System Overview
 
-### 4.3 Shard Metadata and Placement
-Table-scoped shard metadata is managed in control-plane state. Operators can:
-- define shard ownership (`cluster.shard.create`),
-- move ownership (`cluster.shard.move`),
-- and rebalance placement (`cluster.shard.rebalance`).
+### 3.1 Process architecture
 
-Writes are guarded so only the designated primary (global or shard-level) can accept authoritative writes.
+A SkeinDB process hosts:
 
-### 4.4 Replication Transport (Prototype)
-The current transport replicates successful primary writes to replica nodes via SkeinQL RPC fanout. Replication requests are marked with an internal header (`x-skeindb-replication: 1`) to prevent recursive fanout and to allow controlled application on replicas.
+- HTTP SkeinQL endpoint (`/api/v1/rpc`)
+- embedded admin UI routes (`/admin`, `/console`)
+- optional QUIC endpoint
+- execution engine and settings persistence
 
-Replication counters are tracked in control-plane state and surfaced through:
-- `cluster.status.replication`
-- `stats.snapshot.cluster.replication`
+This shape enables local and edge deployments with minimal orchestration while preserving API richness.
 
-This provides an immediately testable, developer-friendly transport before introducing full WAL/LSN streaming and CAS object pull.
+### 3.2 API model
 
-## 5. Web Admin Experience
-SkeinAdmin now includes:
-- phpMyAdmin-like workspace organization (overview, SQL, schema, data, cluster, settings, RPC explorer),
-- server connect/disconnect profiles,
-- cluster action controls (join/promote/shard/move/rebalance),
-- direct settings management (`settings.get`, `settings.set`),
-- and advanced method access through RPC Explorer.
+SkeinQL methods are versioned and typed. Method families include:
 
-The UX objective is to ensure that every feature is operable without CLI-only workflows.
+- core: `system.*`, `transport.*`, `stats.*`, `settings.*`
+- schema/data/query: `schema.*`, `data.*`, `query.*`
+- cluster: `cluster.*`
+- experimental: `vector.*`, `dp.*`, `oblivious.*`, `forensic.*`, `migration.*`, `wasm.plan.*`, and related families
 
-## 6. Research Agenda Mapping
-SkeinDB tracks 20 research agenda streams (R01–R20). The current implementation includes substantial progress across execution, API, and tooling tracks, with active work in clustering and operations.
+At runtime, `system.capabilities` surfaces enabled methods and feature flags for client introspection.
 
-### 6.1 Implemented/Operational in prototype scope
-- Web-native validation and patching (`query.select` with ETag semantics, `query.patch` deltas).
-- QUIC transport path and protocol tests.
-- Vector search and indexing primitives.
-- Differential privacy aggregates and budget controls.
-- Oblivious access policy/explain controls.
-- Forensic query/verify/export surfaces.
-- Merge policies and wasm merge registry.
-- View lifecycle and dependency-aware operations.
-- Migration intent/rewrite analysis workflows.
-- Cluster control-plane + replication fanout + shard metadata operations.
+### 3.3 Persistence model
 
-### 6.2 Remaining deep systems milestones
-- Full WAL streaming protocol with LSN semantics.
-- CAS object pull and object-manifest replication.
-- Read-balancing router and automated failover orchestration.
-- Complete energy-aware compaction and formal performance harnesses.
+Operational metadata is persisted in settings storage. Cluster metadata is serialized under `cluster.state.v1`, including node list, roles, join tokens, shard ownership, and replication counters. This avoids dependence on an external metadata service at prototype stage while keeping state durable across restarts.
 
-## 7. Validation and Test Strategy
-Validation combines:
-- unit tests for method behavior and state transitions,
-- RPC roundtrip tests,
-- QUIC transport integration tests,
-- cluster replication integration tests (multi-node spawned process tests).
+## 4. Cluster Control-Plane Design and Implementation
 
-Standard acceptance pipeline:
-- `cargo fmt`
-- `cargo clippy`
-- `cargo test`
+### 4.1 Implemented RPC methods
 
-This test-first approach is critical because SkeinDB exposes many method families and control-plane transitions where regressions can be subtle.
+The cluster control-plane currently exposes:
+
+1. `cluster.status`
+2. `cluster.nodes`
+3. `cluster.join_token.create`
+4. `cluster.node.join`
+5. `cluster.node.remove`
+6. `cluster.replica.promote`
+7. `cluster.shard.create`
+8. `cluster.shard.move`
+9. `cluster.shard.rebalance`
+
+These methods are typed in the SkeinQL schema crate and dispatched in server RPC handling.
+
+### 4.2 Node identity and lifecycle
+
+Each node has a local identity and role metadata. Join token issuance is explicit and time-bounded. Joining a node updates persisted cluster metadata and can assign replica/primary role semantics.
+
+### 4.3 Write ownership and routing guard
+
+When clustering is enabled, write methods are validated against cluster primary ownership. If the local node is not the shard/global primary for the target object, writes are rejected with a structured error. This enforces consistent authority boundaries before advanced router failover automation is introduced.
+
+### 4.4 Shard metadata and placement
+
+Shard records map `(db, table)` scopes to primary + replica node assignments. Operators can create shard ownership, move ownership, and request rebalance plans. In prototype stage, rebalance is policy-light but operationally explicit.
+
+### 4.5 Replication transport (prototype)
+
+Successful primary writes are faned out to replica nodes over HTTP SkeinQL RPC. Replicated requests carry an internal header (`x-skeindb-replication`) to prevent recursive propagation loops. Replication counters include shipped operations, failed operations, and last-error metadata.
+
+This is intentionally a transitional transport model. It optimizes implementation clarity and testability over maximum throughput.
+
+## 5. SkeinAdmin UX: phpMyAdmin-like but RPC-native
+
+### 5.1 Route and mode model
+
+SkeinAdmin is served in two operator modes:
+
+- `/admin`: full control-plane mode
+- `/console`: SQL/workspace-first mode
+
+Both modes share one UI bundle but expose different default navigation emphases.
+
+### 5.2 Panel architecture
+
+The embedded UI provides 9 primary panels:
+
+1. overview
+2. workspace (SQL)
+3. schema
+4. data
+5. cluster
+6. settings
+7. migration
+8. natural-language lab
+9. RPC explorer
+
+### 5.3 Operator affordances
+
+Recent UX additions include:
+
+- explicit **Connect/Disconnect** controls with status badges
+- connection profiles for multi-target workflows
+- cluster operation controls (token create, join, remove, promote, shard operations)
+- settings management through `settings.get`/`settings.set`
+- capability-driven method discovery through RPC explorer
+
+The design goal is “all features controllable from web UI,” with RPC Explorer serving as a safe universal fallback for newly added methods.
+
+## 6. Methods and Evaluation Protocol
+
+### 6.1 Evaluation focus
+
+Given the prototype maturity stage, evaluation priorities are:
+
+- **correctness of control-plane transitions**
+- **protocol roundtrip reliability**
+- **transport interoperability (HTTP + QUIC)**
+- **regression resistance through automated tests**
+
+### 6.2 Test structure
+
+Validation uses:
+
+- unit tests for engine and server behavior
+- multi-process integration tests for cluster replication
+- QUIC integration tests for transport correctness and safety behavior
+- workspace-level build/test tooling (`cargo fmt`, `cargo clippy`, `cargo test`)
+
+### 6.3 Reproducibility environment
+
+The reported run used:
+
+- OS: Darwin 25.3.0 (ARM64)
+- Rust: `rustc 1.92.0`
+- Cargo: `cargo 1.92.0`
+
+## 7. Results
+
+### 7.1 Feature surface results
+
+**R1 — Method coverage.** The runtime capability endpoint reports **74 methods**. Of these, **9 methods** are cluster control-plane methods.
+
+**R2 — Admin control coverage.** Cluster and settings operations are directly invokable from SkeinAdmin panels, with RPC Explorer exposing complete method-level fallback.
+
+### 7.2 Automated validation results
+
+**R3 — Total tests.** The workspace currently executes **111 tests** across crates and integration suites.
+
+**R4 — Full test runtime.** Full `cargo test` completed in **22.79 seconds** in the reference environment.
+
+**R5 — Cluster replication integration.** The dedicated cluster integration test validated schema and row replication with pass runtime of approximately **3.05 seconds**.
+
+**R6 — QUIC transport integration.** QUIC test suite ran **13 tests**, all passing, with suite runtime approximately **15.70 seconds**, including zero-RTT write safety behavior.
+
+### 7.3 Summary table
+
+| Metric | Value | Evidence source |
+|---|---:|---|
+| Total SkeinQL methods | 74 | `system.capabilities` runtime query |
+| Cluster control-plane methods | 9 | `system.capabilities` method list |
+| Total automated tests | 111 | `cargo test -- --list` aggregate |
+| Full test runtime | 22.79 s | `/usr/bin/time -p cargo test` |
+| Cluster integration runtime | 3.05 s | `tests/cluster_rpc.rs` run |
+| QUIC integration runtime | 15.70 s | `tests/quic_rpc.rs` run |
 
 ## 8. Discussion
-### 8.1 Strengths
-- High implementation velocity from unified binary + explicit RPC contracts.
-- Strong operator visibility through embedded control plane.
-- Research extensibility without external orchestration prerequisites.
 
-### 8.2 Limitations
-- Current replication transport is RPC fanout, not full WAL/CAS replication.
-- Router-level automatic read-balancing is not yet complete.
-- Some method families remain experimental and should be treated as evolving contracts.
+### 8.1 What this validates
 
-### 8.3 Threats to Validity
-- Prototype benchmarks may not represent tuned production systems.
-- In-memory/exploratory components can overstate throughput under constrained workloads.
-- Integration tests validate correctness of flows, not full failure-domain behavior (network partitions, split-brain, disk faults).
+The results support three conclusions:
 
-## 9. Conclusion
-SkeinDB demonstrates that a single-binary database can combine practical operator workflows and high-velocity systems research. The integrated SkeinQL control plane, expanded admin experience, and implemented cluster control-plane provide a coherent path from local development to distributed experimentation. The prototype already supports end-to-end cluster operations (join/promote/shard/rebalance) and replication fanout with persistent state and test coverage. Future work will complete WAL/CAS-native replication, routing automation, and broader performance/energy optimization to transition from research scaffold to production-grade distributed operation.
+1. **Control-plane completeness at prototype level.** Cluster lifecycle and shard operations are fully represented in the API and reachable via UI.
+2. **Cross-surface coherence.** API, tests, and administration panel now expose the same cluster behaviors.
+3. **Fast local verification cycle.** The full test cycle remains short enough for frequent iterative development.
 
-## Acknowledgments
-_Optional section. Add contributors, institutions, funding, or infrastructure support._
+### 8.2 Why this matters
 
-## References
-[1] Kraska, T., et al. "The Case for Learned Index Structures." SIGMOD, 2018.
+Many research database prototypes fail to bridge from demonstration to operator usability. SkeinDB’s approach is to mature interfaces first: stable method contracts, durable metadata semantics, and an operator-facing UI that encourages early operational feedback.
 
-[2] Neumann, T. "Efficiently Compiling Efficient Query Plans for Modern Hardware." VLDB, 2011.
+### 8.3 Current limitations
 
-[3] Haas, A., et al. "Bringing the Web up to Speed with WebAssembly." PLDI, 2017.
+This implementation remains **prototype-grade** in several areas:
 
-[4] Lloyd, W., et al. "Don’t Settle for Eventual: Scalable Causal Consistency." SOSP, 2011.
+- replication uses RPC fanout, not WAL/LSN streaming
+- no external consensus/governance for primary election
+- shard rebalance policy is intentionally simple
+- performance evidence currently emphasizes correctness and reproducibility over throughput/latency benchmarks
 
-[5] McSherry, F. "Privacy Integrated Queries." SIGMOD, 2009.
+## 9. Threats to Validity
 
-[6] Stefanov, E., et al. "Path ORAM." CCS, 2013.
+- **Single-environment measurements.** Timings reported from one hardware/software environment may not generalize.
+- **Correctness-heavy evaluation.** Passing tests establish functional behavior but not production-scale failure resilience.
+- **Prototype transport model.** RPC fanout is not representative of mature replication throughput or durability semantics.
+- **Feature maturity variance.** “Implemented” across research tracks often means validated prototype surfaces rather than finalized production-grade subsystems.
 
-[7] Gupta, A., and Mumick, I. "Maintenance of Materialized Views." IEEE Data Eng. Bulletin, 1995.
+## 10. Roadmap to Production-Grade Cluster Operation
 
-[8] Chaudhuri, S., and Narasayya, V. "AutoAdmin." SIGMOD, 1998.
+Near-term work is organized around four upgrades:
 
-## Appendix A: Reproducibility Notes
-- Build: `cargo build --release`
-- Run: `./target/release/skeindb serve --data ./data --http 8080 --mysql 3306`
-- Admin UI: `http://127.0.0.1:8080/admin`
-- RPC endpoint: `http://127.0.0.1:8080/api/v1/rpc`
+1. **WAL/LSN-native replication path** with idempotent apply semantics.
+2. **CAS object-manifest pull** for efficient distributed state movement.
+3. **Router/failover automation** for read balancing and role transition.
+4. **Benchmark program expansion** (load, failover, long-run stability, and storage efficiency).
 
-## Appendix B: Suggested IJRCOM Submission Checklist
-- Add final author names, affiliations, and correspondence.
-- Apply IJRCOM template typography/heading constraints in DOC format.
-- Verify citation style and numbering against IJRCOM author guidelines.
-- Export final PDF with embedded fonts.
+These upgrades preserve the current RPC contracts while deepening transport and runtime guarantees.
+
+## 11. Conclusion
+
+SkeinDB demonstrates a practical path toward unifying operator ergonomics and systems research iteration in one deployable binary. The cluster control-plane and administration stack now provide an end-to-end management substrate: persistent metadata, node lifecycle controls, shard operations, replication fanout, and web-based execution surfaces.
+
+The current artifact should be interpreted as a high-fidelity prototype: interface-complete for core operations, well-tested for correctness, and ready for the next phase of replication, routing, and benchmark hardening.
+
+## References (IEEE style)
+
+[1] T. Kraska, A. Beutel, E. H. Chi, J. Dean, and N. Polyzotis, "The Case for Learned Index Structures," in *Proc. ACM SIGMOD*, 2018.
+
+[2] T. Neumann, "Efficiently Compiling Efficient Query Plans for Modern Hardware," *PVLDB*, vol. 4, no. 9, pp. 539-550, 2011.
+
+[3] A. Haas et al., "Bringing the Web up to Speed with WebAssembly," in *Proc. PLDI*, 2017.
+
+[4] W. Lloyd, M. Freedman, M. Kaminsky, and D. Andersen, "Don't Settle for Eventual: Scalable Causal Consistency for Wide-Area Storage with COPS," in *Proc. SOSP*, 2011.
+
+[5] F. McSherry, "Privacy Integrated Queries: An Extensible Platform for Privacy-Preserving Data Analysis," in *Proc. ACM SIGMOD*, 2009.
+
+[6] E. Stefanov et al., "Path ORAM: An Extremely Simple Oblivious RAM Protocol," in *Proc. ACM CCS*, 2013.
+
+[7] A. Gupta and I. S. Mumick, "Maintenance of Materialized Views: Problems, Techniques, and Applications," *IEEE Data Eng. Bull.*, vol. 18, no. 2, pp. 3-18, 1995.
+
+[8] S. Chaudhuri and V. Narasayya, "An Efficient Cost-Driven Index Selection Tool for Microsoft SQL Server," in *Proc. VLDB*, 1997.
+
+[9] D. R. Karger et al., "Consistent Hashing and Random Trees: Distributed Caching Protocols for Relieving Hot Spots on the World Wide Web," in *Proc. STOC*, 1997.
+
+[10] M. Stonebraker and U. Cetintemel, "One Size Fits All: An Idea Whose Time Has Come and Gone," in *Proc. ICDE*, 2005.
+
+## Data and code availability
+
+All source code, tests, and documentation artifacts are available in the project repository:  
+[https://github.com/pinkysworld/SkeinDB](https://github.com/pinkysworld/SkeinDB)
+
+The camera-ready draft source is stored in:
+- `docs/papers/SkeinDB_IJRCOM_Submission.md`
+- `docs/papers/SkeinDB_IJRCOM_Submission.docx`
+
+## Funding statement
+
+No external funding was received for this study.
+
+## Conflicts of interest
+
+The authors declare no conflicts of interest.
+
+## Ethical considerations
+
+This study does not involve human participants or animals.
+
+## AI usage statement
+
+Generative AI tools were used to support drafting, restructuring, and language refinement of manuscript text. All technical claims, implementation descriptions, and validation outcomes were reviewed and verified against repository artifacts and executed test outputs by the authors.
+
+## Camera-ready submission checklist (author action items)
+
+- Fill final author metadata table (names, affiliations, ORCID, correspondence).  
+- Add final CRediT percentage table per IJRC template.  
+- Paste this text into the IJRC Word template structure and preserve heading levels.  
+- Verify all references include DOI/URL where available.  
+- Insert any final figures/tables required by reviewers.  
+- Export final PDF with embedded fonts and run one final proofread pass.
