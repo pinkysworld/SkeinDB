@@ -83,6 +83,23 @@ This manuscript provides five concrete contributions supported by repository art
 
 This article intentionally focuses on implemented behavior and directly measured outcomes. It does not claim complete production readiness for all distributed systems concerns. Instead, it documents the current system shape and identifies precise upgrade paths from prototype transport semantics toward robust production replication and routing behavior.
 
+### 1.3 Research questions and success criteria
+
+To improve evaluability, this manuscript frames the implementation against four explicit research questions (RQs).
+
+- **RQ1:** Can a single-binary database expose a cluster control-plane with durable state and clear method contracts?
+- **RQ2:** Can those control-plane capabilities be surfaced in a practical web administration UX without CLI-only dependency?
+- **RQ3:** Can the system provide consistent behavior across HTTP and QUIC method paths in current scope?
+- **RQ4:** Can the above be validated through repeatable, repository-local automation rather than ad hoc manual checks?
+
+Success criteria used in this paper are intentionally concrete:
+
+1. Cluster method family exists and is discoverable via capabilities.
+2. Persistent cluster metadata survives restart semantics.
+3. UI controls map to real cluster/settings method calls.
+4. Automated tests cover cluster transitions and replication behavior.
+5. Full workspace validation executes successfully in measured environment.
+
 ## 2. Background and positioning
 
 ### 2.1 Problem landscape
@@ -118,6 +135,21 @@ The single-binary strategy is sometimes treated as merely operational convenienc
 - and tighter coupling between feature implementation and operator validation.
 
 In short, deployment simplicity is not orthogonal to research quality; it directly influences how often hypotheses are tested and validated against realistic flows.
+
+### 2.4 Positioning against adjacent implementation styles
+
+The table below clarifies how SkeinDB's current implementation stance differs from two common patterns: production-first SQL platforms and research-only prototypes.
+
+| Property | Production-first SQL platforms (typical) | Research-only prototypes (typical) | SkeinDB current stage |
+|---|---|---|---|
+| Deployment unit | Multi-service or external control plane | Often custom harnesses | Single executable with embedded admin routes |
+| Control interface | Mixed SQL + vendor APIs | Often experimental APIs only | Typed SkeinQL RPC + SQL compatibility path |
+| Admin UX parity with API | Varies by vendor and release | Usually limited | Explicit panel-to-method mapping + RPC fallback |
+| Cluster control discoverability | Often documentation-driven | Often code-driven | Runtime `system.capabilities` introspection |
+| Reproducibility emphasis | High in mature products, low transparency | High in papers, low operator usability | High local reproducibility + operator-facing workflows |
+| Research agenda integration | Usually external | Usually central but isolated | Integrated in repository with method/test artifacts |
+
+This framing is not intended as a benchmark superiority claim. It clarifies design priorities and tradeoffs at this prototype maturity phase.
 
 ## 3. System overview
 
@@ -367,6 +399,15 @@ A full timed workspace test run reported:
 - QUIC integration runtime: **15.70 s**,
 - all tests passing.
 
+### 8.6 Measurement protocol notes
+
+The timing values in this manuscript are presented as **reproducible baseline measurements**, not as universal performance claims.
+
+- Test timings are wall-clock values from the reported environment.
+- Measurements were taken from full command execution logs rather than synthetic microbenchmarks.
+- Values are intended to support engineering reproducibility and reviewer verification.
+- A multi-machine, repeated-run benchmark study is planned for subsequent work and is outside the scope of this implementation-focused paper.
+
 ## 9. Results
 
 ### 9.1 Capability and method surface outcomes
@@ -434,6 +475,20 @@ From an operator perspective, this substantially reduces friction between "it is
 | Validation | QUIC integration runtime | 15.70 s |
 | Stability | Failing tests in reported run | 0 |
 
+### 9.7 Claims-to-evidence mapping
+
+To tighten traceability from manuscript claims to verifiable artifacts, Table 9.7 maps primary claims to evidence surfaces.
+
+| Claim ID | Claim | Evidence type | Primary artifact |
+|---|---|---|---|
+| CL1 | Cluster control-plane methods are implemented and discoverable | Runtime capabilities response | `system.capabilities` method list |
+| CL2 | Cluster state is durable across runtime lifecycle | Unit test + persisted settings behavior | server tests for `cluster.state.v1` persistence |
+| CL3 | Non-primary write acceptance is prevented in cluster mode | Unit test failure path | write-guard tests (`forbidden` path) |
+| CL4 | Primary writes replicate to replica in tested flow | Integration test | `tests/cluster_rpc.rs` |
+| CL5 | QUIC method path remains compatible in tested scenarios | Integration suite | `tests/quic_rpc.rs` |
+| CL6 | Web UI exposes cluster/settings operations as actionable controls | Frontend implementation + runtime behavior | SkeinAdmin cluster/settings panels |
+| CL7 | Full project validation is reproducible from repository | Build/test logs | `cargo fmt`, `cargo clippy`, `cargo test` outputs |
+
 ## 10. Discussion
 
 ### 10.1 Interpretation of current maturity
@@ -468,6 +523,21 @@ The cluster work also strengthens multiple agenda tracks indirectly:
 - **R20 energy-aware scheduling:** placement and replication metadata can become inputs to energy-aware control policies.
 
 In this sense, cluster control-plane completion is not isolated progress; it is enabling infrastructure for adjacent research directions.
+
+### 10.5 Replication maturity ladder
+
+A useful interpretation of current progress is a staged maturity ladder.
+
+| Level | Replication capability | Current status |
+|---|---|---|
+| L0 | No replication controls | Surpassed |
+| L1 | Manual replication hooks | Surpassed |
+| L2 | API-visible replication control-plane + fanout path | **Current implemented level** |
+| L3 | WAL/LSN-anchored replication with replay discipline | Planned |
+| L4 | Failover-aware routing and policy-driven automation | Planned |
+| L5 | Production-hardened, benchmarked distributed operation | Future target |
+
+This ladder helps reviewers interpret claims appropriately: SkeinDB currently sits at an interface-complete and test-backed prototype level (L2), not at final production maturity levels.
 
 ## 11. Threats to validity
 
