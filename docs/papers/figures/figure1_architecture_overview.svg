@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4f6df5"/><stop offset="100%" stop-color="#3b4fd4"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient>
+    <linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#d97706"/></linearGradient>
+    <linearGradient id="g5" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#dc2626"/></linearGradient>
+    <linearGradient id="g6" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#06b6d4"/><stop offset="100%" stop-color="#0891b2"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity=".12"/></filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="620" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="450" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Figure 1. SkeinDB Layered Architecture</text>
+
+  <!-- ═══ LAYER 1: Client Interfaces ═══ -->
+  <text x="30" y="66" font-size="10" fill="#64748b" font-weight="600" letter-spacing="1.5">CLIENT INTERFACES</text>
+  <rect x="50" y="75" width="230" height="48" rx="6" fill="url(#g1)" filter="url(#shadow)"/>
+  <text x="165" y="95" text-anchor="middle" font-size="12" fill="#fff" font-weight="600">MySQL Wire Protocol</text>
+  <text x="165" y="110" text-anchor="middle" font-size="9" fill="#c7d2fe">Port 3306 · SQL Compatibility</text>
+
+  <rect x="335" y="75" width="230" height="48" rx="6" fill="url(#g1)" filter="url(#shadow)"/>
+  <text x="450" y="95" text-anchor="middle" font-size="12" fill="#fff" font-weight="600">HTTP RPC</text>
+  <text x="450" y="110" text-anchor="middle" font-size="9" fill="#c7d2fe">/api/v1/rpc · Axum · JSON</text>
+
+  <rect x="620" y="75" width="230" height="48" rx="6" fill="url(#g6)" filter="url(#shadow)"/>
+  <text x="735" y="95" text-anchor="middle" font-size="12" fill="#fff" font-weight="600">QUIC RPC</text>
+  <text x="735" y="110" text-anchor="middle" font-size="9" fill="#cffafe">HTTP/3 · Zero-RTT · quinn</text>
+
+  <!-- Arrows L1→L2 -->
+  <line x1="165" y1="123" x2="165" y2="148" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="450" y1="123" x2="450" y2="148" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="735" y1="123" x2="735" y2="148" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ═══ LAYER 2: Unified Dispatch ═══ -->
+  <text x="30" y="163" font-size="10" fill="#64748b" font-weight="600" letter-spacing="1.5">UNIFIED DISPATCH</text>
+  <rect x="50" y="150" width="800" height="38" rx="6" fill="#1e293b" filter="url(#shadow)"/>
+  <text x="450" y="175" text-anchor="middle" font-size="13" fill="#e2e8f0" font-weight="600">SkeinQL Method Dispatch · 74 Methods · 15 Families</text>
+
+  <!-- Arrows L2→L3 -->
+  <line x1="170" y1="188" x2="170" y2="218" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="370" y1="188" x2="370" y2="218" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="560" y1="188" x2="560" y2="218" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="730" y1="188" x2="730" y2="218" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ═══ LAYER 3: Method Families ═══ -->
+  <text x="30" y="233" font-size="10" fill="#64748b" font-weight="600" letter-spacing="1.5">METHOD FAMILIES</text>
+
+  <!-- Core -->
+  <rect x="50" y="240" width="175" height="100" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#shadow)"/>
+  <rect x="50" y="240" width="175" height="24" rx="6" fill="url(#g2)"/>
+  <rect x="50" y="258" width="175" height="2" rx="0" fill="url(#g2)"/>
+  <text x="137" y="257" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Core Data Path</text>
+  <text x="60" y="280" font-size="9" fill="#475569">schema.* · data.* · query.*</text>
+  <text x="60" y="294" font-size="9" fill="#475569">view.* · settings.*</text>
+  <text x="60" y="308" font-size="9" fill="#475569">system.* · stats.* · transport.*</text>
+  <text x="60" y="322" font-size="9" fill="#475569">merge.*</text>
+
+  <!-- Cluster -->
+  <rect x="250" y="240" width="175" height="100" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#shadow)"/>
+  <rect x="250" y="240" width="175" height="24" rx="6" fill="url(#g4)"/>
+  <rect x="250" y="258" width="175" height="2" rx="0" fill="url(#g4)"/>
+  <text x="337" y="257" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Cluster Control</text>
+  <text x="260" y="280" font-size="9" fill="#475569">cluster.status · cluster.nodes</text>
+  <text x="260" y="294" font-size="9" fill="#475569">cluster.node.join/remove</text>
+  <text x="260" y="308" font-size="9" fill="#475569">cluster.replica.promote</text>
+  <text x="260" y="322" font-size="9" fill="#475569">cluster.shard.* (3 methods)</text>
+
+  <!-- Research: Privacy/Security -->
+  <rect x="450" y="240" width="195" height="100" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#shadow)"/>
+  <rect x="450" y="240" width="195" height="24" rx="6" fill="url(#g3)"/>
+  <rect x="450" y="258" width="195" height="2" rx="0" fill="url(#g3)"/>
+  <text x="547" y="257" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Research: Privacy &amp; AI</text>
+  <text x="460" y="280" font-size="9" fill="#475569">dp.* · oblivious.* · forensic.*</text>
+  <text x="460" y="294" font-size="9" fill="#475569">vector.* · ai.nl.* · ai.autoparam.*</text>
+  <text x="460" y="308" font-size="9" fill="#475569">advisor.* · migration.*</text>
+  <text x="460" y="322" font-size="9" fill="#475569">wasm.plan.* (R01–R20)</text>
+
+  <!-- Admin -->
+  <rect x="670" y="240" width="180" height="100" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#shadow)"/>
+  <rect x="670" y="240" width="180" height="24" rx="6" fill="url(#g5)"/>
+  <rect x="670" y="258" width="180" height="2" rx="0" fill="url(#g5)"/>
+  <text x="760" y="257" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">Embedded Admin</text>
+  <text x="680" y="280" font-size="9" fill="#475569">/admin · /console</text>
+  <text x="680" y="294" font-size="9" fill="#475569">19 panels · 38 RPC templates</text>
+  <text x="680" y="308" font-size="9" fill="#475569">include_str! at compile time</text>
+  <text x="680" y="322" font-size="9" fill="#475569">Same RPC calls as clients</text>
+
+  <!-- Arrows L3→L4 -->
+  <line x1="137" y1="340" x2="250" y2="380" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="337" y1="340" x2="350" y2="380" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="547" y1="340" x2="500" y2="380" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ═══ LAYER 4: Storage Engine ═══ -->
+  <text x="30" y="395" font-size="10" fill="#64748b" font-weight="600" letter-spacing="1.5">STORAGE ENGINE</text>
+  <rect x="50" y="385" width="595" height="105" rx="8" fill="#fff" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="50" y="385" width="595" height="28" rx="8" fill="#1e293b"/>
+  <rect x="50" y="405" width="595" height="2" fill="#1e293b"/>
+  <text x="347" y="404" text-anchor="middle" font-size="12" fill="#e2e8f0" font-weight="600">Cell-Interned MVCC Engine</text>
+
+  <!-- Sub-boxes inside storage -->
+  <rect x="70" y="420" width="130" height="55" rx="4" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="135" y="440" text-anchor="middle" font-size="9" fill="#166534" font-weight="600">Cell Store</text>
+  <text x="135" y="454" text-anchor="middle" font-size="8" fill="#166534">Content-Addressed</text>
+  <text x="135" y="466" text-anchor="middle" font-size="8" fill="#166534">ValueID → Bytes</text>
+
+  <rect x="215" y="420" width="130" height="55" rx="4" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="280" y="440" text-anchor="middle" font-size="9" fill="#1e40af" font-weight="600">Version Chains</text>
+  <text x="280" y="454" text-anchor="middle" font-size="8" fill="#1e40af">PK → [TxID, VIDs]</text>
+  <text x="280" y="466" text-anchor="middle" font-size="8" fill="#1e40af">Snapshot Isolation</text>
+
+  <rect x="360" y="420" width="130" height="55" rx="4" fill="#fdf4ff" stroke="#d8b4fe"/>
+  <text x="425" y="440" text-anchor="middle" font-size="9" fill="#7e22ce" font-weight="600">Delta Chains</text>
+  <text x="425" y="454" text-anchor="middle" font-size="8" fill="#7e22ce">Base + Δ Patches</text>
+  <text x="425" y="466" text-anchor="middle" font-size="8" fill="#7e22ce">R03 Topology</text>
+
+  <rect x="505" y="420" width="125" height="55" rx="4" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="567" y="440" text-anchor="middle" font-size="9" fill="#9a3412" font-weight="600">Deduplication</text>
+  <text x="567" y="454" text-anchor="middle" font-size="8" fill="#9a3412">Structural Sharing</text>
+  <text x="567" y="466" text-anchor="middle" font-size="8" fill="#9a3412">Cross-Table/Version</text>
+
+  <!-- ═══ LAYER 5: Persistence ═══ -->
+  <text x="30" y="515" font-size="10" fill="#64748b" font-weight="600" letter-spacing="1.5">PERSISTENCE</text>
+  <rect x="50" y="520" width="260" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="180" y="541" text-anchor="middle" font-size="10" fill="#475569" font-weight="600">Settings Store</text>
+  <text x="180" y="555" text-anchor="middle" font-size="8" fill="#64748b">cluster.state.v1 · JSON persistence</text>
+
+  <rect x="335" y="520" width="310" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" filter="url(#shadow)"/>
+  <text x="490" y="541" text-anchor="middle" font-size="10" fill="#475569" font-weight="600">Write-Ahead Log (WAL)</text>
+  <text x="490" y="555" text-anchor="middle" font-size="8" fill="#64748b">Hash-chained · Forensic verification (R06)</text>
+
+  <!-- Arrows L4→L5 -->
+  <line x1="200" y1="490" x2="180" y2="520" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="400" y1="490" x2="490" y2="520" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ═══ Replication arrow ═══ -->
+  <rect x="670" y="400" width="180" height="65" rx="6" fill="#fef2f2" stroke="#fca5a5" filter="url(#shadow)"/>
+  <text x="760" y="420" text-anchor="middle" font-size="9" fill="#991b1b" font-weight="600">Cluster Replication</text>
+  <text x="760" y="435" text-anchor="middle" font-size="8" fill="#991b1b">RPC Fanout to Replicas</text>
+  <text x="760" y="448" text-anchor="middle" font-size="8" fill="#991b1b">x-skeindb-replication</text>
+  <text x="760" y="461" text-anchor="middle" font-size="8" fill="#991b1b">Recursion suppression</text>
+
+  <line x1="645" y1="432" x2="670" y2="432" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Legend -->
+  <rect x="670" y="520" width="180" height="78" rx="6" fill="#fff" stroke="#e2e8f0"/>
+  <text x="680" y="537" font-size="8" fill="#64748b" font-weight="600">LEGEND</text>
+  <rect x="680" y="544" width="10" height="10" rx="2" fill="url(#g1)"/><text x="696" y="553" font-size="8" fill="#475569">Client transport</text>
+  <rect x="680" y="558" width="10" height="10" rx="2" fill="url(#g2)"/><text x="696" y="567" font-size="8" fill="#475569">Core method families</text>
+  <rect x="680" y="572" width="10" height="10" rx="2" fill="url(#g3)"/><text x="696" y="581" font-size="8" fill="#475569">Research methods (R01–R20)</text>
+  <rect x="680" y="586" width="10" height="10" rx="2" fill="url(#g5)"/><text x="696" y="595" font-size="8" fill="#475569">Web admin surface</text>
+</svg>

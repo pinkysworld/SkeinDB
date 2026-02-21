@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="gp" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#4f6df5"/><stop offset="100%" stop-color="#3b4fd4"/></linearGradient>
+    <linearGradient id="gr" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient>
+    <linearGradient id="gs" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#d97706"/></linearGradient>
+    <filter id="sh"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity=".1"/></filter>
+    <marker id="a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/></marker>
+  </defs>
+
+  <rect width="900" height="500" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="450" y="30" text-anchor="middle" font-size="15" font-weight="700" fill="#1e293b">Figure 2. Cluster Control-Plane &amp; Replication Flow</text>
+
+  <!-- Primary Node -->
+  <rect x="30" y="60" width="360" height="395" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="210" y="85" text-anchor="middle" font-size="11" fill="#1e40af" font-weight="700" letter-spacing="1">PRIMARY NODE</text>
+
+  <!-- Replica Node -->
+  <rect x="510" y="60" width="360" height="280" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="690" y="85" text-anchor="middle" font-size="11" fill="#166534" font-weight="700" letter-spacing="1">REPLICA NODE</text>
+
+  <!-- Step 1: Join Token -->
+  <rect x="55" y="100" width="310" height="44" rx="6" fill="url(#gs)" filter="url(#sh)"/>
+  <text x="68" y="118" font-size="9" fill="#fff" font-weight="700">①</text>
+  <text x="85" y="118" font-size="10" fill="#fff" font-weight="600">cluster.join_token.create</text>
+  <text x="85" y="133" font-size="8" fill="#fef3c7">Operator issues time-bounded join token</text>
+
+  <!-- Step 2: Node Join -->
+  <rect x="535" y="100" width="310" height="44" rx="6" fill="url(#gr)" filter="url(#sh)"/>
+  <text x="548" y="118" font-size="9" fill="#fff" font-weight="700">②</text>
+  <text x="565" y="118" font-size="10" fill="#fff" font-weight="600">cluster.node.join</text>
+  <text x="565" y="133" font-size="8" fill="#d1fae5">Replica presents token → added to node list</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="365" y1="122" x2="530" y2="122" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="447" y="115" text-anchor="middle" font-size="8" fill="#475569">token</text>
+
+  <!-- Step 3: Shard Create -->
+  <rect x="55" y="160" width="310" height="44" rx="6" fill="url(#gp)" filter="url(#sh)"/>
+  <text x="68" y="178" font-size="9" fill="#fff" font-weight="700">③</text>
+  <text x="85" y="178" font-size="10" fill="#fff" font-weight="600">cluster.shard.create</text>
+  <text x="85" y="193" font-size="8" fill="#c7d2fe">Define shard ownership: primary + replicas</text>
+
+  <!-- Step 4: Write on Primary -->
+  <rect x="55" y="220" width="310" height="44" rx="6" fill="url(#gp)" filter="url(#sh)"/>
+  <text x="68" y="238" font-size="9" fill="#fff" font-weight="700">④</text>
+  <text x="85" y="238" font-size="10" fill="#fff" font-weight="600">data.insert / data.update</text>
+  <text x="85" y="253" font-size="8" fill="#c7d2fe">Write accepted (ownership check passes)</text>
+
+  <!-- Step 5: Write Guard Check -->
+  <rect x="55" y="280" width="310" height="44" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#sh)"/>
+  <text x="68" y="298" font-size="9" fill="#475569" font-weight="700">⑤</text>
+  <text x="85" y="298" font-size="10" fill="#1e293b" font-weight="600">Write Ownership Guard</text>
+  <text x="85" y="313" font-size="8" fill="#64748b">Rejects writes if local ≠ primary for shard</text>
+
+  <!-- Step 6: Fanout -->
+  <rect x="55" y="340" width="310" height="56" rx="6" fill="#fef2f2" stroke="#fca5a5" filter="url(#sh)"/>
+  <text x="68" y="360" font-size="9" fill="#991b1b" font-weight="700">⑥</text>
+  <text x="85" y="360" font-size="10" fill="#991b1b" font-weight="600">RPC Fanout Replication</text>
+  <text x="85" y="375" font-size="8" fill="#991b1b">x-skeindb-replication header set</text>
+  <text x="85" y="387" font-size="8" fill="#991b1b">Counters: shipped / failed / last_error</text>
+
+  <!-- Replica apply -->
+  <rect x="535" y="165" width="310" height="44" rx="6" fill="url(#gr)" filter="url(#sh)"/>
+  <text x="548" y="183" font-size="9" fill="#fff" font-weight="700">⑦</text>
+  <text x="565" y="183" font-size="10" fill="#fff" font-weight="600">Apply Write (no re-fanout)</text>
+  <text x="565" y="198" font-size="8" fill="#d1fae5">Recursion suppression active</text>
+
+  <!-- Arrow 6→7 -->
+  <path d="M365,368 Q440,368 440,280 Q440,187 530,187" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#ar)" stroke-dasharray="6,3"/>
+  <text x="470" y="270" font-size="8" fill="#dc2626" font-weight="600">fanout</text>
+
+  <!-- Replica persistence -->
+  <rect x="535" y="230" width="310" height="44" rx="6" fill="#fff" stroke="#e2e8f0" filter="url(#sh)"/>
+  <text x="548" y="248" font-size="9" fill="#475569" font-weight="700">⑧</text>
+  <text x="565" y="248" font-size="10" fill="#1e293b" font-weight="600">Persist to Cell Store</text>
+  <text x="565" y="263" font-size="8" fill="#64748b">Intern cells → update version chain</text>
+
+  <!-- Replica status -->
+  <rect x="535" y="295" width="310" height="30" rx="6" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="690" y="314" text-anchor="middle" font-size="9" fill="#166534" font-weight="600">cluster.status → replication counters visible</text>
+
+  <!-- Primary persist -->
+  <rect x="55" y="412" width="310" height="30" rx="6" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="210" y="431" text-anchor="middle" font-size="9" fill="#1e40af" font-weight="600">Settings: cluster.state.v1 persisted on restart</text>
+
+  <!-- Legend -->
+  <rect x="540" y="370" width="320" height="80" rx="6" fill="#fff" stroke="#e2e8f0"/>
+  <text x="555" y="390" font-size="8" fill="#64748b" font-weight="700">SEQUENCE SUMMARY</text>
+  <text x="555" y="406" font-size="8" fill="#475569">① Token → ② Join → ③ Shard → ④ Write →</text>
+  <text x="555" y="420" font-size="8" fill="#475569">⑤ Ownership check → ⑥ Fanout → ⑦ Apply →</text>
+  <text x="555" y="434" font-size="8" fill="#475569">⑧ Persist · All operations via typed SkeinQL RPC</text>
+</svg>

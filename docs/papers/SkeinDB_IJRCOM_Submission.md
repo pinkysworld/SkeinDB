@@ -2,7 +2,7 @@
 
 **Manuscript type:** Original research article (systems/database engineering)  
 **Target venue:** International Journal of Research in Computing (IJRC / IJRCOM)  
-**Version:** Camera-ready draft v4 (2026-02-21)
+**Version:** Camera-ready draft v5 (2026-02-22)
 
 ## Author and manuscript metadata
 
@@ -10,17 +10,18 @@
 SkeinDB: A Single-Binary Database with Cell-Interned MVCC, a 20-Track Research Agenda, and a Web-Native Administration Stack
 
 ### Authors
-- Michel Picker (Corresponding Author)
+- Michél Nguyen (Corresponding Author)
 
 ### Affiliations
+- University of the People, Department of Computer Science
 - Independent Researcher, SkeinDB Project
 
 ### Correspondence
-- Michel Picker  
+- Michél Nguyen  
 - Email: 85413447+pinkysworld@users.noreply.github.com
 
 ### ORCID
-- Michel Picker: Not provided
+- Michél Nguyen: [0000-0001-6834-4422](https://orcid.org/0000-0001-6834-4422)
 
 ### CRediT contribution summary (single-author submission)
 - Conceptualization: 100%
@@ -215,7 +216,7 @@ The explicit method model allows progressive expansion without silently changing
 
 ### 3.3 Architecture diagram
 
-![Figure 1. SkeinDB architecture](figures/figure1_architecture_overview.png)
+![Figure 1. SkeinDB architecture](figures/figure1_architecture_overview.svg)
 
 **Figure 1** illustrates the layered architecture of SkeinDB. At the top, three client-facing interfaces (MySQL wire protocol, HTTP RPC, and QUIC RPC) feed into a unified method dispatch layer. The dispatch layer routes requests to 15 method families, which interact with the cell-interned MVCC storage engine. The storage engine manages content-addressed cells, version chains, and optional delta compression. Embedded admin assets are served directly from the HTTP layer, with JavaScript panels issuing the same RPC calls that external clients use.
 
@@ -254,6 +255,10 @@ Each table maintains a version chain per primary key. Version entries record:
 Read operations resolve visibility by scanning the version chain for the most recent entry visible to the requesting transaction's snapshot. Write operations append new version entries and intern any new cell values.
 
 ### 3A.4 Implications for research tracks
+
+![Figure 5. Cell-interned MVCC with content-addressed deduplication](figures/figure5_cell_interning.svg)
+
+**Figure 5** illustrates the cell-interning process end-to-end. When a row with columns ("hello", 42, "hello") is written, the storage engine hashes each cell value, discovers that columns a and c share identical content, and stores only two physical cells. The version chain records ValueID tuples per transaction boundary, enabling snapshot reads at any past point without read-write blocking. The four key properties—automatic dedup, snapshot isolation, delta-chain readiness, and forensic verifiability—derive directly from content-addressed cell storage.
 
 The cell-interned architecture directly supports several research tracks:
 
@@ -336,7 +341,7 @@ SkeinDB currently replicates successful primary writes to replica nodes via HTTP
 
 ### 5.2 Replication workflow diagram
 
-![Figure 2. Cluster control and replication flow](figures/figure2_cluster_control_flow.png)
+![Figure 2. Cluster control and replication flow](figures/figure2_cluster_control_flow.svg)
 
 **Figure 2** summarizes join, ownership, write, fanout, and persistence steps. The model prioritizes correctness and observability over transport optimality.
 
@@ -410,7 +415,7 @@ The embedded UI provides **19 primary panels** organized into four groups:
 
 ### 6.3 UI-to-RPC mapping
 
-![Figure 3. SkeinAdmin panel-to-RPC map](figures/figure3_admin_control_map.png)
+![Figure 3. SkeinAdmin panel-to-RPC map](figures/figure3_admin_control_map.svg)
 
 **Figure 3** illustrates how the 19 panels map to the 15 RPC method families. Every panel action issues a real SkeinQL RPC call—there are no mock responses or placeholder actions. The RPC Explorer panel provides universal fallback access to any method not yet represented by a dedicated panel control.
 
@@ -485,6 +490,10 @@ SkeinDB tracks a 20-item research agenda. Unlike speculative roadmaps common in 
 | R20 | Energy-aware compaction | policy scaffolds and docs | Research Dashboard | Unit tests |
 
 ### 7.2 Deep dive: Differential privacy (R04)
+
+![Figure 6. Differential privacy pipeline](figures/figure6_dp_pipeline.svg)
+
+**Figure 6** shows the end-to-end flow of the `dp.aggregate` method: from query submission through base aggregate evaluation, sensitivity computation, calibrated noise injection, budget deduction, and result return. The Privacy & DP admin panel (Panel #11) provides interactive controls for all pipeline stages, including ε/δ sliders, budget monitoring gauges, and compliance audit log export.
 
 The differential privacy track implements ε-differential privacy [5] for aggregate queries. The `dp.aggregate` method accepts a query specification, privacy parameters (ε, δ), and a mechanism selector (Laplace or Gaussian). The runtime:
 
@@ -696,7 +705,7 @@ From an operator perspective, this substantially reduces friction between "it is
 
 ### 9.6 Validation visualization
 
-![Figure 4. Automated validation coverage](figures/figure4_validation_summary.png)
+![Figure 4. Automated validation coverage](figures/figure4_validation_summary.svg)
 
 **Figure 4** summarizes the current test coverage distribution across crate boundaries, method families, and research tracks. The visualization confirms that all 20 research tracks have exercised method paths in the automated test suite.
 
@@ -1121,8 +1130,9 @@ All software code relevant to this manuscript is available in the same repositor
 
 ## Camera-ready checklist for final submission
 
-- Confirm final institutional affiliation and correspondence details.
-- Add ORCID if available.
-- Verify that figure captions and references match IJRC formatting requirements in the final Word template.
-- Re-check line breaks and table pagination after journal-template import.
-- Export submission PDF with embedded fonts and final proofread pass.
+- [x] Confirm final institutional affiliation: University of the People, Dept. of Computer Science.
+- [x] Add ORCID: 0000-0001-6834-4422.
+- [x] Professional SVG figures (6 total) with layered architecture, cluster flow, admin mapping, validation matrix, cell-interning process, and DP pipeline.
+- [ ] Verify that figure captions and references match IJRC formatting requirements in the final Word template.
+- [ ] Re-check line breaks and table pagination after journal-template import.
+- [ ] Export submission PDF with embedded fonts and final proofread pass.

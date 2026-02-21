@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <linearGradient id="gQ" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6366f1"/><stop offset="100%" stop-color="#4f46e5"/></linearGradient>
+    <linearGradient id="gE" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient>
+    <linearGradient id="gS" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#d97706"/></linearGradient>
+    <linearGradient id="gN" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#dc2626"/></linearGradient>
+    <linearGradient id="gB" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient>
+    <linearGradient id="gR" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#06b6d4"/><stop offset="100%" stop-color="#0891b2"/></linearGradient>
+    <filter id="sh"><feDropShadow dx="0" dy="2" stdDeviation="2" flood-opacity=".08"/></filter>
+    <marker id="a" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+  </defs>
+
+  <rect width="900" height="380" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="450" y="28" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">Figure 6. Differential Privacy Pipeline (R04): dp.aggregate End-to-End Flow</text>
+
+  <!-- Step 1: Query Input -->
+  <rect x="30" y="55" width="120" height="80" rx="8" fill="url(#gQ)" filter="url(#sh)"/>
+  <text x="90" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">① Query</text>
+  <text x="90" y="93" text-anchor="middle" font-size="7" fill="#c7d2fe">dp.aggregate</text>
+  <text x="90" y="106" text-anchor="middle" font-size="7" fill="#c7d2fe">{query, ε, δ,</text>
+  <text x="90" y="117" text-anchor="middle" font-size="7" fill="#c7d2fe">mechanism}</text>
+
+  <line x1="150" y1="95" x2="175" y2="95" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Step 2: Base Aggregate -->
+  <rect x="180" y="55" width="120" height="80" rx="8" fill="url(#gE)" filter="url(#sh)"/>
+  <text x="240" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">② Evaluate</text>
+  <text x="240" y="93" text-anchor="middle" font-size="7" fill="#d1fae5">Execute base</text>
+  <text x="240" y="106" text-anchor="middle" font-size="7" fill="#d1fae5">aggregate on</text>
+  <text x="240" y="117" text-anchor="middle" font-size="7" fill="#d1fae5">cell store</text>
+
+  <line x1="300" y1="95" x2="325" y2="95" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Step 3: Sensitivity -->
+  <rect x="330" y="55" width="120" height="80" rx="8" fill="url(#gS)" filter="url(#sh)"/>
+  <text x="390" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">③ Sensitivity</text>
+  <text x="390" y="93" text-anchor="middle" font-size="7" fill="#fef3c7">Compute Δf</text>
+  <text x="390" y="106" text-anchor="middle" font-size="7" fill="#fef3c7">COUNT→1</text>
+  <text x="390" y="117" text-anchor="middle" font-size="7" fill="#fef3c7">SUM→max, AVG→…</text>
+
+  <line x1="450" y1="95" x2="475" y2="95" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Step 4: Noise -->
+  <rect x="480" y="55" width="120" height="80" rx="8" fill="url(#gN)" filter="url(#sh)"/>
+  <text x="540" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">④ Add Noise</text>
+  <text x="540" y="93" text-anchor="middle" font-size="7" fill="#fecaca">Laplace(Δf/ε)</text>
+  <text x="540" y="106" text-anchor="middle" font-size="7" fill="#fecaca">or</text>
+  <text x="540" y="117" text-anchor="middle" font-size="7" fill="#fecaca">Gaussian(σ²)</text>
+
+  <line x1="600" y1="95" x2="625" y2="95" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Step 5: Budget -->
+  <rect x="630" y="55" width="120" height="80" rx="8" fill="url(#gB)" filter="url(#sh)"/>
+  <text x="690" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">⑤ Budget</text>
+  <text x="690" y="93" text-anchor="middle" font-size="7" fill="#ddd6fe">Deduct ε from</text>
+  <text x="690" y="106" text-anchor="middle" font-size="7" fill="#ddd6fe">per-database</text>
+  <text x="690" y="117" text-anchor="middle" font-size="7" fill="#ddd6fe">privacy budget</text>
+
+  <line x1="750" y1="95" x2="775" y2="95" stroke="#475569" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Step 6: Result -->
+  <rect x="780" y="55" width="90" height="80" rx="8" fill="url(#gR)" filter="url(#sh)"/>
+  <text x="825" y="78" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">⑥ Result</text>
+  <text x="825" y="93" text-anchor="middle" font-size="7" fill="#cffafe">Noised value</text>
+  <text x="825" y="106" text-anchor="middle" font-size="7" fill="#cffafe">+ metadata</text>
+  <text x="825" y="117" text-anchor="middle" font-size="7" fill="#cffafe">returned</text>
+
+  <!-- Budget Tracker & Audit (below main flow) -->
+  <rect x="480" y="160" width="270" height="55" rx="6" fill="#faf5ff" stroke="#c4b5fd" filter="url(#sh)"/>
+  <text x="615" y="180" text-anchor="middle" font-size="9" fill="#6d28d9" font-weight="700">dp.budget.get / dp.budget.set</text>
+  <text x="615" y="196" text-anchor="middle" font-size="8" fill="#7c3aed">Persistent per-database ε budget tracking</text>
+  <text x="615" y="207" text-anchor="middle" font-size="7" fill="#a78bfa">Prevents over-expenditure · configurable limits</text>
+
+  <line x1="690" y1="135" x2="690" y2="155" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="4,2" marker-end="url(#a)"/>
+
+  <!-- Audit Log -->
+  <rect x="180" y="160" width="270" height="55" rx="6" fill="#fefce8" stroke="#fde047" filter="url(#sh)"/>
+  <text x="315" y="180" text-anchor="middle" font-size="9" fill="#854d0e" font-weight="700">dp.audit</text>
+  <text x="315" y="196" text-anchor="middle" font-size="8" fill="#a16207">Full audit log of every DP query executed</text>
+  <text x="315" y="207" text-anchor="middle" font-size="7" fill="#ca8a04">query · params · ε spent · timestamp · mechanism</text>
+
+  <line x1="540" y1="135" x2="400" y2="155" stroke="#d97706" stroke-width="1" stroke-dasharray="4,2" marker-end="url(#a)"/>
+
+  <!-- Admin Panel UI -->
+  <rect x="30" y="240" width="840" height="120" rx="8" fill="#fff" stroke="#e2e8f0" filter="url(#sh)"/>
+  <text x="450" y="262" text-anchor="middle" font-size="11" fill="#1e293b" font-weight="700">Privacy &amp; DP Admin Panel (SkeinAdmin Panel #11)</text>
+
+  <rect x="50" y="275" width="185" height="68" rx="5" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="142" y="292" text-anchor="middle" font-size="8" fill="#166534" font-weight="700">Query Builder</text>
+  <text x="60" y="306" font-size="7" fill="#475569">• Aggregate type selector</text>
+  <text x="60" y="318" font-size="7" fill="#475569">• ε/δ sliders with presets</text>
+  <text x="60" y="330" font-size="7" fill="#475569">• Laplace / Gaussian toggle</text>
+
+  <rect x="250" y="275" width="185" height="68" rx="5" fill="#faf5ff" stroke="#c4b5fd"/>
+  <text x="342" y="292" text-anchor="middle" font-size="8" fill="#6d28d9" font-weight="700">Budget Monitor</text>
+  <text x="260" y="306" font-size="7" fill="#475569">• Real-time ε remaining</text>
+  <text x="260" y="318" font-size="7" fill="#475569">• Per-database tracking</text>
+  <text x="260" y="330" font-size="7" fill="#475569">• Visual progress gauge</text>
+
+  <rect x="450" y="275" width="185" height="68" rx="5" fill="#fefce8" stroke="#fde047"/>
+  <text x="542" y="292" text-anchor="middle" font-size="8" fill="#854d0e" font-weight="700">Audit Log Viewer</text>
+  <text x="460" y="306" font-size="7" fill="#475569">• Timestamped query log</text>
+  <text x="460" y="318" font-size="7" fill="#475569">• ε cost per query</text>
+  <text x="460" y="330" font-size="7" fill="#475569">• Export for compliance</text>
+
+  <rect x="650" y="275" width="205" height="68" rx="5" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="752" y="292" text-anchor="middle" font-size="8" fill="#1e40af" font-weight="700">Oblivious Access (R05)</text>
+  <text x="660" y="306" font-size="7" fill="#475569">• oblivious.get/set controls</text>
+  <text x="660" y="318" font-size="7" fill="#475569">• Access pattern policies</text>
+  <text x="660" y="330" font-size="7" fill="#475569">• oblivious.explain output</text>
+</svg>
