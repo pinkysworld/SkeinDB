@@ -1,2 +1,5 @@
 target/
 .DS_Store
+AGENTS.md
+**/AGENTS.md
+.codex/
