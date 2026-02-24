@@ -240,13 +240,36 @@ async function call(method, params = {}, targetId = 'out') {
     const res = await rpc(baseUrl, token, method, params || {});
     setOut(res, targetId);
     if (res.json && res.json.ok) setConnStatus('ok', 'Connected', 'Connected to ' + baseUrl);
-    else setConnStatus('error', 'RPC error', 'RPC error from ' + baseUrl);
+    else setConnStatus('warn', 'Connected', 'Connected to ' + baseUrl + ' (last RPC returned an error)');
     return res;
   } catch (e) {
     setOut({ error: String(e), hint: baseUrl !== window.location.origin ? 'Cross-origin? Enable CORS.' : 'Server unreachable.' }, targetId);
     setConnStatus('error', 'Offline', 'Unable to reach ' + baseUrl);
     throw e;
   }
+}
+
+function unwrapRpcResult(res, method) {
+  if (!res) throw new Error(method + ' failed: no response');
+  if (!res.json || !res.json.ok) {
+    const err = res.json && res.json.error ? res.json.error : {};
+    const code = err.code || 'rpc_error';
+    const msg = err.message || ('status ' + (res.status || 'unknown'));
+    throw new Error(method + ' failed [' + code + ']: ' + msg);
+  }
+  return res.json.result;
+}
+
+function normalizeSchemaColumnsPayload(columns) {
+  if (!Array.isArray(columns)) return [];
+  return columns.map((col) => {
+    const out = { ...col };
+    if (typeof out.type === 'string') out.type = { kind: out.type };
+    if (!out.type || typeof out.type !== 'object') out.type = { kind: 'string' };
+    if (!out.type.kind && typeof out.kind === 'string') out.type.kind = out.kind;
+    if (!out.type.kind) out.type.kind = 'string';
+    return out;
+  });
 }
 
 function parseJsonInput(raw, label) {
@@ -648,7 +671,7 @@ function schemaBuilderSyncToJson(showMessage = true) {
   }
   const columns = rows.map((row) => cleanParams({
     name: row.name,
-    type: row.type,
+    type: { kind: row.type },
     nullable: row.nullable,
     auto_increment: row.auto_increment
   }));
@@ -696,7 +719,7 @@ async function schemaBuilderCreateDb() {
     const db = $('schemaDb')?.value.trim();
     if (!db) throw new Error('Database is required');
     const res = await schemaCreateDb();
-    if (!res?.json?.ok) throw new Error('Create database RPC failed');
+    unwrapRpcResult(res, 'schema.create_database');
     setOut({ ok: true, message: 'Database ensured: ' + db }, 'schemaBuilderOut');
   } catch (e) {
     setOut({ error: String(e) }, 'schemaBuilderOut');
@@ -716,7 +739,7 @@ async function schemaBuilderCreateTable() {
       { db, table, columns: packed.columns, primary_key: packed.primaryKey, if_not_exists: ine },
       'schemaBuilderOut'
     );
-    if (!res?.json?.ok) throw new Error('Create table RPC failed');
+    unwrapRpcResult(res, 'schema.create_table');
     await loadDbTree();
     setOut({ ok: true, message: 'Table created.', columns: packed.columns.length }, 'schemaBuilderOut');
   } catch (e) {
@@ -765,18 +788,20 @@ async function schemaDescribe() {
 async function schemaCreateDb() {
   const db = $('schemaDb') ? $('schemaDb').value.trim() : ''; if (!db) return;
   const res = await call('schema.create_database', { db }, 'schemaOut');
-  if (res && res.json && res.json.ok) await loadDbTree();
+  if (res?.json?.ok) await loadDbTree();
   return res;
 }
 
 async function schemaCreateTable() {
   try {
     const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim(); if (!db || !table) throw new Error('DB+table required');
-    const columns = parseJsonInput($('schemaColumns').value, 'Columns'); if (!Array.isArray(columns)) throw new Error('Columns must be array');
+    const rawColumns = parseJsonInput($('schemaColumns').value, 'Columns'); if (!Array.isArray(rawColumns)) throw new Error('Columns must be array');
+    const columns = normalizeSchemaColumnsPayload(rawColumns);
     const pk = ($('schemaPk').value.trim() || '').split(',').map(c => c.trim()).filter(Boolean);
     const ine = $('schemaIfNotExists').value === 'true';
     const res = await call('schema.create_table', { db, table, columns, primary_key: pk, if_not_exists: ine }, 'schemaOut');
-    if (res && res.json && res.json.ok) await loadDbTree();
+    unwrapRpcResult(res, 'schema.create_table');
+    await loadDbTree();
     return res;
   } catch (e) { setOut({ error: String(e) }, 'schemaOut'); return null; }
 }
@@ -1339,8 +1364,7 @@ async function easyLoadTableForm() {
     easyApplySelection();
     const tableRef = easyReadTableRef();
     const res = await call('schema.describe_table', tableRef, 'easyOut');
-    if (!res?.json?.ok || !res.json.result) return;
-    const result = res.json.result;
+    const result = unwrapRpcResult(res, 'schema.describe_table');
     easyApplyColumns(result.columns || [], result.primary_key || []);
     dataFormApplyColumns(result.columns || [], result.primary_key || []);
     if ($('dataFormDb')) $('dataFormDb').value = tableRef.db;
@@ -1361,8 +1385,8 @@ async function easyBrowseRows() {
     const tableRef = easyReadTableRef();
     const limit = parseInt($('easyBrowseLimit')?.value || '', 10) || 25;
     const desc = await call('schema.describe_table', tableRef, 'easyOut');
-    if (!desc?.json?.ok || !desc.json.result) return;
-    const cols = (desc.json.result.columns || []).map((col) => col.name);
+    const descResult = unwrapRpcResult(desc, 'schema.describe_table');
+    const cols = (descResult.columns || []).map((col) => col.name);
     const projection = cols.map((name) => ({ expr: { col: name }, as: null }));
     const query = {
       with: [],
@@ -1371,9 +1395,12 @@ async function easyBrowseRows() {
       limit: { limit, offset: 0 }
     };
     const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyOut');
-    if (res?.json?.ok && res.json.result?.data) {
-      const data = res.json.result.data;
+    const result = unwrapRpcResult(res, 'query.select');
+    if (result?.data) {
+      const data = result.data;
       renderTable('easyBrowseTable', (data.columns || []).map((col) => col.name), data.rows || []);
+    } else {
+      renderTable('easyBrowseTable', [], []);
     }
   } catch (e) {
     setOut({ error: String(e) }, 'easyOut');
@@ -1386,7 +1413,8 @@ async function easyInsertRow() {
     const tableRef = easyReadTableRef();
     const payload = easyCollectRow(false);
     if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
-    await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyOut');
+    const res = await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyOut');
+    unwrapRpcResult(res, 'data.insert');
     await easyBrowseRows();
   } catch (e) {
     setOut({ error: String(e) }, 'easyOut');
@@ -1400,7 +1428,8 @@ async function easyGetByPk() {
     const payload = easyCollectRow(true);
     if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
     if (!payload.pk.length) throw new Error('This table has no primary key');
-    await call('data.get', { table: tableRef, pk: payload.pk }, 'easyOut');
+    const res = await call('data.get', { table: tableRef, pk: payload.pk }, 'easyOut');
+    unwrapRpcResult(res, 'data.get');
   } catch (e) {
     setOut({ error: String(e) }, 'easyOut');
   }
@@ -1414,7 +1443,8 @@ async function easyDeleteByPk() {
     if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
     const where = whereByPkColumns(STATE.easyRowColumns, payload.pk);
     if (!where) throw new Error('Could not build primary-key filter');
-    await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyOut');
+    const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyOut');
+    unwrapRpcResult(res, 'data.delete');
     await easyBrowseRows();
   } catch (e) {
     setOut({ error: String(e) }, 'easyOut');
@@ -1425,7 +1455,8 @@ async function easyCreateDb() {
   try {
     const db = $('easyNewDb')?.value.trim() || easyGetSelectedDb();
     if (!db) throw new Error('Enter a database name');
-    await call('schema.create_database', { db }, 'easyOut');
+    const res = await call('schema.create_database', { db }, 'easyOut');
+    unwrapRpcResult(res, 'schema.create_database');
     setSelectedDb(db);
     if ($('schemaDb')) $('schemaDb').value = db;
     if ($('dataDb')) $('dataDb').value = db;
@@ -1445,18 +1476,19 @@ async function easyCreateTable() {
     if (!rows.length) throw new Error('Define at least one column');
     const columns = rows.map((row) => cleanParams({
       name: row.name,
-      type: row.type,
+      type: { kind: row.type },
       nullable: row.nullable,
       auto_increment: row.auto_increment
     }));
     const primaryKey = rows.filter((row) => row.primary).map((row) => row.name);
-    await call('schema.create_table', {
+    const res = await call('schema.create_table', {
       db,
       table,
       columns,
       primary_key: primaryKey,
       if_not_exists: true
     }, 'easyOut');
+    unwrapRpcResult(res, 'schema.create_table');
     setSelectedDb(db);
     setSelectedTable(table);
     await loadDbTree();
