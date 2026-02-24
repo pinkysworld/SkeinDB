@@ -122,6 +122,9 @@ pub struct RowEntry {
 
 const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
+const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
+const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
+const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableRowsDisk {
@@ -173,6 +176,25 @@ struct TableKey {
     table: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableStorageMode {
+    Json,
+    Segment,
+    Dual,
+}
+
+impl TableStorageMode {
+    fn from_env() -> Self {
+        let raw = std::env::var(STORAGE_MODE_ENV).unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "segment" => Self::Segment,
+            "dual" => Self::Dual,
+            "json" => Self::Json,
+            _ => Self::Json,
+        }
+    }
+}
+
 // -----------------------------
 // Engine
 // -----------------------------
@@ -180,6 +202,7 @@ struct TableKey {
 #[derive(Debug)]
 pub struct Engine {
     data_dir: PathBuf,
+    storage_mode: TableStorageMode,
 
     catalog: Catalog,
     tables: HashMap<TableKey, TableData>,
@@ -977,6 +1000,14 @@ pub struct Subscription {
 
 impl Engine {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let storage_mode = TableStorageMode::from_env();
+        Self::open_with_storage_mode(data_dir, storage_mode)
+    }
+
+    fn open_with_storage_mode(
+        data_dir: impl AsRef<Path>,
+        storage_mode: TableStorageMode,
+    ) -> anyhow::Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir)?;
 
@@ -985,6 +1016,7 @@ impl Engine {
 
         let mut engine = Self {
             data_dir,
+            storage_mode,
             catalog,
             tables: HashMap::new(),
             change_seq: 0,
@@ -5092,6 +5124,40 @@ impl Engine {
             .join(format!("{table}.json"))
     }
 
+    fn table_segment_path(&self, db: &str, table: &str) -> PathBuf {
+        self.data_dir
+            .join("tables")
+            .join(db)
+            .join(format!("{table}.rseg"))
+    }
+
+    fn load_table_rows_json_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
+        if let Some(disk) = load_json::<TableRowsDisk>(path) {
+            if let Ok(rows) = decode_table_rows_disk(disk) {
+                return Some(rows);
+            }
+        }
+        load_json::<Vec<RowEntry>>(path)
+    }
+
+    fn load_table_rows_segment_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
+        let bytes = fs::read(path).ok()?;
+        let disk = decode_table_rows_segment(&bytes).ok()?;
+        decode_table_rows_disk(disk).ok()
+    }
+
+    fn load_table_rows_best_effort_for_mode(&self, db: &str, table: &str) -> Vec<RowEntry> {
+        let json_path = self.table_path(db, table);
+        let segment_path = self.table_segment_path(db, table);
+        let from_json = || self.load_table_rows_json_best_effort(&json_path);
+        let from_segment = || self.load_table_rows_segment_best_effort(&segment_path);
+        let loaded = match self.storage_mode {
+            TableStorageMode::Json => from_json().or_else(from_segment),
+            TableStorageMode::Segment | TableStorageMode::Dual => from_segment().or_else(from_json),
+        };
+        loaded.unwrap_or_default()
+    }
+
     fn persist_table(&self, db: &str, table: &str) -> anyhow::Result<()> {
         let key = TableKey {
             db: db.to_string(),
@@ -5110,26 +5176,42 @@ impl Engine {
             .iter()
             .map(|entry| encode_row_entry_disk(entry, &mut seen_refs))
             .collect();
-        save_json(
-            &path,
-            &TableRowsDisk {
-                format_version: TABLE_ROWS_FORMAT_VERSION,
-                rows,
-            },
-        )
+        let disk = TableRowsDisk {
+            format_version: TABLE_ROWS_FORMAT_VERSION,
+            rows,
+        };
+        match self.storage_mode {
+            TableStorageMode::Json => save_json(&path, &disk),
+            TableStorageMode::Segment => {
+                let segment_path = self.table_segment_path(db, table);
+                if let Some(parent) = segment_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let bytes = encode_table_rows_segment(&disk)?;
+                fs::write(segment_path, bytes)?;
+                Ok(())
+            }
+            TableStorageMode::Dual => {
+                save_json(&path, &disk)?;
+                let segment_path = self.table_segment_path(db, table);
+                if let Some(parent) = segment_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let bytes = encode_table_rows_segment(&disk)?;
+                fs::write(segment_path, bytes)?;
+                Ok(())
+            }
+        }
     }
 
     fn load_tables_best_effort(&mut self) {
         for (db, d) in self.catalog.databases.iter() {
             for (table, _) in d.tables.iter() {
-                let path = self.table_path(db, table);
-                let rows = if let Some(disk) = load_json::<TableRowsDisk>(&path) {
-                    decode_table_rows_disk(disk).unwrap_or_default()
-                } else {
-                    load_json::<Vec<RowEntry>>(&path).unwrap_or_default()
+                let rows = self.load_table_rows_best_effort_for_mode(db, table);
+                let mut tdata = TableData {
+                    rows,
+                    ..TableData::default()
                 };
-                let mut tdata = TableData::default();
-                tdata.rows = rows;
                 // Build pk index.
                 if let Ok(schema) = self.get_schema(db, table) {
                     for (idx, entry) in tdata.rows.iter().enumerate() {
@@ -9685,6 +9767,83 @@ fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> 
     Ok(rows)
 }
 
+fn encode_table_rows_segment(disk: &TableRowsDisk) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&TABLE_ROWS_SEGMENT_MAGIC);
+    out.extend_from_slice(&TABLE_ROWS_SEGMENT_FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&disk.format_version.to_le_bytes());
+    let row_count = u64::try_from(disk.rows.len())
+        .map_err(|_| anyhow::anyhow!("too many rows for segment container"))?;
+    out.extend_from_slice(&row_count.to_le_bytes());
+    for row in disk.rows.iter() {
+        let payload = serde_json::to_vec(row)?;
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| anyhow::anyhow!("row payload too large for segment container"))?;
+        out.extend_from_slice(&payload_len.to_le_bytes());
+        out.extend_from_slice(&payload);
+    }
+    Ok(out)
+}
+
+fn decode_table_rows_segment(bytes: &[u8]) -> anyhow::Result<TableRowsDisk> {
+    if bytes.len() < 24 {
+        anyhow::bail!("segment file too small");
+    }
+    if bytes[0..8] != TABLE_ROWS_SEGMENT_MAGIC {
+        anyhow::bail!("segment magic mismatch");
+    }
+
+    let mut offset = 8usize;
+    let segment_version = read_u32_le_chunk(bytes, &mut offset)?;
+    if segment_version != TABLE_ROWS_SEGMENT_FORMAT_VERSION {
+        anyhow::bail!("unsupported segment format version: {segment_version}");
+    }
+    let table_format_version = read_u32_le_chunk(bytes, &mut offset)?;
+    let row_count = read_u64_le_chunk(bytes, &mut offset)?;
+    let capacity = usize::try_from(row_count)
+        .map_err(|_| anyhow::anyhow!("row count too large for this platform"))?;
+    let mut rows = Vec::with_capacity(capacity);
+    for _ in 0..row_count {
+        let payload_len = usize::try_from(read_u32_le_chunk(bytes, &mut offset)?)
+            .map_err(|_| anyhow::anyhow!("payload length overflow"))?;
+        if offset.saturating_add(payload_len) > bytes.len() {
+            anyhow::bail!("segment payload truncated");
+        }
+        let payload = &bytes[offset..offset + payload_len];
+        let row: RowEntryDisk = serde_json::from_slice(payload)?;
+        rows.push(row);
+        offset += payload_len;
+    }
+    if offset != bytes.len() {
+        anyhow::bail!("segment file contains trailing bytes");
+    }
+
+    Ok(TableRowsDisk {
+        format_version: table_format_version,
+        rows,
+    })
+}
+
+fn read_u32_le_chunk(bytes: &[u8], offset: &mut usize) -> anyhow::Result<u32> {
+    if offset.saturating_add(4) > bytes.len() {
+        anyhow::bail!("unexpected eof while reading u32");
+    }
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&bytes[*offset..*offset + 4]);
+    *offset += 4;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u64_le_chunk(bytes: &[u8], offset: &mut usize) -> anyhow::Result<u64> {
+    if offset.saturating_add(8) > bytes.len() {
+        anyhow::bail!("unexpected eof while reading u64");
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[*offset..*offset + 8]);
+    *offset += 8;
+    Ok(u64::from_le_bytes(buf))
+}
+
 fn decode_value_ref_payload(value: &serde_json::Value) -> Option<ValueRefDisk> {
     let obj = value.as_object()?;
     let payload = obj.get(TABLE_ROW_VALUE_REF_KEY)?;
@@ -14192,6 +14351,64 @@ mod tests {
         out
     }
 
+    fn seed_events_table(
+        engine: &mut Engine,
+        payload_a: &str,
+        payload_b: &str,
+    ) -> anyhow::Result<()> {
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: payload_a.to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: payload_b.to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         let unique = format!(
@@ -18192,6 +18409,154 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn table_rows_segment_mode_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("table_rows_segment_roundtrip");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine, "seg-a", "seg-b")?;
+
+        let json_path = engine.table_path("app", "events");
+        let segment_path = engine.table_segment_path("app", "events");
+        assert!(!json_path.exists());
+        assert!(segment_path.exists());
+
+        let raw = fs::read(&segment_path)?;
+        let disk = decode_table_rows_segment(&raw)?;
+        assert_eq!(disk.format_version, TABLE_ROWS_FORMAT_VERSION);
+        assert_eq!(disk.rows.len(), 2);
+
+        drop(engine);
+
+        let reopened = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 2 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "seg-b".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn table_rows_dual_mode_writes_json_and_segment() -> anyhow::Result<()> {
+        let dir = temp_dir("table_rows_dual_mode");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
+        seed_events_table(&mut engine, "dual-a", "dual-b")?;
+
+        let json_path = engine.table_path("app", "events");
+        let segment_path = engine.table_segment_path("app", "events");
+        assert!(json_path.exists());
+        assert!(segment_path.exists());
+
+        drop(engine);
+
+        let from_json = Engine::open_with_storage_mode(&dir, TableStorageMode::Json)?;
+        let json_row = from_json
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            json_row.get("payload"),
+            Some(&Lit::Str {
+                v: "dual-a".to_string()
+            })
+        );
+        drop(from_json);
+
+        let from_segment = Engine::open_with_storage_mode(&dir, TableStorageMode::Segment)?;
+        let segment_row = from_segment
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 2 }],
+            )?
+            .row;
+        assert_eq!(
+            segment_row.get("payload"),
+            Some(&Lit::Str {
+                v: "dual-b".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn table_rows_storage_mode_fallback_reads_other_format() -> anyhow::Result<()> {
+        let dir_json = temp_dir("table_rows_mode_fallback_json_to_segment");
+        let mut engine_json = Engine::open_with_storage_mode(&dir_json, TableStorageMode::Json)?;
+        seed_events_table(&mut engine_json, "json-a", "json-b")?;
+        drop(engine_json);
+
+        let reopened_segment =
+            Engine::open_with_storage_mode(&dir_json, TableStorageMode::Segment)?;
+        let row_from_json = reopened_segment
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 2 }],
+            )?
+            .row;
+        assert_eq!(
+            row_from_json.get("payload"),
+            Some(&Lit::Str {
+                v: "json-b".to_string()
+            })
+        );
+        fs::remove_dir_all(&dir_json).ok();
+
+        let dir_segment = temp_dir("table_rows_mode_fallback_segment_to_json");
+        let mut engine_segment =
+            Engine::open_with_storage_mode(&dir_segment, TableStorageMode::Segment)?;
+        seed_events_table(&mut engine_segment, "seg-json-a", "seg-json-b")?;
+        drop(engine_segment);
+
+        let reopened_json = Engine::open_with_storage_mode(&dir_segment, TableStorageMode::Json)?;
+        let row_from_segment = reopened_json
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row_from_segment.get("payload"),
+            Some(&Lit::Str {
+                v: "seg-json-a".to_string()
+            })
+        );
+        fs::remove_dir_all(&dir_segment).ok();
         Ok(())
     }
 }

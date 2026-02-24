@@ -77,6 +77,14 @@
       th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
       thead th{background:#f1f5fb;position:sticky;top:0;z-index:1}
       tbody tr:hover{background:#f4f8ff}
+      tbody tr.row-selected{background:rgba(43,108,176,.16)}
+      tbody tr.inline-new-row{background:rgba(47,133,90,.09)}
+      .row-actions{display:flex;flex-wrap:wrap;gap:4px}
+      .table-check{display:flex;justify-content:center}
+      .inline-cell-input{min-width:110px;padding:5px 7px;border-radius:6px;border:1px solid var(--line);font-size:11px;background:#fff}
+      .inline-cell-input.pk{background:#f7f9fc;color:var(--muted)}
+      .easy-grid-toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+      .easy-grid-toolbar .builder-check{margin-right:6px}
       .breadcrumb{display:inline-flex;gap:6px;font-size:11px;color:var(--muted);margin-top:4px}
       .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px}
       .stat{padding:8px;border-radius:10px;background:var(--panel-2);border:1px solid var(--line)}
@@ -96,6 +104,9 @@
       .builder-check{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
       .builder-check input{width:auto}
       .builder-muted{font-size:10px;color:var(--muted)}
+      .visual-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+      .visual-field{border:1px solid var(--line);border-radius:10px;padding:8px;background:#fff}
+      .visual-meta{font-size:10px;color:var(--muted);margin-top:2px}
       details.help{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--panel-2);margin-bottom:8px}
       details.help summary{cursor:pointer;font-weight:600;font-size:12px}
       details.help .help-body{margin-top:6px;display:grid;gap:6px;font-size:11px;color:var(--muted)}
@@ -236,8 +247,11 @@
                 <div class="field"><label>Database</label><select id="easyDbSelect"></select></div>
                 <div class="field"><label>Table</label><select id="easyTableSelect"></select></div>
                 <div class="field"><label>Browse Limit</label><input id="easyBrowseLimit" type="number" value="25" /></div>
+                <div class="field"><label>Offset</label><input id="easyBrowseOffset" type="number" value="0" /></div>
+                <div class="field"><label>Order by</label><input id="easyBrowseOrder" placeholder="id" /></div>
+                <div class="field"><label>Search in loaded rows</label><input id="easyBrowseSearch" placeholder="name or value" /></div>
               </div>
-              <div class="actions"><button id="btnEasyReload" class="sm">Reload Targets</button><button id="btnEasyUseSelection" class="primary sm">Use Selection</button><button id="btnEasyLoadTable" class="sm">Load Table Form</button><button id="btnEasyBrowse" class="secondary sm">Browse Rows</button></div>
+              <div class="actions"><button id="btnEasyReload" class="sm">Reload Targets</button><button id="btnEasyUseSelection" class="primary sm">Use Selection</button><button id="btnEasyLoadTable" class="sm">Load Table Form</button><button id="btnEasyBrowse" class="secondary sm">Browse Rows</button><button id="btnEasyBrowsePrev" class="sm ghost">&laquo; Prev</button><button id="btnEasyBrowseNext" class="sm ghost">Next &raquo;</button><span id="easyBrowseInfo" class="hint">No rows loaded.</span></div>
               <pre id="easyOut">Select a database and table to begin.</pre>
             </div>
             <div class="card wide"><h2>Create Database / Table</h2>
@@ -254,7 +268,22 @@
               <div class="actions"><button id="btnEasyRowInsert" class="primary sm">Insert Row</button><button id="btnEasyRowGet" class="sm">Get by Primary Key</button><button id="btnEasyRowDelete" class="danger sm">Delete by Primary Key</button><button id="btnEasyRowClear" class="ghost sm">Clear Form</button></div>
               <div class="builder-list" id="easyRowFields">Load a table to generate row fields.</div>
             </div>
+            <div class="card wide"><h2>Visual Row Editor (Optional)</h2>
+              <details class="help" open><summary>WYSIWYG-style editing</summary><div class="help-body"><div>Click any row in Row Preview to load it into this form.</div><div>Adjust values and click Save Changes. Use Insert as New for new rows.</div><div>This is optional; advanced JSON controls remain in Schema/Data panels.</div></div></details>
+              <div class="actions"><label class="builder-check"><input type="checkbox" id="easyVisualEnabled" checked />Enable visual editor</label><button id="btnEasyVisualLoadSelected" class="sm">Load Selected Row</button><button id="btnEasyVisualSave" class="primary sm">Save Changes</button><button id="btnEasyVisualInsert" class="secondary sm">Insert as New</button><button id="btnEasyVisualDelete" class="danger sm">Delete Selected</button><button id="btnEasyVisualReset" class="ghost sm">Reset Form</button></div>
+              <div class="visual-grid" id="easyVisualFields">Load and browse a table, then click a row to edit visually.</div>
+              <pre id="easyVisualOut">Visual editor ready.</pre>
+            </div>
             <div class="card wide"><h2>Row Preview</h2>
+              <div class="hint">Tip: click a row to open it in the optional visual editor.</div>
+              <div class="easy-grid-toolbar">
+                <label class="builder-check"><input type="checkbox" id="easyGridMode" />Inline grid edit mode</label>
+                <button id="btnEasyGridAddRow" class="sm">Add Row in Grid</button>
+                <button id="btnEasyGridInsertRow" class="secondary sm">Insert Grid Row</button>
+                <button id="btnEasyGridDeleteChecked" class="danger sm">Delete Checked</button>
+                <button id="btnEasyGridCancel" class="ghost sm">Cancel Grid Edit</button>
+              </div>
+              <div class="callout">Grid mode enables spreadsheet-like row entry and inline updates directly in this table. Primary key cells stay read-only during updates for safety.</div>
               <div class="table-wrap"><table id="easyBrowseTable"></table></div>
             </div>
           </div>

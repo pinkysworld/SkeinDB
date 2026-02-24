@@ -4004,11 +4004,15 @@ mod tests {
         assert!(html.contains("RPC Explorer"));
         assert!(html.contains("Easy Viewer"));
         assert!(html.contains("Click-First Database Control"));
+        assert!(html.contains("Visual Row Editor (Optional)"));
+        assert!(html.contains("Inline grid edit mode"));
         assert!(!html.to_lowercase().contains("phpmyadmin"));
         assert!(html.contains("src/main.js"));
         let js = admin_main_js();
         assert!(js.contains("system.capabilities"));
         assert!(js.contains("easyCreateTable"));
+        assert!(js.contains("easyVisualSaveChanges"));
+        assert!(js.contains("easyGridSaveRow"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {

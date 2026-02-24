@@ -9,6 +9,8 @@ Design goals:
 
 Implemented navigation areas:
 - **Easy Viewer** (click-first DB/table/row workflows)
+- **Inline grid row editor** (spreadsheet-style row entry + in-place updates)
+- **Optional visual row editor** (row-click browsing with WYSIWYG-style form edits)
 - **Schema** / **Data** / **SQL Workspace**
 - **Server Load & Statistics** (QPS/TPS, latency, compaction, cache)
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)

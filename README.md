@@ -27,13 +27,13 @@ The repository is written so you can:
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
 - **MVCC extensions:** delta-chained value versions.
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
-- **ValueID-backed row persistence (prototype):** table row files now support ref-based JSON (`format_version: 2`) with backward-compatible loading.
+- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or dual-write via `SKEINDB_STORAGE_MODE=json|segment|dual`.
 - **Security extensions:** hash-chained WAL for tamper evidence.
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** click-first workspace + expert panels for cluster and settings management.
+- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, and expert panels for cluster/settings management.
 
 ---
 
@@ -49,6 +49,12 @@ cargo build --release
 
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
+```
+
+Optional storage mode:
+
+```bash
+SKEINDB_STORAGE_MODE=dual ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
 ```
 
 Open:

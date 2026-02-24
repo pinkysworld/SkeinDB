@@ -40,6 +40,21 @@ Run HTTP-only:
 
 ---
 
+## Environment variables
+
+`SKEINDB_STORAGE_MODE` controls how per-table row files are persisted:
+- `json` (default): read/write `tables/<db>/<table>.json`
+- `segment`: read/write `tables/<db>/<table>.rseg`
+- `dual`: write both files; read prefers `.rseg` then `.json`
+
+Example:
+
+```bash
+SKEINDB_STORAGE_MODE=dual ./skeindb serve --data ./data --http 8080 --mysql 3306
+```
+
+---
+
 ## HTTP services
 
 When enabled, the HTTP listener serves:

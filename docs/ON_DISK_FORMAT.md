@@ -286,6 +286,30 @@ Rules:
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 
+### 11.3 tables/<db>/<table>.rseg (prototype segment container v1)
+
+SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
+
+Header:
+- `magic[8]`: `SKNSEGR1`
+- `segment_format_version` (`u32 LE`): currently `1`
+- `table_format_version` (`u32 LE`): currently `2` (same row payload schema as `.json`)
+- `row_count` (`u64 LE`)
+
+Body:
+- Repeated `row_count` times:
+  - `payload_len` (`u32 LE`)
+  - `payload` (`payload_len` bytes) as JSON-encoded `RowEntryDisk`
+
+Behavior:
+- `SKEINDB_STORAGE_MODE=json` (default): write/read `.json`; fallback read `.rseg`.
+- `SKEINDB_STORAGE_MODE=segment`: write/read `.rseg`; fallback read `.json`.
+- `SKEINDB_STORAGE_MODE=dual`: write both formats; read prefers `.rseg`, then `.json`.
+
+Compatibility notes:
+- Unsupported segment header versions are ignored by fallback readers.
+- If both files are missing or unreadable, the table loads as empty.
+
 ---
 
 # Appendix A) v0.2/v0.3 extensions

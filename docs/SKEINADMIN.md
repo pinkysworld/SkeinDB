@@ -18,6 +18,8 @@ Recent UI updates:
 - Overview includes live dedup/storage metrics (`dedup_ratio`, logical vs unique bytes, interned values).
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - `/admin` now includes an Easy Viewer with click-first database/table/row controls.
+- Easy Viewer now includes inline grid editing for spreadsheet-style row entry and in-place updates.
+- Easy Viewer now includes optional visual row editing (row-click browse + form-based updates/inserts/deletes).
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
 
 ---
@@ -120,6 +122,7 @@ Security note:
 - Click-first database and table selection
 - Guided create database/table flow (column builder + PK checkboxes)
 - Typed row editor for insert/get/delete without manual JSON payloads
+- Inline grid edit mode for in-table row entry, copy, update, and batch delete
 - Dedicated row preview table for fast verification
 
 ### 4.3 SQL Workspace
