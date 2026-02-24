@@ -3,8 +3,17 @@
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
 
+## Reality sync (2026-02-24)
+
+This file now reflects a stricter distinction:
+- `[x]` = implemented and exercised in runtime/tests.
+- `[ ]` = still open (including prototype/partial work that still needs hardening).
+
+For the full implemented-vs-partial matrix (core + research), see:
+- `docs/TRUE_STATUS_MATRIX.md`
+
 ## Phase 0 — Repo setup
-- [ ] T001: Encoding primitives (VarU, Bytes/String, CRC32C)
+- [x] T001: Encoding primitives (VarU, Bytes/String, CRC32C)
 - [ ] T002: FileHeader read/write
 - [ ] T003: RecordFrame append/iterate
 
@@ -18,9 +27,9 @@ Each task should include tests.
 - [ ] T016: MVCC visibility
 
 ## Phase 2 — SQL + virtual metadata
-- [ ] T020: Catalog schema + TableDef
+- [x] T020: Catalog schema + TableDef
 - [ ] T021: information_schema.tables + columns
-- [ ] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
+- [x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
 
 ## Phase 3 — MySQL protocol
 - [ ] T030: Handshake + mysql_native_password
@@ -31,28 +40,28 @@ Each task should include tests.
 
 ## Phase 4 — Web console
 - [ ] T040: HTTP API `/api/v1/sql/exec`
-- [ ] T041: Console UI scaffold
-- [ ] T042: Schema browser + SQL editor
+- [x] T041: Console UI scaffold
+- [x] T042: Schema browser + SQL editor
 - [ ] T043: Data browse/edit + import/export
 - [ ] T044: Users/privileges + status dashboard
 
 ## Phase 5 - SkeinQL native API
-- [ ] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
-- [ ] T051: Implement HTTP RPC endpoint POST /api/v1/rpc (system.ping, system.version)
+- [x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
+- [x] T051: Implement HTTP RPC endpoint POST /api/v1/rpc (system.ping, system.version)
 - [ ] T052: Implement schema.* methods (list/describe/create/drop)
-- [ ] T053: Implement query.select (single-table scan + filter + limit) over SkeinIR
+- [x] T053: Implement query.select (single-table scan + filter + limit) over SkeinIR
 - [ ] T054: Implement tx.begin/commit/rollback via SkeinQL
 
 ## Phase 6 - Cache-coherent HTTP queries (ETags)
-- [ ] T060: Row ETags for data.get and If-Match support for data.update
-- [ ] T061: Planner dependency sets for simple indexed queries
+- [x] T060: Row ETags for data.get and If-Match support for data.update
+- [x] T061: Planner dependency sets for simple indexed queries
 - [ ] T062: query.prepare + GET /api/v1/q/{query_id} with ETag/If-None-Match
 - [ ] T063: SSE subscription to ETag changes (query.subscribe)
 
 ## Phase 7 - Delta-chained values
-- [ ] T070: Add ValueEntry kind DELTA + patch codec (docs/DELTA_VALUES.md)
-- [ ] T071: Delta selection policy + metrics
-- [ ] T072: Compaction rebase (limit delta chain depth)
+- [x] T070: Add ValueEntry kind DELTA + patch codec (docs/DELTA_VALUES.md)
+- [x] T071: Delta selection policy + metrics
+- [x] T072: Compaction rebase (limit delta chain depth)
 
 ## Phase 8 - Wasm extensions
 - [ ] T080: Module store + catalog metadata for UDFs (docs/WASM_UDFS.md)
@@ -77,16 +86,16 @@ Each task should include tests.
 - [ ] T113: telemetry.migration_hints generator (MySQL patterns -> SkeinQL calls)
 
 ## Phase 12 - Standalone management console (SkeinAdmin)
-- [ ] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
-- [ ] T121: SkeinAdmin pages: schema/data/sql workspace
+- [x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
+- [x] T121: SkeinAdmin pages: schema/data/sql workspace
 - [ ] T122: SkeinAdmin security: token UI + role-aware navigation
 - [x] T123: SkeinAdmin cluster page (cluster.*) + actions
 - [ ] T124: SkeinAdmin observability page (stats.*)
 
 ## Phase 13 - Observability and server load statistics
-- [ ] T130: stats.snapshot and basic counters in server
+- [x] T130: stats.snapshot and basic counters in server
 - [ ] T131: query fingerprinting + top_queries / slow_queries
-- [ ] T132: GET /metrics (Prometheus-style) + labels
+- [x] T132: GET /metrics (Prometheus-style) + labels
 - [ ] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction
 
 ## Phase 14 - Cluster management and scale-out
@@ -118,7 +127,7 @@ Each task should include tests.
 ## Phase 18 - Self-tuning index advisor
 - [ ] T170: Telemetry feature extraction (predicates/order/group/join keys) + privacy-safe storage
 - [ ] T171: Candidate index generator + duplication/prefix checks
-- [ ] T172: Benefit estimator (Level 0 rule-based) + SkeinQL advisor.* endpoints
+- [x] T172: Benefit estimator (Level 0 rule-based) + SkeinQL advisor.* endpoints
 - [ ] T173: Apply suggestion (CREATE INDEX) + progress + rollback-on-failure
 - [ ] T174: SkeinAdmin "Index Advisor" page + before/after performance report
 
@@ -142,7 +151,7 @@ Each task should include tests.
 - [ ] T203: Evaluation harness scripts + dashboards for stall rate and p99 latency
 
 ## Phase 22 - SQL autoparameterization and plan cache
-- [ ] T210: SQL normalization (fingerprints) + parameter extraction (docs/AUTOPARAMETERIZATION.md)
+- [x] T210: SQL normalization (fingerprints) + parameter extraction (docs/AUTOPARAMETERIZATION.md)
 - [ ] T211: Plan cache keyed by fingerprint + schema version + session flags
 - [ ] T212: Integrate autoparam with query coalescing, ETag caching, and telemetry
 - [ ] T213: SQL session variable: `SET @@skein.autoparameterize = 1` + safety rules

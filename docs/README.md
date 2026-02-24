@@ -38,6 +38,7 @@ The repo is intentionally written so you can read it in two ways:
 
 6) **Research roadmap**
    - `RESEARCH_AGENDA.md` (20-track status matrix + priorities)
+   - `TRUE_STATUS_MATRIX.md` (runtime reality sync: implemented vs prototype vs planned)
    - `research_agenda/` (prioritized research directions)
    - `papers/SkeinDB_IJRCOM_Submission.md` (submission-ready manuscript draft)
 

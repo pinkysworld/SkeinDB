@@ -6,6 +6,15 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
+## Reality sync (2026-02-24)
+
+Runtime status and checklist status intentionally differ:
+- Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
+- Checklist below: remains open for hardening, stronger benchmarks, and publication-grade evaluation.
+
+Source of truth matrix:
+- `docs/TRUE_STATUS_MATRIX.md`
+
 ## Mapping table (proposal → repo)
 
 | ID | Proposal | Priority (agenda) | Primary repo specs / files | Backlog tasks |
@@ -183,4 +192,3 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T216: Pluggable classifier interface (offline model first)
 - [ ] T217: Feedback loop: cache misses trigger reclassification
 - [ ] T218: Metrics: plan-cache hit rate vs classifier overhead
-
