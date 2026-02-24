@@ -191,7 +191,25 @@
         <!-- OVERVIEW --><section class="panel active" data-panel="overview">
           <div class="panel-grid">
             <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, click Connect.</li><li>Pick a database from the left tree.</li><li>Use tabs above to manage all features.</li></ol><div class="callout">All 20 research agenda features (R01-R20) are accessible via sidebar panels. Every RPC method is callable via the RPC Explorer.</div></div>
-            <div class="card"><h2>Runtime Status</h2><div class="stat-grid"><div class="stat"><div class="stat-label">Uptime</div><div class="stat-value" id="statUptime">--</div></div><div class="stat"><div class="stat-label">CPU</div><div class="stat-value" id="statCpu">--</div></div><div class="stat"><div class="stat-label">RSS</div><div class="stat-value" id="statRss">--</div></div><div class="stat"><div class="stat-label">QPS/TPS</div><div class="stat-value" id="statQps">--</div></div><div class="stat"><div class="stat-label">Methods</div><div class="stat-value" id="statMethods">--</div></div><div class="stat"><div class="stat-label">Databases</div><div class="stat-value" id="statDatabases">--</div></div></div></div>
+            <div class="card"><h2>Runtime Status</h2>
+              <div class="callout">
+                Storage efficiency is shown live from <code>stats.snapshot</code>. A dedup ratio above 1.0 means repeated values are being interned.
+              </div>
+              <div class="stat-grid">
+                <div class="stat"><div class="stat-label">Uptime</div><div class="stat-value" id="statUptime">--</div></div>
+                <div class="stat"><div class="stat-label">CPU</div><div class="stat-value" id="statCpu">--</div></div>
+                <div class="stat"><div class="stat-label">RSS</div><div class="stat-value" id="statRss">--</div></div>
+                <div class="stat"><div class="stat-label">QPS/TPS</div><div class="stat-value" id="statQps">--</div></div>
+                <div class="stat"><div class="stat-label">Methods</div><div class="stat-value" id="statMethods">--</div></div>
+                <div class="stat"><div class="stat-label">Databases</div><div class="stat-value" id="statDatabases">--</div></div>
+                <div class="stat"><div class="stat-label">Dedup Ratio</div><div class="stat-value" id="statDedupRatio">--</div></div>
+                <div class="stat"><div class="stat-label">Saved Bytes</div><div class="stat-value" id="statDedupSaved">--</div></div>
+                <div class="stat"><div class="stat-label">Logical Bytes</div><div class="stat-value" id="statLogicalBytes">--</div></div>
+                <div class="stat"><div class="stat-label">Unique Bytes</div><div class="stat-value" id="statUniqueBytes">--</div></div>
+                <div class="stat"><div class="stat-label">Interned Values</div><div class="stat-value" id="statInternedValues">--</div></div>
+                <div class="stat"><div class="stat-label">Unique Values</div><div class="stat-value" id="statUniqueValues">--</div></div>
+              </div>
+            </div>
             <div class="card"><h2>Server Info</h2><div class="stat-grid"><div class="stat"><div class="stat-label">Version</div><div class="stat-value" id="infoVersion">--</div></div><div class="stat"><div class="stat-label">SkeinQL</div><div class="stat-value" id="infoSkeinql">--</div></div><div class="stat"><div class="stat-label">Transport</div><div class="stat-value" id="infoTransport">--</div></div><div class="stat"><div class="stat-label">Ping</div><div class="stat-value" id="infoPing">--</div></div></div></div>
             <div class="card"><h2>Profiles</h2><div class="field"><label>Name</label><input id="profileName" placeholder="local-dev" /></div><div class="actions"><button id="btnSaveProfile" class="secondary sm">Save</button><button id="btnDeleteProfile" class="ghost sm">Delete</button></div><div class="field"><label>Profiles</label><select id="profileSelect"></select></div></div>
             <div class="card wide"><h2>Feature Center</h2><div class="feature-grid" id="featureCenterGrid"></div></div>

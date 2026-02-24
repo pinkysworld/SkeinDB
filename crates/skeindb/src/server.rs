@@ -781,7 +781,7 @@ pub(crate) async fn handle_rpc(
                 })),
                 "system.capabilities" => Ok(system_capabilities(state)),
                 "transport.capabilities" => Ok(transport_capabilities(state)),
-                "stats.snapshot" => Ok(stats_snapshot(state)),
+                "stats.snapshot" => Ok(stats_snapshot(state).await),
                 "settings.get" => handle_settings_get(state, params.clone()),
                 "settings.set" => handle_settings_set(state, params.clone()),
                 // --------------------
@@ -3787,7 +3787,7 @@ fn system_capabilities(state: &AppState) -> Value {
     })
 }
 
-fn stats_snapshot(state: &AppState) -> Value {
+async fn stats_snapshot(state: &AppState) -> Value {
     // sysinfo is cross-platform; we keep fields minimal and optional.
     let mut sys = System::new();
     sys.refresh_processes();
@@ -3808,6 +3808,10 @@ fn stats_snapshot(state: &AppState) -> Value {
     };
 
     let uptime_s = state.started.elapsed().as_secs();
+    let storage = {
+        let eng = state.engine.read().await;
+        eng.storage_stats_snapshot()
+    };
     let cluster = state.cluster.lock().unwrap();
 
     serde_json::json!({
@@ -3816,7 +3820,15 @@ fn stats_snapshot(state: &AppState) -> Value {
         "qps": 0,
         "tps": 0,
         "process": {"cpu_pct": cpu_pct, "rss_bytes": rss_bytes},
-        "storage": {"wal_bytes": 0, "dedup_ratio": 1.0},
+        "storage": {
+            "wal_bytes": storage.wal_bytes,
+            "dedup_ratio": storage.dedup_ratio,
+            "logical_bytes": storage.logical_bytes,
+            "unique_bytes": storage.unique_bytes,
+            "duplicate_bytes": storage.duplicate_bytes,
+            "unique_values": storage.unique_values,
+            "interned_values": storage.interned_values
+        },
         "background": {"compaction": "idle", "snapshots": "idle"},
         "cluster": {
             "enabled": cluster.enabled,
@@ -5731,6 +5743,99 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_reports_dedup_metrics() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_dedup_metrics");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same-payload".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same-payload".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let storage = stats
+            .result
+            .as_ref()
+            .and_then(|v| v.get("storage"))
+            .cloned()
+            .unwrap_or_default();
+        let logical = storage
+            .get("logical_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let unique = storage
+            .get("unique_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let duplicate = storage
+            .get("duplicate_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ratio = storage
+            .get("dedup_ratio")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+        let interned = storage
+            .get("interned_values")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        assert!(logical > unique);
+        assert!(duplicate > 0);
+        assert!(ratio > 1.0);
+        assert!(interned > 0);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

@@ -120,6 +120,31 @@ pub struct RowEntry {
     pub deleted: bool,
 }
 
+const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
+const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TableRowsDisk {
+    format_version: u32,
+    rows: Vec<RowEntryDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RowEntryDisk {
+    row: BTreeMap<String, serde_json::Value>,
+    version: u64,
+    #[serde(default)]
+    deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ValueRefDisk {
+    kind: String,
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lit: Option<serde_json::Value>,
+}
+
 #[derive(Debug)]
 struct VectorIndex {
     built_version: u64,
@@ -926,6 +951,17 @@ pub struct CdcPollResult {
     pub next_offset: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineStorageStats {
+    pub wal_bytes: u64,
+    pub dedup_ratio: f64,
+    pub logical_bytes: u64,
+    pub unique_bytes: u64,
+    pub duplicate_bytes: u64,
+    pub unique_values: u64,
+    pub interned_values: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct Subscriptions {
     pub subs: HashMap<String, Subscription>,
@@ -984,6 +1020,7 @@ impl Engine {
         };
 
         engine.load_tables_best_effort();
+        engine.rebuild_value_store_from_tables_best_effort();
         engine.load_changes_best_effort();
         engine.load_prepared_best_effort();
         engine.load_snapshots_best_effort();
@@ -999,6 +1036,54 @@ impl Engine {
         engine.restore_advisor_indexes();
 
         Ok(engine)
+    }
+
+    pub fn storage_stats_snapshot(&self) -> EngineStorageStats {
+        let mut logical_bytes = 0u64;
+        let mut unique_bytes = 0u64;
+        let mut unique_values = 0u64;
+        let mut seen_ids = HashSet::<ValueId>::new();
+
+        for tdata in self.tables.values() {
+            for entry in tdata.rows.iter() {
+                if entry.deleted {
+                    continue;
+                }
+                for lit in entry.row.values() {
+                    let Some(item) = value_store_item(lit) else {
+                        continue;
+                    };
+                    let len = item.bytes.len() as u64;
+                    logical_bytes = logical_bytes.saturating_add(len);
+                    if seen_ids.insert(item.id) {
+                        unique_bytes = unique_bytes.saturating_add(len);
+                        unique_values = unique_values.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        let duplicate_bytes = logical_bytes.saturating_sub(unique_bytes);
+        let dedup_ratio = if unique_bytes == 0 {
+            1.0
+        } else {
+            logical_bytes as f64 / unique_bytes as f64
+        };
+        let interned_values = self
+            .value_store
+            .lock()
+            .map(|store| store.stats().entries as u64)
+            .unwrap_or(0);
+
+        EngineStorageStats {
+            wal_bytes: 0,
+            dedup_ratio,
+            logical_bytes,
+            unique_bytes,
+            duplicate_bytes,
+            unique_values,
+            interned_values,
+        }
     }
 
     pub fn list_databases(&self) -> Vec<String> {
@@ -5019,14 +5104,30 @@ impl Engine {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        save_json(&path, &tdata.rows)
+        let mut seen_refs = HashSet::new();
+        let rows = tdata
+            .rows
+            .iter()
+            .map(|entry| encode_row_entry_disk(entry, &mut seen_refs))
+            .collect();
+        save_json(
+            &path,
+            &TableRowsDisk {
+                format_version: TABLE_ROWS_FORMAT_VERSION,
+                rows,
+            },
+        )
     }
 
     fn load_tables_best_effort(&mut self) {
         for (db, d) in self.catalog.databases.iter() {
             for (table, _) in d.tables.iter() {
                 let path = self.table_path(db, table);
-                let rows: Vec<RowEntry> = load_json(&path).unwrap_or_default();
+                let rows = if let Some(disk) = load_json::<TableRowsDisk>(&path) {
+                    decode_table_rows_disk(disk).unwrap_or_default()
+                } else {
+                    load_json::<Vec<RowEntry>>(&path).unwrap_or_default()
+                };
                 let mut tdata = TableData::default();
                 tdata.rows = rows;
                 // Build pk index.
@@ -5049,6 +5150,24 @@ impl Engine {
                     tdata,
                 );
             }
+        }
+    }
+
+    fn rebuild_value_store_from_tables_best_effort(&self) {
+        let mut intern_items = Vec::new();
+        for tdata in self.tables.values() {
+            for entry in tdata.rows.iter() {
+                if entry.deleted {
+                    continue;
+                }
+                collect_value_store_items(&entry.row, &mut intern_items);
+            }
+        }
+        if intern_items.is_empty() {
+            return;
+        }
+        if let Ok(mut store) = self.value_store.lock() {
+            store_value_items(&mut store, intern_items);
         }
     }
 
@@ -9452,6 +9571,136 @@ fn value_store_item(lit: &Lit) -> Option<ValueStoreItem> {
         }
         _ => None,
     }
+}
+
+fn value_kind_label(kind: ValueKind) -> &'static str {
+    match kind {
+        ValueKind::Cell => "cell",
+        ValueKind::Group => "group",
+        ValueKind::BlobChunk => "blob_chunk",
+        ValueKind::BlobManifest => "blob_manifest",
+        ValueKind::Delta => "delta",
+        ValueKind::Embedding => "embedding",
+    }
+}
+
+fn value_kind_from_label(raw: &str) -> Option<ValueKind> {
+    match raw {
+        "cell" => Some(ValueKind::Cell),
+        "group" => Some(ValueKind::Group),
+        "blob_chunk" => Some(ValueKind::BlobChunk),
+        "blob_manifest" => Some(ValueKind::BlobManifest),
+        "delta" => Some(ValueKind::Delta),
+        "embedding" => Some(ValueKind::Embedding),
+        _ => None,
+    }
+}
+
+fn encode_row_entry_disk(entry: &RowEntry, seen_refs: &mut HashSet<ValueId>) -> RowEntryDisk {
+    let mut row = BTreeMap::new();
+    for (k, v) in entry.row.iter() {
+        row.insert(k.clone(), encode_lit_for_disk(v, seen_refs));
+    }
+    RowEntryDisk {
+        row,
+        version: entry.version,
+        deleted: entry.deleted,
+    }
+}
+
+fn encode_lit_for_disk(lit: &Lit, seen_refs: &mut HashSet<ValueId>) -> serde_json::Value {
+    let lit_json = serde_json::to_value(lit).unwrap_or(serde_json::Value::Null);
+    let Some(item) = value_store_item(lit) else {
+        return lit_json;
+    };
+
+    let include_lit = seen_refs.insert(item.id);
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "kind".to_string(),
+        serde_json::Value::String(value_kind_label(item.kind).to_string()),
+    );
+    payload.insert("id".to_string(), serde_json::Value::String(hex16(&item.id)));
+    if include_lit {
+        payload.insert("lit".to_string(), lit_json);
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert(
+        TABLE_ROW_VALUE_REF_KEY.to_string(),
+        serde_json::Value::Object(payload),
+    );
+    serde_json::Value::Object(out)
+}
+
+fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> {
+    if disk.format_version != TABLE_ROWS_FORMAT_VERSION {
+        anyhow::bail!("unsupported table format version: {}", disk.format_version);
+    }
+
+    let mut seeds = HashMap::<ValueId, Lit>::new();
+    for row in disk.rows.iter() {
+        for v in row.row.values() {
+            let Some(refv) = decode_value_ref_payload(v) else {
+                continue;
+            };
+            let _kind = value_kind_from_label(&refv.kind);
+            let Some(id) = parse_hex16(&refv.id) else {
+                continue;
+            };
+            let Some(lit_json) = refv.lit.as_ref() else {
+                continue;
+            };
+            if let Ok(lit) = serde_json::from_value::<Lit>(lit_json.clone()) {
+                seeds.insert(id, lit);
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(disk.rows.len());
+    for row in disk.rows.into_iter() {
+        let mut decoded = RowObject::new();
+        for (k, v) in row.row.into_iter() {
+            let lit = if let Some(refv) = decode_value_ref_payload(&v) {
+                let _kind = value_kind_from_label(&refv.kind);
+                if let Some(inline) = refv.lit {
+                    serde_json::from_value::<Lit>(inline).ok()
+                } else if let Some(id) = parse_hex16(&refv.id) {
+                    seeds.get(&id).cloned()
+                } else {
+                    None
+                }
+            } else {
+                serde_json::from_value::<Lit>(v).ok()
+            }
+            .unwrap_or(Lit::Null);
+            decoded.insert(k, lit);
+        }
+        rows.push(RowEntry {
+            row: decoded,
+            version: row.version,
+            deleted: row.deleted,
+        });
+    }
+    Ok(rows)
+}
+
+fn decode_value_ref_payload(value: &serde_json::Value) -> Option<ValueRefDisk> {
+    let obj = value.as_object()?;
+    let payload = obj.get(TABLE_ROW_VALUE_REF_KEY)?;
+    serde_json::from_value(payload.clone()).ok()
+}
+
+fn parse_hex16(raw: &str) -> Option<[u8; 16]> {
+    if raw.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let b = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).ok()?;
+        out[i] = b;
+    }
+    Some(out)
 }
 
 fn embedding_bytes(dims: u32, v: &[f32], model: Option<&str>) -> Option<Vec<u8>> {
@@ -17749,6 +17998,198 @@ mod tests {
             }),
         })?;
         assert_eq!(status.views[0]["rows"].as_u64(), Some(2));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn dedup_stats_roundtrip_across_restart() -> anyhow::Result<()> {
+        let dir = temp_dir("dedup_stats_restart");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "duplicate".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "duplicate".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let before = engine.storage_stats_snapshot();
+        assert!(before.logical_bytes > before.unique_bytes);
+        assert!(before.duplicate_bytes > 0);
+        assert!(before.dedup_ratio > 1.0);
+        assert!(before.interned_values > 0);
+
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let after = reopened.storage_stats_snapshot();
+        assert_eq!(after.logical_bytes, before.logical_bytes);
+        assert_eq!(after.unique_bytes, before.unique_bytes);
+        assert_eq!(after.duplicate_bytes, before.duplicate_bytes);
+        assert!(after.dedup_ratio > 1.0);
+        assert!(after.interned_values > 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn table_rows_file_stores_value_refs() -> anyhow::Result<()> {
+        let dir = temp_dir("table_rows_value_refs");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let path = engine.table_path("app", "events");
+        let raw = fs::read_to_string(&path)?;
+        let doc: serde_json::Value = serde_json::from_str(&raw)?;
+        assert_eq!(
+            doc.get("format_version").and_then(|v| v.as_u64()),
+            Some(TABLE_ROWS_FORMAT_VERSION as u64)
+        );
+
+        let mut ref_count = 0usize;
+        let mut seed_count = 0usize;
+        let mut compact_ref_count = 0usize;
+        let rows = doc
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for row in rows.into_iter() {
+            let payload = row
+                .get("row")
+                .and_then(|r| r.get("payload"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let Some(obj) = payload.as_object() else {
+                continue;
+            };
+            let Some(refv) = obj.get(TABLE_ROW_VALUE_REF_KEY).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            ref_count = ref_count.saturating_add(1);
+            if refv.get("lit").is_some() {
+                seed_count = seed_count.saturating_add(1);
+            } else {
+                compact_ref_count = compact_ref_count.saturating_add(1);
+            }
+        }
+        assert_eq!(ref_count, 2);
+        assert_eq!(seed_count, 1);
+        assert_eq!(compact_ref_count, 1);
+
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 2 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "same".to_string()
+            })
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

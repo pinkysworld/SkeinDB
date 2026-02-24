@@ -337,6 +337,19 @@ function updateStats(s) {
   if ($('statCpu')) $('statCpu').textContent = s.process && Number.isFinite(s.process.cpu_pct) ? s.process.cpu_pct.toFixed(1)+'%' : '--';
   if ($('statRss')) $('statRss').textContent = s.process ? formatBytes(s.process.rss_bytes) : '--';
   if ($('statQps')) $('statQps').textContent = (s.qps !== undefined ? s.qps : '--') + ' / ' + (s.tps !== undefined ? s.tps : '--');
+  const storage = s.storage || {};
+  if ($('statDedupRatio')) {
+    $('statDedupRatio').textContent = Number.isFinite(storage.dedup_ratio) ? storage.dedup_ratio.toFixed(2) + 'x' : '--';
+  }
+  if ($('statDedupSaved')) $('statDedupSaved').textContent = formatBytes(storage.duplicate_bytes);
+  if ($('statLogicalBytes')) $('statLogicalBytes').textContent = formatBytes(storage.logical_bytes);
+  if ($('statUniqueBytes')) $('statUniqueBytes').textContent = formatBytes(storage.unique_bytes);
+  if ($('statInternedValues')) {
+    $('statInternedValues').textContent = Number.isFinite(storage.interned_values) ? String(storage.interned_values) : '--';
+  }
+  if ($('statUniqueValues')) {
+    $('statUniqueValues').textContent = Number.isFinite(storage.unique_values) ? String(storage.unique_values) : '--';
+  }
 }
 
 async function loadStats() {

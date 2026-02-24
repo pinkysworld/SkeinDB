@@ -1,7 +1,7 @@
-# SkeinDB On-Disk Format v0.2 (v0.1 compatible)
+# SkeinDB On-Disk Format v0.3 (v0.2 compatible)
 
-Status: Draft v0.2 (v0.1 compatible)
-Last updated: 2026-01-19
+Status: Draft v0.3 (v0.2 compatible)
+Last updated: 2026-02-24
 
 This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.
@@ -237,9 +237,58 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
+### 11.2 tables/<db>/<table>.json (format v2)
+
+Prototype row persistence for `tables/<db>/<table>.json` now supports a
+ValueID-backed JSON format to reduce duplicated literal payloads in row files.
+
+Format:
+
+```json
+{
+  "format_version": 2,
+  "rows": [
+    {
+      "row": {
+        "id": {"t":"u64","v":1},
+        "payload": {
+          "$skein_ref": {
+            "kind": "cell",
+            "id": "0123abcd...32hex",
+            "lit": {"t":"str","v":"hello"}
+          }
+        }
+      },
+      "version": 1,
+      "deleted": false
+    },
+    {
+      "row": {
+        "id": {"t":"u64","v":2},
+        "payload": {
+          "$skein_ref": {
+            "kind": "cell",
+            "id": "0123abcd...32hex"
+          }
+        }
+      },
+      "version": 2,
+      "deleted": false
+    }
+  ]
+}
+```
+
+Rules:
+- `"$skein_ref".id` is a 32-char hex ValueID.
+- The first occurrence of a ValueID in a table file should include `lit` seed data.
+- Later duplicates may omit `lit` and reference only `id`.
+- Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
+- v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
+
 ---
 
-# Appendix A) v0.2 extensions
+# Appendix A) v0.2/v0.3 extensions
 
 This appendix specifies optional extensions that can be implemented without invalidating v0.1 data.
 The FileHeader format_ver remains 1; extensions use new record types and/or higher rec_ver values.

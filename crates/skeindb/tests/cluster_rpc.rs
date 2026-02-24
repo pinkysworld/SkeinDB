@@ -182,7 +182,9 @@ impl RpcHttpClient {
 
 fn wait_for_health(port: u16) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/health", port);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // CI and heavily loaded dev machines can take longer to bring up the embedded
+    // HTTP server process; keep this generous to avoid flaky startup failures.
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         let out = std::process::Command::new("curl")
             .arg("-sSf")

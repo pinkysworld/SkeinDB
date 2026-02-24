@@ -126,7 +126,26 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
 
 ---
 
-## 4) QueryPatch (delta updates)
+## 4) Storage + dedup stats
+
+`stats.snapshot` now reports live dedup effectiveness from persisted table data:
+- `storage.dedup_ratio`: logical bytes / unique bytes (higher means better dedup)
+- `storage.logical_bytes`: total bytes before dedup
+- `storage.unique_bytes`: unique bytes after content-addressed dedup
+- `storage.duplicate_bytes`: bytes saved by dedup
+- `storage.interned_values`: unique values currently interned
+
+Example:
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"stats.snapshot","params":{}}'
+```
+
+---
+
+## 5) QueryPatch (delta updates)
 
 See `docs/QUERY_PATCH.md` for a complete spec.
 
@@ -137,7 +156,7 @@ At a high level:
 
 ---
 
-## 5) MySQL compatibility
+## 6) MySQL compatibility
 
 The MySQL surface is intended as an *adoption layer* so existing software can connect using standard MySQL drivers.
 
@@ -146,7 +165,7 @@ Current status is documented in:
 
 ---
 
-## 6) Where to go next
+## 7) Where to go next
 
 - Operator knobs: `docs/CONFIGURATION.md`
 - Specs and research notes: `docs/README.md`
