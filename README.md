@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-02-21
+Last updated: 2026-02-24
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -26,6 +26,8 @@ The repository is written so you can:
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
 - **MVCC extensions:** delta-chained value versions.
+- **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
+- **ValueID-backed row persistence (prototype):** table row files now support ref-based JSON (`format_version: 2`) with backward-compatible loading.
 - **Security extensions:** hash-chained WAL for tamper evidence.
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
@@ -96,6 +98,12 @@ This repo contains both:
 For what is implemented vs planned, see the docs and the backlog:
 - `docs/PROJECT_BACKLOG.md`
 - `docs/RESEARCH_AGENDA.md`
+- `docs/TRUE_STATUS_MATRIX.md`
+
+Recent documentation updates (2026-02-24):
+- `docs/GETTING_STARTED.md`: storage + dedup stats walkthrough
+- `docs/ON_DISK_FORMAT.md`: table row `format_version: 2` ValueID ref encoding
+- `docs/SKEINADMIN.md`: admin/console UX and observability notes
 
 ---
 

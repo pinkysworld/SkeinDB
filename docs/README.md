@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-02-21
+Last updated: 2026-02-24
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -13,6 +13,7 @@ The repo is intentionally written so you can read it in two ways:
 1) **Getting started**
    - `GETTING_STARTED.md` (build, run, first commands)
    - `CONFIGURATION.md` (ports, data dirs, standalone binary behavior)
+   - includes storage/dedup `stats.snapshot` quick check
 
 2) **Core APIs**
    - `SKEINQL.md` (JSON-RPC control plane spec)
@@ -30,6 +31,7 @@ The repo is intentionally written so you can read it in two ways:
    - `DELTA_VALUES.md` (MVCC delta chains)
    - `AUDIT_WAL.md` (tamper-evident audit logging)
    - `WASM_UDFS.md` (sandboxed extensions)
+   - includes table row `format_version: 2` ValueID ref encoding (prototype)
 
 5) **Clustering & operations**
    - `CLUSTERING.md` (cluster configuration and goals)

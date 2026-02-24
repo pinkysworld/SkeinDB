@@ -22,7 +22,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase | Current status | Notes / evidence |
 |---|---|---|
 | Phase 0 Repo setup | Partial | VarU/CRC/value ID primitives are implemented (`crates/skeindb-core/src/lib.rs`). |
-| Phase 1 Storage core | Partial | Prototype engine persists JSON state; full MANIFEST/WAL/LSM on-disk pipeline remains open. |
+| Phase 1 Storage core | Partial | Prototype engine persists JSON state and now includes ValueID-backed row ref encoding for table files (`format_version: 2`); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`). |
 | Phase 3 MySQL protocol | Planned | MySQL compatibility remains a top priority but is not complete in this scaffold. |
 | Phase 4 Web console | Partial | Console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
@@ -34,7 +34,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 10 Row/column snapshots | Partial | Snapshot build/read/incremental paths exist; optimizer coverage still evolving. |
 | Phase 11 Compat telemetry + migration | Partial | Migration intent/rewrite surfaces exist (`migration.*`), full telemetry suite remains open. |
 | Phase 12 SkeinAdmin | Partial | SkeinAdmin is embedded and functional; security/observability hardening remains open. |
-| Phase 13 Observability | Partial | `stats.snapshot` and `/metrics` exist; deeper slow/top query surfaces remain open. |
+| Phase 13 Observability | Partial | `stats.snapshot` and `/metrics` exist, including live dedup storage metrics (`dedup_ratio`, logical/unique/duplicate bytes); deeper slow/top query surfaces remain open. |
 | Phase 14 Cluster scale-out | Partial (advanced) | Node identity, fanout replication, shard metadata, and cluster RPCs are implemented. |
 | Phase 15 Perf improvements | Planned | Interned-column/late-mat/vectorized pipeline items remain backlog work. |
 | Phase 16 Query coalescing | Partial | In-flight coalescing exists (not yet complete for all planned entry points). |
