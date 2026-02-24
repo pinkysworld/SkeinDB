@@ -4,7 +4,7 @@ Status: Implemented embedded admin panel + active roadmap
 Last updated: 2026-02-24
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
-It is intentionally separate from the SkeinDB server binary (similar in spirit to phpMyAdmin),
+It is intentionally separate from the SkeinDB server binary,
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
 **multiple SkeinDB servers or clusters** from one UI.
 
@@ -17,6 +17,7 @@ The same UI bundle powers both routes, with mode-aware navigation and controls.
 Recent UI updates:
 - Overview includes live dedup/storage metrics (`dedup_ratio`, logical vs unique bytes, interned values).
 - Connect/disconnect and profile workflows are shared across admin and console routes.
+- `/admin` now includes an Easy Viewer with click-first database/table/row controls.
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
 
 ---
@@ -35,7 +36,7 @@ Recent UI updates:
    - SkeinAdmin should not rely on browser-to-MySQL connectivity.
    - All operations use SkeinQL HTTP endpoints.
 
-4. **phpMyAdmin-class workflows**
+4. **GUI-first administration workflows**
    - Execute SQL
    - Browse schema
    - Browse/edit tables
@@ -115,43 +116,49 @@ Security note:
 - Storage size
 - Role: standalone / primary / replica / router
 
-### 4.2 SQL Workspace
+### 4.2 Easy Viewer
+- Click-first database and table selection
+- Guided create database/table flow (column builder + PK checkboxes)
+- Typed row editor for insert/get/delete without manual JSON payloads
+- Dedicated row preview table for fast verification
+
+### 4.3 SQL Workspace
 - SQL editor with tabs
 - History
 - Saved queries
 - Results grid
 - EXPLAIN plan viewer
 
-### 4.3 Schema Browser
+### 4.4 Schema Browser
 - Databases
 - Tables
 - Columns
 - Indexes
 - DDL view: "SHOW CREATE TABLE" equivalent
 
-### 4.4 Data Browser
+### 4.5 Data Browser
 - Table browse (paging/sort/filter)
 - Row edit/create/delete
 - CSV import/export
 
-### 4.5 Users & Privileges
+### 4.6 Users & Privileges
 - Create user
 - Reset credentials
 - Grant/revoke privileges
 - Show grants
 
-### 4.6 Maintenance
+### 4.7 Maintenance
 - Checkpoint
 - Compact/vacuum
 - Compaction policy (adaptive scheduler) + pause/resume
 - Snapshot management (column snapshots)
 - Audit verification (hash-chained WAL)
 
-### 4.6.1 Time travel & replay
+### 4.7.1 Time travel & replay
 - Point-in-time query runner (as_of)
 - Replay bundle export/import/verify
 
-### 4.7 Server Load & Statistics
+### 4.8 Server Load & Statistics
 (See docs/OBSERVABILITY.md)
 - CPU, memory, disk, network
 - QPS, active sessions
@@ -162,7 +169,7 @@ Security note:
 - Autoparameterization hit rate
 - CDC subscriptions and lag (if enabled)
 
-### 4.8 Cluster Management
+### 4.9 Cluster Management
 (See docs/CLUSTERING.md)
 - Node list (health, role, lag)
 - Add node / remove node
@@ -170,17 +177,17 @@ Security note:
 - Shards and placement
 - Rebalance
 
-### 4.9 Security and Encryption
+### 4.10 Security and Encryption
 - Encryption mode (ENC_OFF / ENC_RANDOM / ENC_MLE_DB)
 - Key rotation and re-encryption progress
 
-### 4.10 CDC Subscriptions
+### 4.11 CDC Subscriptions
 - Table subscriptions
 - Prepared-query subscriptions
 - Lag and backlog
 
 
-### 4.11 Index Advisor
+### 4.12 Index Advisor
 (See docs/INDEX_ADVISOR.md)
 - Suggested indexes (ranked)
 - One-click apply (with progress)
@@ -189,27 +196,27 @@ Security note:
 
 
 
-### 4.12 Views (Incremental Maintenance)
+### 4.13 Views (Incremental Maintenance)
 (See `docs/research_agenda/R08_*`)
 - Create/drop views
 - Show view freshness/lag
 - Trigger refresh (incremental or full)
 - Show dependency graph edges (what base tables feed the view)
 
-### 4.13 Forensics (Verifiable WAL Queries)
+### 4.14 Forensics (Verifiable WAL Queries)
 (See `docs/AUDIT_WAL.md` and `docs/research_agenda/R06_*`)
 - Run forensic queries over the hash-chained WAL
 - Verify proofs (completeness/inclusion)
 - Export signed forensic reports
 
-### 4.14 Migration Assistant (MySQL → SkeinQL)
+### 4.15 Migration Assistant (MySQL → SkeinQL)
 (See `docs/TELEMETRY_AND_MIGRATION.md` and `docs/research_agenda/R17_*`)
 - Compatibility report (unsupported features)
 - Intent inference: detect patterns like pagination, polling, soft deletes
 - Rewrite previews: before/after SkeinQL migration hints
 - Exportable rewrite reports (JSON/Markdown/HTML) + copy-to-clipboard
 
-### 4.15 NL Query (Experimental)
+### 4.16 NL Query (Experimental)
 (See `docs/research_agenda/R12_*`)
 - Natural language prompt workspace
 - `ai.nl.translate` preview + query JSON editor
@@ -217,7 +224,7 @@ Security note:
 - `ai.nl.execute` gated execution using approval token
 - Suggested SkeinQL-native rewrites (cursor API, CDC subscribe, etc.)
 
-### 4.15 Embeddings
+### 4.17 Embeddings
 (See `docs/research_agenda/R10_*`)
 - Ingest embedding vectors
 - Build / monitor ANN index health

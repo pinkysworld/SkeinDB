@@ -1,5 +1,5 @@
 /* SkeinAdmin – main.js
- * Full phpMyAdmin-like admin with all 20 research features (R01-R20).
+ * Full SkeinDB admin surface with all 20 research features (R01-R20).
  * Works for both /admin and /console routes.
  */
 
@@ -12,7 +12,11 @@ const STATE = {
   dbTree: {},
   isConsole: false,
   connected: false,
-  browseOffset: 0
+  browseOffset: 0,
+  schemaBuilderRows: [],
+  dataFormColumns: [],
+  easyTableBuilderRows: [],
+  easyRowColumns: []
 };
 
 // ---------------------------------------------------------------------------
@@ -20,6 +24,7 @@ const STATE = {
 // ---------------------------------------------------------------------------
 const PANEL_META = {
   overview:   { title: 'Admin Overview',      subtitle: 'Single-binary admin console with all 20 research features.' },
+  easy:       { title: 'Easy Viewer',         subtitle: 'Click-first database controls for common administration tasks.' },
   workspace:  { title: 'SQL Workspace',        subtitle: 'Run SQL for compatibility or SkeinQL for full control.' },
   schema:     { title: 'Structure Manager',    subtitle: 'Create databases, design tables, and review schema.' },
   data:       { title: 'Browse & Edit',        subtitle: 'Browse rows, insert data, and run table edits.' },
@@ -70,10 +75,11 @@ const RESEARCH_TRACKS = [
 // Feature center items
 // ---------------------------------------------------------------------------
 const FEATURE_CENTER = [
+  { title: 'Easy Viewer', desc: 'Click-first controls for daily operations.', panel: 'easy' },
   { title: 'SQL Compat', desc: 'MySQL-compatible SQL layer.', panel: 'workspace' },
   { title: 'SkeinQL', desc: 'Native structured query API.', panel: 'workspace' },
   { title: 'Schema Mgmt', desc: 'Create/alter DB and tables.', panel: 'schema' },
-  { title: 'Data Browse', desc: 'phpMyAdmin-style data browser.', panel: 'data' },
+  { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
   { title: 'CDC', desc: 'Change data capture + polling.', panel: 'rpc' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
@@ -103,10 +109,10 @@ const RPC_TEMPLATES = [
   { label: 'schema.create_database', method: 'schema.create_database', params: { db: 'demo' } },
   { label: 'schema.create_table', method: 'schema.create_table', params: { db:'demo', table:'users', columns:[{name:'id',type:'i64'},{name:'name',type:'string'}], primary_key:['id'], if_not_exists:true } },
   { label: 'schema.describe_table', method: 'schema.describe_table', params: { db:'demo', table:'users' } },
-  { label: 'data.insert', method: 'data.insert', params: { into:{db:'demo',table:'users'}, rows:[{id:{t:'i64',v:1},name:{t:'string',v:'Ada'}}] } },
+  { label: 'data.insert', method: 'data.insert', params: { into:{db:'demo',table:'users'}, rows:[{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}}] } },
   { label: 'data.get', method: 'data.get', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}] } },
-  { label: 'data.update', method: 'data.update', params: { table:{db:'demo',table:'users'}, where:{op:'=',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, set:{name:{t:'string',v:'Ada Lovelace'}}, limit:1 } },
-  { label: 'data.delete', method: 'data.delete', params: { table:{db:'demo',table:'users'}, where:{op:'=',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, limit:1 } },
+  { label: 'data.update', method: 'data.update', params: { table:{db:'demo',table:'users'}, where:{op:'eq',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, set:{name:{t:'str',v:'Ada Lovelace'}}, limit:1 } },
+  { label: 'data.delete', method: 'data.delete', params: { table:{db:'demo',table:'users'}, where:{op:'eq',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, limit:1 } },
   { label: 'query.select', method: 'query.select', params: { query:{schema:'demo',table:'users',select:[{col:'id'},{col:'name'}]}, result_format:'rows_json' } },
   { label: 'query.patch', method: 'query.patch', params: { query:{schema:'demo',table:'users',select:[{col:'id'}]}, base_etag:'', include_full:true, result_format:'rows_json' } },
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
@@ -116,7 +122,7 @@ const RPC_TEMPLATES = [
   { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50 } },
   { label: 'view.create', method: 'view.create', params: { db:'demo', name:'active_users', query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
   { label: 'view.status', method: 'view.status', params: { db:'demo', name:'active_users' } },
-  { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'string',v:'Ada'}} } },
+  { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
   { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { name:'merge_sum', wasm_b64:'AA==' } },
   { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { wasm_b64:'AA==', schema:{columns:[{name:'x',type:'i64'}]} } },
   { label: 'advisor.synthesize', method: 'advisor.synthesize', params: { db:'demo', table:'users' } },
@@ -134,6 +140,10 @@ const RPC_TEMPLATES = [
   { label: 'migration.intent_report', method: 'migration.intent_report', params: {} },
   { label: 'transport.capabilities', method: 'transport.capabilities', params: {} }
 ];
+
+const SCHEMA_TYPE_OPTIONS = ['i64', 'u64', 'f64', 'bool', 'string', 'json', 'datetime', 'date', 'uuid', 'bytes'];
+let schemaBuilderNextId = 1;
+let easyBuilderNextId = 1;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -166,16 +176,20 @@ function setConnStatus(kind, message, detail) {
 
 function setSelectedDb(db) {
   STATE.selectedDb = (db || '').trim();
-  ['schemaDb','dataDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb'].forEach(id => {
-    const el = $(id); if (el && !el.value.trim()) el.value = STATE.selectedDb;
+  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb','easyDbSelect'].forEach(id => {
+    const el = $(id); if (el) el.value = STATE.selectedDb;
   });
+  const easyDb = $('easyNewDb');
+  if (easyDb && !easyDb.value.trim()) easyDb.value = STATE.selectedDb;
 }
 
 function setSelectedTable(table) {
   STATE.selectedTable = (table || '').trim();
-  ['schemaTable','dataTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable'].forEach(id => {
-    const el = $(id); if (el && !el.value.trim()) el.value = STATE.selectedTable;
+  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable','easyTableSelect'].forEach(id => {
+    const el = $(id); if (el) el.value = STATE.selectedTable;
   });
+  const easyTable = $('easyNewTable');
+  if (easyTable && !easyTable.value.trim()) easyTable.value = STATE.selectedTable;
 }
 
 function resolveDefaultDb() {
@@ -249,6 +263,31 @@ function cleanParams(p) {
   const o = { ...p };
   Object.keys(o).forEach(k => { const v = o[k]; if (v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)) delete o[k]; });
   return o;
+}
+
+function canonicalLitTag(tag) {
+  if (typeof tag !== 'string') return tag;
+  const k = tag.trim().toLowerCase();
+  if (k === 'string' || k === 'text' || k === 'varchar') return 'str';
+  if (k === 'integer' || k === 'int' || k === 'bigint') return 'i64';
+  if (k === 'float' || k === 'double' || k === 'real') return 'f64';
+  if (k === 'boolean') return 'bool';
+  if (k === 'timestamp') return 'datetime';
+  return k;
+}
+
+function normalizeLitAliases(value) {
+  if (Array.isArray(value)) return value.map(normalizeLitAliases);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  Object.entries(value).forEach(([k, v]) => { out[k] = normalizeLitAliases(v); });
+  if (typeof out.t === 'string') out.t = canonicalLitTag(out.t);
+  return out;
+}
+
+function parseLitJsonInput(raw, label) {
+  const parsed = parseJsonInput(raw, label);
+  return normalizeLitAliases(parsed);
 }
 
 function formatBytes(b) {
@@ -411,7 +450,10 @@ function disconnect() {
   STATE.methods = []; STATE.dbTree = {};
   setSelectedDb(''); setSelectedTable('');
   renderDbTree({}, '');
-  renderTable('browseTable', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
+  dataFormApplyColumns([], []);
+  easyApplyColumns([], []);
+  easyRefreshTargetsFromTree();
+  renderTable('browseTable', [], []); renderTable('easyBrowseTable', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
   updateContext();
 }
 
@@ -482,6 +524,7 @@ async function loadDbTree() {
   }
   STATE.dbTree = tree;
   renderDbTree(tree, $('dbSearch') ? $('dbSearch').value : '');
+  easyRefreshTargetsFromTree();
   updateContext();
 }
 
@@ -500,7 +543,12 @@ function renderTableList(tables) {
   if (!tables || !tables.length) { t.textContent = 'No tables.'; return; }
   tables.forEach(tbl => {
     const btn = document.createElement('button'); btn.textContent = tbl;
-    btn.addEventListener('click', () => { setSelectedTable(tbl); updateContext(); });
+    btn.addEventListener('click', async () => {
+      setSelectedTable(tbl);
+      updateContext();
+      await schemaDescribe();
+      await dataFormLoadColumns();
+    });
     t.appendChild(btn);
   });
 }
@@ -508,6 +556,174 @@ function renderTableList(tables) {
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
+function defaultSchemaBuilderRows() {
+  return [
+    { id: schemaBuilderNextId++, name: 'id', type: 'i64', nullable: false, auto_increment: true, primary: true },
+    { id: schemaBuilderNextId++, name: 'name', type: 'string', nullable: false, auto_increment: false, primary: false }
+  ];
+}
+
+function normalizeSchemaBuilderRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return defaultSchemaBuilderRows();
+  return rows
+    .map((row) => ({
+      id: row.id || schemaBuilderNextId++,
+      name: String(row.name || '').trim(),
+      type: String(row.type || 'string').trim() || 'string',
+      nullable: !!row.nullable,
+      auto_increment: !!row.auto_increment,
+      primary: !!row.primary
+    }))
+    .filter((row) => row.name);
+}
+
+function schemaBuilderSetRows(rows) {
+  STATE.schemaBuilderRows = normalizeSchemaBuilderRows(rows);
+  renderSchemaBuilderRows();
+}
+
+function renderSchemaBuilderRows() {
+  const target = $('schemaBuilderRows');
+  if (!target) return;
+  target.textContent = '';
+  if (!STATE.schemaBuilderRows.length) {
+    target.textContent = 'No columns defined yet.';
+    return;
+  }
+  STATE.schemaBuilderRows.forEach((row) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'builder-row';
+    wrap.dataset.rowId = String(row.id);
+    wrap.innerHTML =
+      '<div class="field"><label>Column name</label><input data-role="name" value="' + escapeHtml(row.name) + '" placeholder="column_name" /></div>' +
+      '<div class="field"><label>Type</label><select data-role="type">' +
+      SCHEMA_TYPE_OPTIONS.map((opt) => '<option value="' + opt + '"' + (opt === row.type ? ' selected' : '') + '>' + opt + '</option>').join('') +
+      '</select></div>' +
+      '<label class="builder-check"><input type="checkbox" data-role="nullable"' + (row.nullable ? ' checked' : '') + ' />Nullable</label>' +
+      '<label class="builder-check"><input type="checkbox" data-role="auto_increment"' + (row.auto_increment ? ' checked' : '') + ' />Auto Inc</label>' +
+      '<label class="builder-check"><input type="checkbox" data-role="primary"' + (row.primary ? ' checked' : '') + ' />Primary Key</label>' +
+      '<button class="danger sm" data-role="remove">Remove</button>';
+    const remove = wrap.querySelector('[data-role="remove"]');
+    if (remove) remove.addEventListener('click', () => {
+      STATE.schemaBuilderRows = STATE.schemaBuilderRows.filter((item) => item.id !== row.id);
+      renderSchemaBuilderRows();
+      schemaBuilderSyncToJson(false);
+    });
+    target.appendChild(wrap);
+  });
+}
+
+function schemaBuilderCollectRows() {
+  const target = $('schemaBuilderRows');
+  if (!target) return [];
+  const rows = [];
+  target.querySelectorAll('.builder-row').forEach((rowEl) => {
+    const name = rowEl.querySelector('[data-role="name"]')?.value.trim() || '';
+    if (!name) return;
+    rows.push({
+      id: Number(rowEl.dataset.rowId || 0) || schemaBuilderNextId++,
+      name,
+      type: rowEl.querySelector('[data-role="type"]')?.value || 'string',
+      nullable: !!rowEl.querySelector('[data-role="nullable"]')?.checked,
+      auto_increment: !!rowEl.querySelector('[data-role="auto_increment"]')?.checked,
+      primary: !!rowEl.querySelector('[data-role="primary"]')?.checked
+    });
+  });
+  return rows;
+}
+
+function schemaBuilderAddColumn(seed) {
+  const normalized = schemaBuilderCollectRows();
+  if (normalized.length) STATE.schemaBuilderRows = normalized;
+  const payload = seed || { id: schemaBuilderNextId++, name: '', type: 'string', nullable: true, auto_increment: false, primary: false };
+  STATE.schemaBuilderRows.push(payload);
+  renderSchemaBuilderRows();
+}
+
+function schemaBuilderSyncToJson(showMessage = true) {
+  const rows = schemaBuilderCollectRows();
+  if (!rows.length) {
+    if (showMessage) setOut({ error: 'Define at least one column.' }, 'schemaBuilderOut');
+    return null;
+  }
+  const columns = rows.map((row) => cleanParams({
+    name: row.name,
+    type: row.type,
+    nullable: row.nullable,
+    auto_increment: row.auto_increment
+  }));
+  const primaryKey = rows.filter((row) => row.primary).map((row) => row.name);
+  STATE.schemaBuilderRows = rows;
+  if ($('schemaColumns')) $('schemaColumns').value = JSON.stringify(columns, null, 2);
+  if ($('schemaPk')) $('schemaPk').value = primaryKey.join(',');
+  if (showMessage) setOut({ ok: true, columns: columns.length, primary_key: primaryKey }, 'schemaBuilderOut');
+  return { columns, primaryKey };
+}
+
+function schemaBuilderSeedDefaults() {
+  schemaBuilderSetRows(defaultSchemaBuilderRows());
+  schemaBuilderSyncToJson(false);
+  setOut({ ok: true, message: 'Starter columns loaded.' }, 'schemaBuilderOut');
+}
+
+async function schemaBuilderLoadCurrent() {
+  try {
+    const db = $('schemaDb')?.value.trim();
+    const table = $('schemaTable')?.value.trim();
+    if (!db || !table) throw new Error('Database and table are required');
+    const res = await call('schema.describe_table', { db, table }, 'schemaBuilderOut');
+    if (!res?.json?.ok || !res.json.result) return;
+    const result = res.json.result;
+    const pk = new Set(Array.isArray(result.primary_key) ? result.primary_key : []);
+    const rows = (result.columns || []).map((col) => ({
+      id: schemaBuilderNextId++,
+      name: col.name,
+      type: col.type?.kind || 'string',
+      nullable: !!col.nullable,
+      auto_increment: !!col.auto_increment,
+      primary: pk.has(col.name)
+    }));
+    schemaBuilderSetRows(rows);
+    schemaBuilderSyncToJson(false);
+    setOut({ ok: true, message: 'Loaded existing structure.', columns: rows.length }, 'schemaBuilderOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaBuilderOut');
+  }
+}
+
+async function schemaBuilderCreateDb() {
+  try {
+    const db = $('schemaDb')?.value.trim();
+    if (!db) throw new Error('Database is required');
+    const res = await schemaCreateDb();
+    if (!res?.json?.ok) throw new Error('Create database RPC failed');
+    setOut({ ok: true, message: 'Database ensured: ' + db }, 'schemaBuilderOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaBuilderOut');
+  }
+}
+
+async function schemaBuilderCreateTable() {
+  const packed = schemaBuilderSyncToJson(false);
+  if (!packed) return;
+  try {
+    const db = $('schemaDb')?.value.trim();
+    const table = $('schemaTable')?.value.trim();
+    if (!db || !table) throw new Error('Database and table are required');
+    const ine = $('schemaIfNotExists')?.value === 'true';
+    const res = await call(
+      'schema.create_table',
+      { db, table, columns: packed.columns, primary_key: packed.primaryKey, if_not_exists: ine },
+      'schemaBuilderOut'
+    );
+    if (!res?.json?.ok) throw new Error('Create table RPC failed');
+    await loadDbTree();
+    setOut({ ok: true, message: 'Table created.', columns: packed.columns.length }, 'schemaBuilderOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaBuilderOut');
+  }
+}
+
 async function schemaListDatabases() {
   const res = await call('schema.list_databases', {}, 'schemaOut');
   if (res && res.json && res.json.ok && res.json.result) renderDatabaseList(res.json.result.databases || []);
@@ -524,7 +740,25 @@ async function schemaDescribe() {
     const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim();
     if (!db || !table) throw new Error('DB and table required');
     const res = await call('schema.describe_table', { db, table }, 'schemaOut');
-    if (res && res.json && res.json.ok && res.json.result) { renderStructure(res.json.result); setOut(res.json.result, 'structureOut'); }
+    if (res && res.json && res.json.ok && res.json.result) {
+      const result = res.json.result;
+      setSelectedDb(db);
+      setSelectedTable(table);
+      renderStructure(result);
+      setOut(result, 'structureOut');
+      const pk = new Set(Array.isArray(result.primary_key) ? result.primary_key : []);
+      schemaBuilderSetRows((result.columns || []).map((col) => ({
+        id: schemaBuilderNextId++,
+        name: col.name,
+        type: col.type?.kind || 'string',
+        nullable: !!col.nullable,
+        auto_increment: !!col.auto_increment,
+        primary: pk.has(col.name)
+      })));
+      schemaBuilderSyncToJson(false);
+      dataFormApplyColumns(result.columns || [], result.primary_key || []);
+      updateContext();
+    }
   } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
 }
 
@@ -532,6 +766,7 @@ async function schemaCreateDb() {
   const db = $('schemaDb') ? $('schemaDb').value.trim() : ''; if (!db) return;
   const res = await call('schema.create_database', { db }, 'schemaOut');
   if (res && res.json && res.json.ok) await loadDbTree();
+  return res;
 }
 
 async function schemaCreateTable() {
@@ -542,7 +777,8 @@ async function schemaCreateTable() {
     const ine = $('schemaIfNotExists').value === 'true';
     const res = await call('schema.create_table', { db, table, columns, primary_key: pk, if_not_exists: ine }, 'schemaOut');
     if (res && res.json && res.json.ok) await loadDbTree();
-  } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
+    return res;
+  } catch (e) { setOut({ error: String(e) }, 'schemaOut'); return null; }
 }
 
 async function schemaDropDb() {
@@ -585,36 +821,242 @@ async function schemaApplyMerge() {
 // ---------------------------------------------------------------------------
 // Data
 // ---------------------------------------------------------------------------
+function normalizeTypeKind(kind) {
+  return String(kind || 'string').trim().toLowerCase();
+}
+
+function dataTypePlaceholder(kind) {
+  const k = normalizeTypeKind(kind);
+  if (k.includes('bool')) return 'true / false';
+  if (k.includes('json')) return '{"field":"value"}';
+  if (k.includes('date') || k.includes('time')) return 'ISO-8601 value';
+  if (k.includes('bytes') || k.includes('blob')) return 'base64 bytes';
+  if (k.includes('int') || k.includes('u64') || k.includes('i64')) return '123';
+  if (k.includes('float') || k.includes('double') || k.includes('dec') || k.includes('f64')) return '123.45';
+  return 'Text value';
+}
+
+function dataTypeHint(kind) {
+  const k = normalizeTypeKind(kind);
+  if (k.includes('bool')) return 'Stored as bool literal.';
+  if (k.includes('json')) return 'Stored as JSON literal.';
+  if (k.includes('date')) return 'Use ISO date/datetime.';
+  if (k.includes('bytes') || k.includes('blob')) return 'Paste base64 payload.';
+  if (k.includes('int') || k.includes('u64') || k.includes('i64')) return 'Stored as i64.';
+  if (k.includes('float') || k.includes('double') || k.includes('dec') || k.includes('f64')) return 'Stored as f64.';
+  return 'Stored as string literal.';
+}
+
+function literalFromInput(kind, raw, forceNull) {
+  if (forceNull) return { t: 'null' };
+  const value = String(raw || '').trim();
+  if (!value.length) return { t: 'null' };
+  const k = normalizeTypeKind(kind);
+  if (k.includes('bool')) {
+    const boolValue = /^(true|1|yes|on)$/i.test(value) ? true : /^(false|0|no|off)$/i.test(value) ? false : null;
+    if (boolValue === null) throw new Error('Invalid boolean: ' + value);
+    return { t: 'bool', v: boolValue };
+  }
+  if (k.includes('json')) return { t: 'json', v: JSON.parse(value) };
+  if (k.includes('date') || k.includes('time')) {
+    if (k.includes('date') && k.includes('time')) return { t: 'datetime', iso: value };
+    if (k.includes('time')) return { t: 'time', iso: value };
+    return { t: 'date', iso: value };
+  }
+  if (k.includes('bytes') || k.includes('blob')) return { t: 'bytes', b64: value };
+  if (k.includes('int') || k.includes('u64') || k.includes('i64')) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) throw new Error('Invalid integer: ' + value);
+    return { t: 'i64', v: parsed };
+  }
+  if (k.includes('float') || k.includes('double') || k.includes('dec') || k.includes('f64')) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) throw new Error('Invalid number: ' + value);
+    return { t: 'f64', v: parsed };
+  }
+  return { t: 'str', v: value };
+}
+
+function dataFormApplyColumns(columns, primaryKey) {
+  const target = $('dataFormFields');
+  if (!target) return;
+  const pk = new Set(Array.isArray(primaryKey) ? primaryKey : []);
+  STATE.dataFormColumns = (columns || []).map((col) => ({
+    name: col.name,
+    kind: col.type?.kind || 'string',
+    nullable: !!col.nullable,
+    primary: pk.has(col.name)
+  }));
+  target.textContent = '';
+  if (!STATE.dataFormColumns.length) {
+    target.textContent = 'No columns returned for this table.';
+    return;
+  }
+  STATE.dataFormColumns.forEach((col) => {
+    const row = document.createElement('div');
+    row.className = 'builder-row compact';
+    row.dataset.colName = col.name;
+    row.dataset.colKind = col.kind;
+    row.dataset.colPrimary = col.primary ? 'true' : 'false';
+    row.innerHTML =
+      '<div class="field"><label>' + escapeHtml(col.name) + '</label><input data-role="value" placeholder="' + escapeHtml(dataTypePlaceholder(col.kind)) + '" /></div>' +
+      '<div class="field"><label>Type</label><div class="builder-muted">' + escapeHtml(col.kind + (col.primary ? ' (PK)' : '')) + '</div><div class="builder-muted">' + escapeHtml(dataTypeHint(col.kind)) + '</div></div>' +
+      '<label class="builder-check"><input type="checkbox" data-role="null" ' + (col.nullable ? '' : 'disabled') + ' />Set NULL</label>' +
+      '<button class="sm ghost" data-role="clear">Clear</button>';
+    const clear = row.querySelector('[data-role="clear"]');
+    if (clear) {
+      clear.addEventListener('click', () => {
+        const input = row.querySelector('[data-role="value"]');
+        const nullToggle = row.querySelector('[data-role="null"]');
+        if (input) input.value = '';
+        if (nullToggle && !nullToggle.disabled) nullToggle.checked = false;
+      });
+    }
+    target.appendChild(row);
+  });
+}
+
+function dataFormCollect(includeAllColumns) {
+  const target = $('dataFormFields');
+  if (!target) throw new Error('Load table columns first');
+  const rows = {};
+  const pk = [];
+  const pkMissing = [];
+  target.querySelectorAll('.builder-row').forEach((row) => {
+    const name = row.dataset.colName || '';
+    if (!name) return;
+    const kind = row.dataset.colKind || 'string';
+    const primary = row.dataset.colPrimary === 'true';
+    const input = row.querySelector('[data-role="value"]');
+    const nullToggle = row.querySelector('[data-role="null"]');
+    const raw = input ? input.value : '';
+    const forceNull = !!nullToggle?.checked;
+    const hasValue = forceNull || String(raw || '').trim().length > 0;
+    if (!hasValue && !includeAllColumns && !primary) return;
+    const lit = literalFromInput(kind, raw, forceNull);
+    if (includeAllColumns || hasValue || primary) rows[name] = lit;
+    if (primary) {
+      if (!hasValue || lit.t === 'null') pkMissing.push(name);
+      pk.push(lit);
+    }
+  });
+  return { row: rows, pk, pkMissing };
+}
+
+async function dataFormLoadColumns() {
+  try {
+    const db = $('dataFormDb')?.value.trim() || $('dataDb')?.value.trim();
+    const table = $('dataFormTable')?.value.trim() || $('dataTable')?.value.trim();
+    if (!db || !table) throw new Error('Database and table are required');
+    setSelectedDb(db);
+    setSelectedTable(table);
+    const res = await call('schema.describe_table', { db, table }, 'dataGuideOut');
+    if (!res?.json?.ok || !res.json.result) return;
+    const result = res.json.result;
+    dataFormApplyColumns(result.columns || [], result.primary_key || []);
+    setOut({ ok: true, columns: (result.columns || []).length, primary_key: result.primary_key || [] }, 'dataGuideOut');
+    if ($('dataDb')) $('dataDb').value = db;
+    if ($('dataTable')) $('dataTable').value = table;
+  } catch (e) {
+    setOut({ error: String(e) }, 'dataGuideOut');
+  }
+}
+
+async function dataFormInsertRow() {
+  try {
+    const t = readDbTable('dataFormDb', 'dataFormTable');
+    const payload = dataFormCollect(false);
+    if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
+    if ($('dataRows')) $('dataRows').value = JSON.stringify([payload.row], null, 2);
+    await call('data.insert', { into: t, rows: [payload.row] }, 'dataGuideOut');
+    await browseTable();
+  } catch (e) {
+    setOut({ error: String(e) }, 'dataGuideOut');
+  }
+}
+
+function whereByPkColumns(columns, pkValues) {
+  const names = columns.filter((col) => col.primary).map((col) => col.name);
+  if (!names.length || names.length !== pkValues.length) return null;
+  if (names.length === 1) {
+    return { op: 'eq', a: { col: names[0] }, b: { lit: pkValues[0] } };
+  }
+  return {
+    op: 'and',
+    args: names.map((name, idx) => ({ op: 'eq', a: { col: name }, b: { lit: pkValues[idx] } }))
+  };
+}
+
+async function dataFormGetByPk() {
+  try {
+    const t = readDbTable('dataFormDb', 'dataFormTable');
+    const payload = dataFormCollect(true);
+    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
+    if (!payload.pk.length) throw new Error('This table has no primary key');
+    if ($('dataPk')) $('dataPk').value = JSON.stringify(payload.pk, null, 2);
+    await call('data.get', { table: t, pk: payload.pk }, 'dataGuideOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'dataGuideOut');
+  }
+}
+
+async function dataFormDeleteByPk() {
+  try {
+    const t = readDbTable('dataFormDb', 'dataFormTable');
+    const payload = dataFormCollect(true);
+    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
+    const where = whereByPkColumns(STATE.dataFormColumns, payload.pk);
+    if (!where) throw new Error('Could not build PK filter for this table');
+    if ($('dataWhere')) $('dataWhere').value = JSON.stringify(where, null, 2);
+    await call('data.delete', { table: t, where, limit: 1 }, 'dataGuideOut');
+    await browseTable();
+  } catch (e) {
+    setOut({ error: String(e) }, 'dataGuideOut');
+  }
+}
+
 async function dataGet() {
-  try { const t = readDbTable('dataDb','dataTable'); const pk = parseJsonInput($('dataPk').value,'PK') || []; await call('data.get',{table:t,pk},'dataOut'); } catch (e) { setOut({error:String(e)},'dataOut'); }
+  try {
+    const t = readDbTable('dataDb', 'dataTable');
+    const pk = parseLitJsonInput($('dataPk').value, 'PK') || [];
+    await call('data.get', { table: t, pk }, 'dataOut');
+  } catch (e) { setOut({ error: String(e) }, 'dataOut'); }
 }
 
 async function dataInsert() {
-  try { const t = readDbTable('dataDb','dataTable'); const rows = parseJsonInput($('dataRows').value,'Rows') || []; await call('data.insert',{into:t,rows},'dataOut'); } catch (e) { setOut({error:String(e)},'dataOut'); }
+  try {
+    const t = readDbTable('dataDb', 'dataTable');
+    const rows = parseLitJsonInput($('dataRows').value, 'Rows') || [];
+    await call('data.insert', { into: t, rows }, 'dataOut');
+  } catch (e) { setOut({ error: String(e) }, 'dataOut'); }
 }
 
 async function dataUpdate() {
   try {
-    const t = readDbTable('dataDb','dataTable');
-    const w = parseJsonInput($('dataWhere').value,'Where'), s = parseJsonInput($('dataSet').value,'Set');
+    const t = readDbTable('dataDb', 'dataTable');
+    const w = parseLitJsonInput($('dataWhere').value, 'Where');
+    const s = parseLitJsonInput($('dataSet').value, 'Set');
     if (!w || !s) throw new Error('Where+Set required');
-    const lim = parseInt($('dataLimit').value,10);
-    await call('data.update', cleanParams({table:t,where:w,set:s,limit:Number.isNaN(lim)?undefined:lim}),'dataOut');
-  } catch (e) { setOut({error:String(e)},'dataOut'); }
+    const lim = parseInt($('dataLimit').value, 10);
+    await call('data.update', cleanParams({ table: t, where: w, set: s, limit: Number.isNaN(lim) ? undefined : lim }), 'dataOut');
+  } catch (e) { setOut({ error: String(e) }, 'dataOut'); }
 }
 
 async function dataDelete() {
   try {
-    const t = readDbTable('dataDb','dataTable');
-    const w = parseJsonInput($('dataWhere').value,'Where'); if (!w) throw new Error('Where required');
-    const lim = parseInt($('dataLimit').value,10);
-    await call('data.delete', cleanParams({table:t,where:w,limit:Number.isNaN(lim)?undefined:lim}),'dataOut');
-  } catch (e) { setOut({error:String(e)},'dataOut'); }
+    const t = readDbTable('dataDb', 'dataTable');
+    const w = parseLitJsonInput($('dataWhere').value, 'Where');
+    if (!w) throw new Error('Where required');
+    const lim = parseInt($('dataLimit').value, 10);
+    await call('data.delete', cleanParams({ table: t, where: w, limit: Number.isNaN(lim) ? undefined : lim }), 'dataOut');
+  } catch (e) { setOut({ error: String(e) }, 'dataOut'); }
 }
 
 async function browseTable() {
   try {
-    const t = readDbTable('dataDb','dataTable');
+    const t = readDbTable('dataDb', 'dataTable');
+    if ($('dataFormDb')) $('dataFormDb').value = t.db;
+    if ($('dataFormTable')) $('dataFormTable').value = t.table;
     const limit = parseInt($('dataBrowseLimit').value,10) || 50;
     const offset = parseInt($('dataBrowseOffset').value,10) || 0;
     const orderCol = $('dataBrowseOrder').value.trim();
@@ -645,6 +1087,386 @@ function browseNext() {
   const cur = parseInt($('dataBrowseOffset').value,10) || 0;
   $('dataBrowseOffset').value = cur + limit;
   browseTable();
+}
+
+// ---------------------------------------------------------------------------
+// Easy Viewer
+// ---------------------------------------------------------------------------
+function defaultEasyBuilderRows() {
+  return [
+    { id: easyBuilderNextId++, name: 'id', type: 'i64', nullable: false, auto_increment: true, primary: true },
+    { id: easyBuilderNextId++, name: 'name', type: 'string', nullable: false, auto_increment: false, primary: false }
+  ];
+}
+
+function easySetBuilderRows(rows) {
+  const normalized = Array.isArray(rows) ? rows : [];
+  STATE.easyTableBuilderRows = normalized
+    .map((row) => ({
+      id: row.id || easyBuilderNextId++,
+      name: String(row.name || '').trim(),
+      type: String(row.type || 'string').trim() || 'string',
+      nullable: !!row.nullable,
+      auto_increment: !!row.auto_increment,
+      primary: !!row.primary
+    }))
+    .filter((row) => row.name);
+  renderEasyBuilderRows();
+}
+
+function renderEasyBuilderRows() {
+  const target = $('easyTableBuilderRows');
+  if (!target) return;
+  target.textContent = '';
+  if (!STATE.easyTableBuilderRows.length) {
+    target.textContent = 'Add a column to define the table.';
+    return;
+  }
+  STATE.easyTableBuilderRows.forEach((row) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'builder-row';
+    wrap.dataset.rowId = String(row.id);
+    wrap.innerHTML =
+      '<div class="field"><label>Column</label><input data-role="name" value="' + escapeHtml(row.name) + '" placeholder="column_name" /></div>' +
+      '<div class="field"><label>Type</label><select data-role="type">' +
+      SCHEMA_TYPE_OPTIONS.map((opt) => '<option value="' + opt + '"' + (opt === row.type ? ' selected' : '') + '>' + opt + '</option>').join('') +
+      '</select></div>' +
+      '<label class="builder-check"><input type="checkbox" data-role="nullable"' + (row.nullable ? ' checked' : '') + ' />Nullable</label>' +
+      '<label class="builder-check"><input type="checkbox" data-role="auto_increment"' + (row.auto_increment ? ' checked' : '') + ' />Auto Inc</label>' +
+      '<label class="builder-check"><input type="checkbox" data-role="primary"' + (row.primary ? ' checked' : '') + ' />Primary Key</label>' +
+      '<button class="danger sm" data-role="remove">Remove</button>';
+    wrap.querySelector('[data-role="remove"]')?.addEventListener('click', () => {
+      STATE.easyTableBuilderRows = STATE.easyTableBuilderRows.filter((item) => item.id !== row.id);
+      renderEasyBuilderRows();
+    });
+    target.appendChild(wrap);
+  });
+}
+
+function easyCollectBuilderRows() {
+  const target = $('easyTableBuilderRows');
+  if (!target) return [];
+  const rows = [];
+  target.querySelectorAll('.builder-row').forEach((rowEl) => {
+    const name = rowEl.querySelector('[data-role="name"]')?.value.trim() || '';
+    if (!name) return;
+    rows.push({
+      id: Number(rowEl.dataset.rowId || 0) || easyBuilderNextId++,
+      name,
+      type: rowEl.querySelector('[data-role="type"]')?.value || 'string',
+      nullable: !!rowEl.querySelector('[data-role="nullable"]')?.checked,
+      auto_increment: !!rowEl.querySelector('[data-role="auto_increment"]')?.checked,
+      primary: !!rowEl.querySelector('[data-role="primary"]')?.checked
+    });
+  });
+  return rows;
+}
+
+function easyAddColumn() {
+  const current = easyCollectBuilderRows();
+  if (current.length) STATE.easyTableBuilderRows = current;
+  STATE.easyTableBuilderRows.push({
+    id: easyBuilderNextId++,
+    name: '',
+    type: 'string',
+    nullable: true,
+    auto_increment: false,
+    primary: false
+  });
+  renderEasyBuilderRows();
+}
+
+function easySeedColumns() {
+  easySetBuilderRows(defaultEasyBuilderRows());
+  setOut({ ok: true, message: 'Starter columns loaded.' }, 'easyOut');
+}
+
+function easyGetSelectedDb() {
+  return $('easyDbSelect')?.value.trim() || STATE.selectedDb || '';
+}
+
+function easyGetSelectedTable() {
+  return $('easyTableSelect')?.value.trim() || STATE.selectedTable || '';
+}
+
+function easyRefreshTableOptions(db) {
+  const tableSelect = $('easyTableSelect');
+  if (!tableSelect) return;
+  const selected = easyGetSelectedTable();
+  tableSelect.textContent = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select table';
+  tableSelect.appendChild(placeholder);
+  const tables = db && STATE.dbTree[db] ? STATE.dbTree[db] : [];
+  tables.forEach((table) => {
+    const opt = document.createElement('option');
+    opt.value = table;
+    opt.textContent = table;
+    tableSelect.appendChild(opt);
+  });
+  if (tables.includes(selected)) tableSelect.value = selected;
+  else tableSelect.value = '';
+}
+
+function easyRefreshTargetsFromTree() {
+  const dbSelect = $('easyDbSelect');
+  if (!dbSelect) return;
+  const dbs = Object.keys(STATE.dbTree || {}).sort();
+  const selected = easyGetSelectedDb();
+  dbSelect.textContent = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select database';
+  dbSelect.appendChild(placeholder);
+  dbs.forEach((db) => {
+    const opt = document.createElement('option');
+    opt.value = db;
+    opt.textContent = db;
+    dbSelect.appendChild(opt);
+  });
+  if (dbs.includes(selected)) dbSelect.value = selected;
+  else if (dbs.length) dbSelect.value = dbs[0];
+  else dbSelect.value = '';
+  easyRefreshTableOptions(dbSelect.value);
+}
+
+function easyApplySelection() {
+  const db = easyGetSelectedDb();
+  const table = easyGetSelectedTable();
+  if (!db) {
+    setOut({ error: 'Select a database first.' }, 'easyOut');
+    return;
+  }
+  setSelectedDb(db);
+  if (table) setSelectedTable(table);
+  updateContext();
+  if ($('easyNewDb') && !$('easyNewDb').value.trim()) $('easyNewDb').value = db;
+  if ($('easyNewTable') && table && !$('easyNewTable').value.trim()) $('easyNewTable').value = table;
+  setOut({ ok: true, database: db, table: table || null }, 'easyOut');
+}
+
+async function easyReloadTargets() {
+  try {
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+    setOut({ ok: true, databases: Object.keys(STATE.dbTree).length }, 'easyOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+function easyApplyColumns(columns, primaryKey) {
+  const target = $('easyRowFields');
+  if (!target) return;
+  const pk = new Set(Array.isArray(primaryKey) ? primaryKey : []);
+  STATE.easyRowColumns = (columns || []).map((col) => ({
+    name: col.name,
+    kind: col.type?.kind || 'string',
+    nullable: !!col.nullable,
+    primary: pk.has(col.name)
+  }));
+  target.textContent = '';
+  if (!STATE.easyRowColumns.length) {
+    target.textContent = 'Load a table to generate row fields.';
+    return;
+  }
+  STATE.easyRowColumns.forEach((col) => {
+    const row = document.createElement('div');
+    row.className = 'builder-row compact';
+    row.dataset.colName = col.name;
+    row.dataset.colKind = col.kind;
+    row.dataset.colPrimary = col.primary ? 'true' : 'false';
+    row.innerHTML =
+      '<div class="field"><label>' + escapeHtml(col.name) + '</label><input data-role="value" placeholder="' + escapeHtml(dataTypePlaceholder(col.kind)) + '" /></div>' +
+      '<div class="field"><label>Type</label><div class="builder-muted">' + escapeHtml(col.kind + (col.primary ? ' (PK)' : '')) + '</div><div class="builder-muted">' + escapeHtml(dataTypeHint(col.kind)) + '</div></div>' +
+      '<label class="builder-check"><input type="checkbox" data-role="null" ' + (col.nullable ? '' : 'disabled') + ' />Set NULL</label>' +
+      '<button class="sm ghost" data-role="clear">Clear</button>';
+    row.querySelector('[data-role="clear"]')?.addEventListener('click', () => {
+      row.querySelector('[data-role="value"]').value = '';
+      const toggle = row.querySelector('[data-role="null"]');
+      if (toggle && !toggle.disabled) toggle.checked = false;
+    });
+    target.appendChild(row);
+  });
+}
+
+function easyClearRowForm() {
+  const target = $('easyRowFields');
+  if (!target) return;
+  target.querySelectorAll('.builder-row').forEach((row) => {
+    const input = row.querySelector('[data-role="value"]');
+    const toggle = row.querySelector('[data-role="null"]');
+    if (input) input.value = '';
+    if (toggle && !toggle.disabled) toggle.checked = false;
+  });
+}
+
+function easyCollectRow(includeAllColumns) {
+  const target = $('easyRowFields');
+  if (!target) throw new Error('Load table form first');
+  const row = {};
+  const pk = [];
+  const pkMissing = [];
+  target.querySelectorAll('.builder-row').forEach((rowEl) => {
+    const name = rowEl.dataset.colName || '';
+    const kind = rowEl.dataset.colKind || 'string';
+    const primary = rowEl.dataset.colPrimary === 'true';
+    if (!name) return;
+    const raw = rowEl.querySelector('[data-role="value"]')?.value || '';
+    const forceNull = !!rowEl.querySelector('[data-role="null"]')?.checked;
+    const hasValue = forceNull || String(raw).trim().length > 0;
+    if (!hasValue && !includeAllColumns && !primary) return;
+    const lit = literalFromInput(kind, raw, forceNull);
+    if (includeAllColumns || hasValue || primary) row[name] = lit;
+    if (primary) {
+      if (!hasValue || lit.t === 'null') pkMissing.push(name);
+      pk.push(lit);
+    }
+  });
+  return { row, pk, pkMissing };
+}
+
+function easyReadTableRef() {
+  const db = easyGetSelectedDb();
+  const table = easyGetSelectedTable();
+  if (!db || !table) throw new Error('Select database and table');
+  return { db, table };
+}
+
+async function easyLoadTableForm() {
+  try {
+    easyApplySelection();
+    const tableRef = easyReadTableRef();
+    const res = await call('schema.describe_table', tableRef, 'easyOut');
+    if (!res?.json?.ok || !res.json.result) return;
+    const result = res.json.result;
+    easyApplyColumns(result.columns || [], result.primary_key || []);
+    dataFormApplyColumns(result.columns || [], result.primary_key || []);
+    if ($('dataFormDb')) $('dataFormDb').value = tableRef.db;
+    if ($('dataFormTable')) $('dataFormTable').value = tableRef.table;
+    if ($('dataDb')) $('dataDb').value = tableRef.db;
+    if ($('dataTable')) $('dataTable').value = tableRef.table;
+    if ($('schemaDb')) $('schemaDb').value = tableRef.db;
+    if ($('schemaTable')) $('schemaTable').value = tableRef.table;
+    setOut({ ok: true, columns: (result.columns || []).length, primary_key: result.primary_key || [] }, 'easyOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyBrowseRows() {
+  try {
+    easyApplySelection();
+    const tableRef = easyReadTableRef();
+    const limit = parseInt($('easyBrowseLimit')?.value || '', 10) || 25;
+    const desc = await call('schema.describe_table', tableRef, 'easyOut');
+    if (!desc?.json?.ok || !desc.json.result) return;
+    const cols = (desc.json.result.columns || []).map((col) => col.name);
+    const projection = cols.map((name) => ({ expr: { col: name }, as: null }));
+    const query = {
+      with: [],
+      body: { select: { projection, from: [tableRef] } },
+      order_by: [],
+      limit: { limit, offset: 0 }
+    };
+    const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyOut');
+    if (res?.json?.ok && res.json.result?.data) {
+      const data = res.json.result.data;
+      renderTable('easyBrowseTable', (data.columns || []).map((col) => col.name), data.rows || []);
+    }
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyInsertRow() {
+  try {
+    easyApplySelection();
+    const tableRef = easyReadTableRef();
+    const payload = easyCollectRow(false);
+    if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
+    await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyOut');
+    await easyBrowseRows();
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyGetByPk() {
+  try {
+    easyApplySelection();
+    const tableRef = easyReadTableRef();
+    const payload = easyCollectRow(true);
+    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
+    if (!payload.pk.length) throw new Error('This table has no primary key');
+    await call('data.get', { table: tableRef, pk: payload.pk }, 'easyOut');
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyDeleteByPk() {
+  try {
+    easyApplySelection();
+    const tableRef = easyReadTableRef();
+    const payload = easyCollectRow(true);
+    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
+    const where = whereByPkColumns(STATE.easyRowColumns, payload.pk);
+    if (!where) throw new Error('Could not build primary-key filter');
+    await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyOut');
+    await easyBrowseRows();
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyCreateDb() {
+  try {
+    const db = $('easyNewDb')?.value.trim() || easyGetSelectedDb();
+    if (!db) throw new Error('Enter a database name');
+    await call('schema.create_database', { db }, 'easyOut');
+    setSelectedDb(db);
+    if ($('schemaDb')) $('schemaDb').value = db;
+    if ($('dataDb')) $('dataDb').value = db;
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
+}
+
+async function easyCreateTable() {
+  try {
+    const db = easyGetSelectedDb() || $('easyNewDb')?.value.trim();
+    const table = $('easyNewTable')?.value.trim();
+    if (!db || !table) throw new Error('Database and table name are required');
+    const rows = easyCollectBuilderRows();
+    if (!rows.length) throw new Error('Define at least one column');
+    const columns = rows.map((row) => cleanParams({
+      name: row.name,
+      type: row.type,
+      nullable: row.nullable,
+      auto_increment: row.auto_increment
+    }));
+    const primaryKey = rows.filter((row) => row.primary).map((row) => row.name);
+    await call('schema.create_table', {
+      db,
+      table,
+      columns,
+      primary_key: primaryKey,
+      if_not_exists: true
+    }, 'easyOut');
+    setSelectedDb(db);
+    setSelectedTable(table);
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+    if ($('easyTableSelect')) $('easyTableSelect').value = table;
+    await easyLoadTableForm();
+    await easyBrowseRows();
+  } catch (e) {
+    setOut({ error: String(e) }, 'easyOut');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -820,10 +1642,10 @@ async function importData() {
       for (const [k, v] of Object.entries(row)) {
         if (v && typeof v === 'object' && 't' in v) out[k] = v;
         else if (typeof v === 'number') out[k] = { t: Number.isInteger(v) ? 'i64' : 'f64', v };
-        else if (typeof v === 'string') out[k] = { t: 'string', v };
+        else if (typeof v === 'string') out[k] = { t: 'str', v };
         else if (typeof v === 'boolean') out[k] = { t: 'bool', v };
         else if (v === null) out[k] = { t: 'null' };
-        else out[k] = { t: 'string', v: JSON.stringify(v) };
+        else out[k] = { t: 'str', v: JSON.stringify(v) };
       }
       return out;
     });
@@ -1306,6 +2128,31 @@ function sqlTemplateSelect() {
   else setSqlText('SELECT 1 AS healthcheck;');
 }
 
+function quickCreateDb() {
+  setActivePanel('easy', true);
+  if ($('easyNewDb')) $('easyNewDb').focus();
+}
+
+function quickCreateTable() {
+  setActivePanel('easy', true);
+  if (!STATE.easyTableBuilderRows.length) easySeedColumns();
+  if ($('easyNewTable')) $('easyNewTable').focus();
+}
+
+function quickInsertRow() {
+  setActivePanel('easy', true);
+  if ($('easyDbSelect')) $('easyDbSelect').focus();
+}
+
+function quickBrowseData() {
+  setActivePanel('easy', true);
+  easyBrowseRows();
+}
+
+function quickOpenCluster() {
+  setActivePanel('cluster', true);
+}
+
 // ---------------------------------------------------------------------------
 // Wire all buttons
 // ---------------------------------------------------------------------------
@@ -1315,8 +2162,41 @@ function wire(id, fn) { const el = $(id); if (el) el.addEventListener('click', f
 wire('btnConnect', connect);
 wire('btnDisconnect', disconnect);
 wire('btnPing', ping);
+wire('btnVersion', loadVersion);
 wire('btnStats', loadStats);
 wire('btnCapabilities', loadCapabilities);
+wire('btnTransport', loadTransport);
+
+// Overview quick actions
+wire('btnQuickCreateDb', quickCreateDb);
+wire('btnQuickCreateTable', quickCreateTable);
+wire('btnQuickInsertRow', quickInsertRow);
+wire('btnQuickBrowseData', quickBrowseData);
+wire('btnQuickCluster', quickOpenCluster);
+
+// Easy viewer
+wire('btnEasyReload', easyReloadTargets);
+wire('btnEasyUseSelection', easyApplySelection);
+wire('btnEasyLoadTable', easyLoadTableForm);
+wire('btnEasyBrowse', easyBrowseRows);
+wire('btnEasyCreateDb', easyCreateDb);
+wire('btnEasyAddCol', easyAddColumn);
+wire('btnEasySeedCols', easySeedColumns);
+wire('btnEasyCreateTable', easyCreateTable);
+wire('btnEasyRowInsert', easyInsertRow);
+wire('btnEasyRowGet', easyGetByPk);
+wire('btnEasyRowDelete', easyDeleteByPk);
+wire('btnEasyRowClear', easyClearRowForm);
+if ($('easyDbSelect')) $('easyDbSelect').addEventListener('change', (e) => {
+  easyRefreshTableOptions(e.target.value);
+  setSelectedDb(e.target.value);
+  setSelectedTable('');
+  easyApplyColumns([], []);
+  renderTable('easyBrowseTable', [], []);
+});
+if ($('easyTableSelect')) $('easyTableSelect').addEventListener('change', (e) => {
+  setSelectedTable(e.target.value);
+});
 
 // Profiles
 wire('btnSaveProfile', saveProfile);
@@ -1346,8 +2226,18 @@ wire('btnSchemaDropTable', schemaDropTable);
 wire('btnSchemaPropose', schemaProposeChange);
 wire('btnSchemaMergeStatus', schemaMergeStatus);
 wire('btnSchemaApplyMerge', schemaApplyMerge);
+wire('btnSchemaBuilderSeed', schemaBuilderSeedDefaults);
+wire('btnSchemaBuilderAddCol', () => schemaBuilderAddColumn());
+wire('btnSchemaBuilderLoad', schemaBuilderLoadCurrent);
+wire('btnSchemaBuilderSync', () => schemaBuilderSyncToJson(true));
+wire('btnSchemaBuilderCreateDb', schemaBuilderCreateDb);
+wire('btnSchemaBuilderCreateTable', schemaBuilderCreateTable);
 
 // Data
+wire('btnDataFormLoad', dataFormLoadColumns);
+wire('btnDataFormInsert', dataFormInsertRow);
+wire('btnDataFormGetPk', dataFormGetByPk);
+wire('btnDataFormDeletePk', dataFormDeleteByPk);
 wire('btnDataGet', dataGet);
 wire('btnDataInsert', dataInsert);
 wire('btnDataUpdate', dataUpdate);
@@ -1355,6 +2245,8 @@ wire('btnDataDelete', dataDelete);
 wire('btnBrowse', browseTable);
 wire('btnBrowsePrev', browsePrev);
 wire('btnBrowseNext', browseNext);
+if ($('dataDb')) $('dataDb').addEventListener('change', () => { if ($('dataFormDb')) $('dataFormDb').value = $('dataDb').value; });
+if ($('dataTable')) $('dataTable').addEventListener('change', () => { if ($('dataFormTable')) $('dataFormTable').value = $('dataTable').value; });
 
 // Cluster
 wire('btnClusterStatus', clusterReadStatus);
@@ -1473,6 +2365,9 @@ refreshProfiles();
 renderResearchDashboard();
 renderFeatureCenterGrid();
 renderResearchSettings();
+schemaBuilderSeedDefaults();
+easySetBuilderRows(defaultEasyBuilderRows());
+easyRefreshTargetsFromTree();
 setConnStatus('warn', 'Disconnected', 'Connect to start.');
 
 // Auto-connect if same origin

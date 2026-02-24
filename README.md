@@ -33,7 +33,7 @@ The repository is written so you can:
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** phpMyAdmin-like workspace + cluster + settings management.
+- **SkeinAdmin control panel:** click-first workspace + expert panels for cluster and settings management.
 
 ---
 

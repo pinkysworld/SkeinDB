@@ -1,6 +1,6 @@
 # SkeinAdmin (Standalone Console)
 
-This folder contains the embedded **SkeinAdmin** SPA, a phpMyAdmin-like management console.
+This folder contains the embedded **SkeinAdmin** SPA, a click-first management console with optional expert mode.
 
 Design goals:
 - Static deployable SPA (hostable behind IIS/Apache/Nginx)
@@ -8,6 +8,7 @@ Design goals:
 - Supports multiple servers and clusters via connection profiles
 
 Implemented navigation areas:
+- **Easy Viewer** (click-first DB/table/row workflows)
 - **Schema** / **Data** / **SQL Workspace**
 - **Server Load & Statistics** (QPS/TPS, latency, compaction, cache)
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)

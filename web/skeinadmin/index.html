@@ -90,6 +90,12 @@
       .feature-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
       .feature-card{border:1px solid var(--line);border-radius:12px;padding:10px;background:#fff;display:grid;gap:4px}
       .feature-title{font-weight:600;font-size:12px}
+      .builder-list{display:grid;gap:8px}
+      .builder-row{display:grid;grid-template-columns:1.4fr 1fr auto auto auto auto;gap:8px;align-items:end;padding:8px;border:1px dashed var(--line);border-radius:10px;background:#fff}
+      .builder-row.compact{grid-template-columns:1.4fr 1fr auto auto}
+      .builder-check{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+      .builder-check input{width:auto}
+      .builder-muted{font-size:10px;color:var(--muted)}
       details.help{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--panel-2);margin-bottom:8px}
       details.help summary{cursor:pointer;font-weight:600;font-size:12px}
       details.help .help-body{margin-top:6px;display:grid;gap:6px;font-size:11px;color:var(--muted)}
@@ -112,7 +118,7 @@
       .research-card .actions{margin-bottom:0}
       .pagination{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11px}
       @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-      @media(max-width:980px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}.nav{flex-direction:row;flex-wrap:wrap}.panel{padding:12px}.card.wide{grid-column:1/-1}}
+      @media(max-width:980px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}.nav{flex-direction:row;flex-wrap:wrap}.panel{padding:12px}.card.wide{grid-column:1/-1}.builder-row,.builder-row.compact{grid-template-columns:1fr 1fr}}
     </style>
   </head>
   <body data-app="skeinadmin" data-mode="admin">
@@ -122,6 +128,7 @@
         <nav class="nav">
           <div class="nav-group-title">General</div>
           <button class="nav-item active" data-panel="overview" data-scope="admin">Overview</button>
+          <button class="nav-item" data-panel="easy" data-scope="admin">Easy Viewer</button>
           <button class="nav-item" data-panel="workspace">Console</button>
           <button class="nav-item" data-panel="schema">Schema</button>
           <button class="nav-item" data-panel="data">Data</button>
@@ -157,7 +164,7 @@
       </aside>
       <main class="main">
         <header class="topbar">
-          <div><h1 id="pageTitle">Admin Overview</h1><p class="subtitle" id="pageSubtitle">Full phpMyAdmin-like admin with all 20 research features.</p></div>
+          <div><h1 id="pageTitle">Admin Overview</h1><p class="subtitle" id="pageSubtitle">Complete SkeinDB control surface with guided workflows for all 20 research features.</p></div>
           <div class="topbar-actions">
             <div class="field inline" style="min-width:160px;margin-bottom:0"><label>Base URL</label><input id="baseUrl" placeholder="http://localhost:8080" /></div>
             <div class="field inline" style="min-width:100px;margin-bottom:0"><label>Token</label><input id="token" type="password" placeholder="Bearer token" /></div>
@@ -165,14 +172,17 @@
               <button id="btnConnect" class="primary">Connect</button>
               <button id="btnDisconnect" class="ghost">Disconnect</button>
               <button id="btnPing" class="primary sm">Ping</button>
+              <button id="btnVersion" class="sm">Version</button>
               <button id="btnStats" class="admin-only sm">Stats</button>
               <button id="btnCapabilities" class="admin-only sm">Capabilities</button>
+              <button id="btnTransport" class="admin-only sm">Transport</button>
             </div>
             <div class="topbar-meta"><div class="pill" id="connBadge">Disconnected</div><div class="hint" id="connSummary">Connect to start.</div></div>
           </div>
         </header>
         <nav class="top-tabs">
           <button class="tab-btn active" data-panel="overview" data-scope="admin">Overview</button>
+          <button class="tab-btn" data-panel="easy" data-scope="admin">Easy</button>
           <button class="tab-btn" data-panel="workspace">SQL</button>
           <button class="tab-btn" data-panel="schema">Structure</button>
           <button class="tab-btn" data-panel="data">Browse</button>
@@ -190,7 +200,7 @@
 
         <!-- OVERVIEW --><section class="panel active" data-panel="overview">
           <div class="panel-grid">
-            <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, click Connect.</li><li>Pick a database from the left tree.</li><li>Use tabs above to manage all features.</li></ol><div class="callout">All 20 research agenda features (R01-R20) are accessible via sidebar panels. Every RPC method is callable via the RPC Explorer.</div></div>
+            <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, then click Connect.</li><li>Create a database and table using the guided builders.</li><li>Use Browse &amp; Edit for row operations and Cluster Manager for topology.</li></ol><div class="callout">Every management path is available in two layers: guided forms for day-to-day workflows and advanced JSON/RPC controls for full fidelity.</div><div class="actions"><button id="btnQuickCreateDb" class="sm">New Database</button><button id="btnQuickCreateTable" class="sm">New Table</button><button id="btnQuickInsertRow" class="sm">Insert Row</button><button id="btnQuickBrowseData" class="sm">Browse Table</button><button id="btnQuickCluster" class="sm">Open Cluster</button></div></div>
             <div class="card"><h2>Runtime Status</h2>
               <div class="callout">
                 Storage efficiency is shown live from <code>stats.snapshot</code>. A dedup ratio above 1.0 means repeated values are being interned.
@@ -215,6 +225,38 @@
             <div class="card wide"><h2>Feature Center</h2><div class="feature-grid" id="featureCenterGrid"></div></div>
             <div class="card wide"><h2>Capabilities</h2><pre id="capabilitiesOut">Run Capabilities to load.</pre></div>
             <div class="card wide"><h2>Latest Response</h2><pre id="out">Ready.</pre></div>
+          </div>
+        </section>
+
+        <!-- EASY VIEWER --><section class="panel admin-only" data-panel="easy">
+          <div class="panel-grid">
+            <div class="card wide"><h2>Click-First Database Control</h2>
+              <div class="callout">This view is designed for fast point-and-click administration: no JSON required. Advanced mode remains available in Schema/Data/RPC panels.</div>
+              <div class="row">
+                <div class="field"><label>Database</label><select id="easyDbSelect"></select></div>
+                <div class="field"><label>Table</label><select id="easyTableSelect"></select></div>
+                <div class="field"><label>Browse Limit</label><input id="easyBrowseLimit" type="number" value="25" /></div>
+              </div>
+              <div class="actions"><button id="btnEasyReload" class="sm">Reload Targets</button><button id="btnEasyUseSelection" class="primary sm">Use Selection</button><button id="btnEasyLoadTable" class="sm">Load Table Form</button><button id="btnEasyBrowse" class="secondary sm">Browse Rows</button></div>
+              <pre id="easyOut">Select a database and table to begin.</pre>
+            </div>
+            <div class="card wide"><h2>Create Database / Table</h2>
+              <details class="help" open><summary>Table creation flow</summary><div class="help-body"><div>Create a database if needed.</div><div>Define columns below and mark the primary key.</div><div>Click <strong>Create Table</strong>.</div></div></details>
+              <div class="row">
+                <div class="field"><label>New Database Name</label><input id="easyNewDb" placeholder="demo" /></div>
+                <div class="field"><label>New Table Name</label><input id="easyNewTable" placeholder="users" /></div>
+              </div>
+              <div class="actions"><button id="btnEasyCreateDb" class="sm">Create Database</button><button id="btnEasyAddCol" class="sm">Add Column</button><button id="btnEasySeedCols" class="sm">Starter Columns</button><button id="btnEasyCreateTable" class="primary sm">Create Table</button></div>
+              <div class="builder-list" id="easyTableBuilderRows">Add a column to define the table.</div>
+            </div>
+            <div class="card wide"><h2>Row Editor</h2>
+              <details class="help" open><summary>Row editing flow</summary><div class="help-body"><div>Load table form to generate typed fields.</div><div>Fill fields, then insert/get/delete using primary key where needed.</div></div></details>
+              <div class="actions"><button id="btnEasyRowInsert" class="primary sm">Insert Row</button><button id="btnEasyRowGet" class="sm">Get by Primary Key</button><button id="btnEasyRowDelete" class="danger sm">Delete by Primary Key</button><button id="btnEasyRowClear" class="ghost sm">Clear Form</button></div>
+              <div class="builder-list" id="easyRowFields">Load a table to generate row fields.</div>
+            </div>
+            <div class="card wide"><h2>Row Preview</h2>
+              <div class="table-wrap"><table id="easyBrowseTable"></table></div>
+            </div>
           </div>
         </section>
 
@@ -244,9 +286,17 @@
               <div class="actions"><button id="btnSchemaListDb" class="primary sm">List DB</button><button id="btnSchemaListTables" class="sm">List Tables</button><button id="btnSchemaDropDb" class="danger sm">Drop DB</button><button id="btnSchemaDropTable" class="danger sm">Drop Table</button></div>
               <div class="row"><div class="field"><label>Databases</label><div class="list" id="dbList">--</div></div><div class="field"><label>Tables</label><div class="list" id="tableList">--</div></div></div>
             </div>
+            <div class="card wide"><h2>Guided Table Builder</h2>
+              <details class="help" open><summary>How this works</summary><div class="help-body"><div>1) Pick database + table name.</div><div>2) Add columns and mark one or more primary-key fields.</div><div>3) Click <strong>Build JSON</strong> (fills the advanced JSON editor), then <strong>Create Table</strong>.</div></div></details>
+              <div class="actions"><button id="btnSchemaBuilderSeed" class="sm">Load Starter Columns</button><button id="btnSchemaBuilderAddCol" class="sm">Add Column</button><button id="btnSchemaBuilderLoad" class="sm">Load Current Table</button><button id="btnSchemaBuilderSync" class="secondary sm">Build JSON</button></div>
+              <div class="builder-list" id="schemaBuilderRows">Add a column to get started.</div>
+              <div class="actions"><button id="btnSchemaBuilderCreateDb" class="sm">Create DB</button><button id="btnSchemaBuilderCreateTable" class="primary sm">Create Table</button></div>
+              <pre id="schemaBuilderOut">Use this guided form to create table definitions quickly.</pre>
+            </div>
             <div class="card wide"><h2>Schema Ops</h2>
+              <div class="callout">Advanced mode: direct JSON payload editing for full RPC control. Guided Builder writes into these fields automatically.</div>
               <div class="row"><div class="field"><label>Database</label><input id="schemaDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="schemaTable" placeholder="users" /></div></div>
-              <div class="field"><label>Columns (JSON)</label><textarea id="schemaColumns" placeholder='[{"name":"id","type":"i64"},{"name":"name","type":"string"}]'></textarea></div>
+              <div class="field"><label>Columns (JSON)</label><textarea id="schemaColumns" placeholder='[{"name":"id","type":"i64","nullable":false,"auto_increment":true},{"name":"name","type":"string","nullable":false}]'></textarea></div>
               <div class="row"><div class="field"><label>PK (comma)</label><input id="schemaPk" placeholder="id" /></div><div class="field"><label>IF NOT EXISTS</label><select id="schemaIfNotExists"><option value="true">true</option><option value="false">false</option></select></div></div>
               <div class="actions"><button id="btnSchemaCreateDb" class="sm">Create DB</button><button id="btnSchemaDescribe" class="sm">Describe</button><button id="btnSchemaCreateTable" class="primary sm">Create Table</button><button id="btnSchemaPropose" class="secondary sm">Propose Change</button><button id="btnSchemaMergeStatus" class="sm">Merge Status</button><button id="btnSchemaApplyMerge" class="sm">Apply Merge</button></div>
               <pre id="schemaOut">Waiting.</pre>
@@ -257,12 +307,20 @@
 
         <!-- DATA --><section class="panel" data-panel="data">
           <div class="panel-grid">
+            <div class="card wide"><h2>Guided Row Editor</h2>
+              <details class="help" open><summary>Quick workflow</summary><div class="help-body"><div>Use this form for day-to-day inserts and PK lookups without writing JSON manually.</div><div>Start with <strong>Load Table Columns</strong> after selecting database and table.</div></div></details>
+              <div class="row"><div class="field"><label>Database</label><input id="dataFormDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="dataFormTable" placeholder="users" /></div></div>
+              <div class="actions"><button id="btnDataFormLoad" class="sm">Load Table Columns</button><button id="btnDataFormInsert" class="primary sm">Insert Row</button><button id="btnDataFormGetPk" class="sm">Get by PK</button><button id="btnDataFormDeletePk" class="danger sm">Delete by PK</button></div>
+              <div class="builder-list" id="dataFormFields">Load a table to generate typed input fields.</div>
+              <pre id="dataGuideOut">Ready.</pre>
+            </div>
             <div class="card wide"><h2>Data Operations</h2>
+              <div class="callout">Advanced mode: direct JSON payload editing for full RPC compatibility.</div>
               <div class="row"><div class="field"><label>Database</label><input id="dataDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="dataTable" placeholder="users" /></div><div class="field"><label>Limit</label><input id="dataLimit" type="number" placeholder="50" /></div></div>
               <div class="field"><label>PK</label><textarea id="dataPk" rows="1" placeholder='[{"t":"i64","v":1}]'></textarea></div>
-              <div class="field"><label>Rows</label><textarea id="dataRows" rows="2" placeholder='[{"id":{"t":"i64","v":1},"name":{"t":"string","v":"Ada"}}]'></textarea></div>
-              <div class="field"><label>Where</label><textarea id="dataWhere" rows="1" placeholder='{"op":"=","left":{"col":"id"},"right":{"lit":{"t":"i64","v":1}}}'></textarea></div>
-              <div class="field"><label>Set</label><textarea id="dataSet" rows="1" placeholder='{"name":{"t":"string","v":"updated"}}'></textarea></div>
+              <div class="field"><label>Rows</label><textarea id="dataRows" rows="2" placeholder='[{"id":{"t":"i64","v":1},"name":{"t":"str","v":"Ada"}}]'></textarea></div>
+              <div class="field"><label>Where</label><textarea id="dataWhere" rows="1" placeholder='{"op":"eq","a":{"col":"id"},"b":{"lit":{"t":"i64","v":1}}}'></textarea></div>
+              <div class="field"><label>Set</label><textarea id="dataSet" rows="1" placeholder='{"name":{"t":"str","v":"updated"}}'></textarea></div>
               <div class="actions"><button id="btnDataGet" class="sm">Get</button><button id="btnDataInsert" class="primary sm">Insert</button><button id="btnDataUpdate" class="sm">Update</button><button id="btnDataDelete" class="danger sm">Delete</button><button id="btnBrowse" class="secondary sm">Browse</button></div>
               <pre id="dataOut">Waiting.</pre>
             </div>
@@ -354,7 +412,7 @@
         <!-- FORENSICS --><section class="panel" data-panel="forensics">
           <div class="panel-grid"><div class="card wide"><h2>Forensic Audit (R06)</h2>
             <div class="row"><div class="field"><label>From ID</label><input id="forFromId" type="number" value="0" /></div><div class="field"><label>Limit</label><input id="forLimit" type="number" value="100" /></div></div>
-            <div class="field"><label>Filter</label><textarea id="forFilter" rows="2" placeholder='{"op":"=","a":{"col":"db"},"b":{"lit":{"t":"string","v":"demo"}}}'></textarea></div>
+            <div class="field"><label>Filter</label><textarea id="forFilter" rows="2" placeholder='{"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"demo"}}}'></textarea></div>
             <div class="actions"><button id="btnForVerify" class="primary sm">Verify</button><button id="btnForQuery" class="sm">Query</button><button id="btnForExport" class="secondary sm">Export</button></div>
             <pre id="forOut">Ready.</pre>
           </div></div>
