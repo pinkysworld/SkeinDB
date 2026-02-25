@@ -45,7 +45,7 @@ Phase 0 verification checklist:
 - [ ] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
 
 ## Phase 4 — Web console
-- [ ] T040: HTTP API `/api/v1/sql/exec`
+- [x] T040: HTTP API `/api/v1/sql/exec`
 - [x] T041: Console UI scaffold
 - [x] T042: Schema browser + SQL editor
 - [ ] T043: Data browse/edit + import/export

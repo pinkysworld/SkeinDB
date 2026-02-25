@@ -364,6 +364,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let app_state = state.clone();
     let app = Router::new()
         .route("/api/v1/rpc", post(rpc_handler))
+        .route("/api/v1/sql/exec", post(sql_exec_http_handler))
         .route("/api/v1/q/:query_id", get(prepared_get_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
@@ -1804,6 +1805,32 @@ async fn rpc_handler(
         .into_response()
 }
 
+async fn sql_exec_http_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(params): Json<SqlExecParams>,
+) -> axum::response::Response {
+    let params = match serde_json::to_value(params) {
+        Ok(v) => v,
+        Err(err) => {
+            let resp = RpcResponse::err(
+                None,
+                RpcError::new("invalid_request", format!("invalid sql payload: {err}")),
+            );
+            return (StatusCode::BAD_REQUEST, Json(resp)).into_response();
+        }
+    };
+    let req = RpcRequest {
+        skeinql: SKEINQL_VERSION.to_string(),
+        id: None,
+        method: "sql.exec".to_string(),
+        params: Some(params),
+    };
+    handle_rpc(&state, Some(&headers), req, RpcPolicy::default())
+        .await
+        .into_response()
+}
+
 fn should_guard_cluster_write(method: &str) -> bool {
     if matches!(
         method,
@@ -2471,7 +2498,7 @@ fn now_unix_ms_u64() -> u64 {
     now_unix_ms() as u64
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct SqlExecParams {
     sql: String,
     #[serde(default)]
@@ -4426,6 +4453,72 @@ mod tests {
             .expect("collect body")
             .to_bytes();
         serde_json::from_slice(&bytes).expect("parse rpc response")
+    }
+
+    async fn call_sql_exec_http(state: &AppState, payload: Value) -> RpcResponse {
+        let params: SqlExecParams =
+            serde_json::from_value(payload).expect("decode sql exec payload");
+        let resp =
+            sql_exec_http_handler(State(state.clone()), HeaderMap::new(), Json(params)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("parse sql response")
+    }
+
+    #[tokio::test]
+    async fn sql_exec_http_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_http_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
+        assert!(resp.ok);
+
+        let resp = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"CREATE TABLE app.users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"INSERT INTO app.users (id, name) VALUES (1, 'Nora')"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT id, name FROM app.users WHERE id = 1"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let rows = resp
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["v"].as_u64(), Some(1));
+        assert_eq!(rows[0][1]["v"].as_str(), Some("Nora"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[tokio::test]

@@ -158,6 +158,51 @@ async fn cluster_replication_ships_schema_and_rows() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("sql_http_exec")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({"sql":"CREATE DATABASE app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .sql_exec(json!({
+            "sql":"CREATE TABLE app.users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .sql_exec(json!({
+            "sql":"INSERT INTO app.users (id, name) VALUES (7, 'Mia')"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .sql_exec(json!({
+            "sql":"SELECT id, name FROM app.users WHERE id = 7"
+        }))
+        .await?;
+    assert!(resp.ok);
+    let rows = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .and_then(|v| v.get("rows"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0]["v"].as_u64(), Some(7));
+    assert_eq!(rows[0][1]["v"].as_str(), Some("Mia"));
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
@@ -215,6 +260,24 @@ impl RpcHttpClient {
             return Err(anyhow!("http rpc failed: {}", status));
         }
         let parsed: RpcResponse = serde_json::from_slice(&bytes).context("decode rpc response")?;
+        Ok(parsed)
+    }
+
+    async fn sql_exec(&self, params: serde_json::Value) -> anyhow::Result<RpcResponse> {
+        let url = format!("{}/api/v1/sql/exec", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(url)
+            .json(&params)
+            .send()
+            .await
+            .context("send sql exec request")?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.context("read sql exec response")?;
+        if !status.is_success() {
+            return Err(anyhow!("http sql exec failed: {}", status));
+        }
+        let parsed: RpcResponse = serde_json::from_slice(&bytes).context("decode sql response")?;
         Ok(parsed)
     }
 }
