@@ -1,7 +1,7 @@
 # Clustering and Scale-Out (SkeinCluster)
 
 Status: Prototype v0.2 (control-plane + replication transport + shard placement)
-Last updated: 2026-02-21
+Last updated: 2026-02-25
 
 This document defines SkeinDB's approach to clustering.
 
@@ -132,6 +132,7 @@ Proposed methods:
 - `cluster.join_token.create`
 - `cluster.node.join`
 - `cluster.node.remove`
+- `cluster.node.leave`
 - `cluster.replica.promote`
 
 For sharding:
@@ -145,6 +146,7 @@ Implemented in this build:
 - `cluster.join_token.create`
 - `cluster.node.join`
 - `cluster.node.remove`
+- `cluster.node.leave`
 - `cluster.replica.promote`
 - `cluster.shard.create`
 - `cluster.shard.move`
@@ -155,6 +157,7 @@ Replication transport implemented:
 - successful write RPCs are fanned out to replica nodes over HTTP RPC
 - replica applies replicated writes using `x-skeindb-replication: 1`
 - replication counters are exposed in `cluster.status` and `stats.snapshot.cluster`
+- graceful shutdown (`Ctrl+C`, `SIGTERM`, or `system.shutdown`) marks the local node offline and sends best-effort `cluster.node.leave` notifications to online peers
 
 ---
 

@@ -3,7 +3,7 @@
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
 
-## Reality sync (2026-02-24)
+## Reality sync (2026-02-25)
 
 This file now reflects a stricter distinction:
 - `[x]` = implemented and exercised in runtime/tests.
@@ -14,8 +14,8 @@ For the full implemented-vs-partial matrix (core + research), see:
 
 ## Phase 0 — Repo setup
 - [x] T001: Encoding primitives (VarU, Bytes/String, CRC32C)
-- [ ] T002: FileHeader read/write
-- [ ] T003: RecordFrame append/iterate
+- [x] T002: FileHeader read/write
+- [x] T003: RecordFrame append/iterate
 
 ## Phase 1 — Storage core
 - [ ] T010: MANIFEST.log reader/writer

@@ -5204,6 +5204,35 @@ impl Engine {
         }
     }
 
+    pub fn checkpoint_for_shutdown(&mut self) -> anyhow::Result<()> {
+        self.persist_catalog()?;
+
+        let mut table_targets = Vec::new();
+        for (db, meta) in self.catalog.databases.iter() {
+            for table in meta.tables.keys() {
+                table_targets.push((db.clone(), table.clone()));
+            }
+        }
+        for (db, table) in table_targets.into_iter() {
+            self.persist_table(&db, &table)?;
+        }
+
+        self.persist_changes_best_effort();
+        self.persist_prepared_best_effort();
+        self.persist_snapshots_best_effort();
+        self.persist_schema_versions_best_effort();
+        self.persist_schema_changes_best_effort();
+        self.persist_views_best_effort();
+        self.persist_merge_policies_best_effort();
+        self.persist_merge_wasm_registry_best_effort();
+        self.persist_forensic_best_effort();
+        self.persist_dp_best_effort();
+        self.persist_oblivious_best_effort();
+        self.persist_advisor_patterns_best_effort();
+        self.persist_advisor_history_best_effort();
+        Ok(())
+    }
+
     fn load_tables_best_effort(&mut self) {
         for (db, d) in self.catalog.databases.iter() {
             for (table, _) in d.tables.iter() {
@@ -18557,6 +18586,42 @@ mod tests {
             })
         );
         fs::remove_dir_all(&dir_segment).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_for_shutdown_persists_core_files() -> anyhow::Result<()> {
+        let dir = temp_dir("checkpoint_shutdown");
+        let mut engine = Engine::open(&dir)?;
+        seed_events_table(&mut engine, "checkpoint-a", "checkpoint-b")?;
+
+        engine.checkpoint_for_shutdown()?;
+        assert!(dir.join("catalog.json").exists());
+        assert!(dir.join("changes.json").exists());
+        assert!(dir.join("prepared.json").exists());
+        assert!(dir.join("snapshots.json").exists());
+
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let row = reopened
+            .data_get(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![Lit::U64 { v: 1 }],
+            )?
+            .row;
+        assert_eq!(
+            row.get("payload"),
+            Some(&Lit::Str {
+                v: "checkpoint-a".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
         Ok(())
     }
 }

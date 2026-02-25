@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-02-24
+Last updated: 2026-02-25
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -34,6 +34,7 @@ The repository is written so you can:
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
 - **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, and expert panels for cluster/settings management.
+- **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
 
 ---
 

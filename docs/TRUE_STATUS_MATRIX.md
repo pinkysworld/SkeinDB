@@ -1,6 +1,6 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-02-24
+Last updated: 2026-02-25
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -11,7 +11,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **24 done / 81 open** (105 total)
+- `docs/PROJECT_BACKLOG.md`: **26 done / 79 open** (105 total)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open**
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -21,7 +21,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 
 | Phase | Current status | Notes / evidence |
 |---|---|---|
-| Phase 0 Repo setup | Partial | VarU/CRC/value ID primitives are implemented (`crates/skeindb-core/src/lib.rs`). |
+| Phase 0 Repo setup | Implemented | VarU/CRC/value ID primitives plus FileHeader read/write and RecordFrame append/iterate are implemented (`crates/skeindb-core/src/lib.rs`). |
 | Phase 1 Storage core | Partial | Prototype engine persists JSON state and now includes ValueID-backed row ref encoding for table files (`format_version: 2`); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`). |
 | Phase 3 MySQL protocol | Planned | MySQL compatibility remains a top priority but is not complete in this scaffold. |

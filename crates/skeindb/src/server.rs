@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Instant,
@@ -27,19 +27,20 @@ use skeindb_skeinql::{
         AdvisorIndexSynthesizeParams, AiAutoparamAnalyzeParams, AiAutoparamClassifyParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcPollParams,
         CdcSubscribeTableParams, ClusterJoinTokenCreateParams, ClusterNodeJoinParams,
-        ClusterNodeRemoveParams, ClusterNodesParams, ClusterReplicaPromoteParams,
-        ClusterShardCreateParams, ClusterShardMoveParams, ClusterShardRebalanceParams,
-        DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
-        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, EdgeBundleApplyParams,
-        EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
-        ForensicVerifyParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
-        MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
-        MigrationRewritePreviewParams, ObliviousExplainParams, ObliviousPolicyGetParams,
-        ObliviousPolicySetParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
-        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
-        SchemaProposeChangeParams, VectorIndexStatusParams, VectorInsertParams, VectorSearchParams,
-        ViewCreateParams, ViewDropParams, ViewExplainDepsParams, ViewRefreshParams,
-        ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
+        ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
+        ClusterReplicaPromoteParams, ClusterShardCreateParams, ClusterShardMoveParams,
+        ClusterShardRebalanceParams, DataDeleteParams, DataGetParams, DataInsertParams,
+        DataUpdateParams, DpAggregateParams, DpAuditLogParams, DpBudgetGetParams,
+        DpBudgetSetParams, EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
+        ForensicExportParams, ForensicQueryParams, ForensicVerifyParams, MergeApplyParams,
+        MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams, MergeWasmRegisterParams,
+        MigrationIntentReportParams, MigrationRewritePreviewParams, ObliviousExplainParams,
+        ObliviousPolicyGetParams, ObliviousPolicySetParams, QueryExecutePreparedParams,
+        QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo,
+        SchemaMergeStatusParams, SchemaProposeChangeParams, VectorIndexStatusParams,
+        VectorInsertParams, VectorSearchParams, ViewCreateParams, ViewDropParams,
+        ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams,
+        WasmPlanRunParams,
     },
     types::{
         BaseTableRef, Expr, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache,
@@ -51,7 +52,7 @@ use skeindb_skeinql::{
 use crate::engine::{ColumnSchema, Engine, Subscriptions};
 use crate::quic;
 
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 
 const REPLICATION_HEADER: &str = "x-skeindb-replication";
@@ -107,6 +108,7 @@ pub(crate) struct AppState {
     subs: Arc<Mutex<Subscriptions>>,
     coalesce: Arc<QueryCoalescer>,
     transport: TransportCapabilities,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -335,6 +337,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         http: true,
         quic: opts.quic_port.is_some(),
     };
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     let state = AppState {
         started: Instant::now(),
@@ -350,6 +353,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         subs: Arc::new(Mutex::new(Subscriptions::default())),
         coalesce: Arc::new(QueryCoalescer::default()),
         transport,
+        shutdown_tx,
     };
 
     // Load persisted settings if present.
@@ -416,20 +420,145 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     tracing::info!(%http_addr, "HTTP listening");
 
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = shutdown_requested.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() {
+                        tracing::info!("shutdown requested via system.shutdown");
+                    }
+                }
+            }
+            shutdown_flag.store(true, Ordering::SeqCst);
+        })
         .await?;
 
     if let Some(handle) = quic_handle {
         handle.abort();
     }
 
+    if shutdown_requested.load(Ordering::SeqCst) {
+        run_shutdown_tasks(&app_state).await;
+    }
+
     Ok(())
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        if let Ok(mut sigterm) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
     tracing::info!("shutdown signal received");
+}
+
+async fn run_shutdown_tasks(state: &AppState) {
+    if let Err(err) = checkpoint_engine_for_shutdown(state).await {
+        tracing::warn!(error = %err, "shutdown checkpoint failed");
+    }
+    if let Err(err) = mark_local_node_offline(state) {
+        tracing::warn!(error = %err, "failed to mark local node offline");
+    }
+    if let Err(err) = notify_cluster_node_leave(state).await {
+        tracing::warn!(error = %err, "failed to notify peers about node leave");
+    }
+}
+
+async fn checkpoint_engine_for_shutdown(state: &AppState) -> anyhow::Result<()> {
+    let mut engine = state.engine.write().await;
+    engine.checkpoint_for_shutdown()
+}
+
+fn mark_local_node_offline(state: &AppState) -> anyhow::Result<()> {
+    let now = now_unix_ms_u64();
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        let local_node_id = cluster.local_node_id.clone();
+        let Some(local_node) = cluster
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == local_node_id)
+        else {
+            return Ok(());
+        };
+        local_node.status = "offline".to_string();
+        local_node.last_seen_ms = now;
+    }
+    persist_cluster_state(state)?;
+    Ok(())
+}
+
+async fn notify_cluster_node_leave(state: &AppState) -> anyhow::Result<()> {
+    let (enabled, local_node_id, targets) = {
+        let cluster = state.cluster.lock().unwrap();
+        (
+            cluster.enabled,
+            cluster.local_node_id.clone(),
+            cluster
+                .nodes
+                .iter()
+                .filter(|node| node.node_id != cluster.local_node_id && node.status == "online")
+                .map(|node| node.rpc_url.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    if !enabled || targets.is_empty() {
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let auth_token = std::env::var("SKEINDB_TOKEN").ok();
+    let payload = serde_json::json!({
+        "skeinql": SKEINQL_VERSION,
+        "method": "cluster.node.leave",
+        "params": {
+            "node_id": local_node_id,
+        },
+    });
+
+    for rpc_url in targets {
+        let url = format!("{}/api/v1/rpc", rpc_url.trim_end_matches('/'));
+        let mut req = client
+            .post(&url)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .header(REPLICATION_HEADER, "1")
+            .json(&payload);
+        if let Some(token) = auth_token.as_ref() {
+            req = req.bearer_auth(token);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                tracing::warn!(peer = %url, status = %resp.status(), "cluster leave notify failed");
+            }
+            Err(err) => {
+                tracing::warn!(peer = %url, error = %err, "cluster leave transport error");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -779,6 +908,7 @@ pub(crate) async fn handle_rpc(
                     "version": env!("CARGO_PKG_VERSION"),
                     "skeinql": SKEINQL_VERSION,
                 })),
+                "system.shutdown" => request_server_shutdown(state),
                 "system.capabilities" => Ok(system_capabilities(state)),
                 "transport.capabilities" => Ok(transport_capabilities(state)),
                 "stats.snapshot" => Ok(stats_snapshot(state).await),
@@ -815,6 +945,10 @@ pub(crate) async fn handle_rpc(
                 "cluster.node.remove" => {
                     let p: ClusterNodeRemoveParams = parse_params(params.clone())?;
                     cluster_node_remove(state, p)
+                }
+                "cluster.node.leave" => {
+                    let p: ClusterNodeLeaveParams = parse_params(params.clone())?;
+                    cluster_node_leave(state, p)
                 }
                 "cluster.replica.promote" => {
                     let p: ClusterReplicaPromoteParams = parse_params(params.clone())?;
@@ -1642,7 +1776,10 @@ async fn rpc_handler(
 }
 
 fn should_guard_cluster_write(method: &str) -> bool {
-    if matches!(method, "cluster.status" | "cluster.nodes") {
+    if matches!(
+        method,
+        "cluster.status" | "cluster.nodes" | "system.shutdown"
+    ) {
         return false;
     }
     method.starts_with("cluster.") || !is_read_only_method(method)
@@ -1821,6 +1958,7 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
+        "cluster.node.leave",
         "cluster.replica.promote",
         "cluster.shard.create",
         "cluster.shard.move",
@@ -1999,6 +2137,75 @@ fn cluster_node_remove(
     Ok(serde_json::json!({
         "ok": true,
         "removed": params.node_id,
+        "new_primary": new_primary,
+    }))
+}
+
+fn cluster_node_leave(state: &AppState, params: ClusterNodeLeaveParams) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let mut new_primary = None;
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        let mut found = false;
+        for node in cluster.nodes.iter_mut() {
+            if node.node_id == params.node_id {
+                node.status = "offline".to_string();
+                node.last_seen_ms = now;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(RpcError::new("not_found", "node not found"));
+        }
+
+        if cluster.primary_node_id == params.node_id {
+            if let Some(next_id) = cluster
+                .nodes
+                .iter()
+                .find(|n| n.node_id != params.node_id && n.status == "online")
+                .map(|n| n.node_id.clone())
+            {
+                cluster.primary_node_id = next_id.clone();
+                new_primary = Some(next_id.clone());
+                for node in cluster.nodes.iter_mut() {
+                    if node.node_id == next_id {
+                        node.role = "primary".to_string();
+                    } else if node.role == "primary" {
+                        node.role = "replica".to_string();
+                    }
+                }
+            }
+        }
+
+        let online_nodes: HashSet<String> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.status == "online")
+            .map(|n| n.node_id.clone())
+            .collect();
+        for shard in cluster.shards.iter_mut() {
+            shard.replicas.retain(|id| id != &params.node_id);
+            if shard.primary_node_id == params.node_id {
+                if let Some(next) = shard
+                    .replicas
+                    .iter()
+                    .find(|id| online_nodes.contains(*id))
+                    .cloned()
+                    .or_else(|| new_primary.clone())
+                {
+                    shard.primary_node_id = next.clone();
+                    shard.replicas.retain(|id| id != &next);
+                }
+                shard.updated_at_ms = now;
+            }
+        }
+    }
+    persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "node_id": params.node_id,
+        "status": "offline",
         "new_primary": new_primary,
     }))
 }
@@ -3687,10 +3894,22 @@ fn transport_capabilities(state: &AppState) -> Value {
     })
 }
 
+fn request_server_shutdown(state: &AppState) -> Result<Value, RpcError> {
+    state
+        .shutdown_tx
+        .send(true)
+        .map_err(|_| RpcError::new("internal", "shutdown channel unavailable"))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "message": "shutdown initiated"
+    }))
+}
+
 fn system_capabilities(state: &AppState) -> Value {
     let methods = vec![
         "system.ping",
         "system.version",
+        "system.shutdown",
         "system.capabilities",
         "transport.capabilities",
         "stats.snapshot",
@@ -3701,6 +3920,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "cluster.join_token.create",
         "cluster.node.join",
         "cluster.node.remove",
+        "cluster.node.leave",
         "cluster.replica.promote",
         "cluster.shard.create",
         "cluster.shard.move",
@@ -3985,6 +4205,7 @@ fn save_settings(state: &AppState) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::post, Json};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
     use http_body_util::BodyExt;
@@ -4003,16 +4224,18 @@ mod tests {
         assert!(html.contains("Feature Center"));
         assert!(html.contains("RPC Explorer"));
         assert!(html.contains("Easy Viewer"));
-        assert!(html.contains("Click-First Database Control"));
-        assert!(html.contains("Visual Row Editor (Optional)"));
-        assert!(html.contains("Inline grid edit mode"));
+        assert!(html.contains("data-etab=\"browse\""));
+        assert!(html.contains("easyDataGrid"));
+        assert!(html.contains("easyCreateTableName"));
+        assert!(html.contains("btnShutdown"));
         assert!(!html.to_lowercase().contains("phpmyadmin"));
         assert!(html.contains("src/main.js"));
         let js = admin_main_js();
+        assert!(js.contains("system.shutdown"));
         assert!(js.contains("system.capabilities"));
-        assert!(js.contains("easyCreateTable"));
-        assert!(js.contains("easyVisualSaveChanges"));
-        assert!(js.contains("easyGridSaveRow"));
+        assert!(js.contains("easyDoCreateTable"));
+        assert!(js.contains("easyRenderDataGrid"));
+        assert!(js.contains("easyDeleteCheckedRows"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
@@ -4130,6 +4353,7 @@ mod tests {
     fn build_state(dir: PathBuf, engine: Engine) -> AppState {
         let local_rpc_url = "http://127.0.0.1:8080".to_string();
         let local_node_id = "node-test".to_string();
+        let (shutdown_tx, _) = watch::channel(false);
         AppState {
             started: Instant::now(),
             data_dir: dir,
@@ -4147,6 +4371,7 @@ mod tests {
                 http: true,
                 quic: false,
             },
+            shutdown_tx,
         }
     }
 
@@ -5740,6 +5965,13 @@ mod tests {
             .and_then(|v| v.as_array())
             .map(|m| m.iter().any(|method| method == "sql.exec"))
             .unwrap_or(false));
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "system.shutdown"))
+            .unwrap_or(false));
 
         let transport = call_rpc(&state, "transport.capabilities", json!({})).await;
         assert!(transport.ok);
@@ -5751,6 +5983,30 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn system_shutdown_sets_shutdown_channel() -> anyhow::Result<()> {
+        let dir = temp_dir("system_shutdown");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        let mut shutdown_rx = state.shutdown_tx.subscribe();
+
+        let resp = call_rpc(&state, "system.shutdown", json!({})).await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("ok"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx.changed()).await??;
+        assert!(*shutdown_rx.borrow());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -6235,6 +6491,327 @@ mod tests {
                 .get("cluster.enabled")
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_node_leave_marks_node_offline() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_leave");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let token = call_rpc(&state, "cluster.join_token.create", json!({}))
+            .await
+            .result
+            .expect("missing join token result")["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let joined = call_rpc(
+            &state,
+            "cluster.node.join",
+            json!({
+                "token": token,
+                "node_id": "replica-offline",
+                "rpc_url": "http://127.0.0.1:19091",
+                "role": "replica"
+            }),
+        )
+        .await;
+        assert!(joined.ok);
+
+        let leave = call_rpc(
+            &state,
+            "cluster.node.leave",
+            json!({
+                "node_id": "replica-offline"
+            }),
+        )
+        .await;
+        assert!(leave.ok);
+        assert_eq!(
+            leave
+                .result
+                .as_ref()
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("offline")
+        );
+
+        let nodes = call_rpc(
+            &state,
+            "cluster.nodes",
+            json!({
+                "role": "replica"
+            }),
+        )
+        .await;
+        assert!(nodes.ok);
+        assert_eq!(
+            nodes
+                .result
+                .as_ref()
+                .and_then(|v| v.get("nodes"))
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("offline")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_node_leave_reassigns_shard_primary() -> anyhow::Result<()> {
+        let dir = temp_dir("cluster_leave_shard");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let token = call_rpc(&state, "cluster.join_token.create", json!({}))
+            .await
+            .result
+            .expect("missing join token result")["token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let joined = call_rpc(
+            &state,
+            "cluster.node.join",
+            json!({
+                "token": token,
+                "node_id": "replica-shard",
+                "rpc_url": "http://127.0.0.1:19092",
+                "role": "replica"
+            }),
+        )
+        .await;
+        assert!(joined.ok);
+
+        let created = call_rpc(
+            &state,
+            "cluster.shard.create",
+            json!({
+                "db": "app",
+                "table": "events",
+                "replicas": ["replica-shard"]
+            }),
+        )
+        .await;
+        assert!(created.ok);
+        let shard_id = created
+            .result
+            .as_ref()
+            .and_then(|v| v.get("shard"))
+            .and_then(|v| v.get("shard_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(!shard_id.is_empty());
+
+        let moved = call_rpc(
+            &state,
+            "cluster.shard.move",
+            json!({
+                "shard_id": shard_id,
+                "to_node_id": "replica-shard",
+                "dry_run": false
+            }),
+        )
+        .await;
+        assert!(moved.ok);
+
+        let leave = call_rpc(
+            &state,
+            "cluster.node.leave",
+            json!({
+                "node_id": "replica-shard"
+            }),
+        )
+        .await;
+        assert!(leave.ok);
+
+        let status = call_rpc(&state, "cluster.status", json!({})).await;
+        assert!(status.ok);
+        let shard_primary = status
+            .result
+            .as_ref()
+            .and_then(|v| v.get("shards"))
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("primary_node_id"))
+            .and_then(|v| v.as_str());
+        assert_eq!(shard_primary, Some("node-test"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_tasks_checkpoint_and_mark_local_offline() -> anyhow::Result<()> {
+        let dir = temp_dir("shutdown_tasks");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shutdown-a".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shutdown-b".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        run_shutdown_tasks(&state).await;
+
+        let settings_bytes = std::fs::read(settings_path(&state))?;
+        let settings_json: Value = serde_json::from_slice(&settings_bytes)?;
+        let local_status = settings_json
+            .get(CLUSTER_STATE_KEY)
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .find(|n| n.get("node_id").and_then(|v| v.as_str()) == Some("node-test"))
+            })
+            .and_then(|n| n.get("status"))
+            .and_then(|v| v.as_str());
+        assert_eq!(local_status, Some("offline"));
+
+        assert!(dir.join("catalog.json").exists());
+        assert!(dir.join("changes.json").exists());
+        assert!(dir.join("prepared.json").exists());
+        assert!(dir.join("snapshots.json").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_notifies_peers_with_cluster_node_leave() -> anyhow::Result<()> {
+        let dir = temp_dir("shutdown_notify");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let seen_methods: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_nodes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_header: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let methods_ref = seen_methods.clone();
+        let nodes_ref = seen_nodes.clone();
+        let header_ref = seen_header.clone();
+        let app = Router::new().route(
+            "/api/v1/rpc",
+            post(move |headers: HeaderMap, Json(payload): Json<Value>| {
+                let methods_ref = methods_ref.clone();
+                let nodes_ref = nodes_ref.clone();
+                let header_ref = header_ref.clone();
+                async move {
+                    let method = payload
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let node_id = payload
+                        .get("params")
+                        .and_then(|v| v.get("node_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let replication = headers
+                        .get(REPLICATION_HEADER)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.to_string());
+                    methods_ref.lock().unwrap().push(method);
+                    nodes_ref.lock().unwrap().push(node_id);
+                    header_ref.lock().unwrap().push(replication);
+                    Json(serde_json::json!({
+                        "skeinql": SKEINQL_VERSION,
+                        "ok": true,
+                        "result": {"ok": true}
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let peer_addr = listener.local_addr()?;
+        let mock = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            cluster.enabled = true;
+            cluster.nodes.push(ClusterNode {
+                node_id: "peer-a".to_string(),
+                rpc_url: format!("http://{}", peer_addr),
+                role: "replica".to_string(),
+                status: "online".to_string(),
+                joined_at_ms: now_unix_ms_u64(),
+                last_seen_ms: now_unix_ms_u64(),
+            });
+        }
+
+        notify_cluster_node_leave(&state).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        mock.abort();
+
+        assert_eq!(
+            seen_methods.lock().unwrap().as_slice(),
+            &["cluster.node.leave"]
+        );
+        assert_eq!(seen_nodes.lock().unwrap().as_slice(), &["node-test"]);
+        assert_eq!(
+            seen_header.lock().unwrap().as_slice(),
+            &[Some("1".to_string())]
         );
 
         std::fs::remove_dir_all(&dir).ok();

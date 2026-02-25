@@ -117,6 +117,7 @@ const FEATURE_CENTER = [
 const RPC_TEMPLATES = [
   { label: 'system.ping', method: 'system.ping', params: {} },
   { label: 'system.version', method: 'system.version', params: {} },
+  { label: 'system.shutdown', method: 'system.shutdown', params: {} },
   { label: 'system.capabilities', method: 'system.capabilities', params: {} },
   { label: 'stats.snapshot', method: 'stats.snapshot', params: {} },
   { label: 'schema.list_databases', method: 'schema.list_databases', params: {} },
@@ -493,6 +494,38 @@ function disconnect() {
   easyRefreshTargetsFromTree();
   renderTable('browseTable', [], []); renderTable('easyDataGrid', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
   updateContext();
+}
+
+async function shutdownServer() {
+  const baseUrl = getBaseUrl();
+  const confirmText =
+    'Shutdown SkeinDB at ' +
+    baseUrl +
+    ' now? This closes active sessions and marks this node offline in cluster state.';
+  if (!window.confirm(confirmText)) return;
+  setConnStatus('warn', 'Shutting down', 'Sending shutdown request to ' + baseUrl);
+  try {
+    const res = await call('system.shutdown', {}, 'out');
+    if (res && res.json && res.json.ok) {
+      setOut(
+        {
+          ok: true,
+          note: 'Shutdown request accepted. The server process is stopping gracefully.'
+        },
+        'out'
+      );
+    }
+  } catch (_) {
+    // Server may terminate before the response reaches the browser.
+    setOut(
+      {
+        ok: true,
+        note: 'Shutdown request sent. Server became unreachable, which can be expected during shutdown.'
+      },
+      'out'
+    );
+  }
+  setConnStatus('warn', 'Offline', 'Shutdown requested for ' + baseUrl);
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,7 +1163,7 @@ function browseNext() {
 }
 
 // ---------------------------------------------------------------------------
-// Easy Viewer (phpMyAdmin-inspired)
+// Easy Viewer (familiar table-admin workflow)
 // ---------------------------------------------------------------------------
 
 function easySetSubTab(tab) {
@@ -2746,6 +2779,7 @@ wire('btnVersion', loadVersion);
 wire('btnStats', loadStats);
 wire('btnCapabilities', loadCapabilities);
 wire('btnTransport', loadTransport);
+wire('btnShutdown', shutdownServer);
 
 // Overview quick actions
 wire('btnQuickCreateDb', quickCreateDb);

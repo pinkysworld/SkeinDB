@@ -128,7 +128,7 @@
       .research-card .desc{font-size:11px;color:var(--muted);margin-bottom:6px}
       .research-card .actions{margin-bottom:0}
       .pagination{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11px}
-      /* Easy Viewer – phpMyAdmin-inspired layout */
+      /* Easy Viewer – familiar table-admin layout */
       .easy-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;min-height:calc(100vh - 200px)}
       .easy-sidebar{background:#f8f9fb;border-right:1px solid var(--line);padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:calc(100vh - 200px)}
       .easy-sb-top{display:flex;justify-content:space-between;align-items:center}
@@ -248,6 +248,7 @@
               <button id="btnStats" class="admin-only sm">Stats</button>
               <button id="btnCapabilities" class="admin-only sm">Capabilities</button>
               <button id="btnTransport" class="admin-only sm">Transport</button>
+              <button id="btnShutdown" class="admin-only danger sm">Shutdown</button>
             </div>
             <div class="topbar-meta"><div class="pill" id="connBadge">Disconnected</div><div class="hint" id="connSummary">Connect to start.</div></div>
           </div>

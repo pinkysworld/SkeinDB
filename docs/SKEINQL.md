@@ -570,6 +570,17 @@ Result:
 {"name":"skeindb","version":"0.x.y","skeinql":"1.0"}
 ```
 
+#### system.shutdown
+Gracefully stop the server process. The server checkpoints state, marks the local cluster node offline, and sends best-effort leave notifications to peers.
+
+Params: `{}`
+
+Result:
+
+```json
+{"ok":true,"message":"shutdown initiated"}
+```
+
 #### system.capabilities
 Params: `{}`
 
@@ -2012,7 +2023,7 @@ Control-plane method families for operations and adoption:
 - advisor: `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, `advisor.history`, `advisor.migration_hints` (MySQL -> SkeinQL)
 - migration: `migration.intent_report`, `migration.rewrite_preview`
 - admin: `admin.users.*`, `admin.roles.*`
-- cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`
+- cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.node.leave`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`
 
 #### cluster.status (experimental)
 Return control-plane state, nodes, shards, and replication counters.
@@ -2050,6 +2061,17 @@ Params:
   "node_id": "replica-a",
   "rpc_url": "http://127.0.0.1:8081",
   "role": "replica"
+}
+```
+
+#### cluster.node.leave (experimental)
+Mark a node as offline without deleting its metadata. This is used for graceful shutdown and node liveness signaling.
+
+Params:
+
+```json
+{
+  "node_id": "replica-a"
 }
 ```
 

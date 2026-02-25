@@ -1723,6 +1723,20 @@ pub struct ClusterNodeRemoveResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeLeaveParams {
+    pub node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNodeLeaveResult {
+    pub ok: bool,
+    pub node_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_primary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterReplicaPromoteParams {
     pub node_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

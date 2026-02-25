@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-02-24
+Last updated: 2026-02-25
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -17,7 +17,8 @@ The same UI bundle powers both routes, with mode-aware navigation and controls.
 Recent UI updates:
 - Overview includes live dedup/storage metrics (`dedup_ratio`, logical vs unique bytes, interned values).
 - Connect/disconnect and profile workflows are shared across admin and console routes.
-- `/admin` now includes a **phpMyAdmin-inspired Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
+- Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.
+- `/admin` now includes an **Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
 - Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
 - Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop).
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
@@ -118,7 +119,7 @@ Security note:
 - Storage size
 - Role: standalone / primary / replica / router
 
-### 4.2 Easy Viewer (phpMyAdmin-inspired)
+### 4.2 Easy Viewer
 - **Left sidebar** with collapsible database/table tree, filter input, New DB button, and reload
 - **Breadcrumb navigation** showing Server › Database › Table context
 - **Sub-tabs** per table: Browse, Structure, Insert, Search, New Table, Export, Operations
@@ -163,6 +164,7 @@ Security note:
 - Compaction policy (adaptive scheduler) + pause/resume
 - Snapshot management (column snapshots)
 - Audit verification (hash-chained WAL)
+- Graceful shutdown trigger (admin action that checkpoints and marks cluster node offline)
 
 ### 4.7.1 Time travel & replay
 - Point-in-time query runner (as_of)
@@ -254,6 +256,7 @@ SkeinAdmin uses SkeinQL methods only.
 Minimum required methods:
 - system.version
 - system.capabilities
+- system.shutdown (optional but recommended for controlled operations)
 - schema.list_databases / list_tables / describe_table
 - query.select
 - sql.exec (optional, for power users)
