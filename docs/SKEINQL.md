@@ -659,6 +659,19 @@ Result:
 {"ok":true}
 ```
 
+#### schema.drop_database
+Params:
+
+```json
+{"db":"mydb","if_exists":true}
+```
+
+Result:
+
+```json
+{"ok":true}
+```
+
 #### schema.list_tables
 Params:
 
@@ -719,7 +732,7 @@ Result:
 }
 ```
 
-#### schema.drop_table (optional)
+#### schema.drop_table
 Params: `{ "db":"mydb", "table":"users", "if_exists":true }`
 
 Result: `{ "ok": true }`

@@ -1145,6 +1145,25 @@ impl Engine {
         self.persist_catalog()
     }
 
+    pub fn drop_database(&mut self, db: &str, if_exists: bool) -> anyhow::Result<()> {
+        let Some(database) = self.catalog.databases.get(db) else {
+            if if_exists {
+                return Ok(());
+            }
+            anyhow::bail!("database not found: {db}");
+        };
+        let table_names: Vec<String> = database.tables.keys().cloned().collect();
+        self.catalog.databases.remove(db);
+
+        for table in table_names {
+            self.remove_table_state(db, &table)?;
+        }
+
+        self.persist_after_schema_drop()?;
+        self.cleanup_database_table_dir_if_empty(db);
+        Ok(())
+    }
+
     pub fn list_tables(&self, db: &str) -> anyhow::Result<Vec<String>> {
         let Some(d) = self.catalog.databases.get(db) else {
             anyhow::bail!("database not found: {db}");
@@ -1208,6 +1227,28 @@ impl Engine {
 
         self.persist_catalog()?;
         self.persist_table(db, table)
+    }
+
+    pub fn drop_table(&mut self, db: &str, table: &str, if_exists: bool) -> anyhow::Result<()> {
+        let Some(database) = self.catalog.databases.get_mut(db) else {
+            if if_exists {
+                return Ok(());
+            }
+            anyhow::bail!("database not found: {db}");
+        };
+
+        let removed = database.tables.remove(table).is_some();
+        if !removed {
+            if if_exists {
+                return Ok(());
+            }
+            anyhow::bail!("table not found: {db}.{table}");
+        }
+
+        self.remove_table_state(db, table)?;
+        self.persist_after_schema_drop()?;
+        self.cleanup_database_table_dir_if_empty(db);
+        Ok(())
     }
 
     pub fn describe_table(&self, db: &str, table: &str) -> anyhow::Result<serde_json::Value> {
@@ -5128,6 +5169,70 @@ impl Engine {
 
     fn persist_catalog(&self) -> anyhow::Result<()> {
         save_json(&self.data_dir.join("catalog.json"), &self.catalog)
+    }
+
+    fn persist_after_schema_drop(&self) -> anyhow::Result<()> {
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        self.persist_schema_changes_best_effort();
+        self.persist_oblivious_best_effort();
+        self.persist_merge_policies_best_effort();
+        self.persist_views_best_effort();
+        self.persist_snapshots_best_effort();
+        self.persist_advisor_patterns_best_effort();
+        Ok(())
+    }
+
+    fn cleanup_database_table_dir_if_empty(&self, db: &str) {
+        let dir = self.data_dir.join("tables").join(db);
+        let is_empty = fs::read_dir(&dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if is_empty {
+            let _ = fs::remove_dir(&dir);
+        }
+    }
+
+    fn remove_table_state(&mut self, db: &str, table: &str) -> anyhow::Result<()> {
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
+
+        self.tables.remove(&key);
+        self.schema_versions.remove(&key);
+        self.oblivious_policies.remove(&key);
+        self.merge_policies.remove(&key);
+        self.edge_coverage.remove(&key);
+
+        self.schema_changes
+            .retain(|entry| entry.table.db != db || entry.table.table != table);
+
+        self.views.retain(|view_key, view| {
+            if view_key == &key {
+                return false;
+            }
+            !view
+                .deps
+                .iter()
+                .any(|dep| dep.db == db && dep.table == table)
+        });
+
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            snapshots.snapshots.remove(&key);
+            snapshots.patterns.by_table.remove(&key);
+        }
+
+        if let Ok(mut advisor) = self.index_advisor.lock() {
+            advisor.by_table.remove(&key);
+        }
+
+        self.cached_select.lock().unwrap().clear();
+        self.cached_patch.lock().unwrap().clear();
+
+        remove_file_if_exists(&self.table_path(db, table))?;
+        remove_file_if_exists(&self.table_segment_path(db, table))?;
+        Ok(())
     }
 
     fn table_path(&self, db: &str, table: &str) -> PathBuf {
@@ -14360,6 +14465,14 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18664,6 +18777,82 @@ mod tests {
                 v: "checkpoint-a".to_string()
             })
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn drop_table_removes_rows_and_files() -> anyhow::Result<()> {
+        let dir = temp_dir("drop_table_files");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
+        seed_events_table(&mut engine, "drop-a", "drop-b")?;
+
+        let json_path = engine.table_path("app", "events");
+        let segment_path = engine.table_segment_path("app", "events");
+        assert!(json_path.exists());
+        assert!(segment_path.exists());
+
+        engine.drop_table("app", "events", false)?;
+
+        assert!(!json_path.exists());
+        assert!(!segment_path.exists());
+        assert_eq!(engine.list_tables("app")?, Vec::<String>::new());
+        assert!(engine
+            .drop_table("app", "events", false)
+            .expect_err("missing table should error")
+            .to_string()
+            .contains("table not found"));
+        engine.drop_table("app", "events", true)?;
+
+        drop(engine);
+
+        let reopened = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
+        assert_eq!(reopened.list_tables("app")?, Vec::<String>::new());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn drop_database_removes_tables_and_catalog() -> anyhow::Result<()> {
+        let dir = temp_dir("drop_database");
+        let mut engine = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
+        seed_events_table(&mut engine, "db-a", "db-b")?;
+        engine.create_table(
+            "app",
+            "audit",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let events_json = engine.table_path("app", "events");
+        let audit_json = engine.table_path("app", "audit");
+        assert!(events_json.exists());
+        assert!(audit_json.exists());
+
+        engine.drop_database("app", false)?;
+        assert!(!events_json.exists());
+        assert!(!audit_json.exists());
+        assert!(!engine.list_databases().iter().any(|db| db == "app"));
+        assert!(engine
+            .drop_database("app", false)
+            .expect_err("missing db should error")
+            .to_string()
+            .contains("database not found"));
+        engine.drop_database("app", true)?;
+
+        drop(engine);
+
+        let reopened = Engine::open_with_storage_mode(&dir, TableStorageMode::Dual)?;
+        assert!(!reopened.list_databases().iter().any(|db| db == "app"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

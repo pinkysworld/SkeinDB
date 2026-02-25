@@ -26,7 +26,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`). |
 | Phase 3 MySQL protocol | Planned | MySQL compatibility remains a top priority but is not complete in this scaffold. |
 | Phase 4 Web console | Partial | Console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
-| Phase 5 SkeinQL API | Partial | Typed SkeinQL models + `/api/v1/rpc` + `query.select` are implemented. |
+| Phase 5 SkeinQL API | Partial | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` are implemented; `tx.*` remains open. |
 | Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates + dependency-aware query paths exist. |
 | Phase 7 Delta values | Implemented (prototype) | DELTA kind, policy/metrics, and compaction behavior are implemented in ValueStore tests. |
 | Phase 8 Wasm extensions | Partial | Wasm plan compile/run + merge wasm registry exist; full UDF surface is still open. |

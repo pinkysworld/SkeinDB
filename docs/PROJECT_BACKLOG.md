@@ -54,7 +54,7 @@ Phase 0 verification checklist:
 ## Phase 5 - SkeinQL native API
 - [x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
 - [x] T051: Implement HTTP RPC endpoint POST /api/v1/rpc (system.ping, system.version)
-- [ ] T052: Implement schema.* methods (list/describe/create/drop)
+- [x] T052: Implement schema.* methods (list/describe/create/drop)
 - [x] T053: Implement query.select (single-table scan + filter + limit) over SkeinIR
 - [ ] T054: Implement tx.begin/commit/rollback via SkeinQL
 

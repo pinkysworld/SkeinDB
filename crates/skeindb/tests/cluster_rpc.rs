@@ -116,6 +116,45 @@ async fn cluster_replication_ships_schema_and_rows() -> anyhow::Result<()> {
     }
 
     assert!(replicated, "replica did not receive replicated row");
+
+    let resp = primary_client
+        .rpc(
+            "schema.drop_table",
+            json!({
+                "db": "app",
+                "table": "users"
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut dropped = false;
+    while Instant::now() < deadline {
+        let resp = replica_client
+            .rpc(
+                "schema.list_tables",
+                json!({
+                    "db": "app"
+                }),
+            )
+            .await?;
+        if resp.ok {
+            let tables = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("tables"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if !tables.iter().any(|t| t.as_str() == Some("users")) {
+                dropped = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(dropped, "replica did not apply replicated drop_table");
     Ok(())
 }
 

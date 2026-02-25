@@ -992,6 +992,19 @@ pub(crate) async fn handle_rpc(
                     eng.create_database(&p.db).map_err(to_rpc_error)?;
                     Ok(serde_json::json!({"ok": true}))
                 }
+                "schema.drop_database" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
+                        #[serde(default)]
+                        if_exists: bool,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.drop_database(&p.db, p.if_exists)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::json!({"ok": true}))
+                }
                 "schema.list_tables" => {
                     #[derive(serde::Deserialize)]
                     struct P {
@@ -1036,6 +1049,20 @@ pub(crate) async fn handle_rpc(
                         p.compat_mysql,
                     )
                     .map_err(to_rpc_error)?;
+                    Ok(serde_json::json!({"ok": true}))
+                }
+                "schema.drop_table" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        db: String,
+                        table: String,
+                        #[serde(default)]
+                        if_exists: bool,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.drop_table(&p.db, &p.table, p.if_exists)
+                        .map_err(to_rpc_error)?;
                     Ok(serde_json::json!({"ok": true}))
                 }
                 "schema.describe_table" => {
@@ -1794,7 +1821,9 @@ fn should_replicate_method(method: &str, params: Option<&Value>) -> bool {
     matches!(
         method,
         "schema.create_database"
+            | "schema.drop_database"
             | "schema.create_table"
+            | "schema.drop_table"
             | "schema.apply_merge"
             | "data.insert"
             | "data.update"
@@ -1827,7 +1856,9 @@ fn write_target_from_params(
     };
     match method {
         "schema.create_database" => (s(&["db"]), None),
+        "schema.drop_database" => (s(&["db"]), None),
         "schema.create_table" => (s(&["db"]), s(&["table"])),
+        "schema.drop_table" => (s(&["db"]), s(&["table"])),
         "schema.apply_merge" => (s(&["table", "db"]), s(&["table", "table"])),
         "data.insert" => (s(&["into", "db"]), s(&["into", "table"])),
         "data.update" | "data.delete" => (s(&["table", "db"]), s(&["table", "table"])),
@@ -3929,8 +3960,10 @@ fn system_capabilities(state: &AppState) -> Value {
         "cluster.shard.rebalance",
         "schema.list_databases",
         "schema.create_database",
+        "schema.drop_database",
         "schema.list_tables",
         "schema.create_table",
+        "schema.drop_table",
         "schema.describe_table",
         "schema.propose_change",
         "schema.merge_status",
@@ -5673,6 +5706,75 @@ mod tests {
         assert!(resp.ok);
         let row = resp.result.expect("missing result")["row"].clone();
         assert_eq!(row["region"]["v"].as_str(), Some("eu"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_drop_methods_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_drop_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(
+            &state,
+            "schema.drop_table",
+            json!({"db":"app","table":"users"}),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "schema.list_tables", json!({"db":"app"})).await;
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("tables"))
+                .and_then(|v| v.as_array())
+                .map(|tables| tables.len()),
+            Some(0)
+        );
+
+        let resp = call_rpc(
+            &state,
+            "schema.drop_table",
+            json!({"db":"app","table":"users","if_exists": true}),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "schema.drop_database", json!({"db":"app"})).await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "schema.drop_database",
+            json!({"db":"app","if_exists": true}),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "schema.list_databases", json!({})).await;
+        assert!(resp.ok);
+        let databases = resp.result.expect("missing result")["databases"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!databases.iter().any(|db| db.as_str() == Some("app")));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
