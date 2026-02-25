@@ -1,4 +1,4 @@
-# SkeinDB Project Backlog (Codex-friendly)
+# SkeinDB Project Backlog
 
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
@@ -13,6 +13,7 @@ For the full implemented-vs-partial matrix (core + research), see:
 - `docs/TRUE_STATUS_MATRIX.md`
 
 ## Phase 0 — Repo setup
+- Status: complete in runtime + tests (`crates/skeindb-core/src/lib.rs`, `crates/skeindb-core/tests/phase0_format.rs`)
 - [x] T001: Encoding primitives (VarU, Bytes/String, CRC32C)
 - [x] T002: FileHeader read/write
 - [x] T003: RecordFrame append/iterate
@@ -172,6 +173,6 @@ For the full implemented-vs-partial matrix (core + research), see:
 The repository includes a January 2026 research agenda with 20 proposals.
 
 - Overview: `docs/RESEARCH_AGENDA.md`
-- Codex-friendly research tasks (T230+): `docs/RESEARCH_BACKLOG.md`
+- Task-level research tasks (T230+): `docs/RESEARCH_BACKLOG.md`
 
 These items are intentionally separated from the core phases above to keep the main build plan focused.
