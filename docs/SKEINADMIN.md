@@ -17,9 +17,9 @@ The same UI bundle powers both routes, with mode-aware navigation and controls.
 Recent UI updates:
 - Overview includes live dedup/storage metrics (`dedup_ratio`, logical vs unique bytes, interned values).
 - Connect/disconnect and profile workflows are shared across admin and console routes.
-- `/admin` now includes an Easy Viewer with click-first database/table/row controls.
-- Easy Viewer now includes inline grid editing for spreadsheet-style row entry and in-place updates.
-- Easy Viewer now includes optional visual row editing (row-click browse + form-based updates/inserts/deletes).
+- `/admin` now includes a **phpMyAdmin-inspired Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
+- Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
+- Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop).
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
 
 ---
@@ -118,12 +118,19 @@ Security note:
 - Storage size
 - Role: standalone / primary / replica / router
 
-### 4.2 Easy Viewer
-- Click-first database and table selection
-- Guided create database/table flow (column builder + PK checkboxes)
-- Typed row editor for insert/get/delete without manual JSON payloads
-- Inline grid edit mode for in-table row entry, copy, update, and batch delete
-- Dedicated row preview table for fast verification
+### 4.2 Easy Viewer (phpMyAdmin-inspired)
+- **Left sidebar** with collapsible database/table tree, filter input, New DB button, and reload
+- **Breadcrumb navigation** showing Server › Database › Table context
+- **Sub-tabs** per table: Browse, Structure, Insert, Search, New Table, Export, Operations
+- **Browse tab**: paginated data grid with per-row Edit/Copy/Delete buttons, inline editing, check-all bulk delete, configurable rows-per-page
+- **Structure tab**: column listing with type, nullable, and primary-key info
+- **Insert tab**: form-based row insert with labeled fields per column
+- **Search tab**: condition-based search with column/operator/value fields
+- **New Table tab**: column builder with name, type, nullable, PK checkboxes
+- **Export tab**: export table data as CSV or SQL, plus structure-only SQL export
+- **Operations tab**: truncate table, drop table, and drop database with confirmation dialogs
+- **Toast notifications** for success, error, and info feedback
+- Responsive layout: sidebar collapses on narrow viewports
 
 ### 4.3 SQL Workspace
 - SQL editor with tabs

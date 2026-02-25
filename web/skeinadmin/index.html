@@ -128,6 +128,67 @@
       .research-card .desc{font-size:11px;color:var(--muted);margin-bottom:6px}
       .research-card .actions{margin-bottom:0}
       .pagination{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:11px}
+      /* Easy Viewer – phpMyAdmin-inspired layout */
+      .easy-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;min-height:calc(100vh - 200px)}
+      .easy-sidebar{background:#f8f9fb;border-right:1px solid var(--line);padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:calc(100vh - 200px)}
+      .easy-sb-top{display:flex;justify-content:space-between;align-items:center}
+      .easy-sb-title{font-size:11px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;color:var(--muted)}
+      .easy-sb-filter{font-size:11px;padding:5px 8px;border-radius:6px;border:1px solid var(--line)}
+      .easy-tree{display:flex;flex-direction:column;gap:2px;overflow-y:auto;flex:1;min-height:60px}
+      .easy-tree-db{border-radius:6px;overflow:hidden}
+      .easy-tree-db-header{display:flex;align-items:center;gap:4px;padding:5px 8px;font-size:12px;font-weight:600;cursor:pointer;border-radius:6px;color:var(--ink);transition:background .12s}
+      .easy-tree-db-header:hover{background:rgba(43,108,176,.08)}
+      .easy-tree-db.active>.easy-tree-db-header{background:rgba(43,108,176,.12);color:var(--accent)}
+      .easy-tree-icon{font-size:13px;flex-shrink:0}
+      .easy-tree-count{font-size:10px;color:var(--muted);font-weight:400;margin-left:auto}
+      .easy-tree-tables{padding-left:16px;display:flex;flex-direction:column;gap:1px}
+      .easy-tree-table{padding:4px 8px;font-size:11px;cursor:pointer;border-radius:5px;color:var(--muted);transition:all .12s}
+      .easy-tree-table:hover{background:rgba(43,108,176,.06);color:var(--ink)}
+      .easy-tree-table.active{background:var(--accent);color:#fff;font-weight:600}
+      .easy-main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+      .easy-breadcrumb{display:flex;align-items:center;gap:6px;padding:8px 16px;border-bottom:1px solid var(--line);background:#fff;font-size:12px}
+      .easy-bc-server,.easy-bc-db,.easy-bc-table{font-weight:600;color:var(--muted);padding:2px 4px;border-radius:4px}
+      .easy-bc-db{color:var(--accent)}.easy-bc-table{color:var(--ink)}.easy-bc-sep{color:var(--line);font-size:14px}
+      .easy-toast{display:none;padding:8px 14px;font-size:12px;font-weight:600;border-bottom:1px solid var(--line);animation:fadeUp .25s ease}
+      .easy-toast.success{display:block;background:#f0fff4;color:#1b6a3a;border-color:rgba(27,106,58,.2)}
+      .easy-toast.error{display:block;background:#fff5f5;color:#c53030;border-color:rgba(197,48,48,.2)}
+      .easy-toast.info{display:block;background:#ebf8ff;color:#2b6cb0;border-color:rgba(43,108,176,.2)}
+      .easy-tabs{display:flex;flex-wrap:wrap;gap:0;padding:0 16px;border-bottom:1px solid var(--line);background:#f7f9fc}
+      .easy-tab{padding:8px 14px;font-size:11px;font-weight:600;color:var(--muted);background:transparent;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all .15s}
+      .easy-tab:hover{color:var(--ink);background:rgba(43,108,176,.04)}
+      .easy-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:#fff}
+      .easy-tab-pane{display:none;padding:14px 16px;overflow-y:auto;flex:1}
+      .easy-tab-pane.active{display:block}
+      .easy-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;padding:6px 0}
+      .easy-toolbar-label{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)}
+      .easy-toolbar-label select,.easy-toolbar-label input{font-size:11px;padding:4px 6px;border-radius:6px;border:1px solid var(--line);width:auto}
+      .easy-bulk-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:6px 10px;border:1px dashed var(--line);border-radius:8px;margin-bottom:8px;background:#fefefe;font-size:11px}
+      .easy-check-label{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;cursor:pointer}
+      .easy-check-label input{width:auto}
+      .easy-pager{display:flex;gap:8px;align-items:center;margin-top:8px;padding:6px 0;font-size:11px}
+      .easy-pager .hint{flex:1;text-align:center}
+      .easy-edit-fields-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+      .easy-field-item{display:flex;flex-direction:column;gap:2px}
+      .easy-field-item label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+      .easy-field-item input{padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-family:"IBM Plex Sans","Segoe UI",sans-serif}
+      .easy-field-item .field-hint{font-size:9px;color:var(--muted)}
+      .easy-col-builder{margin-top:8px}
+      .easy-col-table{width:100%;border-collapse:collapse;font-size:11px}
+      .easy-col-table th{background:#f1f5fb;padding:6px 8px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+      .easy-col-table td{padding:4px 6px;border-bottom:1px solid var(--line)}
+      .easy-col-table input,.easy-col-table select{font-size:11px;padding:4px 6px;border-radius:5px;border:1px solid var(--line);width:100%}
+      .easy-col-table input[type="checkbox"]{width:auto}
+      .easy-ops-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+      .easy-ops-item{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}
+      .easy-ops-item h3{margin:0 0 4px;font-size:12px}.easy-ops-item .hint{margin:0 0 8px}
+      tbody tr.editing-row{background:rgba(43,108,176,.08)!important}
+      tbody tr.editing-row td{padding:4px 6px}
+      .inline-edit-input{width:100%;min-width:80px;padding:4px 6px;border:1px solid var(--accent);border-radius:5px;font-size:11px;background:#fff;font-family:"IBM Plex Sans","Segoe UI",sans-serif}
+      .inline-edit-input.pk-readonly{background:#f7f9fc;border-color:var(--line);color:var(--muted)}
+      .row-action-btn{padding:3px 6px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:#fff;cursor:pointer;transition:all .12s;min-width:24px}
+      .row-action-btn:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.1)}
+      .row-action-btn.edit{color:var(--accent)}.row-action-btn.copy{color:var(--accent-2)}.row-action-btn.delete{color:var(--danger)}
+      @media(max-width:860px){.easy-layout{grid-template-columns:1fr}.easy-sidebar{max-height:200px;border-right:none;border-bottom:1px solid var(--line)}}
       @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
       @media(max-width:980px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}.nav{flex-direction:row;flex-wrap:wrap}.panel{padding:12px}.card.wide{grid-column:1/-1}.builder-row,.builder-row.compact{grid-template-columns:1fr 1fr}}
     </style>
@@ -240,51 +301,142 @@
         </section>
 
         <!-- EASY VIEWER --><section class="panel admin-only" data-panel="easy">
-          <div class="panel-grid">
-            <div class="card wide"><h2>Click-First Database Control</h2>
-              <div class="callout">This view is designed for fast point-and-click administration: no JSON required. Advanced mode remains available in Schema/Data/RPC panels.</div>
-              <div class="row">
-                <div class="field"><label>Database</label><select id="easyDbSelect"></select></div>
-                <div class="field"><label>Table</label><select id="easyTableSelect"></select></div>
-                <div class="field"><label>Browse Limit</label><input id="easyBrowseLimit" type="number" value="25" /></div>
-                <div class="field"><label>Offset</label><input id="easyBrowseOffset" type="number" value="0" /></div>
-                <div class="field"><label>Order by</label><input id="easyBrowseOrder" placeholder="id" /></div>
-                <div class="field"><label>Search in loaded rows</label><input id="easyBrowseSearch" placeholder="name or value" /></div>
+          <div class="easy-layout">
+            <aside class="easy-sidebar">
+              <div class="easy-sb-top">
+                <span class="easy-sb-title">Databases</span>
+                <button id="easyBtnNewDb" class="primary sm" title="Create Database">+ New</button>
               </div>
-              <div class="actions"><button id="btnEasyReload" class="sm">Reload Targets</button><button id="btnEasyUseSelection" class="primary sm">Use Selection</button><button id="btnEasyLoadTable" class="sm">Load Table Form</button><button id="btnEasyBrowse" class="secondary sm">Browse Rows</button><button id="btnEasyBrowsePrev" class="sm ghost">&laquo; Prev</button><button id="btnEasyBrowseNext" class="sm ghost">Next &raquo;</button><span id="easyBrowseInfo" class="hint">No rows loaded.</span></div>
-              <pre id="easyOut">Select a database and table to begin.</pre>
-            </div>
-            <div class="card wide"><h2>Create Database / Table</h2>
-              <details class="help" open><summary>Table creation flow</summary><div class="help-body"><div>Create a database if needed.</div><div>Define columns below and mark the primary key.</div><div>Click <strong>Create Table</strong>.</div></div></details>
-              <div class="row">
-                <div class="field"><label>New Database Name</label><input id="easyNewDb" placeholder="demo" /></div>
-                <div class="field"><label>New Table Name</label><input id="easyNewTable" placeholder="users" /></div>
+              <input id="easyTreeFilter" placeholder="Filter databases/tables…" class="easy-sb-filter" />
+              <div class="easy-tree" id="easyTree">Connect to load databases.</div>
+              <button id="btnEasyReloadTree" class="ghost sm" style="margin-top:6px;width:100%">&#x21bb; Reload</button>
+            </aside>
+            <div class="easy-main">
+              <div class="easy-breadcrumb">
+                <span class="easy-bc-server" id="easyBcServer">Server</span>
+                <span class="easy-bc-sep">&rsaquo;</span>
+                <span class="easy-bc-db" id="easyBcDb">--</span>
+                <span class="easy-bc-sep" id="easyBcSep2">&rsaquo;</span>
+                <span class="easy-bc-table" id="easyBcTable">--</span>
               </div>
-              <div class="actions"><button id="btnEasyCreateDb" class="sm">Create Database</button><button id="btnEasyAddCol" class="sm">Add Column</button><button id="btnEasySeedCols" class="sm">Starter Columns</button><button id="btnEasyCreateTable" class="primary sm">Create Table</button></div>
-              <div class="builder-list" id="easyTableBuilderRows">Add a column to define the table.</div>
-            </div>
-            <div class="card wide"><h2>Row Editor</h2>
-              <details class="help" open><summary>Row editing flow</summary><div class="help-body"><div>Load table form to generate typed fields.</div><div>Fill fields, then insert/get/delete using primary key where needed.</div></div></details>
-              <div class="actions"><button id="btnEasyRowInsert" class="primary sm">Insert Row</button><button id="btnEasyRowGet" class="sm">Get by Primary Key</button><button id="btnEasyRowDelete" class="danger sm">Delete by Primary Key</button><button id="btnEasyRowClear" class="ghost sm">Clear Form</button></div>
-              <div class="builder-list" id="easyRowFields">Load a table to generate row fields.</div>
-            </div>
-            <div class="card wide"><h2>Visual Row Editor (Optional)</h2>
-              <details class="help" open><summary>WYSIWYG-style editing</summary><div class="help-body"><div>Click any row in Row Preview to load it into this form.</div><div>Adjust values and click Save Changes. Use Insert as New for new rows.</div><div>This is optional; advanced JSON controls remain in Schema/Data panels.</div></div></details>
-              <div class="actions"><label class="builder-check"><input type="checkbox" id="easyVisualEnabled" checked />Enable visual editor</label><button id="btnEasyVisualLoadSelected" class="sm">Load Selected Row</button><button id="btnEasyVisualSave" class="primary sm">Save Changes</button><button id="btnEasyVisualInsert" class="secondary sm">Insert as New</button><button id="btnEasyVisualDelete" class="danger sm">Delete Selected</button><button id="btnEasyVisualReset" class="ghost sm">Reset Form</button></div>
-              <div class="visual-grid" id="easyVisualFields">Load and browse a table, then click a row to edit visually.</div>
-              <pre id="easyVisualOut">Visual editor ready.</pre>
-            </div>
-            <div class="card wide"><h2>Row Preview</h2>
-              <div class="hint">Tip: click a row to open it in the optional visual editor.</div>
-              <div class="easy-grid-toolbar">
-                <label class="builder-check"><input type="checkbox" id="easyGridMode" />Inline grid edit mode</label>
-                <button id="btnEasyGridAddRow" class="sm">Add Row in Grid</button>
-                <button id="btnEasyGridInsertRow" class="secondary sm">Insert Grid Row</button>
-                <button id="btnEasyGridDeleteChecked" class="danger sm">Delete Checked</button>
-                <button id="btnEasyGridCancel" class="ghost sm">Cancel Grid Edit</button>
+              <div class="easy-toast" id="easyToast"></div>
+              <nav class="easy-tabs">
+                <button class="easy-tab active" data-etab="browse">Browse</button>
+                <button class="easy-tab" data-etab="structure">Structure</button>
+                <button class="easy-tab" data-etab="insert">Insert</button>
+                <button class="easy-tab" data-etab="search">Search</button>
+                <button class="easy-tab" data-etab="create">New Table</button>
+                <button class="easy-tab" data-etab="export">Export</button>
+                <button class="easy-tab" data-etab="operations">Operations</button>
+              </nav>
+              <!-- Browse Tab -->
+              <div class="easy-tab-pane active" data-etab="browse">
+                <div class="easy-toolbar">
+                  <button id="easyBtnInsertFromBrowse" class="primary sm">&#x271A; Insert row</button>
+                  <button id="easyBtnRefreshBrowse" class="sm">&#x21bb; Refresh</button>
+                  <div style="flex:1"></div>
+                  <label class="easy-toolbar-label">Show
+                    <select id="easyPerPage"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option><option value="250">250</option></select>
+                  rows</label>
+                  <label class="easy-toolbar-label">Order by
+                    <input id="easyOrderCol" placeholder="column" style="width:100px" />
+                  </label>
+                </div>
+                <div class="easy-bulk-bar" id="easyBulkBar">
+                  <label class="easy-check-label"><input type="checkbox" id="easyCheckAll" /> Check all</label>
+                  <span id="easyCheckedInfo" class="hint">0 selected</span>
+                  <button id="easyBtnDeleteChecked" class="danger sm">&#x1F5D1; Delete selected</button>
+                </div>
+                <div class="table-wrap"><table id="easyDataGrid"></table></div>
+                <div class="easy-pager">
+                  <button id="easyPgPrev" class="sm ghost">&lsaquo; Previous</button>
+                  <span id="easyPgInfo" class="hint">No rows loaded.</span>
+                  <button id="easyPgNext" class="sm ghost">Next &rsaquo;</button>
+                </div>
               </div>
-              <div class="callout">Grid mode enables spreadsheet-like row entry and inline updates directly in this table. Primary key cells stay read-only during updates for safety.</div>
-              <div class="table-wrap"><table id="easyBrowseTable"></table></div>
+              <!-- Structure Tab -->
+              <div class="easy-tab-pane" data-etab="structure">
+                <div class="table-wrap"><table id="easyStructureGrid"></table></div>
+                <div class="hint" id="easyStructureInfo">Select a table to view its structure.</div>
+              </div>
+              <!-- Insert Tab -->
+              <div class="easy-tab-pane" data-etab="insert">
+                <div id="easyInsertFields">Select a table to insert rows.</div>
+                <div class="actions" style="margin-top:12px">
+                  <button id="easyBtnDoInsert" class="primary sm">&#x271A; Insert</button>
+                  <button id="easyBtnInsertAnother" class="secondary sm">Insert &amp; add another</button>
+                  <button id="easyBtnClearInsert" class="ghost sm">Clear fields</button>
+                </div>
+                <pre id="easyInsertOut" class="hint" style="margin-top:8px">Fill in the fields and click Insert.</pre>
+              </div>
+              <!-- Search Tab -->
+              <div class="easy-tab-pane" data-etab="search">
+                <div class="row" style="margin-bottom:10px">
+                  <div class="field"><label>Search value</label><input id="easySearchValue" placeholder="Type to search…" /></div>
+                  <div class="field"><label>Column</label><select id="easySearchCol"><option value="">All columns</option></select></div>
+                </div>
+                <div class="actions" style="margin-bottom:10px">
+                  <button id="easyBtnDoSearch" class="primary sm">&#x1F50D; Search</button>
+                  <button id="easyBtnClearSearch" class="ghost sm">Clear</button>
+                </div>
+                <div class="table-wrap"><table id="easySearchGrid"></table></div>
+                <div class="hint" id="easySearchInfo"></div>
+              </div>
+              <!-- Create Table Tab -->
+              <div class="easy-tab-pane" data-etab="create">
+                <div class="row" style="margin-bottom:10px">
+                  <div class="field"><label>Database</label><input id="easyCreateDb" placeholder="demo" /></div>
+                  <div class="field"><label>Table name</label><input id="easyCreateTableName" placeholder="my_table" /></div>
+                </div>
+                <div class="easy-col-builder">
+                  <table class="easy-col-table">
+                    <thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Auto Inc</th><th>PK</th><th></th></tr></thead>
+                    <tbody id="easyColRows"></tbody>
+                  </table>
+                </div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="easyBtnAddCol" class="sm">+ Add column</button>
+                  <button id="easyBtnSeedCols" class="ghost sm">Starter columns</button>
+                </div>
+                <div class="actions" style="margin-top:12px">
+                  <button id="easyBtnDoCreateTable" class="primary">Create Table</button>
+                  <button id="easyBtnDoCreateDb" class="sm">Create Database first</button>
+                </div>
+                <pre id="easyCreateOut" class="hint" style="margin-top:8px">Define columns and click Create Table.</pre>
+              </div>
+              <!-- Export Tab -->
+              <div class="easy-tab-pane" data-etab="export">
+                <div class="row" style="margin-bottom:10px">
+                  <div class="field"><label>Format</label><select id="easyExportFmt"><option value="json">JSON</option><option value="csv">CSV</option><option value="sql">SQL</option></select></div>
+                </div>
+                <div class="actions">
+                  <button id="easyBtnExportData" class="primary sm">Export Data</button>
+                  <button id="easyBtnExportStruct" class="sm">Export Structure</button>
+                </div>
+                <pre id="easyExportOut" class="hint" style="margin-top:8px">Select a table to export.</pre>
+              </div>
+              <!-- Operations Tab -->
+              <div class="easy-tab-pane" data-etab="operations">
+                <div class="callout" style="margin-bottom:12px">&#9888; These operations are destructive and cannot be undone.</div>
+                <div class="easy-ops-grid">
+                  <div class="easy-ops-item">
+                    <h3>Truncate Table</h3>
+                    <p class="hint">Remove all rows but keep the table structure.</p>
+                    <button id="easyBtnTruncate" class="danger sm">Truncate</button>
+                  </div>
+                  <div class="easy-ops-item">
+                    <h3>Drop Table</h3>
+                    <p class="hint">Permanently delete this table and all its data.</p>
+                    <button id="easyBtnDropTable" class="danger sm">Drop Table</button>
+                  </div>
+                  <div class="easy-ops-item">
+                    <h3>Drop Database</h3>
+                    <p class="hint">Permanently delete the entire database.</p>
+                    <button id="easyBtnDropDb" class="danger sm">Drop Database</button>
+                  </div>
+                </div>
+                <pre id="easyOpsOut" class="hint" style="margin-top:8px">Select an operation above.</pre>
+              </div>
             </div>
           </div>
         </section>

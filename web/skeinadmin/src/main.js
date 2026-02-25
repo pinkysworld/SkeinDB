@@ -30,7 +30,8 @@ const STATE = {
   easyGridEditDraft: {},
   easyGridInsertActive: false,
   easyGridInsertDraft: {},
-  easyGridCheckedRows: {}
+  easyGridCheckedRows: {},
+  easySubTab: 'browse'
 };
 
 // ---------------------------------------------------------------------------
@@ -190,19 +191,19 @@ function setConnStatus(kind, message, detail) {
 
 function setSelectedDb(db) {
   STATE.selectedDb = (db || '').trim();
-  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb','easyDbSelect'].forEach(id => {
+  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedDb;
   });
-  const easyDb = $('easyNewDb');
+  const easyDb = $('easyCreateDb');
   if (easyDb && !easyDb.value.trim()) easyDb.value = STATE.selectedDb;
 }
 
 function setSelectedTable(table) {
   STATE.selectedTable = (table || '').trim();
-  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable','easyTableSelect'].forEach(id => {
+  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedTable;
   });
-  const easyTable = $('easyNewTable');
+  const easyTable = $('easyCreateTableName');
   if (easyTable && !easyTable.value.trim()) easyTable.value = STATE.selectedTable;
 }
 
@@ -490,7 +491,7 @@ function disconnect() {
   dataFormApplyColumns([], []);
   easyApplyColumns([], []);
   easyRefreshTargetsFromTree();
-  renderTable('browseTable', [], []); renderTable('easyBrowseTable', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
+  renderTable('browseTable', [], []); renderTable('easyDataGrid', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
   updateContext();
 }
 
@@ -1129,8 +1130,116 @@ function browseNext() {
 }
 
 // ---------------------------------------------------------------------------
-// Easy Viewer
+// Easy Viewer (phpMyAdmin-inspired)
 // ---------------------------------------------------------------------------
+
+function easySetSubTab(tab) {
+  STATE.easySubTab = tab;
+  document.querySelectorAll('.easy-tab').forEach(el => el.classList.toggle('active', el.dataset.etab === tab));
+  document.querySelectorAll('.easy-tab-pane').forEach(el => el.classList.toggle('active', el.dataset.etab === tab));
+  const db = easyGetSelectedDb(), table = easyGetSelectedTable();
+  if (tab === 'structure' && db && table) easyLoadStructure();
+  if (tab === 'insert' && db && table) easyRenderInsertForm();
+  if (tab === 'create') {
+    if ($('easyCreateDb') && !$('easyCreateDb').value.trim()) $('easyCreateDb').value = db || '';
+  }
+  if (tab === 'search') easyPopulateSearchCols();
+}
+
+function easyShowToast(msg, type) {
+  const el = $('easyToast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'easy-toast ' + (type || 'info');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'easy-toast'; }, 5000);
+}
+
+function easyUpdateBreadcrumb() {
+  const s = $('easyBcServer'); if (s) s.textContent = getBaseUrl().replace(/^https?:\/\//, '') || 'Server';
+  const d = $('easyBcDb'); if (d) d.textContent = easyGetSelectedDb() || '(no database)';
+  const t = $('easyBcTable'); if (t) t.textContent = easyGetSelectedTable() || '';
+  const sep = $('easyBcSep2');
+  if (sep) sep.style.display = easyGetSelectedTable() ? '' : 'none';
+  if (t) t.style.display = easyGetSelectedTable() ? '' : 'none';
+}
+
+function easyRenderTree() {
+  const target = $('easyTree');
+  if (!target) return;
+  target.textContent = '';
+  const tree = STATE.dbTree || {};
+  const filter = ($('easyTreeFilter')?.value || '').toLowerCase();
+  const dbs = Object.keys(tree).sort();
+  if (!dbs.length) { target.textContent = 'No databases loaded. Click Connect above.'; return; }
+  const curDb = easyGetSelectedDb();
+  const curTable = easyGetSelectedTable();
+  dbs.forEach(db => {
+    const tables = tree[db] || [];
+    const filtered = filter ? tables.filter(t => t.toLowerCase().includes(filter) || db.toLowerCase().includes(filter)) : tables;
+    if (filter && !db.toLowerCase().includes(filter) && !filtered.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'easy-tree-db' + (db === curDb ? ' active' : '');
+    const header = document.createElement('div');
+    header.className = 'easy-tree-db-header';
+    header.innerHTML = '<span class="easy-tree-icon">\uD83D\uDDC3</span> ' + escapeHtml(db) + ' <span class="easy-tree-count">(' + tables.length + ')</span>';
+    header.addEventListener('click', () => easySelectDatabase(db));
+    wrap.appendChild(header);
+    if (db === curDb || filter) {
+      const list = document.createElement('div');
+      list.className = 'easy-tree-tables';
+      filtered.forEach(tbl => {
+        const item = document.createElement('div');
+        item.className = 'easy-tree-table' + (db === curDb && tbl === curTable ? ' active' : '');
+        item.innerHTML = '<span class="easy-tree-icon">\uD83D\uDCC4</span> ' + escapeHtml(tbl);
+        item.addEventListener('click', e => { e.stopPropagation(); easyNavigateToTable(db, tbl); });
+        list.appendChild(item);
+      });
+      wrap.appendChild(list);
+    }
+    target.appendChild(wrap);
+  });
+}
+
+function easySelectDatabase(db) {
+  setSelectedDb(db);
+  setSelectedTable('');
+  STATE.easyBrowseColumns = [];
+  STATE.easyBrowseRows = [];
+  STATE.easyRowColumns = [];
+  easyResetEditState();
+  easyUpdateBreadcrumb();
+  easyRenderTree();
+  easyRenderDataGrid();
+  updateContext();
+}
+
+async function easyNavigateToTable(db, table) {
+  setSelectedDb(db);
+  setSelectedTable(table);
+  easyUpdateBreadcrumb();
+  easyRenderTree();
+  updateContext();
+  easySetSubTab('browse');
+  try {
+    const res = await call('schema.describe_table', { db, table }, 'easyInsertOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    easyApplyColumns(result.columns || [], result.primary_key || []);
+    dataFormApplyColumns(result.columns || [], result.primary_key || []);
+    if ($('dataFormDb')) $('dataFormDb').value = db;
+    if ($('dataFormTable')) $('dataFormTable').value = table;
+    if ($('dataDb')) $('dataDb').value = db;
+    if ($('dataTable')) $('dataTable').value = table;
+    if ($('schemaDb')) $('schemaDb').value = db;
+    if ($('schemaTable')) $('schemaTable').value = table;
+    await easyBrowseRows();
+  } catch (e) {
+    easyShowToast('Error loading table: ' + e.message, 'error');
+  }
+}
+
+// --- Column builder helpers ---
+
 function defaultEasyBuilderRows() {
   return [
     { id: easyBuilderNextId++, name: 'id', type: 'i64', nullable: false, auto_increment: true, primary: true },
@@ -1141,7 +1250,7 @@ function defaultEasyBuilderRows() {
 function easySetBuilderRows(rows) {
   const normalized = Array.isArray(rows) ? rows : [];
   STATE.easyTableBuilderRows = normalized
-    .map((row) => ({
+    .map(row => ({
       id: row.id || easyBuilderNextId++,
       name: String(row.name || '').trim(),
       type: String(row.type || 'string').trim() || 'string',
@@ -1149,53 +1258,49 @@ function easySetBuilderRows(rows) {
       auto_increment: !!row.auto_increment,
       primary: !!row.primary
     }))
-    .filter((row) => row.name);
-  renderEasyBuilderRows();
+    .filter(row => row.name);
+  easyRenderColBuilder();
 }
 
-function renderEasyBuilderRows() {
-  const target = $('easyTableBuilderRows');
+function renderEasyBuilderRows() { easyRenderColBuilder(); }
+
+function easyRenderColBuilder() {
+  const target = $('easyColRows');
   if (!target) return;
   target.textContent = '';
-  if (!STATE.easyTableBuilderRows.length) {
-    target.textContent = 'Add a column to define the table.';
-    return;
-  }
-  STATE.easyTableBuilderRows.forEach((row) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'builder-row';
-    wrap.dataset.rowId = String(row.id);
-    wrap.innerHTML =
-      '<div class="field"><label>Column</label><input data-role="name" value="' + escapeHtml(row.name) + '" placeholder="column_name" /></div>' +
-      '<div class="field"><label>Type</label><select data-role="type">' +
-      SCHEMA_TYPE_OPTIONS.map((opt) => '<option value="' + opt + '"' + (opt === row.type ? ' selected' : '') + '>' + opt + '</option>').join('') +
-      '</select></div>' +
-      '<label class="builder-check"><input type="checkbox" data-role="nullable"' + (row.nullable ? ' checked' : '') + ' />Nullable</label>' +
-      '<label class="builder-check"><input type="checkbox" data-role="auto_increment"' + (row.auto_increment ? ' checked' : '') + ' />Auto Inc</label>' +
-      '<label class="builder-check"><input type="checkbox" data-role="primary"' + (row.primary ? ' checked' : '') + ' />Primary Key</label>' +
-      '<button class="danger sm" data-role="remove">Remove</button>';
-    wrap.querySelector('[data-role="remove"]')?.addEventListener('click', () => {
-      STATE.easyTableBuilderRows = STATE.easyTableBuilderRows.filter((item) => item.id !== row.id);
-      renderEasyBuilderRows();
+  if (!STATE.easyTableBuilderRows.length) return;
+  STATE.easyTableBuilderRows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.dataset.rowId = String(row.id);
+    tr.innerHTML =
+      '<td><input data-role="name" value="' + escapeHtml(row.name) + '" placeholder="column_name" style="min-width:100px" /></td>' +
+      '<td><select data-role="type">' + SCHEMA_TYPE_OPTIONS.map(opt => '<option value="' + opt + '"' + (opt === row.type ? ' selected' : '') + '>' + opt + '</option>').join('') + '</select></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-role="nullable"' + (row.nullable ? ' checked' : '') + ' /></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-role="auto_increment"' + (row.auto_increment ? ' checked' : '') + ' /></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-role="primary"' + (row.primary ? ' checked' : '') + ' /></td>' +
+      '<td><button class="danger sm" data-role="remove" style="padding:2px 8px">\u2715</button></td>';
+    tr.querySelector('[data-role="remove"]')?.addEventListener('click', () => {
+      STATE.easyTableBuilderRows = STATE.easyTableBuilderRows.filter(item => item.id !== row.id);
+      easyRenderColBuilder();
     });
-    target.appendChild(wrap);
+    target.appendChild(tr);
   });
 }
 
 function easyCollectBuilderRows() {
-  const target = $('easyTableBuilderRows');
+  const target = $('easyColRows');
   if (!target) return [];
   const rows = [];
-  target.querySelectorAll('.builder-row').forEach((rowEl) => {
-    const name = rowEl.querySelector('[data-role="name"]')?.value.trim() || '';
+  target.querySelectorAll('tr').forEach(tr => {
+    const name = tr.querySelector('[data-role="name"]')?.value.trim() || '';
     if (!name) return;
     rows.push({
-      id: Number(rowEl.dataset.rowId || 0) || easyBuilderNextId++,
+      id: Number(tr.dataset.rowId || 0) || easyBuilderNextId++,
       name,
-      type: rowEl.querySelector('[data-role="type"]')?.value || 'string',
-      nullable: !!rowEl.querySelector('[data-role="nullable"]')?.checked,
-      auto_increment: !!rowEl.querySelector('[data-role="auto_increment"]')?.checked,
-      primary: !!rowEl.querySelector('[data-role="primary"]')?.checked
+      type: tr.querySelector('[data-role="type"]')?.value || 'string',
+      nullable: !!tr.querySelector('[data-role="nullable"]')?.checked,
+      auto_increment: !!tr.querySelector('[data-role="auto_increment"]')?.checked,
+      primary: !!tr.querySelector('[data-role="primary"]')?.checked
     });
   });
   return rows;
@@ -1205,202 +1310,62 @@ function easyAddColumn() {
   const current = easyCollectBuilderRows();
   if (current.length) STATE.easyTableBuilderRows = current;
   STATE.easyTableBuilderRows.push({
-    id: easyBuilderNextId++,
-    name: '',
-    type: 'string',
-    nullable: true,
-    auto_increment: false,
-    primary: false
+    id: easyBuilderNextId++, name: '', type: 'string', nullable: true, auto_increment: false, primary: false
   });
-  renderEasyBuilderRows();
+  easyRenderColBuilder();
 }
 
 function easySeedColumns() {
   easySetBuilderRows(defaultEasyBuilderRows());
-  setOut({ ok: true, message: 'Starter columns loaded.' }, 'easyOut');
 }
 
-function easyGetSelectedDb() {
-  return $('easyDbSelect')?.value.trim() || STATE.selectedDb || '';
-}
+// --- Selection helpers ---
 
-function easyGetSelectedTable() {
-  return $('easyTableSelect')?.value.trim() || STATE.selectedTable || '';
-}
-
-function easyRefreshTableOptions(db) {
-  const tableSelect = $('easyTableSelect');
-  if (!tableSelect) return;
-  const selected = easyGetSelectedTable();
-  tableSelect.textContent = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = 'Select table';
-  tableSelect.appendChild(placeholder);
-  const tables = db && STATE.dbTree[db] ? STATE.dbTree[db] : [];
-  tables.forEach((table) => {
-    const opt = document.createElement('option');
-    opt.value = table;
-    opt.textContent = table;
-    tableSelect.appendChild(opt);
-  });
-  if (tables.includes(selected)) tableSelect.value = selected;
-  else tableSelect.value = '';
-}
+function easyGetSelectedDb() { return STATE.selectedDb || ''; }
+function easyGetSelectedTable() { return STATE.selectedTable || ''; }
 
 function easyRefreshTargetsFromTree() {
-  const dbSelect = $('easyDbSelect');
-  if (!dbSelect) return;
-  const dbs = Object.keys(STATE.dbTree || {}).sort();
-  const selected = easyGetSelectedDb();
-  dbSelect.textContent = '';
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = 'Select database';
-  dbSelect.appendChild(placeholder);
-  dbs.forEach((db) => {
-    const opt = document.createElement('option');
-    opt.value = db;
-    opt.textContent = db;
-    dbSelect.appendChild(opt);
-  });
-  if (dbs.includes(selected)) dbSelect.value = selected;
-  else if (dbs.length) dbSelect.value = dbs[0];
-  else dbSelect.value = '';
-  easyRefreshTableOptions(dbSelect.value);
-}
-
-function easyApplySelection() {
-  const db = easyGetSelectedDb();
-  const table = easyGetSelectedTable();
-  if (!db) {
-    setOut({ error: 'Select a database first.' }, 'easyOut');
-    return;
-  }
-  setSelectedDb(db);
-  if (table) setSelectedTable(table);
-  updateContext();
-  if ($('easyNewDb') && !$('easyNewDb').value.trim()) $('easyNewDb').value = db;
-  if ($('easyNewTable') && table && !$('easyNewTable').value.trim()) $('easyNewTable').value = table;
-  setOut({ ok: true, database: db, table: table || null }, 'easyOut');
-}
-
-async function easyReloadTargets() {
-  try {
-    await loadDbTree();
-    easyRefreshTargetsFromTree();
-    setOut({ ok: true, databases: Object.keys(STATE.dbTree).length }, 'easyOut');
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
-  }
+  easyRenderTree();
+  easyUpdateBreadcrumb();
 }
 
 function easyApplyColumns(columns, primaryKey) {
-  const target = $('easyRowFields');
-  if (!target) return;
   const pk = new Set(Array.isArray(primaryKey) ? primaryKey : []);
-  STATE.easyRowColumns = (columns || []).map((col) => ({
+  STATE.easyRowColumns = (columns || []).map(col => ({
     name: col.name,
     kind: col.type?.kind || 'string',
     nullable: !!col.nullable,
     primary: pk.has(col.name),
     auto_increment: !!col.auto_increment
   }));
-  target.textContent = '';
-  if (!STATE.easyRowColumns.length) {
-    target.textContent = 'Load a table to generate row fields.';
-    return;
-  }
-  STATE.easyRowColumns.forEach((col) => {
-    const row = document.createElement('div');
-    row.className = 'builder-row compact';
-    row.dataset.colName = col.name;
-    row.dataset.colKind = col.kind;
-    row.dataset.colPrimary = col.primary ? 'true' : 'false';
-    row.innerHTML =
-      '<div class="field"><label>' + escapeHtml(col.name) + '</label><input data-role="value" placeholder="' + escapeHtml(dataTypePlaceholder(col.kind)) + '" /></div>' +
-      '<div class="field"><label>Type</label><div class="builder-muted">' + escapeHtml(col.kind + (col.primary ? ' (PK)' : '')) + '</div><div class="builder-muted">' + escapeHtml(dataTypeHint(col.kind)) + '</div></div>' +
-      '<label class="builder-check"><input type="checkbox" data-role="null" ' + (col.nullable ? '' : 'disabled') + ' />Set NULL</label>' +
-      '<button class="sm ghost" data-role="clear">Clear</button>';
-    row.querySelector('[data-role="clear"]')?.addEventListener('click', () => {
-      row.querySelector('[data-role="value"]').value = '';
-      const toggle = row.querySelector('[data-role="null"]');
-      if (toggle && !toggle.disabled) toggle.checked = false;
-    });
-    target.appendChild(row);
-  });
+  STATE.easyBrowseColumns = [];
+  STATE.easyBrowseRows = [];
   STATE.easySelectedRowIndex = -1;
   STATE.easySelectedRowPk = [];
-  easyResetGridState();
-  easyBuildVisualFields();
-  renderTable('easyBrowseTable', [], []);
-  const info = $('easyBrowseInfo'); if (info) info.textContent = 'No rows loaded.';
+  STATE.easySelectedRowObject = null;
+  easyResetEditState();
+  easyRenderDataGrid();
 }
 
-function easyClearRowForm() {
-  const target = $('easyRowFields');
-  if (!target) return;
-  target.querySelectorAll('.builder-row').forEach((row) => {
-    const input = row.querySelector('[data-role="value"]');
-    const toggle = row.querySelector('[data-role="null"]');
-    if (input) input.value = '';
-    if (toggle && !toggle.disabled) toggle.checked = false;
-  });
-}
-
-function easyCollectRow(includeAllColumns) {
-  const target = $('easyRowFields');
-  if (!target) throw new Error('Load table form first');
-  const row = {};
-  const pk = [];
-  const pkMissing = [];
-  target.querySelectorAll('.builder-row').forEach((rowEl) => {
-    const name = rowEl.dataset.colName || '';
-    const kind = rowEl.dataset.colKind || 'string';
-    const primary = rowEl.dataset.colPrimary === 'true';
-    if (!name) return;
-    const raw = rowEl.querySelector('[data-role="value"]')?.value || '';
-    const forceNull = !!rowEl.querySelector('[data-role="null"]')?.checked;
-    const hasValue = forceNull || String(raw).trim().length > 0;
-    if (!hasValue && !includeAllColumns && !primary) return;
-    const lit = literalFromInput(kind, raw, forceNull);
-    if (includeAllColumns || hasValue || primary) row[name] = lit;
-    if (primary) {
-      if (!hasValue || lit.t === 'null') pkMissing.push(name);
-      pk.push(lit);
-    }
-  });
-  return { row, pk, pkMissing };
+function easyResetEditState() {
+  STATE.easyGridEditIndex = -1;
+  STATE.easyGridEditDraft = {};
+  STATE.easyGridCheckedRows = {};
 }
 
 function easyReadTableRef() {
   const db = easyGetSelectedDb();
   const table = easyGetSelectedTable();
-  if (!db || !table) throw new Error('Select database and table');
+  if (!db || !table) throw new Error('Select a database and table first');
   return { db, table };
 }
 
 function easyPkColumns() {
-  return STATE.easyRowColumns.filter((col) => col.primary).map((col) => col.name);
-}
-
-function easyLitEquals(a, b) {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-}
-
-function easyRowObjectToPk(rowObject) {
-  const pkCols = easyPkColumns();
-  return pkCols.map((col) => rowObject[col]);
+  return STATE.easyRowColumns.filter(col => col.primary).map(col => col.name);
 }
 
 function easyColumnSchema(name) {
-  return STATE.easyRowColumns.find((col) => col.name === name) || {
-    name,
-    kind: 'string',
-    nullable: true,
-    primary: false,
-    auto_increment: false
-  };
+  return STATE.easyRowColumns.find(col => col.name === name) || { name, kind: 'string', nullable: true, primary: false, auto_increment: false };
 }
 
 function easyInputFromLit(lit) {
@@ -1424,284 +1389,208 @@ function easyParseGridLit(col, raw) {
   return literalFromInput(col.kind, value, false);
 }
 
-function easyPkKey(pkValues) {
-  return JSON.stringify(pkValues || []);
+function easyLitEquals(a, b) {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-function easyRowPkKey(rowObject) {
-  return easyPkKey(easyRowObjectToPk(rowObject || {}));
+function easyRowObjectToPk(rowObject) {
+  return easyPkColumns().map(col => rowObject[col]);
 }
+
+function easyPkKey(pkValues) { return JSON.stringify(pkValues || []); }
+function easyRowPkKey(rowObject) { return easyPkKey(easyRowObjectToPk(rowObject || {})); }
 
 function easyGridCheckedCount() {
   return Object.keys(STATE.easyGridCheckedRows || {}).length;
 }
 
-function easyResetGridState() {
-  STATE.easyGridEditIndex = -1;
-  STATE.easyGridEditDraft = {};
-  STATE.easyGridInsertActive = false;
-  STATE.easyGridInsertDraft = {};
-  STATE.easyGridCheckedRows = {};
-}
+// ---------------------------------------------------------------------------
+// Browse tab – Data grid with inline edit/delete/copy
+// ---------------------------------------------------------------------------
 
-function easyBrowseFilteredIndexes() {
-  const query = (STATE.easyBrowseFilter || '').trim().toLowerCase();
-  if (!query) return STATE.easyBrowseRows.map((_, idx) => idx);
-  return STATE.easyBrowseRows
-    .map((row, idx) => ({ row, idx }))
-    .filter(({ row }) => STATE.easyBrowseColumns.some((col) => formatLit(row[col]).toLowerCase().includes(query)))
-    .map((item) => item.idx);
-}
-
-function easyVisualFields() {
-  return Array.from(document.querySelectorAll('#easyVisualFields .visual-field'));
-}
-
-function easyBuildVisualFields() {
-  const target = $('easyVisualFields');
-  if (!target) return;
-  target.textContent = '';
-  if (!$('easyVisualEnabled')?.checked) {
-    target.textContent = 'Visual editor is disabled. Enable it to edit rows in form mode.';
+function easyRenderDataGrid() {
+  const table = $('easyDataGrid');
+  if (!table) return;
+  table.textContent = '';
+  const cols = STATE.easyBrowseColumns;
+  if (!cols.length) {
+    const info = $('easyPgInfo');
+    if (info) info.textContent = easyGetSelectedTable() ? 'Click Browse or refresh to load rows.' : 'Select a table from the sidebar to browse data.';
     return;
   }
-  if (!STATE.easyRowColumns.length) {
-    target.textContent = 'Load a table first, then click a row to edit.';
-    return;
-  }
-  STATE.easyRowColumns.forEach((col) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'visual-field';
-    wrap.dataset.colName = col.name;
-    wrap.dataset.colKind = col.kind;
-    wrap.dataset.colPrimary = col.primary ? 'true' : 'false';
-    wrap.innerHTML =
-      '<div class="field"><label>' + escapeHtml(col.name + (col.primary ? ' (PK)' : '')) + '</label><input data-role="value" placeholder="' + escapeHtml(dataTypePlaceholder(col.kind)) + '" /></div>' +
-      '<label class="builder-check"><input type="checkbox" data-role="null" ' + (col.nullable ? '' : 'disabled') + ' />Set NULL</label>' +
-      '<div class="visual-meta">' + escapeHtml(col.kind + ' - ' + dataTypeHint(col.kind)) + '</div>';
-    target.appendChild(wrap);
-  });
-}
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  const thCheck = document.createElement('th'); thCheck.style.width = '32px'; thCheck.textContent = '\u2610'; hr.appendChild(thCheck);
+  const thActions = document.createElement('th'); thActions.textContent = 'Actions'; thActions.style.minWidth = '110px'; hr.appendChild(thActions);
+  cols.forEach(col => { const th = document.createElement('th'); th.textContent = col; hr.appendChild(th); });
+  thead.appendChild(hr); table.appendChild(thead);
 
-function easySetVisualMode(mode) {
-  STATE.easyVisualMode = mode;
-  const isEdit = mode === 'edit';
-  easyVisualFields().forEach((field) => {
-    const isPrimary = field.dataset.colPrimary === 'true';
-    const input = field.querySelector('[data-role="value"]');
-    if (!input) return;
-    input.readOnly = isEdit && isPrimary;
-  });
-}
+  const tbody = document.createElement('tbody');
+  const filter = (STATE.easyBrowseFilter || '').toLowerCase();
+  STATE.easyBrowseRows.forEach((row, idx) => {
+    if (filter && !cols.some(col => formatLit(row[col]).toLowerCase().includes(filter))) return;
+    const rowPkKey = easyRowPkKey(row);
+    const isEditing = idx === STATE.easyGridEditIndex;
+    const tr = document.createElement('tr');
+    if (isEditing) tr.className = 'editing-row';
 
-function easyFillVisualForm(rowObject, mode) {
-  if (!$('easyVisualEnabled')?.checked) return;
-  easyBuildVisualFields();
-  if (!STATE.easyRowColumns.length) return;
-  const source = rowObject || {};
-  easyVisualFields().forEach((field) => {
-    const name = field.dataset.colName || '';
-    const lit = source[name];
-    const input = field.querySelector('[data-role="value"]');
-    const nullToggle = field.querySelector('[data-role="null"]');
-    if (!input || !nullToggle) return;
-    if (!lit || lit.t === 'null') {
-      input.value = '';
-      if (!nullToggle.disabled) nullToggle.checked = !!lit;
-      return;
-    }
-    if (!nullToggle.disabled) nullToggle.checked = false;
-    if ('v' in lit) input.value = String(lit.v ?? '');
-    else if ('iso' in lit) input.value = String(lit.iso ?? '');
-    else if ('b64' in lit) input.value = String(lit.b64 ?? '');
-    else input.value = formatLit(lit);
-  });
-  easySetVisualMode(mode || 'insert');
-}
+    // Checkbox
+    const tdCheck = document.createElement('td'); tdCheck.className = 'table-check';
+    const cb = document.createElement('input'); cb.type = 'checkbox';
+    cb.checked = !!STATE.easyGridCheckedRows[rowPkKey];
+    cb.addEventListener('click', e => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      if (cb.checked) STATE.easyGridCheckedRows[rowPkKey] = true;
+      else delete STATE.easyGridCheckedRows[rowPkKey];
+      easyUpdateCheckedInfo();
+    });
+    tdCheck.appendChild(cb); tr.appendChild(tdCheck);
 
-function easyResetVisualForm() {
-  STATE.easySelectedRowIndex = -1;
-  STATE.easySelectedRowPk = [];
-  STATE.easySelectedRowObject = null;
-  easyFillVisualForm({}, 'insert');
-  easyRenderBrowseTable();
-  setOut({ ok: true, mode: 'insert', message: 'Visual form cleared.' }, 'easyVisualOut');
-}
-
-function easyCollectVisualRow() {
-  if (!$('easyVisualEnabled')?.checked) throw new Error('Enable visual editor first');
-  const row = {};
-  const pk = [];
-  const pkMissing = [];
-  easyVisualFields().forEach((field) => {
-    const name = field.dataset.colName || '';
-    const kind = field.dataset.colKind || 'string';
-    const isPrimary = field.dataset.colPrimary === 'true';
-    const input = field.querySelector('[data-role="value"]');
-    const nullToggle = field.querySelector('[data-role="null"]');
-    const raw = input ? input.value : '';
-    const forceNull = !!nullToggle?.checked;
-    const hasValue = forceNull || String(raw || '').trim().length > 0;
-    if (!hasValue && !isPrimary) return;
-    const lit = literalFromInput(kind, raw, forceNull);
-    row[name] = lit;
-    if (isPrimary) {
-      if (!hasValue || lit.t === 'null') pkMissing.push(name);
-      pk.push(lit);
-    }
-  });
-  return { row, pk, pkMissing };
-}
-
-function easyGridSetMode(enabled) {
-  STATE.easyGridMode = !!enabled;
-  if (!STATE.easyGridMode) {
-    STATE.easyGridEditIndex = -1;
-    STATE.easyGridEditDraft = {};
-    STATE.easyGridInsertActive = false;
-    STATE.easyGridInsertDraft = {};
-    STATE.easyGridCheckedRows = {};
-  }
-  easyRenderBrowseTable();
-}
-
-function easyGridStartEdit(index) {
-  const row = STATE.easyBrowseRows[index];
-  if (!row) return;
-  STATE.easyGridEditIndex = index;
-  const draft = {};
-  STATE.easyBrowseColumns.forEach((name) => { draft[name] = easyInputFromLit(row[name]); });
-  STATE.easyGridEditDraft = draft;
-  STATE.easyGridInsertActive = false;
-  STATE.easyGridInsertDraft = {};
-  easySelectBrowseRow(index, false);
-  easyRenderBrowseTable();
-}
-
-function easyGridStartInsert(seedRow) {
-  STATE.easyGridInsertActive = true;
-  const draft = {};
-  STATE.easyBrowseColumns.forEach((name) => {
-    draft[name] = seedRow ? easyInputFromLit(seedRow[name]) : '';
-  });
-  STATE.easyGridInsertDraft = draft;
-  STATE.easyGridEditIndex = -1;
-  STATE.easyGridEditDraft = {};
-  easyRenderBrowseTable();
-}
-
-function easyGridCancel() {
-  STATE.easyGridEditIndex = -1;
-  STATE.easyGridEditDraft = {};
-  STATE.easyGridInsertActive = false;
-  STATE.easyGridInsertDraft = {};
-  STATE.easyGridCheckedRows = {};
-  easyRenderBrowseTable();
-  setOut({ ok: true, message: 'Grid edit state cleared.' }, 'easyVisualOut');
-}
-
-function easyGridToggleChecked(rowObject, checked) {
-  const key = easyRowPkKey(rowObject);
-  if (!key || key === '[]') return;
-  if (checked) STATE.easyGridCheckedRows[key] = true;
-  else delete STATE.easyGridCheckedRows[key];
-}
-
-function easyGridBuildInsertRow(draft) {
-  const row = {};
-  const pkMissing = [];
-  STATE.easyRowColumns.forEach((col) => {
-    const raw = String(draft[col.name] ?? '').trim();
-    if (!raw.length) {
-      if (col.primary && !col.auto_increment) pkMissing.push(col.name);
-      return;
-    }
-    row[col.name] = easyParseGridLit(col, raw);
-  });
-  return { row, pkMissing };
-}
-
-function easyGridBuildChangesFromDraft(index, draft) {
-  const row = STATE.easyBrowseRows[index];
-  if (!row) throw new Error('Row not found');
-  const changes = {};
-  STATE.easyRowColumns.forEach((col) => {
-    if (col.primary) return;
-    if (!(col.name in draft)) return;
-    const before = row[col.name];
-    const raw = String(draft[col.name] ?? '').trim();
-    let after = before;
-    if (!raw.length) {
-      if (!col.nullable) throw new Error('Column "' + col.name + '" cannot be empty');
-      after = { t: 'null' };
+    // Actions
+    const tdAct = document.createElement('td'); tdAct.className = 'row-actions';
+    if (isEditing) {
+      const saveBtn = document.createElement('button'); saveBtn.className = 'row-action-btn edit'; saveBtn.textContent = '\uD83D\uDCBE'; saveBtn.title = 'Save';
+      saveBtn.addEventListener('click', e => { e.stopPropagation(); easySaveRowEdit(idx); });
+      const cancelBtn = document.createElement('button'); cancelBtn.className = 'row-action-btn'; cancelBtn.textContent = '\u2715'; cancelBtn.title = 'Cancel';
+      cancelBtn.addEventListener('click', e => { e.stopPropagation(); easyCancelRowEdit(); });
+      tdAct.appendChild(saveBtn); tdAct.appendChild(cancelBtn);
     } else {
-      after = easyParseGridLit(col, raw);
+      const editBtn = document.createElement('button'); editBtn.className = 'row-action-btn edit'; editBtn.textContent = '\u270E'; editBtn.title = 'Edit inline';
+      editBtn.addEventListener('click', e => { e.stopPropagation(); easyStartRowEdit(idx); });
+      const copyBtn = document.createElement('button'); copyBtn.className = 'row-action-btn copy'; copyBtn.textContent = '\u29C9'; copyBtn.title = 'Copy to Insert';
+      copyBtn.addEventListener('click', e => { e.stopPropagation(); easyCopyRowToInsert(idx); });
+      const delBtn = document.createElement('button'); delBtn.className = 'row-action-btn delete'; delBtn.textContent = '\u2715'; delBtn.title = 'Delete';
+      delBtn.addEventListener('click', e => { e.stopPropagation(); easyDeleteRow(idx); });
+      tdAct.appendChild(editBtn); tdAct.appendChild(copyBtn); tdAct.appendChild(delBtn);
     }
-    if (!easyLitEquals(before, after)) changes[col.name] = after;
+    tr.appendChild(tdAct);
+
+    // Data cells
+    cols.forEach(col => {
+      const td = document.createElement('td');
+      if (isEditing) {
+        const colMeta = easyColumnSchema(col);
+        const input = document.createElement('input');
+        input.className = 'inline-edit-input' + (colMeta.primary ? ' pk-readonly' : '');
+        input.value = String((STATE.easyGridEditDraft || {})[col] ?? easyInputFromLit(row[col]));
+        input.placeholder = dataTypePlaceholder(colMeta.kind);
+        if (colMeta.primary) input.readOnly = true;
+        input.addEventListener('click', e => e.stopPropagation());
+        input.addEventListener('input', e => { STATE.easyGridEditDraft[col] = e.target.value; });
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') easySaveRowEdit(idx); if (e.key === 'Escape') easyCancelRowEdit(); });
+        td.appendChild(input);
+      } else {
+        const val = formatLit(row[col]);
+        td.textContent = val.length > 120 ? val.substring(0, 120) + '\u2026' : val;
+        td.title = val;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
   });
-  return changes;
+  table.appendChild(tbody);
+
+  // Pagination info
+  const info = $('easyPgInfo');
+  if (info) {
+    const offset = STATE.easyBrowseOffset || 0;
+    const count = STATE.easyBrowseRows.length;
+    info.textContent = count ? 'Showing rows ' + (offset + 1) + '\u2013' + (offset + count) + ' (offset ' + offset + ')' : 'No rows in this table.';
+  }
+  easyUpdateCheckedInfo();
 }
 
-async function easyGridSaveRow(index) {
+function easyUpdateCheckedInfo() {
+  const el = $('easyCheckedInfo');
+  if (el) el.textContent = easyGridCheckedCount() + ' selected';
+  const checkAll = $('easyCheckAll');
+  if (checkAll) checkAll.checked = STATE.easyBrowseRows.length > 0 && easyGridCheckedCount() === STATE.easyBrowseRows.length;
+}
+
+function easyStartRowEdit(idx) {
+  const row = STATE.easyBrowseRows[idx];
+  if (!row) return;
+  STATE.easyGridEditIndex = idx;
+  const draft = {};
+  STATE.easyBrowseColumns.forEach(name => { draft[name] = easyInputFromLit(row[name]); });
+  STATE.easyGridEditDraft = draft;
+  easyRenderDataGrid();
+}
+
+function easyCancelRowEdit() {
+  STATE.easyGridEditIndex = -1;
+  STATE.easyGridEditDraft = {};
+  easyRenderDataGrid();
+}
+
+async function easySaveRowEdit(idx) {
   try {
-    const row = STATE.easyBrowseRows[index];
+    const row = STATE.easyBrowseRows[idx];
     if (!row) throw new Error('Row not found');
     const tableRef = easyReadTableRef();
     const pk = easyRowObjectToPk(row);
     const where = whereByPkColumns(STATE.easyRowColumns, pk);
-    if (!where) throw new Error('Could not build primary-key filter for row');
-    const changes = easyGridBuildChangesFromDraft(index, STATE.easyGridEditDraft || {});
-    if (!Object.keys(changes).length) throw new Error('No changed values to save');
-    const res = await call('data.update', { table: tableRef, where, set: changes, limit: 1 }, 'easyVisualOut');
+    if (!where) throw new Error('Could not build primary-key filter');
+    const changes = {};
+    STATE.easyRowColumns.forEach(col => {
+      if (col.primary) return;
+      if (!(col.name in STATE.easyGridEditDraft)) return;
+      const before = row[col.name];
+      const raw = String(STATE.easyGridEditDraft[col.name] ?? '').trim();
+      let after;
+      if (!raw.length) {
+        if (!col.nullable) throw new Error('Column "' + col.name + '" cannot be empty');
+        after = { t: 'null' };
+      } else {
+        after = easyParseGridLit(col, raw);
+      }
+      if (!easyLitEquals(before, after)) changes[col.name] = after;
+    });
+    if (!Object.keys(changes).length) { easyShowToast('No changes detected.', 'info'); easyCancelRowEdit(); return; }
+    const res = await call('data.update', { table: tableRef, where, set: changes, limit: 1 }, 'easyInsertOut');
     unwrapRpcResult(res, 'data.update');
-    await easyBrowseRows();
     STATE.easyGridEditIndex = -1;
     STATE.easyGridEditDraft = {};
-    setOut({ ok: true, updated_fields: Object.keys(changes) }, 'easyVisualOut');
+    easyShowToast('\u2713 Row updated (' + Object.keys(changes).join(', ') + ').', 'success');
+    await easyBrowseRows();
   } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
+    easyShowToast('Update failed: ' + e.message, 'error');
   }
 }
 
-async function easyGridDeleteRow(index) {
+function easyCopyRowToInsert(idx) {
+  const row = STATE.easyBrowseRows[idx];
+  if (!row) return;
+  easySetSubTab('insert');
+  easyRenderInsertForm(row);
+  easyShowToast('Row copied to Insert tab. Modify and insert.', 'info');
+}
+
+async function easyDeleteRow(idx) {
+  const row = STATE.easyBrowseRows[idx];
+  if (!row) return;
+  const pkDisplay = easyPkColumns().map(c => c + '=' + formatLit(row[c])).join(', ');
+  if (!confirm('Delete row where ' + pkDisplay + '?')) return;
   try {
-    const row = STATE.easyBrowseRows[index];
-    if (!row) throw new Error('Row not found');
     const tableRef = easyReadTableRef();
     const pk = easyRowObjectToPk(row);
     const where = whereByPkColumns(STATE.easyRowColumns, pk);
-    if (!where) throw new Error('Could not build primary-key filter for row');
-    const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyVisualOut');
+    if (!where) throw new Error('Could not build primary-key filter');
+    const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyInsertOut');
     unwrapRpcResult(res, 'data.delete');
     delete STATE.easyGridCheckedRows[easyRowPkKey(row)];
+    easyShowToast('\u2713 Row deleted.', 'success');
     await easyBrowseRows();
-    setOut({ ok: true, deleted: 1 }, 'easyVisualOut');
   } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
+    easyShowToast('Delete failed: ' + e.message, 'error');
   }
 }
 
-async function easyGridInsertRow() {
+async function easyDeleteCheckedRows() {
+  const count = easyGridCheckedCount();
+  if (!count) { easyShowToast('No rows selected.', 'info'); return; }
+  if (!confirm('Delete ' + count + ' selected row(s)? This cannot be undone.')) return;
   try {
-    const tableRef = easyReadTableRef();
-    const payload = easyGridBuildInsertRow(STATE.easyGridInsertDraft || {});
-    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
-    if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
-    const res = await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyVisualOut');
-    unwrapRpcResult(res, 'data.insert');
-    await easyBrowseRows();
-    STATE.easyGridInsertActive = false;
-    STATE.easyGridInsertDraft = {};
-    setOut({ ok: true, inserted: 1 }, 'easyVisualOut');
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
-  }
-}
-
-async function easyGridDeleteChecked() {
-  try {
-    const selectedKeys = Object.keys(STATE.easyGridCheckedRows || {});
-    if (!selectedKeys.length) throw new Error('Select at least one row');
     const tableRef = easyReadTableRef();
     let deleted = 0;
     for (const row of STATE.easyBrowseRows) {
@@ -1709,355 +1598,66 @@ async function easyGridDeleteChecked() {
       if (!STATE.easyGridCheckedRows[key]) continue;
       const where = whereByPkColumns(STATE.easyRowColumns, easyRowObjectToPk(row));
       if (!where) continue;
-      const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyVisualOut');
-      unwrapRpcResult(res, 'data.delete');
-      deleted += 1;
+      await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyInsertOut');
+      deleted++;
     }
-    await easyBrowseRows();
     STATE.easyGridCheckedRows = {};
-    setOut({ ok: true, deleted }, 'easyVisualOut');
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
-  }
-}
-
-function easyRenderBrowseTable() {
-  const table = $('easyBrowseTable');
-  if (!table) return;
-  table.textContent = '';
-  const indexes = easyBrowseFilteredIndexes();
-  const cols = STATE.easyBrowseColumns;
-  if (!cols.length) {
-    const info = $('easyBrowseInfo'); if (info) info.textContent = 'No rows loaded.';
-    return;
-  }
-  const thead = document.createElement('thead');
-  const hr = document.createElement('tr');
-  ['Pick', 'Row', 'Actions'].concat(cols).forEach((label) => {
-    const th = document.createElement('th');
-    th.textContent = label;
-    hr.appendChild(th);
-  });
-  thead.appendChild(hr);
-  table.appendChild(thead);
-  const tbody = document.createElement('tbody');
-
-  if (STATE.easyGridMode && STATE.easyGridInsertActive) {
-    const insertTr = document.createElement('tr');
-    insertTr.className = 'inline-new-row';
-    const pick = document.createElement('td');
-    pick.textContent = '--';
-    insertTr.appendChild(pick);
-    const rowNo = document.createElement('td');
-    rowNo.textContent = 'new';
-    insertTr.appendChild(rowNo);
-    const actions = document.createElement('td');
-    actions.className = 'row-actions';
-    const insertBtn = document.createElement('button');
-    insertBtn.className = 'secondary sm';
-    insertBtn.textContent = 'Insert';
-    insertBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      easyGridInsertRow();
-    });
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'ghost sm';
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      STATE.easyGridInsertActive = false;
-      STATE.easyGridInsertDraft = {};
-      easyRenderBrowseTable();
-    });
-    actions.appendChild(insertBtn);
-    actions.appendChild(cancelBtn);
-    insertTr.appendChild(actions);
-    cols.forEach((colName) => {
-      const col = easyColumnSchema(colName);
-      const td = document.createElement('td');
-      const input = document.createElement('input');
-      input.className = 'inline-cell-input' + (col.primary ? ' pk' : '');
-      input.placeholder = dataTypePlaceholder(col.kind);
-      input.value = String((STATE.easyGridInsertDraft || {})[colName] ?? '');
-      input.addEventListener('click', (event) => event.stopPropagation());
-      input.addEventListener('input', (event) => {
-        STATE.easyGridInsertDraft[colName] = event.target.value;
-      });
-      td.appendChild(input);
-      insertTr.appendChild(td);
-    });
-    tbody.appendChild(insertTr);
-  }
-
-  indexes.forEach((idx) => {
-    const row = STATE.easyBrowseRows[idx] || {};
-    const rowPkKey = easyRowPkKey(row);
-    const isEditing = STATE.easyGridMode && idx === STATE.easyGridEditIndex;
-    const tr = document.createElement('tr');
-    if (idx === STATE.easySelectedRowIndex) tr.classList.add('row-selected');
-    const pick = document.createElement('td');
-    if (STATE.easyGridMode) {
-      pick.className = 'table-check';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !!STATE.easyGridCheckedRows[rowPkKey];
-      cb.addEventListener('click', (event) => event.stopPropagation());
-      cb.addEventListener('change', () => {
-        easyGridToggleChecked(row, cb.checked);
-        easyRenderBrowseTable();
-      });
-      pick.appendChild(cb);
-    } else {
-      pick.textContent = '--';
-    }
-    tr.appendChild(pick);
-    const rowNo = document.createElement('td');
-    rowNo.textContent = String(STATE.easyBrowseOffset + idx + 1);
-    tr.appendChild(rowNo);
-    const action = document.createElement('td');
-    action.className = 'row-actions';
-    if (STATE.easyGridMode) {
-      if (isEditing) {
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'primary sm';
-        saveBtn.textContent = 'Save';
-        saveBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          easyGridSaveRow(idx);
-        });
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'ghost sm';
-        cancelBtn.textContent = 'Cancel';
-        cancelBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          STATE.easyGridEditIndex = -1;
-          STATE.easyGridEditDraft = {};
-          easyRenderBrowseTable();
-        });
-        action.appendChild(saveBtn);
-        action.appendChild(cancelBtn);
-      } else {
-        const editBtn = document.createElement('button');
-        editBtn.className = 'sm';
-        editBtn.textContent = 'Edit';
-        editBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          easyGridStartEdit(idx);
-        });
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'sm';
-        copyBtn.textContent = 'Copy';
-        copyBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          easyGridStartInsert(row);
-        });
-        const deleteBtn = document.createElement('button');
-        deleteBtn.className = 'danger sm';
-        deleteBtn.textContent = 'Delete';
-        deleteBtn.addEventListener('click', (event) => {
-          event.stopPropagation();
-          easyGridDeleteRow(idx);
-        });
-        action.appendChild(editBtn);
-        action.appendChild(copyBtn);
-        action.appendChild(deleteBtn);
-      }
-    } else {
-      const editBtn = document.createElement('button');
-      editBtn.className = 'sm';
-      editBtn.textContent = idx === STATE.easySelectedRowIndex ? 'Selected' : 'Edit';
-      editBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        easySelectBrowseRow(idx, true);
-      });
-      action.appendChild(editBtn);
-    }
-    tr.appendChild(action);
-    cols.forEach((col) => {
-      const td = document.createElement('td');
-      if (isEditing) {
-        const colMeta = easyColumnSchema(col);
-        const input = document.createElement('input');
-        input.className = 'inline-cell-input' + (colMeta.primary ? ' pk' : '');
-        input.value = String((STATE.easyGridEditDraft || {})[col] ?? easyInputFromLit(row[col]));
-        input.placeholder = dataTypePlaceholder(colMeta.kind);
-        if (colMeta.primary) input.readOnly = true;
-        input.addEventListener('click', (event) => event.stopPropagation());
-        input.addEventListener('input', (event) => {
-          STATE.easyGridEditDraft[col] = event.target.value;
-        });
-        td.appendChild(input);
-      } else {
-        td.textContent = formatLit(row[col]);
-      }
-      tr.appendChild(td);
-    });
-    tr.addEventListener('click', () => easySelectBrowseRow(idx, false));
-    tbody.appendChild(tr);
-  });
-  table.appendChild(tbody);
-  const info = $('easyBrowseInfo');
-  if (info) {
-    const mode = STATE.easyGridMode ? ' Grid mode ON.' : '';
-    const selected = STATE.easyGridMode ? (' Checked: ' + easyGridCheckedCount() + '.') : '';
-    info.textContent =
-      'Loaded ' + STATE.easyBrowseRows.length + ' row(s), showing ' + indexes.length +
-      ' after filter, offset ' + STATE.easyBrowseOffset + '.' + mode + selected;
-  }
-}
-
-function easySelectBrowseRow(index, loadVisual) {
-  const row = STATE.easyBrowseRows[index];
-  if (!row) return;
-  const pk = easyRowObjectToPk(row);
-  if (!pk.length || pk.some((lit) => lit === undefined || lit === null || lit.t === 'null')) {
-    setOut({ error: 'Selected row has incomplete primary key and cannot be edited safely.' }, 'easyVisualOut');
-    return;
-  }
-  STATE.easySelectedRowIndex = index;
-  STATE.easySelectedRowPk = pk;
-  STATE.easySelectedRowObject = row;
-  easyRenderBrowseTable();
-  if (loadVisual || $('easyVisualEnabled')?.checked) {
-    easyFillVisualForm(row, 'edit');
-    setOut({ ok: true, mode: 'edit', row_index: STATE.easyBrowseOffset + index }, 'easyVisualOut');
-  }
-}
-
-async function easyVisualLoadSelected() {
-  try {
-    if (STATE.easySelectedRowIndex < 0) throw new Error('Select a row from Row Preview first');
-    easySelectBrowseRow(STATE.easySelectedRowIndex, true);
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
-  }
-}
-
-async function easyVisualSaveChanges() {
-  try {
-    if (STATE.easySelectedRowIndex < 0 || !STATE.easySelectedRowObject) {
-      throw new Error('Select a row first');
-    }
-    const tableRef = easyReadTableRef();
-    const payload = easyCollectVisualRow();
-    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
-    const where = whereByPkColumns(STATE.easyRowColumns, STATE.easySelectedRowPk);
-    if (!where) throw new Error('Could not build primary-key filter');
-    const changes = {};
-    STATE.easyRowColumns.filter((col) => !col.primary).forEach((col) => {
-      if (!(col.name in payload.row)) return;
-      const before = STATE.easySelectedRowObject[col.name];
-      const after = payload.row[col.name];
-      if (!easyLitEquals(before, after)) changes[col.name] = after;
-    });
-    if (!Object.keys(changes).length) throw new Error('No changed fields to save');
-    const res = await call('data.update', { table: tableRef, where, set: changes, limit: 1 }, 'easyVisualOut');
-    unwrapRpcResult(res, 'data.update');
+    easyShowToast('\u2713 ' + deleted + ' row(s) deleted.', 'success');
     await easyBrowseRows();
-    setOut({ ok: true, updated_fields: Object.keys(changes) }, 'easyVisualOut');
   } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
+    easyShowToast('Batch delete failed: ' + e.message, 'error');
   }
 }
 
-async function easyVisualInsertNew() {
-  try {
-    const tableRef = easyReadTableRef();
-    const payload = easyCollectVisualRow();
-    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
-    if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
-    const res = await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyVisualOut');
-    unwrapRpcResult(res, 'data.insert');
-    await easyBrowseRows();
-    easyResetVisualForm();
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
+function easyToggleCheckAll() {
+  const checkAll = $('easyCheckAll');
+  if (!checkAll) return;
+  STATE.easyGridCheckedRows = {};
+  if (checkAll.checked) {
+    STATE.easyBrowseRows.forEach(row => {
+      const key = easyRowPkKey(row);
+      if (key && key !== '[]') STATE.easyGridCheckedRows[key] = true;
+    });
   }
+  easyRenderDataGrid();
 }
 
-async function easyVisualDeleteSelected() {
-  try {
-    if (STATE.easySelectedRowIndex < 0 || !STATE.easySelectedRowPk.length) {
-      throw new Error('Select a row first');
-    }
-    const tableRef = easyReadTableRef();
-    const where = whereByPkColumns(STATE.easyRowColumns, STATE.easySelectedRowPk);
-    if (!where) throw new Error('Could not build primary-key filter');
-    const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyVisualOut');
-    unwrapRpcResult(res, 'data.delete');
-    await easyBrowseRows();
-    easyResetVisualForm();
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyVisualOut');
-  }
-}
+// ---------------------------------------------------------------------------
+// Browse – Pagination & Loading
+// ---------------------------------------------------------------------------
 
 function easyBrowsePrev() {
-  const limit = parseInt($('easyBrowseLimit')?.value || '', 10) || 25;
-  const current = parseInt($('easyBrowseOffset')?.value || '', 10) || 0;
-  const next = Math.max(0, current - limit);
-  if ($('easyBrowseOffset')) $('easyBrowseOffset').value = String(next);
+  const limit = parseInt($('easyPerPage')?.value || '', 10) || 25;
+  STATE.easyBrowseOffset = Math.max(0, (STATE.easyBrowseOffset || 0) - limit);
   easyBrowseRows();
 }
 
 function easyBrowseNext() {
-  const limit = parseInt($('easyBrowseLimit')?.value || '', 10) || 25;
-  const current = parseInt($('easyBrowseOffset')?.value || '', 10) || 0;
-  const next = current + limit;
-  if ($('easyBrowseOffset')) $('easyBrowseOffset').value = String(next);
+  const limit = parseInt($('easyPerPage')?.value || '', 10) || 25;
+  STATE.easyBrowseOffset = (STATE.easyBrowseOffset || 0) + limit;
   easyBrowseRows();
-}
-
-async function easyLoadTableForm() {
-  try {
-    easyApplySelection();
-    const tableRef = easyReadTableRef();
-    const res = await call('schema.describe_table', tableRef, 'easyOut');
-    const result = unwrapRpcResult(res, 'schema.describe_table');
-    easyApplyColumns(result.columns || [], result.primary_key || []);
-    dataFormApplyColumns(result.columns || [], result.primary_key || []);
-    if ($('dataFormDb')) $('dataFormDb').value = tableRef.db;
-    if ($('dataFormTable')) $('dataFormTable').value = tableRef.table;
-    if ($('dataDb')) $('dataDb').value = tableRef.db;
-    if ($('dataTable')) $('dataTable').value = tableRef.table;
-    if ($('schemaDb')) $('schemaDb').value = tableRef.db;
-    if ($('schemaTable')) $('schemaTable').value = tableRef.table;
-    STATE.easyBrowseColumns = [];
-    STATE.easyBrowseRows = [];
-    STATE.easyBrowseOffset = 0;
-    STATE.easyBrowseFilter = '';
-    easyResetVisualForm();
-    setOut({ ok: true, columns: (result.columns || []).length, primary_key: result.primary_key || [] }, 'easyOut');
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
-  }
 }
 
 async function easyBrowseRows() {
   try {
-    const previousGridEditPk =
-      STATE.easyGridEditIndex >= 0 && STATE.easyBrowseRows[STATE.easyGridEditIndex]
-        ? easyRowPkKey(STATE.easyBrowseRows[STATE.easyGridEditIndex])
-        : '';
-    easyApplySelection();
     const tableRef = easyReadTableRef();
-    const limit = parseInt($('easyBrowseLimit')?.value || '', 10) || 25;
-    const offset = parseInt($('easyBrowseOffset')?.value || '', 10) || 0;
-    const orderCol = $('easyBrowseOrder')?.value.trim() || '';
-    const search = $('easyBrowseSearch')?.value.trim() || '';
-    STATE.easyBrowseOffset = offset;
-    STATE.easyBrowseFilter = search;
-    const desc = await call('schema.describe_table', tableRef, 'easyOut');
+    const limit = parseInt($('easyPerPage')?.value || '', 10) || 25;
+    const offset = STATE.easyBrowseOffset || 0;
+    const orderCol = $('easyOrderCol')?.value.trim() || '';
+    const desc = await call('schema.describe_table', tableRef, 'easyInsertOut');
     const descResult = unwrapRpcResult(desc, 'schema.describe_table');
-    const cols = (descResult.columns || []).map((col) => col.name);
-    const projection = cols.map((name) => ({ expr: { col: name }, as: null }));
+    if (!STATE.easyRowColumns.length) {
+      easyApplyColumns(descResult.columns || [], descResult.primary_key || []);
+    }
+    const cols = (descResult.columns || []).map(col => col.name);
+    const projection = cols.map(name => ({ expr: { col: name }, as: null }));
     const query = {
       with: [],
       body: { select: { projection, from: [tableRef] } },
       order_by: orderCol ? [{ expr: { col: orderCol }, dir: 'asc' }] : [],
       limit: { limit, offset }
     };
-    const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyOut');
+    const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyInsertOut');
     const result = unwrapRpcResult(res, 'query.select');
     if (result?.data) {
       const data = result.data;
@@ -2065,137 +1665,384 @@ async function easyBrowseRows() {
         if (typeof col === 'string') return col;
         return col?.name || col?.col || ('col' + (idx + 1));
       });
-      STATE.easyBrowseRows = (data.rows || []).map((row) => {
+      STATE.easyBrowseRows = (data.rows || []).map(row => {
         const obj = {};
-        STATE.easyBrowseColumns.forEach((col, idx) => {
-          obj[col] = Array.isArray(row) ? row[idx] : undefined;
-        });
+        STATE.easyBrowseColumns.forEach((col, idx) => { obj[col] = Array.isArray(row) ? row[idx] : undefined; });
         return obj;
       });
-      const selectedStillVisible = STATE.easySelectedRowPk.length
-        ? STATE.easyBrowseRows.findIndex((row) => {
-            const pk = easyRowObjectToPk(row);
-            return pk.length === STATE.easySelectedRowPk.length
-              && pk.every((lit, i) => easyLitEquals(lit, STATE.easySelectedRowPk[i]));
-          })
-        : -1;
-      STATE.easySelectedRowIndex = selectedStillVisible >= 0 ? selectedStillVisible : -1;
-      if (STATE.easySelectedRowIndex >= 0) STATE.easySelectedRowObject = STATE.easyBrowseRows[STATE.easySelectedRowIndex];
-      else {
-        STATE.easySelectedRowPk = [];
-        STATE.easySelectedRowObject = null;
-      }
-      if (previousGridEditPk) {
-        STATE.easyGridEditIndex = STATE.easyBrowseRows.findIndex((row) => easyRowPkKey(row) === previousGridEditPk);
-        if (STATE.easyGridEditIndex < 0) STATE.easyGridEditDraft = {};
-      }
-      easyRenderBrowseTable();
+      STATE.easyBrowseOffset = offset;
+      STATE.easyGridEditIndex = -1;
+      STATE.easyGridEditDraft = {};
     } else {
-      STATE.easyBrowseColumns = [];
+      STATE.easyBrowseColumns = cols;
       STATE.easyBrowseRows = [];
-      STATE.easySelectedRowIndex = -1;
-      STATE.easySelectedRowPk = [];
-      STATE.easySelectedRowObject = null;
-      easyResetGridState();
-      easyRenderBrowseTable();
+    }
+    easyRenderDataGrid();
+  } catch (e) {
+    if (e.message.includes('Select a database')) {
+      const info = $('easyPgInfo');
+      if (info) info.textContent = 'Select a table from the sidebar.';
+    } else {
+      easyShowToast('Browse failed: ' + e.message, 'error');
+    }
+  }
+}
+
+// Backward compat aliases
+function easyRenderBrowseTable() { easyRenderDataGrid(); }
+
+// ---------------------------------------------------------------------------
+// Structure tab
+// ---------------------------------------------------------------------------
+
+async function easyLoadStructure() {
+  try {
+    const tableRef = easyReadTableRef();
+    const res = await call('schema.describe_table', tableRef, 'easyInsertOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    const table = $('easyStructureGrid');
+    if (!table) return;
+    table.textContent = '';
+    const cols = result.columns || [];
+    const pk = new Set(Array.isArray(result.primary_key) ? result.primary_key : []);
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    ['#', 'Column', 'Type', 'Nullable', 'Auto Increment', 'Primary Key'].forEach(h => {
+      const th = document.createElement('th'); th.textContent = h; hr.appendChild(th);
+    });
+    thead.appendChild(hr); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    cols.forEach((col, i) => {
+      const tr = document.createElement('tr');
+      [String(i + 1), col.name, col.type?.kind || JSON.stringify(col.type || ''),
+       col.nullable ? 'YES' : 'NO', col.auto_increment ? 'YES' : 'NO',
+       pk.has(col.name) ? '\uD83D\uDD11 YES' : 'NO'
+      ].forEach(v => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    const info = $('easyStructureInfo');
+    if (info) info.textContent = cols.length + ' column(s). Primary key: ' + (result.primary_key || []).join(', ');
+  } catch (e) {
+    easyShowToast('Structure load failed: ' + e.message, 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Insert tab
+// ---------------------------------------------------------------------------
+
+function easyRenderInsertForm(prefill) {
+  const target = $('easyInsertFields');
+  if (!target) return;
+  target.textContent = '';
+  if (!STATE.easyRowColumns.length) {
+    target.textContent = 'Select a table from the sidebar to insert data.';
+    return;
+  }
+  const grid = document.createElement('div');
+  grid.className = 'easy-edit-fields-grid';
+  STATE.easyRowColumns.forEach(col => {
+    const item = document.createElement('div');
+    item.className = 'easy-field-item';
+    item.dataset.colName = col.name;
+    item.dataset.colKind = col.kind;
+    item.dataset.colPrimary = col.primary ? 'true' : 'false';
+    const label = document.createElement('label');
+    label.textContent = col.name + (col.primary ? ' \uD83D\uDD11' : '') + (col.auto_increment ? ' (auto)' : '');
+    item.appendChild(label);
+    const input = document.createElement('input');
+    input.dataset.role = 'value';
+    input.placeholder = col.auto_increment ? '(auto-generated)' : dataTypePlaceholder(col.kind);
+    if (prefill && prefill[col.name]) {
+      input.value = easyInputFromLit(prefill[col.name]);
+      if (col.primary && col.auto_increment) input.value = '';
+    }
+    item.appendChild(input);
+    const hint = document.createElement('div');
+    hint.className = 'field-hint';
+    hint.textContent = col.kind + (col.nullable ? ', nullable' : ', required');
+    item.appendChild(hint);
+    grid.appendChild(item);
+  });
+  target.appendChild(grid);
+}
+
+function easyCollectInsertRow() {
+  const target = $('easyInsertFields');
+  if (!target) throw new Error('Load a table first');
+  const row = {};
+  target.querySelectorAll('.easy-field-item').forEach(item => {
+    const name = item.dataset.colName || '';
+    const kind = item.dataset.colKind || 'string';
+    if (!name) return;
+    const raw = item.querySelector('[data-role="value"]')?.value || '';
+    const value = String(raw).trim();
+    if (!value.length) return;
+    row[name] = literalFromInput(kind, raw, false);
+  });
+  return row;
+}
+
+async function easyDoInsert(keepForm) {
+  try {
+    const tableRef = easyReadTableRef();
+    const row = easyCollectInsertRow();
+    if (!Object.keys(row).length) throw new Error('Enter at least one value');
+    const res = await call('data.insert', { into: tableRef, rows: [row] }, 'easyInsertOut');
+    unwrapRpcResult(res, 'data.insert');
+    easyShowToast('\u2713 Row inserted successfully!', 'success');
+    setOut({ ok: true, inserted: 1 }, 'easyInsertOut');
+    if (!keepForm) {
+      easySetSubTab('browse');
+      await easyBrowseRows();
+    } else {
+      easyClearInsertForm();
+      await easyBrowseRows();
     }
   } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
+    easyShowToast('Insert failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyInsertOut');
   }
 }
 
-async function easyInsertRow() {
+function easyClearInsertForm() {
+  const target = $('easyInsertFields');
+  if (!target) return;
+  target.querySelectorAll('.easy-field-item input[data-role="value"]').forEach(input => { input.value = ''; });
+}
+
+// ---------------------------------------------------------------------------
+// Search tab
+// ---------------------------------------------------------------------------
+
+function easyPopulateSearchCols() {
+  const sel = $('easySearchCol');
+  if (!sel) return;
+  const current = sel.value;
+  sel.textContent = '';
+  const all = document.createElement('option'); all.value = ''; all.textContent = 'All columns'; sel.appendChild(all);
+  (STATE.easyBrowseColumns.length ? STATE.easyBrowseColumns : STATE.easyRowColumns.map(c => c.name)).forEach(col => {
+    const opt = document.createElement('option'); opt.value = col; opt.textContent = col; sel.appendChild(opt);
+  });
+  if (current) sel.value = current;
+}
+
+async function easyDoSearch() {
   try {
-    easyApplySelection();
     const tableRef = easyReadTableRef();
-    const payload = easyCollectRow(false);
-    if (!Object.keys(payload.row).length) throw new Error('Enter at least one value');
-    const res = await call('data.insert', { into: tableRef, rows: [payload.row] }, 'easyOut');
-    unwrapRpcResult(res, 'data.insert');
-    await easyBrowseRows();
+    const searchVal = $('easySearchValue')?.value.trim() || '';
+    const searchCol = $('easySearchCol')?.value || '';
+    if (!searchVal) throw new Error('Enter a search value');
+    const desc = await call('schema.describe_table', tableRef, 'easyInsertOut');
+    const descResult = unwrapRpcResult(desc, 'schema.describe_table');
+    const cols = (descResult.columns || []).map(c => c.name);
+    const projection = cols.map(name => ({ expr: { col: name }, as: null }));
+    let where;
+    if (searchCol) {
+      where = { op: 'like', a: { col: searchCol }, b: { lit: { t: 'str', v: '%' + searchVal + '%' } } };
+    } else {
+      const conditions = cols.map(col => ({
+        op: 'like', a: { fn: 'cast', args: [{ col }, { lit: { t: 'str', v: 'string' } }] }, b: { lit: { t: 'str', v: '%' + searchVal + '%' } }
+      }));
+      where = conditions.length === 1 ? conditions[0] : { op: 'or', args: conditions };
+    }
+    const query = {
+      with: [],
+      body: { select: { projection, from: [tableRef], where } },
+      order_by: [],
+      limit: { limit: 100, offset: 0 }
+    };
+    const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyInsertOut');
+    const result = unwrapRpcResult(res, 'query.select');
+    if (result?.data) {
+      const data = result.data;
+      const columns = (data.columns || []).map((c, i) => typeof c === 'string' ? c : (c?.name || 'col' + (i + 1)));
+      renderTable('easySearchGrid', columns, data.rows || []);
+      const info = $('easySearchInfo');
+      if (info) info.textContent = (data.rows || []).length + ' result(s) found.';
+    }
   } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
+    easyShowToast('Search failed: ' + e.message, 'error');
   }
 }
 
-async function easyGetByPk() {
-  try {
-    easyApplySelection();
-    const tableRef = easyReadTableRef();
-    const payload = easyCollectRow(true);
-    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
-    if (!payload.pk.length) throw new Error('This table has no primary key');
-    const res = await call('data.get', { table: tableRef, pk: payload.pk }, 'easyOut');
-    unwrapRpcResult(res, 'data.get');
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
-  }
-}
+// ---------------------------------------------------------------------------
+// Create Table tab
+// ---------------------------------------------------------------------------
 
-async function easyDeleteByPk() {
+async function easyDoCreateTable() {
   try {
-    easyApplySelection();
-    const tableRef = easyReadTableRef();
-    const payload = easyCollectRow(true);
-    if (payload.pkMissing.length) throw new Error('Primary-key fields required: ' + payload.pkMissing.join(', '));
-    const where = whereByPkColumns(STATE.easyRowColumns, payload.pk);
-    if (!where) throw new Error('Could not build primary-key filter');
-    const res = await call('data.delete', { table: tableRef, where, limit: 1 }, 'easyOut');
-    unwrapRpcResult(res, 'data.delete');
-    await easyBrowseRows();
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
-  }
-}
-
-async function easyCreateDb() {
-  try {
-    const db = $('easyNewDb')?.value.trim() || easyGetSelectedDb();
-    if (!db) throw new Error('Enter a database name');
-    const res = await call('schema.create_database', { db }, 'easyOut');
-    unwrapRpcResult(res, 'schema.create_database');
-    setSelectedDb(db);
-    if ($('schemaDb')) $('schemaDb').value = db;
-    if ($('dataDb')) $('dataDb').value = db;
-    await loadDbTree();
-    easyRefreshTargetsFromTree();
-  } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
-  }
-}
-
-async function easyCreateTable() {
-  try {
-    const db = easyGetSelectedDb() || $('easyNewDb')?.value.trim();
-    const table = $('easyNewTable')?.value.trim();
+    const db = $('easyCreateDb')?.value.trim() || easyGetSelectedDb();
+    const table = $('easyCreateTableName')?.value.trim();
     if (!db || !table) throw new Error('Database and table name are required');
     const rows = easyCollectBuilderRows();
     if (!rows.length) throw new Error('Define at least one column');
-    const columns = rows.map((row) => cleanParams({
-      name: row.name,
-      type: { kind: row.type },
-      nullable: row.nullable,
-      auto_increment: row.auto_increment
+    const columns = rows.map(row => cleanParams({
+      name: row.name, type: { kind: row.type }, nullable: row.nullable, auto_increment: row.auto_increment
     }));
-    const primaryKey = rows.filter((row) => row.primary).map((row) => row.name);
-    const res = await call('schema.create_table', {
-      db,
-      table,
-      columns,
-      primary_key: primaryKey,
-      if_not_exists: true
-    }, 'easyOut');
+    const primaryKey = rows.filter(row => row.primary).map(row => row.name);
+    const res = await call('schema.create_table', { db, table, columns, primary_key: primaryKey, if_not_exists: true }, 'easyCreateOut');
     unwrapRpcResult(res, 'schema.create_table');
-    setSelectedDb(db);
-    setSelectedTable(table);
+    easyShowToast('\u2713 Table "' + db + '.' + table + '" created!', 'success');
+    setOut({ ok: true, table: db + '.' + table }, 'easyCreateOut');
     await loadDbTree();
     easyRefreshTargetsFromTree();
-    if ($('easyTableSelect')) $('easyTableSelect').value = table;
-    if ($('easyBrowseOffset')) $('easyBrowseOffset').value = '0';
-    await easyLoadTableForm();
+    await easyNavigateToTable(db, table);
+  } catch (e) {
+    easyShowToast('Create table failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyCreateOut');
+  }
+}
+
+async function easyDoCreateDb() {
+  try {
+    const db = $('easyCreateDb')?.value.trim();
+    if (!db) throw new Error('Enter a database name');
+    const res = await call('schema.create_database', { db }, 'easyCreateOut');
+    unwrapRpcResult(res, 'schema.create_database');
+    setSelectedDb(db);
+    easyShowToast('\u2713 Database "' + db + '" created!', 'success');
+    setOut({ ok: true, database: db }, 'easyCreateOut');
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+  } catch (e) {
+    easyShowToast('Create database failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyCreateOut');
+  }
+}
+
+async function easyNewDbPrompt() {
+  const name = prompt('New database name:');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await call('schema.create_database', { db: name.trim() }, 'easyCreateOut');
+    unwrapRpcResult(res, 'schema.create_database');
+    setSelectedDb(name.trim());
+    easyShowToast('\u2713 Database "' + name.trim() + '" created!', 'success');
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+    easySelectDatabase(name.trim());
+  } catch (e) {
+    easyShowToast('Create failed: ' + e.message, 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export tab
+// ---------------------------------------------------------------------------
+
+async function easyDoExport() {
+  try {
+    const tableRef = easyReadTableRef();
+    const fmt = $('easyExportFmt')?.value || 'json';
+    const desc = await call('schema.describe_table', tableRef, 'easyExportOut');
+    const descResult = unwrapRpcResult(desc, 'schema.describe_table');
+    const cols = (descResult.columns || []).map(c => c.name);
+    const projection = cols.map(name => ({ expr: { col: name }, as: null }));
+    const query = { with: [], body: { select: { projection, from: [tableRef] } }, order_by: [], limit: { limit: 10000, offset: 0 } };
+    const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyExportOut');
+    const result = unwrapRpcResult(res, 'query.select');
+    if (!result?.data) throw new Error('No data returned');
+    const data = result.data;
+    const columns = (data.columns || []).map((c, i) => typeof c === 'string' ? c : (c?.name || 'col' + (i + 1)));
+    const rows = data.rows || [];
+    if (fmt === 'json') {
+      const objects = rows.map(row => {
+        const obj = {}; columns.forEach((col, i) => { obj[col] = Array.isArray(row) ? formatLit(row[i]) : ''; }); return obj;
+      });
+      downloadBlob(JSON.stringify(objects, null, 2), tableRef.db + '_' + tableRef.table + '.json', 'application/json');
+    } else if (fmt === 'csv') {
+      const lines = [columns.join(',')];
+      rows.forEach(row => {
+        lines.push(columns.map((_, i) => { const v = Array.isArray(row) ? formatLit(row[i]) : ''; return '"' + String(v).replace(/"/g, '""') + '"'; }).join(','));
+      });
+      downloadBlob(lines.join('\n'), tableRef.db + '_' + tableRef.table + '.csv', 'text/csv');
+    } else {
+      const inserts = rows.map(row => {
+        const vals = columns.map((_, i) => {
+          const v = Array.isArray(row) ? row[i] : null;
+          if (!v || v.t === 'null') return 'NULL';
+          if (v.t === 'i64' || v.t === 'f64' || v.t === 'u64') return String(v.v);
+          if (v.t === 'bool') return v.v ? 'TRUE' : 'FALSE';
+          return "'" + String(formatLit(v)).replace(/'/g, "''") + "'";
+        });
+        return 'INSERT INTO ' + tableRef.db + '.' + tableRef.table + ' (' + columns.join(', ') + ') VALUES (' + vals.join(', ') + ');';
+      });
+      downloadBlob(inserts.join('\n'), tableRef.db + '_' + tableRef.table + '.sql', 'text/sql');
+    }
+    easyShowToast('\u2713 Exported ' + rows.length + ' rows as ' + fmt.toUpperCase() + '.', 'success');
+    setOut({ ok: true, rows: rows.length, format: fmt }, 'easyExportOut');
+  } catch (e) {
+    easyShowToast('Export failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyExportOut');
+  }
+}
+
+async function easyDoExportStruct() {
+  try {
+    const tableRef = easyReadTableRef();
+    const res = await call('schema.describe_table', tableRef, 'easyExportOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    downloadBlob(JSON.stringify(result, null, 2), tableRef.db + '_' + tableRef.table + '_schema.json', 'application/json');
+    easyShowToast('\u2713 Structure exported.', 'success');
+  } catch (e) {
+    easyShowToast('Export failed: ' + e.message, 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Operations tab
+// ---------------------------------------------------------------------------
+
+async function easyTruncateTable() {
+  try {
+    const tableRef = easyReadTableRef();
+    if (!confirm('Truncate all rows from "' + tableRef.db + '.' + tableRef.table + '"? This cannot be undone.')) return;
+    const res = await call('sql.exec', { sql: 'DELETE FROM ' + tableRef.db + '.' + tableRef.table + ';' }, 'easyOpsOut');
+    easyShowToast('\u2713 Table truncated.', 'success');
+    setOut(res, 'easyOpsOut');
     await easyBrowseRows();
   } catch (e) {
-    setOut({ error: String(e) }, 'easyOut');
+    easyShowToast('Truncate failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyOpsOut');
+  }
+}
+
+async function easyDropTableOp() {
+  try {
+    const tableRef = easyReadTableRef();
+    if (!confirm('DROP TABLE "' + tableRef.db + '.' + tableRef.table + '"? This permanently deletes the table and all data.')) return;
+    const res = await call('schema.drop_table', tableRef, 'easyOpsOut');
+    easyShowToast('\u2713 Table "' + tableRef.table + '" dropped.', 'success');
+    setOut(res, 'easyOpsOut');
+    setSelectedTable('');
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+    easyUpdateBreadcrumb();
+    STATE.easyBrowseColumns = []; STATE.easyBrowseRows = []; STATE.easyRowColumns = [];
+    easyRenderDataGrid();
+  } catch (e) {
+    easyShowToast('Drop table failed: ' + e.message, 'error');
+  }
+}
+
+async function easyDropDbOp() {
+  try {
+    const db = easyGetSelectedDb();
+    if (!db) throw new Error('Select a database first');
+    if (!confirm('DROP DATABASE "' + db + '"? This permanently deletes ALL tables and data.')) return;
+    const res = await call('schema.drop_database', { db }, 'easyOpsOut');
+    easyShowToast('\u2713 Database "' + db + '" dropped.', 'success');
+    setOut(res, 'easyOpsOut');
+    setSelectedDb(''); setSelectedTable('');
+    await loadDbTree();
+    easyRefreshTargetsFromTree();
+    easyUpdateBreadcrumb();
+    STATE.easyBrowseColumns = []; STATE.easyBrowseRows = []; STATE.easyRowColumns = [];
+    easyRenderDataGrid();
+  } catch (e) {
+    easyShowToast('Drop database failed: ' + e.message, 'error');
   }
 }
 
@@ -2860,22 +2707,25 @@ function sqlTemplateSelect() {
 
 function quickCreateDb() {
   setActivePanel('easy', true);
-  if ($('easyNewDb')) $('easyNewDb').focus();
+  easySetSubTab('create');
+  if ($('easyCreateDb')) $('easyCreateDb').focus();
 }
 
 function quickCreateTable() {
   setActivePanel('easy', true);
+  easySetSubTab('create');
   if (!STATE.easyTableBuilderRows.length) easySeedColumns();
-  if ($('easyNewTable')) $('easyNewTable').focus();
+  if ($('easyCreateTableName')) $('easyCreateTableName').focus();
 }
 
 function quickInsertRow() {
   setActivePanel('easy', true);
-  if ($('easyDbSelect')) $('easyDbSelect').focus();
+  easySetSubTab('insert');
 }
 
 function quickBrowseData() {
   setActivePanel('easy', true);
+  easySetSubTab('browse');
   easyBrowseRows();
 }
 
@@ -2905,67 +2755,32 @@ wire('btnQuickBrowseData', quickBrowseData);
 wire('btnQuickCluster', quickOpenCluster);
 
 // Easy viewer
-wire('btnEasyReload', easyReloadTargets);
-wire('btnEasyUseSelection', easyApplySelection);
-wire('btnEasyLoadTable', easyLoadTableForm);
-wire('btnEasyBrowse', easyBrowseRows);
-wire('btnEasyBrowsePrev', easyBrowsePrev);
-wire('btnEasyBrowseNext', easyBrowseNext);
-wire('btnEasyCreateDb', easyCreateDb);
-wire('btnEasyAddCol', easyAddColumn);
-wire('btnEasySeedCols', easySeedColumns);
-wire('btnEasyCreateTable', easyCreateTable);
-wire('btnEasyRowInsert', easyInsertRow);
-wire('btnEasyRowGet', easyGetByPk);
-wire('btnEasyRowDelete', easyDeleteByPk);
-wire('btnEasyRowClear', easyClearRowForm);
-wire('btnEasyVisualLoadSelected', easyVisualLoadSelected);
-wire('btnEasyVisualSave', easyVisualSaveChanges);
-wire('btnEasyVisualInsert', easyVisualInsertNew);
-wire('btnEasyVisualDelete', easyVisualDeleteSelected);
-wire('btnEasyVisualReset', easyResetVisualForm);
-wire('btnEasyGridAddRow', () => {
-  if (!STATE.easyBrowseColumns.length) {
-    setOut({ error: 'Load table and browse rows first.' }, 'easyVisualOut');
-    return;
-  }
-  if (!STATE.easyGridMode) {
-    setOut({ error: 'Enable inline grid edit mode first.' }, 'easyVisualOut');
-    return;
-  }
-  easyGridStartInsert();
-});
-wire('btnEasyGridInsertRow', easyGridInsertRow);
-wire('btnEasyGridDeleteChecked', easyGridDeleteChecked);
-wire('btnEasyGridCancel', easyGridCancel);
-if ($('easyDbSelect')) $('easyDbSelect').addEventListener('change', (e) => {
-  easyRefreshTableOptions(e.target.value);
-  setSelectedDb(e.target.value);
-  setSelectedTable('');
-  easyApplyColumns([], []);
-  STATE.easyBrowseColumns = [];
-  STATE.easyBrowseRows = [];
-  STATE.easySelectedRowIndex = -1;
-  STATE.easySelectedRowPk = [];
-  STATE.easySelectedRowObject = null;
-  easyRenderBrowseTable();
-});
-if ($('easyTableSelect')) $('easyTableSelect').addEventListener('change', (e) => {
-  setSelectedTable(e.target.value);
-});
-if ($('easyBrowseSearch')) $('easyBrowseSearch').addEventListener('input', (e) => {
-  STATE.easyBrowseFilter = e.target.value || '';
-  easyRenderBrowseTable();
-});
-if ($('easyVisualEnabled')) $('easyVisualEnabled').addEventListener('change', () => {
-  easyBuildVisualFields();
-  if (STATE.easySelectedRowObject && $('easyVisualEnabled')?.checked) easyFillVisualForm(STATE.easySelectedRowObject, 'edit');
-});
-if ($('easyGridMode')) $('easyGridMode').addEventListener('change', (e) => {
-  easyGridSetMode(!!e.target.checked);
-  if (STATE.easyGridMode) {
-    setOut({ ok: true, mode: 'inline-grid', hint: 'Click Edit on any row to modify values in place.' }, 'easyVisualOut');
-  }
+wire('btnEasyReloadTree', async () => { await loadDbTree(); easyRefreshTargetsFromTree(); });
+wire('easyBtnNewDb', easyNewDbPrompt);
+wire('easyBtnInsertFromBrowse', () => { easySetSubTab('insert'); easyRenderInsertForm(); });
+wire('easyBtnRefreshBrowse', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
+wire('easyPgPrev', easyBrowsePrev);
+wire('easyPgNext', easyBrowseNext);
+wire('easyCheckAll', easyToggleCheckAll);
+wire('easyBtnDeleteChecked', easyDeleteCheckedRows);
+wire('easyBtnDoInsert', () => easyDoInsert(false));
+wire('easyBtnInsertAnother', () => easyDoInsert(true));
+wire('easyBtnClearInsert', easyClearInsertForm);
+wire('easyBtnDoSearch', easyDoSearch);
+wire('easyBtnClearSearch', () => { if ($('easySearchValue')) $('easySearchValue').value = ''; renderTable('easySearchGrid', [], []); if ($('easySearchInfo')) $('easySearchInfo').textContent = ''; });
+wire('easyBtnAddCol', easyAddColumn);
+wire('easyBtnSeedCols', easySeedColumns);
+wire('easyBtnDoCreateTable', easyDoCreateTable);
+wire('easyBtnDoCreateDb', easyDoCreateDb);
+wire('easyBtnExportData', easyDoExport);
+wire('easyBtnExportStruct', easyDoExportStruct);
+wire('easyBtnTruncate', easyTruncateTable);
+wire('easyBtnDropTable', easyDropTableOp);
+wire('easyBtnDropDb', easyDropDbOp);
+if ($('easyTreeFilter')) $('easyTreeFilter').addEventListener('input', () => easyRenderTree());
+if ($('easyPerPage')) $('easyPerPage').addEventListener('change', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
+document.querySelectorAll('.easy-tab').forEach(btn => {
+  btn.addEventListener('click', () => easySetSubTab(btn.dataset.etab));
 });
 
 // Profiles
