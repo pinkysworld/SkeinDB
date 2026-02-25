@@ -18,6 +18,11 @@ For the full implemented-vs-partial matrix (core + research), see:
 - [x] T002: FileHeader read/write
 - [x] T003: RecordFrame append/iterate
 
+Phase 0 verification checklist:
+- [x] T001 evidence: VarU and hash/CRC tests (`tests::varu_roundtrip_*`, `tests::value_id_is_stable`, `tests::audit_hash_is_stable`) in `crates/skeindb-core/src/lib.rs`
+- [x] T002 evidence: FileHeader encode/decode + corruption tests in `crates/skeindb-core/src/lib.rs` and file roundtrip in `crates/skeindb-core/tests/phase0_format.rs`
+- [x] T003 evidence: RecordFrame append/decode/iterate + truncation/CRC tests in `crates/skeindb-core/src/lib.rs` and file-backed iteration in `crates/skeindb-core/tests/phase0_format.rs`
+
 ## Phase 1 — Storage core
 - [ ] T010: MANIFEST.log reader/writer
 - [ ] T011: WAL writer/reader + recovery

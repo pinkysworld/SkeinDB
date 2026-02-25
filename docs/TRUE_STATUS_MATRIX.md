@@ -21,7 +21,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 
 | Phase | Current status | Notes / evidence |
 |---|---|---|
-| Phase 0 Repo setup | Implemented | VarU/CRC/value ID primitives plus FileHeader read/write and RecordFrame append/iterate are implemented (`crates/skeindb-core/src/lib.rs`) with unit+integration tests (`crates/skeindb-core/tests/phase0_format.rs`). |
+| Phase 0 Repo setup | Implemented | T001/T002/T003 are complete in runtime and tests: VarU/CRC/value ID primitives, FileHeader read/write, and RecordFrame append/iterate (`crates/skeindb-core/src/lib.rs`, `crates/skeindb-core/tests/phase0_format.rs`). |
 | Phase 1 Storage core | Partial | Prototype engine persists JSON state and now includes ValueID-backed row ref encoding for table files (`format_version: 2`); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`). |
 | Phase 3 MySQL protocol | Planned | MySQL compatibility remains a top priority but is not complete in this scaffold. |
