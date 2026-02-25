@@ -173,6 +173,13 @@ Phase 0 verification checklist:
 - [ ] T224: Retention + resnapshot protocol when WAL horizon is exceeded
 - [ ] T225: SkeinAdmin CDC page + subscription management + lag visualization
 
+## Phase 24 - Website and documentation site polish
+- [x] T230: Homepage: add Docs nav CTA, mobile hamburger menu, maturity badges on feature cards, fix broken links (architecture image, paper), consistent API endpoints
+- [x] T231: Docs site homepage: sync with public site (mobile menu, Docs CTA, maturity badges, fixed quickstart endpoint, correct paper link)
+- [x] T232: Docs landing (docs.html): add client-side search/filter, mobile menu, polished footer, keyword metadata on cards
+- [x] T233: Footer overhaul across all pages — structured 4-column footer with Product/Documentation/Community sections
+- [x] T234: Research tracks on public site converted to clickable links pointing to docs/site/research pages
+
 ---
 
 ## Research Agenda Extensions (Optional)

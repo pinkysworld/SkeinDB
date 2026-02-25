@@ -33,22 +33,69 @@
     html { scroll-behavior:smooth; }
     body { font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif; background:var(--bg); color:var(--text); line-height:1.6; -webkit-font-smoothing:antialiased; }
 
+    /* --- NAV --- */
     nav { position:sticky; top:0; z-index:100; background:rgba(9,9,11,.85); backdrop-filter:blur(16px); border-bottom:1px solid var(--border); padding:0 2rem; }
     .nav-inner { max-width:1200px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; height:56px; }
     .nav-logo { font-size:1.1rem; font-weight:800; letter-spacing:-.02em; background:linear-gradient(135deg,var(--accent-light),var(--cyan)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; text-decoration:none; }
-    .nav-links { display:flex; gap:1.5rem; }
+    .nav-links { display:flex; gap:1.5rem; align-items:center; }
     .nav-links a { color:var(--text-secondary); text-decoration:none; font-size:.85rem; font-weight:500; transition:color .2s; }
     .nav-links a:hover { color:var(--text); }
     .nav-links a.active { color:var(--text); }
+    .nav-links a.nav-docs-cta {
+      color:var(--accent-light); font-weight:600;
+      padding:4px 12px; border-radius:6px;
+      background:rgba(99,102,241,.08); border:1px solid rgba(99,102,241,.2);
+      transition:background .2s, border-color .2s;
+    }
+    .nav-links a.nav-docs-cta:hover { background:rgba(99,102,241,.15); border-color:rgba(99,102,241,.4); }
     .nav-gh { display:inline-flex; align-items:center; gap:6px; background:var(--bg-card); border:1px solid var(--border); padding:6px 14px; border-radius:20px; color:var(--text); text-decoration:none; font-size:.82rem; font-weight:500; transition:border-color .2s, background .2s; }
     .nav-gh:hover { border-color:var(--accent); background:var(--bg-card-hover); }
     .nav-gh svg { width:16px; height:16px; fill:currentColor; }
 
+    /* --- MOBILE MENU --- */
+    .nav-hamburger {
+      display:none; background:none; border:none; cursor:pointer;
+      color:var(--text-secondary); padding:4px;
+    }
+    .nav-hamburger svg { width:22px; height:22px; stroke:currentColor; fill:none; stroke-width:2; }
+    .mobile-menu {
+      display:none; position:fixed; inset:0; z-index:200;
+      background:rgba(9,9,11,.95); backdrop-filter:blur(20px);
+      flex-direction:column; align-items:center; justify-content:center; gap:1.5rem;
+    }
+    .mobile-menu.open { display:flex; }
+    .mobile-menu a {
+      color:var(--text); text-decoration:none; font-size:1.2rem; font-weight:600;
+      padding:8px 24px; border-radius:8px; transition:background .2s;
+    }
+    .mobile-menu a:hover { background:var(--bg-card); }
+    .mobile-menu-close {
+      position:absolute; top:1rem; right:1.5rem;
+      background:none; border:none; color:var(--text-secondary); cursor:pointer;
+    }
+    .mobile-menu-close svg { width:24px; height:24px; stroke:currentColor; fill:none; stroke-width:2; }
+
+    /* --- HERO --- */
     .hero { max-width:1200px; margin:0 auto; padding:4rem 2rem 2rem; text-align:center; position:relative; }
     .hero::before { content:''; position:absolute; top:-200px; left:50%; transform:translateX(-50%); width:600px; height:600px; background:radial-gradient(circle,rgba(99,102,241,.1) 0%,transparent 70%); pointer-events:none; }
     .hero h1 { font-size:clamp(1.8rem,4vw,2.8rem); font-weight:900; letter-spacing:-.03em; line-height:1.1; margin-bottom:.75rem; }
     .hero h1 .grad { background:linear-gradient(135deg,var(--accent-light),var(--cyan)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
     .hero p { max-width:640px; margin:0 auto; font-size:1rem; color:var(--text-secondary); line-height:1.7; }
+    .hero-search {
+      max-width:480px; margin:1.5rem auto 0; position:relative;
+    }
+    .hero-search input {
+      width:100%; padding:12px 16px 12px 40px;
+      background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius);
+      color:var(--text); font-size:.9rem; font-family:inherit; outline:none;
+      transition:border-color .2s;
+    }
+    .hero-search input:focus { border-color:var(--accent); }
+    .hero-search input::placeholder { color:var(--text-dim); }
+    .hero-search svg {
+      position:absolute; left:12px; top:50%; transform:translateY(-50%);
+      width:18px; height:18px; stroke:var(--text-dim); fill:none; stroke-width:2;
+    }
 
     .content { max-width:1200px; margin:0 auto; padding:3rem 2rem 4rem; }
 
@@ -65,8 +112,8 @@
     .doc-card .tag { display:inline-block; font-size:.68rem; font-weight:600; padding:2px 8px; border-radius:4px; margin-top:.6rem; }
 
     .research-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(255px,1fr)); gap:.75rem; }
-    .research-link { display:flex; align-items:center; gap:10px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); padding:.75rem 1rem; text-decoration:none; color:inherit; transition:border-color .2s; }
-    .research-link:hover { border-color:var(--green); }
+    .research-link { display:flex; align-items:center; gap:10px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); padding:.75rem 1rem; text-decoration:none; color:inherit; transition:border-color .2s, transform .15s; }
+    .research-link:hover { border-color:var(--green); transform:translateY(-1px); }
     .research-id { font-family:'JetBrains Mono',monospace; font-size:.72rem; font-weight:600; border-radius:4px; padding:2px 6px; white-space:nowrap; flex-shrink:0; }
     .research-name { font-size:.82rem; font-weight:500; }
 
@@ -78,15 +125,34 @@
     .area-devtools .research-id { color:var(--amber); background:rgba(245,158,11,.1); }
     .area-systems .research-id { color:var(--accent-light); background:rgba(129,140,248,.1); }
 
-    footer { border-top:1px solid var(--border); padding:3rem 2rem; text-align:center; }
-    footer p { color:var(--text-dim); font-size:.82rem; }
-    footer a { color:var(--accent-light); text-decoration:none; }
-    footer a:hover { text-decoration:underline; }
+    /* --- FOOTER --- */
+    footer { border-top:1px solid var(--border); padding:3rem 2rem 2rem; }
+    .footer-inner {
+      max-width:1200px; margin:0 auto;
+      display:flex; justify-content:space-between; align-items:start;
+      flex-wrap:wrap; gap:2rem;
+    }
+    .footer-brand { max-width:280px; }
+    .footer-brand .nav-logo { font-size:1rem; display:inline-block; margin-bottom:.5rem; }
+    .footer-brand p { font-size:.78rem; color:var(--text-dim); line-height:1.6; }
+    .footer-col h4 { font-size:.75rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-secondary); margin-bottom:.75rem; }
+    .footer-col a { display:block; color:var(--text-dim); text-decoration:none; font-size:.82rem; padding:3px 0; transition:color .2s; }
+    .footer-col a:hover { color:var(--accent-light); }
+    .footer-bottom {
+      max-width:1200px; margin:2rem auto 0;
+      padding-top:1.5rem; border-top:1px solid var(--border);
+      text-align:center;
+    }
+    .footer-bottom p { color:var(--text-dim); font-size:.78rem; }
+    .footer-bottom a { color:var(--accent-light); text-decoration:none; }
+    .footer-bottom a:hover { text-decoration:underline; }
 
     @media(max-width:768px) {
       .nav-links { display:none; }
+      .nav-hamburger { display:block; }
       .doc-grid { grid-template-columns:1fr; }
       .research-grid { grid-template-columns:1fr; }
+      .footer-inner { flex-direction:column; gap:1.5rem; }
     }
   </style>
 </head>
@@ -98,39 +164,60 @@
     <div class="nav-links">
       <a href="index.html#features">Features</a>
       <a href="index.html#research">Research</a>
-      <a href="docs.html" class="active">Docs</a>
       <a href="index.html#quickstart">Quick Start</a>
-      <a href="index.html#paper">Paper</a>
+      <a href="docs.html" class="nav-docs-cta active">Docs</a>
     </div>
-    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
-      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      GitHub
-    </a>
+    <div style="display:flex;align-items:center;gap:10px">
+      <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <button class="nav-hamburger" onclick="document.getElementById('mobileMenu').classList.add('open')" aria-label="Open menu">
+        <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
   </div>
 </nav>
+
+<!-- MOBILE MENU -->
+<div class="mobile-menu" id="mobileMenu">
+  <button class="mobile-menu-close" onclick="document.getElementById('mobileMenu').classList.remove('open')" aria-label="Close menu">
+    <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+  </button>
+  <a href="index.html">Home</a>
+  <a href="index.html#features" onclick="document.getElementById('mobileMenu').classList.remove('open')">Features</a>
+  <a href="index.html#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research</a>
+  <a href="index.html#quickstart" onclick="document.getElementById('mobileMenu').classList.remove('open')">Quick Start</a>
+  <a href="docs.html" onclick="document.getElementById('mobileMenu').classList.remove('open')">Documentation</a>
+  <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+</div>
 
 <section class="hero">
   <h1>SkeinDB <span class="grad">Documentation</span></h1>
   <p>Everything you need to install, configure, query, and extend SkeinDB. All documentation is also available as Markdown in the <code style="background:var(--bg-card);padding:2px 8px;border-radius:4px;font-size:.88em;font-family:'JetBrains Mono',monospace">docs/</code> directory of the repository.</p>
+  <div class="hero-search">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" placeholder="Search docs (Ctrl+K)" id="docSearch" oninput="filterDocs(this.value)">
+  </div>
 </section>
 
 <div class="content">
 
   <!-- GETTING STARTED -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(16,185,129,.1);color:var(--green)">🚀</span> Getting Started</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank" data-keywords="getting started guide build install prerequisites run server first queries admin console">
         <h3>Getting Started Guide</h3>
         <p>Prerequisites (Rust 1.75+), building from source, running the server, first queries, and opening the admin console.</p>
         <span class="tag" style="background:rgba(16,185,129,.1);color:var(--green)">Start Here</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CONFIGURATION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CONFIGURATION.md" target="_blank" data-keywords="configuration json config server bind address ports storage paths cluster settings feature toggles">
         <h3>Configuration</h3>
         <p>JSON-based config (<code style="font-family:'JetBrains Mono',monospace;font-size:.85em">skeindb-config.json</code>): server bind address, ports, storage paths, cluster settings, and feature toggles.</p>
         <span class="tag" style="background:rgba(99,102,241,.1);color:var(--accent-light)">Reference</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/README.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/README.md" target="_blank" data-keywords="readme overview project architecture features tests">
         <h3>Project README</h3>
         <p>High-level project overview, architecture summary, feature matrix, test results, and contribution guidelines.</p>
         <span class="tag" style="background:rgba(99,102,241,.1);color:var(--accent-light)">Overview</span>
@@ -139,25 +226,25 @@
   </div>
 
   <!-- QUERY & API -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">⚡</span> Querying &amp; API</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank" data-keywords="skeinql reference rpc protocol methods families request response schemas json-rpc batch api">
         <h3>SkeinQL Reference</h3>
         <p>Complete reference for the native typed RPC protocol: 74 methods across 15 families, request/response schemas, JSON-RPC envelope, and batch requests.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Core API</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank" data-keywords="mysql compatibility sql wire protocol statements deviations dialect bridging">
         <h3>MySQL Compatibility</h3>
         <p>Supported SQL statements, wire protocol details, compatibility matrix, known deviations from MySQL 8+, and dialect bridging.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Compatibility</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COMPATIBILITY.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COMPATIBILITY.md" target="_blank" data-keywords="compatibility telemetry unsupported features scoring migration advisory">
         <h3>Compatibility Telemetry</h3>
         <p>How SkeinDB detects and reports unsupported features, compatibility scoring, and the migration advisory system.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Compatibility</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/openapi/skeinql.yaml" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/openapi/skeinql.yaml" target="_blank" data-keywords="openapi specification schema swagger api client generator">
         <h3>OpenAPI Specification</h3>
         <p>Machine-readable OpenAPI 3.0 schema for all SkeinQL endpoints. Use with Swagger UI or any API client generator.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Schema</span>
@@ -166,25 +253,25 @@
   </div>
 
   <!-- STORAGE & INTERNALS -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🧬</span> Storage &amp; Internals</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ON_DISK_FORMAT.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ON_DISK_FORMAT.md" target="_blank" data-keywords="on-disk format binary record formats version tags valueid encoding cell interning lsm wal">
         <h3>On-Disk Format</h3>
         <p>Binary record formats, version tags, ValueID encoding, cell interning strategy, LSM level layout, and WAL record structure.</p>
         <span class="tag" style="background:rgba(244,63,94,.1);color:var(--rose)">Internals</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/DELTA_VALUES.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/DELTA_VALUES.md" target="_blank" data-keywords="delta-chained values mvcc version chains base values forward reverse deltas topology optimization dedup">
         <h3>Delta-Chained Values</h3>
         <p>Delta encoding for MVCC version chains: base values, forward/reverse deltas, chain topology optimization, and dedup interactions.</p>
         <span class="tag" style="background:rgba(244,63,94,.1);color:var(--rose)">Internals</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COMPACTION_SCHEDULER.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COMPACTION_SCHEDULER.md" target="_blank" data-keywords="compaction scheduler workload trigger conditions level sizing io throttling concurrent">
         <h3>Compaction Scheduler</h3>
         <p>Workload-guided compaction strategy: trigger conditions, level sizing, I/O throttling, and concurrent compaction management.</p>
         <span class="tag" style="background:rgba(244,63,94,.1);color:var(--rose)">Internals</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CONVERGENT_ENCRYPTION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CONVERGENT_ENCRYPTION.md" target="_blank" data-keywords="convergent encryption content-derived keys encrypted deduplication threat model key derivation cell interning">
         <h3>Convergent Encryption</h3>
         <p>Content-derived keys for encrypted deduplication: threat model, key derivation, and integration with cell interning.</p>
         <span class="tag" style="background:rgba(244,63,94,.1);color:var(--rose)">Internals</span>
@@ -193,25 +280,25 @@
   </div>
 
   <!-- OPERATIONS -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</span> Operations &amp; Administration</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINADMIN.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINADMIN.md" target="_blank" data-keywords="skeinadmin web console admin panel schema browser data editor sql cluster dashboard research">
         <h3>SkeinAdmin (Web Console)</h3>
         <p>19-panel web admin: schema browser, data editor, SQL console, cluster dashboard, and dedicated panels for all research features.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Admin</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CLUSTERING.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CLUSTERING.md" target="_blank" data-keywords="clustering multi-node deployment join tokens topology lifecycle shard placement replica promotion rpc fanout">
         <h3>Clustering</h3>
         <p>Multi-node deployment: join tokens, topology lifecycle, shard placement, replica promotion, and RPC fanout with recursion suppression.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Distributed</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OBSERVABILITY.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OBSERVABILITY.md" target="_blank" data-keywords="observability prometheus metrics structured logging tracing spans health endpoints monitoring">
         <h3>Observability</h3>
         <p>Prometheus metrics, structured logging, tracing spans, health endpoints, and integration with monitoring stacks.</p>
         <span class="tag" style="background:rgba(16,185,129,.1);color:var(--green)">Operations</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PERFORMANCE.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PERFORMANCE.md" target="_blank" data-keywords="performance benchmark methodology throughput latency percentiles optimization profiling">
         <h3>Performance</h3>
         <p>Benchmark methodology, throughput numbers, latency percentiles, optimization guidelines, and profiling tips.</p>
         <span class="tag" style="background:rgba(16,185,129,.1);color:var(--green)">Operations</span>
@@ -220,45 +307,45 @@
   </div>
 
   <!-- ADVANCED FEATURES -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</span> Advanced Features</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/AUDIT_WAL.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/AUDIT_WAL.md" target="_blank" data-keywords="audit wal hash-chained write-ahead log tamper-evident audit trails forensic query">
         <h3>Audit WAL</h3>
         <p>Hash-chained write-ahead log for tamper-evident audit trails. Forensic query language for WAL analysis.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Security</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/WASM_UDFS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/WASM_UDFS.md" target="_blank" data-keywords="wasm udfs webassembly sandbox user-defined functions safe cancellation memory limits wasi">
         <h3>Wasm UDFs</h3>
         <p>WebAssembly sandbox for user-defined functions: safe cancellation, memory limits, and WASI integration.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Extensions</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/WASM_OPERATORS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/WASM_OPERATORS.md" target="_blank" data-keywords="wasm query operators webassembly portable execution server browser edge runtimes">
         <h3>Wasm Query Operators</h3>
         <p>WebAssembly-compiled query operators for portable execution across server, browser, and edge runtimes.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Extensions</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ETAG_VALIDATORS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ETAG_VALIDATORS.md" target="_blank" data-keywords="etag validators cache-coherent reads http etag chains causal consistency conditional requests invalidation">
         <h3>ETag Validators</h3>
         <p>Cache-coherent reads via HTTP ETag chains: causal consistency, conditional requests, and invalidation.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Web-Native</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CDC_CHANGEFEED.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CDC_CHANGEFEED.md" target="_blank" data-keywords="cdc changefeed change data capture subscribe row-level changes filter query predicates stream consumers">
         <h3>CDC Changefeed</h3>
         <p>Query-scoped change data capture: subscribe to row-level changes, filter by query predicates, and stream to consumers.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Streaming</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRAFFIC_REDUCTION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRAFFIC_REDUCTION.md" target="_blank" data-keywords="traffic reduction encoding network efficiency delta patches column projection pushdown result compression">
         <h3>Traffic Reduction</h3>
         <p>Encoding strategies for network efficiency: delta patches, column projection pushdown, and result compression.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Web-Native</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRANSPORT_QUIC.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRANSPORT_QUIC.md" target="_blank" data-keywords="quic transport http/3 quic-native database protocol stream multiplexing 0-rtt">
         <h3>QUIC Transport</h3>
         <p>HTTP/3 and QUIC-native database protocol: stream multiplexing, 0-RTT, and transport-level parity with HTTP.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Transport</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COLUMN_SNAPSHOTS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COLUMN_SNAPSHOTS.md" target="_blank" data-keywords="column snapshots hybrid row column storage columnar materialization scan optimization storage format">
         <h3>Column Snapshots</h3>
         <p>Hybrid row+column storage: columnar materialization strategy, scan optimization, and storage format.</p>
         <span class="tag" style="background:rgba(244,63,94,.1);color:var(--rose)">Storage</span>
@@ -267,25 +354,25 @@
   </div>
 
   <!-- RESEARCH -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(16,185,129,.1);color:var(--green)">📐</span> Research &amp; Design</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RESEARCH_AGENDA.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RESEARCH_AGENDA.md" target="_blank" data-keywords="research agenda 20 tracks objectives status interconnections">
         <h3>Research Agenda</h3>
         <p>Overview of all 20 research tracks: objectives, status, and interconnections between tracks.</p>
         <span class="tag" style="background:rgba(16,185,129,.1);color:var(--green)">Research</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINIR.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINIR.md" target="_blank" data-keywords="skeinir intermediate representation ast type system optimization passes lowering execution plans">
         <h3>SkeinIR</h3>
         <p>Intermediate representation for SkeinQL: AST, type system, optimization passes, and lowering to execution plans.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Compiler</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL_RESEARCH_EXTENSIONS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL_RESEARCH_EXTENSIONS.md" target="_blank" data-keywords="skeinql research extensions experimental privacy queries learned index hints wasm operator registration">
         <h3>SkeinQL Research Extensions</h3>
         <p>Experimental SkeinQL methods for research features: privacy queries, learned index hints, and Wasm operator registration.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Experimental</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/AUTOPARAMETERIZATION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/AUTOPARAMETERIZATION.md" target="_blank" data-keywords="autoparameterization llm-assisted query literal extraction parameter reuse plan cache">
         <h3>Autoparameterization</h3>
         <p>LLM-assisted query autoparameterization: literal extraction, parameter reuse, and plan cache hit optimization.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">AI</span>
@@ -294,54 +381,54 @@
   </div>
 
   <!-- MORE DOCS -->
-  <div class="doc-section">
+  <div class="doc-section" data-section>
     <h2><span class="icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">📋</span> Additional Topics</h2>
     <div class="doc-grid">
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INCREMENTAL_VIEWS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INCREMENTAL_VIEWS.md" target="_blank" data-keywords="incremental views dependency-graph view maintenance change propagation invalidation materialized refresh">
         <h3>Incremental Views</h3>
         <p>Dependency-graph–based incremental view maintenance: change propagation, invalidation, and materialized refresh.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INDEX_ADVISOR.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INDEX_ADVISOR.md" target="_blank" data-keywords="index advisor automatic recommendations workload analysis candidate generation cost modeling adaptation">
         <h3>Index Advisor</h3>
         <p>Automatic index recommendations from workload analysis: candidate generation, cost modeling, and online adaptation.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/LEARNED_INDEXES.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/LEARNED_INDEXES.md" target="_blank" data-keywords="learned indexes machine-learned models valueid lookup training serving fallback strategies">
         <h3>Learned Indexes</h3>
         <p>Machine-learned index models for ValueID lookup: training, serving, fallback strategies.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MERGE_FUNCTIONS.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MERGE_FUNCTIONS.md" target="_blank" data-keywords="merge functions crdt conflict resolution register types set operations custom merge udfs">
         <h3>Merge Functions</h3>
         <p>CRDT-inspired merge semantics for conflict resolution: register types, set operations, and custom merge UDFs.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TIME_TRAVEL_REPLAY.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TIME_TRAVEL_REPLAY.md" target="_blank" data-keywords="time-travel replay point-in-time queries deterministic replay bundles snapshot reads temporal predicates debugging">
         <h3>Time-Travel &amp; Replay</h3>
         <p>Point-in-time queries and deterministic replay bundles: snapshot reads, temporal predicates, and debugging workflows.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OBLIVIOUS_EXECUTION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OBLIVIOUS_EXECUTION.md" target="_blank" data-keywords="oblivious execution access-pattern-hiding query execution multi-tenant privacy oram scans dummy operations">
         <h3>Oblivious Execution</h3>
         <p>Access-pattern–hiding query execution for multi-tenant privacy: ORAM-based scans and dummy operations.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_COALESCING.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_COALESCING.md" target="_blank" data-keywords="query coalescing merging concurrent identical queries single execution shared result broadcast">
         <h3>Query Coalescing</h3>
         <p>Merging concurrent identical queries into a single execution with shared result broadcast.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_PATCH.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_PATCH.md" target="_blank" data-keywords="query patch query result patches diff generation client reconciliation">
         <h3>Query Patch</h3>
         <p>Sending query result patches instead of full results: diff generation, client reconciliation.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OFFLINE_WRITE_QUEUE.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OFFLINE_WRITE_QUEUE.md" target="_blank" data-keywords="offline write queue client-side write buffering queue management conflict resolution reconnect">
         <h3>Offline Write Queue</h3>
         <p>Client-side write buffering for offline operation: queue management, conflict resolution on reconnect.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CAS_REPLICATION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CAS_REPLICATION.md" target="_blank" data-keywords="cas replication content-addressed storage dedup-aware sync merkle-tree verification bandwidth efficiency">
         <h3>CAS Replication</h3>
         <p>Content-addressed storage replication: dedup-aware sync, Merkle-tree verification, and bandwidth efficiency.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TELEMETRY_AND_MIGRATION.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TELEMETRY_AND_MIGRATION.md" target="_blank" data-keywords="telemetry migration compatibility collection readiness scoring advisory system mysql-to-skeinql transition">
         <h3>Telemetry &amp; Migration</h3>
         <p>Compatibility telemetry collection, migration readiness scoring, and advisory system for MySQL-to-SkeinQL transition.</p>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PROJECT_BACKLOG.md" target="_blank">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PROJECT_BACKLOG.md" target="_blank" data-keywords="project backlog engineering tasks milestones implementation roadmap">
         <h3>Project Backlog</h3>
         <p>Complete engineering backlog: prioritized tasks, milestones, and implementation roadmap.</p>
       </a>
@@ -349,7 +436,7 @@
   </div>
 
   <!-- RESEARCH TRACKS DIRECTORY -->
-  <div class="doc-section" id="research-tracks">
+  <div class="doc-section" id="research-tracks" data-section>
     <h2><span class="icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔬</span> 20 Research Tracks — Detailed Pages</h2>
     <p style="color:var(--text-secondary);font-size:.9rem;margin-bottom:1.25rem">Each track has a dedicated page with novelty analysis, technical phases, testable hypotheses, and key references.</p>
     <div class="research-grid">
@@ -379,12 +466,61 @@
 </div>
 
 <footer>
-  <p>
-    SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a>
-    · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
-    · Open Source
-  </p>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <span class="nav-logo">SkeinDB</span>
+      <p>A single-binary database engine with cell-interned MVCC, 20 research tracks, and a web-native admin stack.</p>
+    </div>
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="index.html#features">Features</a>
+      <a href="index.html#quickstart">Quick Start</a>
+      <a href="index.html#architecture">Architecture</a>
+      <a href="index.html#research">Research Tracks</a>
+    </div>
+    <div class="footer-col">
+      <h4>Documentation</h4>
+      <a href="docs.html">All Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank">Issues</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Author (ORCID)</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <p>SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a> · Open Source</p>
+  </div>
 </footer>
+
+<script>
+// Client-side doc search / filter
+function filterDocs(query) {
+  const q = query.toLowerCase().trim();
+  document.querySelectorAll('.doc-card, .research-link').forEach(card => {
+    if (!q) { card.style.display = ''; return; }
+    const text = (card.textContent + ' ' + (card.dataset.keywords || '')).toLowerCase();
+    card.style.display = text.includes(q) ? '' : 'none';
+  });
+  // Hide section headers when all children are hidden
+  document.querySelectorAll('.doc-section[data-section]').forEach(sec => {
+    const grid = sec.querySelector('.doc-grid, .research-grid');
+    if (!grid) return;
+    const visible = [...grid.children].some(c => c.style.display !== 'none');
+    sec.style.display = visible || !q ? '' : 'none';
+  });
+}
+// Ctrl+K / Cmd+K shortcut
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    document.getElementById('docSearch').focus();
+  }
+});
+</script>
 
 </body>
 </html>

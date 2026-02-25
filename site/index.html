@@ -59,13 +59,21 @@
       font-size: 1.1rem; font-weight: 800; letter-spacing: -.02em;
       background: linear-gradient(135deg, var(--accent-light), var(--cyan));
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      text-decoration: none;
     }
-    .nav-links { display: flex; gap: 1.5rem; }
+    .nav-links { display: flex; gap: 1.5rem; align-items: center; }
     .nav-links a {
       color: var(--text-secondary); text-decoration: none; font-size: .85rem; font-weight: 500;
       transition: color .2s;
     }
     .nav-links a:hover { color: var(--text); }
+    .nav-links a.nav-docs-cta {
+      color: var(--accent-light); font-weight: 600;
+      padding: 4px 12px; border-radius: 6px;
+      background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.2);
+      transition: background .2s, border-color .2s;
+    }
+    .nav-links a.nav-docs-cta:hover { background: rgba(99,102,241,.15); border-color: rgba(99,102,241,.4); }
     .nav-gh {
       display: inline-flex; align-items: center; gap: 6px;
       background: var(--bg-card); border: 1px solid var(--border);
@@ -75,6 +83,29 @@
     }
     .nav-gh:hover { border-color: var(--accent); background: var(--bg-card-hover); }
     .nav-gh svg { width: 16px; height: 16px; fill: currentColor; }
+
+    /* --- MOBILE MENU --- */
+    .nav-hamburger {
+      display: none; background: none; border: none; cursor: pointer;
+      color: var(--text-secondary); padding: 4px;
+    }
+    .nav-hamburger svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; }
+    .mobile-menu {
+      display: none; position: fixed; inset: 0; z-index: 200;
+      background: rgba(9,9,11,.95); backdrop-filter: blur(20px);
+      flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem;
+    }
+    .mobile-menu.open { display: flex; }
+    .mobile-menu a {
+      color: var(--text); text-decoration: none; font-size: 1.2rem; font-weight: 600;
+      padding: 8px 24px; border-radius: 8px; transition: background .2s;
+    }
+    .mobile-menu a:hover { background: var(--bg-card); }
+    .mobile-menu-close {
+      position: absolute; top: 1rem; right: 1.5rem;
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+    }
+    .mobile-menu-close svg { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 2; }
 
     /* --- HERO --- */
     .hero {
@@ -134,6 +165,11 @@
       color: var(--text);
     }
     .btn-secondary:hover { border-color: var(--accent); }
+    .btn-ghost {
+      background: transparent; border: 1px solid transparent;
+      color: var(--accent-light);
+    }
+    .btn-ghost:hover { background: rgba(99,102,241,.08); border-color: rgba(99,102,241,.2); }
 
     /* --- STATS --- */
     .stats {
@@ -173,6 +209,7 @@
       background: var(--bg-card); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 1.75rem;
       transition: border-color .2s, transform .15s;
+      position: relative;
     }
     .feature-card:hover { border-color: var(--accent); transform: translateY(-2px); }
     .feature-icon {
@@ -182,6 +219,14 @@
     }
     .feature-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: .5rem; }
     .feature-card p { font-size: .85rem; color: var(--text-secondary); line-height: 1.6; }
+    .status-badge {
+      position: absolute; top: 1rem; right: 1rem;
+      font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+      padding: 3px 8px; border-radius: 4px;
+    }
+    .status-implemented { background: rgba(16,185,129,.12); color: var(--green); }
+    .status-prototype  { background: rgba(245,158,11,.12); color: var(--amber); }
+    .status-planned     { background: rgba(99,102,241,.12); color: var(--accent-light); }
 
     /* --- ARCHITECTURE --- */
     .arch-wrapper {
@@ -190,6 +235,13 @@
     }
     .arch-wrapper img, .arch-wrapper object {
       width: 100%; max-width: 900px; display: block; margin: 0 auto;
+    }
+    .arch-fallback {
+      text-align: center; padding: 3rem 2rem; color: var(--text-secondary); font-size: .9rem;
+    }
+    .arch-fallback code {
+      background: var(--bg); padding: 3px 8px; border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace; font-size: .82rem;
     }
 
     /* --- RESEARCH TRACKS --- */
@@ -201,9 +253,10 @@
       display: flex; align-items: center; gap: 10px;
       background: var(--bg-card); border: 1px solid var(--border);
       border-radius: var(--radius-sm); padding: .75rem 1rem;
-      transition: border-color .2s;
+      transition: border-color .2s, transform .15s;
+      text-decoration: none; color: inherit;
     }
-    .track:hover { border-color: var(--green); }
+    .track:hover { border-color: var(--green); transform: translateY(-1px); }
     .track-id {
       font-family: 'JetBrains Mono', monospace;
       font-size: .72rem; font-weight: 600; color: var(--green);
@@ -266,18 +319,38 @@
     /* --- FOOTER --- */
     footer {
       border-top: 1px solid var(--border);
-      padding: 3rem 2rem;
+      padding: 3rem 2rem 2rem;
+    }
+    .footer-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; justify-content: space-between; align-items: start;
+      flex-wrap: wrap; gap: 2rem;
+    }
+    .footer-brand { max-width: 280px; }
+    .footer-brand .nav-logo { font-size: 1rem; display: inline-block; margin-bottom: .5rem; }
+    .footer-brand p { font-size: .78rem; color: var(--text-dim); line-height: 1.6; }
+    .footer-col h4 { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); margin-bottom: .75rem; }
+    .footer-col a { display: block; color: var(--text-dim); text-decoration: none; font-size: .82rem; padding: 3px 0; transition: color .2s; }
+    .footer-col a:hover { color: var(--accent-light); }
+    .footer-bottom {
+      max-width: 1200px; margin: 2rem auto 0;
+      padding-top: 1.5rem; border-top: 1px solid var(--border);
       text-align: center;
     }
-    footer p { color: var(--text-dim); font-size: .82rem; }
-    footer a { color: var(--accent-light); text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
+    .footer-bottom p { color: var(--text-dim); font-size: .78rem; }
+    .footer-bottom a { color: var(--accent-light); text-decoration: none; }
+    .footer-bottom a:hover { text-decoration: underline; }
 
     /* --- RESPONSIVE --- */
     @media (max-width: 768px) {
       .nav-links { display: none; }
+      .nav-hamburger { display: block; }
       .features-grid { grid-template-columns: 1fr; }
       .paper-card { flex-direction: column; }
+      .footer-inner { flex-direction: column; gap: 1.5rem; }
+      .hero { padding: 4rem 1.5rem 3rem; }
+      .hero h1 { font-size: 2rem; }
+      .tracks-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -286,20 +359,40 @@
 <!-- NAV -->
 <nav>
   <div class="nav-inner">
-    <div class="nav-logo">SkeinDB</div>
+    <a class="nav-logo" href="#">SkeinDB</a>
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
       <a href="#research">Research</a>
       <a href="#quickstart">Quick Start</a>
       <a href="#paper">Paper</a>
+      <a href="../docs/site/docs.html" class="nav-docs-cta">Docs</a>
     </div>
-    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
-      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      GitHub
-    </a>
+    <div style="display:flex;align-items:center;gap:10px">
+      <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <button class="nav-hamburger" onclick="document.getElementById('mobileMenu').classList.add('open')" aria-label="Open menu">
+        <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
   </div>
 </nav>
+
+<!-- MOBILE MENU -->
+<div class="mobile-menu" id="mobileMenu">
+  <button class="mobile-menu-close" onclick="document.getElementById('mobileMenu').classList.remove('open')" aria-label="Close menu">
+    <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+  </button>
+  <a href="#features" onclick="document.getElementById('mobileMenu').classList.remove('open')">Features</a>
+  <a href="#architecture" onclick="document.getElementById('mobileMenu').classList.remove('open')">Architecture</a>
+  <a href="#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research</a>
+  <a href="#quickstart" onclick="document.getElementById('mobileMenu').classList.remove('open')">Quick Start</a>
+  <a href="#paper" onclick="document.getElementById('mobileMenu').classList.remove('open')">Paper</a>
+  <a href="../docs/site/docs.html">Documentation</a>
+  <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+</div>
 
 <!-- HERO -->
 <section class="hero">
@@ -321,10 +414,13 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
       Get Started
     </a>
-    <a href="https://github.com/pinkysworld/SkeinDB" class="btn btn-secondary" target="_blank" rel="noopener">
-      View on GitHub
+    <a href="../docs/site/docs.html" class="btn btn-secondary">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      Read the Docs
     </a>
-    <a href="#paper" class="btn btn-secondary">Read the Paper</a>
+    <a href="https://github.com/pinkysworld/SkeinDB" class="btn btn-ghost" target="_blank" rel="noopener">
+      View on GitHub →
+    </a>
   </div>
 </section>
 
@@ -364,31 +460,37 @@
   </div>
   <div class="features-grid">
     <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
       <h3>Cell-Interned MVCC</h3>
       <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-planned">Planned</span>
       <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔌</div>
       <h3>MySQL Wire Protocol</h3>
       <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol alongside its native SkeinQL typed RPC, lowering adoption barriers for existing toolchains.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-planned">Planned</span>
       <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">⚡</div>
       <h3>HTTP + QUIC Dual Transport</h3>
-      <p>Every RPC method works identically over HTTP/1.1, HTTP/2, and QUIC. 13 dedicated integration tests confirm transport-level behavioral parity.</p>
+      <p>Every RPC method works identically over HTTP/1.1, HTTP/2, and QUIC. Dedicated integration tests confirm transport-level behavioral parity.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
       <p>19 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, and dedicated panels for all 20 research features, including a click-first Easy Viewer and expert control panels.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</div>
       <h3>20 Research Tracks</h3>
-      <p>From differential privacy and learned indexes to Wasm query operators and forensic audit — each track has working RPC methods, admin panels, and test coverage.</p>
+      <p>From differential privacy and learned indexes to Wasm query operators and forensic audit — each track has RPC method stubs, admin panels, and growing test coverage.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🌐</div>
       <h3>Cluster Control-Plane</h3>
       <p>9 typed cluster methods for topology lifecycle: join tokens, node admission, shard placement, replica promotion, and RPC fanout replication with recursion suppression.</p>
@@ -403,7 +505,11 @@
     <p>Five layers from client interface to persistence, unified by typed SkeinQL method dispatch.</p>
   </div>
   <div class="arch-wrapper">
-    <img src="../papers/figures/figure1_architecture_overview.svg" alt="SkeinDB layered architecture" loading="lazy">
+    <img src="../docs/figures/architecture.png" alt="SkeinDB layered architecture" loading="lazy"
+         onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+    <div class="arch-fallback" style="display:none">
+      <p>Architecture diagram available at <code>docs/figures/architecture.png</code></p>
+    </div>
   </div>
 </section>
 
@@ -411,29 +517,29 @@
 <section id="research">
   <div class="section-header">
     <h2>20 Research Tracks</h2>
-    <p>Each track has implemented RPC methods, a dedicated admin panel, and automated test coverage.</p>
+    <p>Each track has RPC methods, a dedicated admin panel, and automated test coverage. Click any track for details.</p>
   </div>
   <div class="tracks-grid">
-    <div class="track"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></div>
-    <div class="track"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></div>
-    <div class="track"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></div>
-    <div class="track"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></div>
-    <div class="track"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></div>
-    <div class="track"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></div>
-    <div class="track"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></div>
-    <div class="track"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></div>
-    <div class="track"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></div>
-    <div class="track"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></div>
-    <div class="track"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></div>
-    <div class="track"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></div>
-    <div class="track"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></div>
-    <div class="track"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></div>
-    <div class="track"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></div>
-    <div class="track"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></div>
-    <div class="track"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></div>
-    <div class="track"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></div>
-    <div class="track"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></div>
-    <div class="track"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></div>
+    <a class="track" href="../docs/site/research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
+    <a class="track" href="../docs/site/research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
+    <a class="track" href="../docs/site/research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
+    <a class="track" href="../docs/site/research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
+    <a class="track" href="../docs/site/research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
+    <a class="track" href="../docs/site/research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
+    <a class="track" href="../docs/site/research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
+    <a class="track" href="../docs/site/research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
+    <a class="track" href="../docs/site/research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
+    <a class="track" href="../docs/site/research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
+    <a class="track" href="../docs/site/research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
+    <a class="track" href="../docs/site/research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
+    <a class="track" href="../docs/site/research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
+    <a class="track" href="../docs/site/research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
+    <a class="track" href="../docs/site/research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
+    <a class="track" href="../docs/site/research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
+    <a class="track" href="../docs/site/research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
+    <a class="track" href="../docs/site/research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
+    <a class="track" href="../docs/site/research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
+    <a class="track" href="../docs/site/research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
   </div>
 </section>
 
@@ -456,19 +562,19 @@
 <span class="comment"># Build</span>
 <span class="cmd">cargo build</span> <span class="flag">--release</span>
 
-<span class="comment"># Run all tests (113 tests, ~23s)</span>
+<span class="comment"># Run all tests</span>
 <span class="cmd">cargo test</span>
 
 <span class="comment"># Start the server</span>
-<span class="cmd">cargo run</span> <span class="flag">-p skeindb -- serve --bind 127.0.0.1 --http 8080</span>
+<span class="cmd">./target/release/skeindb serve</span> <span class="flag">--data ./data --http 8080</span>
 
 <span class="comment"># Open the admin panel</span>
 <span class="url">http://127.0.0.1:8080/admin</span>
 
-<span class="comment"># Query capabilities via SkeinQL RPC</span>
-<span class="cmd">curl</span> <span class="flag">-X POST</span> <span class="url">http://127.0.0.1:8080/skeinql</span> \
+<span class="comment"># Send your first SkeinQL RPC request</span>
+<span class="cmd">curl</span> <span class="flag">-s -X POST</span> <span class="url">http://127.0.0.1:8080/api/v1/rpc</span> \
   <span class="flag">-H</span> "Content-Type: application/json" \
-  <span class="flag">-d</span> '{"skeinql":"1.0","id":"1","method":"system.capabilities","params":{}}'
+  <span class="flag">-d</span> '{"jsonrpc":"2.0","id":1,"method":"system.ping","params":{}}'
 </pre>
   </div>
 </section>
@@ -477,7 +583,7 @@
 <section id="paper">
   <div class="section-header">
     <h2>Research Paper</h2>
-    <p>Peer-reviewed systems contribution covering architecture, cluster control, and 20 research tracks.</p>
+    <p>Systems contribution covering architecture, cluster control, and 20 research tracks.</p>
   </div>
   <div class="paper-card">
     <div class="paper-info">
@@ -493,7 +599,10 @@
         SkeinDB addresses the divide between production database systems and research prototypes through a novel single-binary architecture that co-hosts a MySQL-compatible SQL layer, a typed RPC control surface (SkeinQL), and 20 experimental research features within one executable process. The paper presents four dimensions of contribution: cell-interned MVCC storage, persistent cluster control-plane, 20 research tracks with working implementations, and comprehensive web administration.
       </p>
       <br>
-      <a href="../papers/SkeinDB_IJRCOM_Submission.md" class="btn btn-secondary" style="display:inline-flex">Read Full Paper</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" class="btn btn-secondary" style="display:inline-flex" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+        Author Profile (ORCID)
+      </a>
     </div>
     <div class="paper-stats">
       <div class="paper-stat">
@@ -532,11 +641,35 @@
 
 <!-- FOOTER -->
 <footer>
-  <p>
-    SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a>
-    · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
-    · Open Source
-  </p>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <span class="nav-logo">SkeinDB</span>
+      <p>A single-binary database engine with cell-interned MVCC, 20 research tracks, and a web-native admin stack.</p>
+    </div>
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="#features">Features</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#research">Research Tracks</a>
+    </div>
+    <div class="footer-col">
+      <h4>Documentation</h4>
+      <a href="../docs/site/docs.html">All Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">MySQL Compat</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank">Issues</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Author (ORCID)</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <p>SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a> · Open Source</p>
+  </div>
 </footer>
 
 </body>
