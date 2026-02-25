@@ -19,6 +19,7 @@ skeindb serve [OPTIONS]
 
 OPTIONS:
   --data <path>      Data directory (WAL, snapshots, metadata)
+  --storage-mode     Table row persistence mode: json | segment | hybrid (default hybrid)
   --http <port>      HTTP port (SkeinQL + admin console)
   --mysql <port>     MySQL protocol port (compatibility surface)
   --bind <ip>        Bind address (default 127.0.0.1)
@@ -32,6 +33,12 @@ Run on ports 8080/3306:
 ./skeindb serve --data ./data --http 8080 --mysql 3306
 ```
 
+Run with JSON-only row files:
+
+```bash
+./skeindb serve --data ./data --http 8080 --mysql 3306 --storage-mode json
+```
+
 Run HTTP-only:
 
 ```bash
@@ -43,15 +50,19 @@ Run HTTP-only:
 ## Environment variables
 
 `SKEINDB_STORAGE_MODE` controls how per-table row files are persisted:
-- `json` (default): read/write `tables/<db>/<table>.json`
+- `json`: read/write `tables/<db>/<table>.json`
 - `segment`: read/write `tables/<db>/<table>.rseg`
-- `dual`: write both files; read prefers `.rseg` then `.json`
+- `hybrid` / `dual` (default): write both files; read prefers `.rseg` then `.json`
 
 Example:
 
 ```bash
-SKEINDB_STORAGE_MODE=dual ./skeindb serve --data ./data --http 8080 --mysql 3306
+SKEINDB_STORAGE_MODE=segment ./skeindb serve --data ./data --http 8080 --mysql 3306
 ```
+
+Notes:
+- CLI `--storage-mode` takes precedence for `serve`.
+- Environment variable is still used by non-serve workflows that open the engine directly.
 
 ---
 

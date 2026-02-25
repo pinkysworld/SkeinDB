@@ -184,14 +184,18 @@ enum TableStorageMode {
 }
 
 impl TableStorageMode {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "segment" => Some(Self::Segment),
+            "dual" | "hybrid" => Some(Self::Dual),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
+
     fn from_env() -> Self {
         let raw = std::env::var(STORAGE_MODE_ENV).unwrap_or_default();
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "segment" => Self::Segment,
-            "dual" => Self::Dual,
-            "json" => Self::Json,
-            _ => Self::Json,
-        }
+        Self::parse(&raw).unwrap_or(Self::Dual)
     }
 }
 
@@ -1001,6 +1005,15 @@ pub struct Subscription {
 impl Engine {
     pub fn open(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
         let storage_mode = TableStorageMode::from_env();
+        Self::open_with_storage_mode(data_dir, storage_mode)
+    }
+
+    pub(crate) fn open_with_storage_mode_name(
+        data_dir: impl AsRef<Path>,
+        mode: &str,
+    ) -> anyhow::Result<Self> {
+        let storage_mode = TableStorageMode::parse(mode)
+            .ok_or_else(|| anyhow::anyhow!("invalid storage mode '{mode}'"))?;
         Self::open_with_storage_mode(data_dir, storage_mode)
     }
 
@@ -18586,6 +18599,37 @@ mod tests {
             })
         );
         fs::remove_dir_all(&dir_segment).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn storage_mode_parser_accepts_hybrid_alias() {
+        assert_eq!(
+            TableStorageMode::parse("json"),
+            Some(TableStorageMode::Json)
+        );
+        assert_eq!(
+            TableStorageMode::parse("segment"),
+            Some(TableStorageMode::Segment)
+        );
+        assert_eq!(
+            TableStorageMode::parse("dual"),
+            Some(TableStorageMode::Dual)
+        );
+        assert_eq!(
+            TableStorageMode::parse("hybrid"),
+            Some(TableStorageMode::Dual)
+        );
+        assert_eq!(TableStorageMode::parse("unknown"), None);
+    }
+
+    #[test]
+    fn open_with_storage_mode_name_rejects_invalid_mode() -> anyhow::Result<()> {
+        let dir = temp_dir("open_invalid_storage_mode");
+        let err = Engine::open_with_storage_mode_name(&dir, "not-a-mode")
+            .expect_err("invalid mode should fail");
+        assert!(err.to_string().contains("invalid storage mode"));
+        fs::remove_dir_all(&dir).ok();
         Ok(())
     }
 

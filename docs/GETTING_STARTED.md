@@ -135,10 +135,13 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
 - `storage.duplicate_bytes`: bytes saved by dedup
 - `storage.interned_values`: unique values currently interned
 
-Optional persistence mode (default is `json`):
-- `SKEINDB_STORAGE_MODE=json`: write/read `tables/<db>/<table>.json`
-- `SKEINDB_STORAGE_MODE=segment`: write/read `tables/<db>/<table>.rseg`
-- `SKEINDB_STORAGE_MODE=dual`: write both formats; read prefers `.rseg`
+Optional persistence mode (default is `hybrid`):
+- `--storage-mode json`: write/read `tables/<db>/<table>.json`
+- `--storage-mode segment`: write/read `tables/<db>/<table>.rseg`
+- `--storage-mode hybrid`: write both formats; read prefers `.rseg`
+
+Compatibility:
+- `SKEINDB_STORAGE_MODE=dual` remains accepted as an alias for `hybrid`.
 
 Example:
 

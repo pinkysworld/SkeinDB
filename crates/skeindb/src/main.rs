@@ -1,11 +1,56 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod engine;
 mod nl_eval;
 mod quic;
 mod server;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum StorageModeArg {
+    Json,
+    Segment,
+    Hybrid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_defaults_to_hybrid_storage_mode() {
+        let cli = Cli::try_parse_from(["skeindb", "serve"]).expect("parse serve defaults");
+        match cli.command {
+            Commands::Serve { storage_mode, .. } => {
+                assert_eq!(storage_mode, StorageModeArg::Hybrid);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_parses_storage_mode_flag() {
+        let cli = Cli::try_parse_from(["skeindb", "serve", "--storage-mode", "segment"])
+            .expect("parse serve with storage mode");
+        match cli.command {
+            Commands::Serve { storage_mode, .. } => {
+                assert_eq!(storage_mode, StorageModeArg::Segment);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+}
+
+impl StorageModeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Segment => "segment",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "skeindb")]
@@ -25,6 +70,10 @@ enum Commands {
         /// Data directory
         #[arg(long, default_value = "./data")]
         data: String,
+
+        /// Table row persistence mode (json, segment, hybrid).
+        #[arg(long, value_enum, default_value_t = StorageModeArg::Hybrid)]
+        storage_mode: StorageModeArg,
 
         /// Bind address for listeners
         #[arg(long, default_value = "127.0.0.1")]
@@ -107,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Serve {
             data,
+            storage_mode,
             bind,
             mysql,
             http,
@@ -117,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             server::serve(server::ServeOpts {
                 data_dir: data,
+                storage_mode: storage_mode.as_str().to_string(),
                 bind,
                 mysql_port: mysql,
                 http_port: http,

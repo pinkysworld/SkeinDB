@@ -302,9 +302,9 @@ Body:
   - `payload` (`payload_len` bytes) as JSON-encoded `RowEntryDisk`
 
 Behavior:
-- `SKEINDB_STORAGE_MODE=json` (default): write/read `.json`; fallback read `.rseg`.
-- `SKEINDB_STORAGE_MODE=segment`: write/read `.rseg`; fallback read `.json`.
-- `SKEINDB_STORAGE_MODE=dual`: write both formats; read prefers `.rseg`, then `.json`.
+- `--storage-mode json` (or `SKEINDB_STORAGE_MODE=json`): write/read `.json`; fallback read `.rseg`.
+- `--storage-mode segment` (or `SKEINDB_STORAGE_MODE=segment`): write/read `.rseg`; fallback read `.json`.
+- `--storage-mode hybrid` (default, or `SKEINDB_STORAGE_MODE=hybrid|dual`): write both formats; read prefers `.rseg`, then `.json`.
 
 Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.

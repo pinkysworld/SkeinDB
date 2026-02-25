@@ -80,6 +80,7 @@ fn admin_main_js() -> &'static str {
 #[derive(Debug, Clone)]
 pub struct ServeOpts {
     pub data_dir: String,
+    pub storage_mode: String,
     pub bind: String,
     pub mysql_port: u16,
     pub http_port: u16,
@@ -321,7 +322,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let data_dir = PathBuf::from(&opts.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
-    let engine = Engine::open(&data_dir)?;
+    let engine = Engine::open_with_storage_mode_name(&data_dir, &opts.storage_mode)?;
     let advertised_host = if opts.bind == "0.0.0.0" {
         "127.0.0.1".to_string()
     } else {
@@ -411,6 +412,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         http_port = %opts.http_port,
         mysql_port = %opts.mysql_port,
         cluster_port = %opts.cluster_port,
+        storage_mode = %opts.storage_mode,
         "SkeinDB server starting"
     );
     tracing::warn!(

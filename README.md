@@ -27,7 +27,7 @@ The repository is written so you can:
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
 - **MVCC extensions:** delta-chained value versions.
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
-- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or dual-write via `SKEINDB_STORAGE_MODE=json|segment|dual`.
+- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
 - **Security extensions:** hash-chained WAL for tamper evidence.
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
@@ -55,7 +55,7 @@ cargo build --release
 Optional storage mode:
 
 ```bash
-SKEINDB_STORAGE_MODE=dual ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
+./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --storage-mode hybrid
 ```
 
 Open:
