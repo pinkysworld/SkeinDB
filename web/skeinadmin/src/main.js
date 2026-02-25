@@ -45,6 +45,7 @@ const PANEL_META = {
   data:       { title: 'Browse & Edit',        subtitle: 'Browse rows, insert data, and run table edits.' },
   cluster:    { title: 'Cluster Manager',      subtitle: 'Plan topology, inspect transport, and manage layouts.' },
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
+  engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
   import:     { title: 'Import / Export',      subtitle: 'Bulk import data or export schemas and rows.' },
   research:   { title: 'Research Agenda',      subtitle: 'Dashboard for all 20 research tracks R01–R20.' },
@@ -95,6 +96,7 @@ const FEATURE_CENTER = [
   { title: 'SkeinQL', desc: 'Native structured query API.', panel: 'workspace' },
   { title: 'Schema Mgmt', desc: 'Create/alter DB and tables.', panel: 'schema' },
   { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
+  { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
   { title: 'CDC', desc: 'Change data capture + polling.', panel: 'rpc' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
@@ -409,30 +411,104 @@ function extractSqlTable(result) {
 // ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
+function setStat(id, value) { const el = $(id); if (el) el.textContent = value; }
+
+function formatUptime(seconds) {
+  if (!Number.isFinite(seconds)) return '--';
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
+  if (seconds < 86400) return h + 'h ' + m + 'm';
+  const d = Math.floor(seconds / 86400);
+  return d + 'd ' + (h % 24) + 'h';
+}
+
+function formatNumber(n) {
+  if (!Number.isFinite(n)) return '--';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
 function updateStats(s) {
   if (!s) return;
-  if ($('statUptime')) $('statUptime').textContent = Number.isFinite(s.uptime_s) ? s.uptime_s + 's' : '--';
-  if ($('statCpu')) $('statCpu').textContent = s.process && Number.isFinite(s.process.cpu_pct) ? s.process.cpu_pct.toFixed(1)+'%' : '--';
-  if ($('statRss')) $('statRss').textContent = s.process ? formatBytes(s.process.rss_bytes) : '--';
-  if ($('statQps')) $('statQps').textContent = (s.qps !== undefined ? s.qps : '--') + ' / ' + (s.tps !== undefined ? s.tps : '--');
+  // Runtime
+  setStat('statUptime', formatUptime(s.uptime_s));
+  setStat('statCpu', s.process && Number.isFinite(s.process.cpu_pct) ? s.process.cpu_pct.toFixed(1) + '%' : '--');
+  setStat('statRss', s.process ? formatBytes(s.process.rss_bytes) : '--');
+  setStat('statQps', (s.qps !== undefined ? s.qps : '--') + ' / ' + (s.tps !== undefined ? s.tps : '--'));
+  setStat('statOpenTxns', s.open_txns !== undefined ? String(s.open_txns) : '--');
+  setStat('statConnections', s.connections !== undefined ? String(s.connections) : '--');
+
+  // Storage & Dedup
   const storage = s.storage || {};
-  if ($('statDedupRatio')) {
-    $('statDedupRatio').textContent = Number.isFinite(storage.dedup_ratio) ? storage.dedup_ratio.toFixed(2) + 'x' : '--';
+  const dedupRatio = storage.dedup_ratio;
+  setStat('statDedupRatio', Number.isFinite(dedupRatio) ? dedupRatio.toFixed(2) + 'x' : '--');
+  setStat('statDedupEnabled', storage.dedup_enabled !== undefined ? (storage.dedup_enabled ? '✅ ON' : '❌ OFF') : '--');
+  setStat('statDedupSaved', formatBytes(storage.duplicate_bytes));
+  setStat('statLogicalBytes', formatBytes(storage.logical_bytes));
+  setStat('statUniqueBytes', formatBytes(storage.unique_bytes));
+  setStat('statInternedValues', formatNumber(storage.interned_values));
+  setStat('statUniqueValues', formatNumber(storage.unique_values));
+  // Savings percentage
+  const logical = storage.logical_bytes || 0, unique = storage.unique_bytes || 0;
+  const pct = logical > 0 ? ((1 - unique / logical) * 100) : 0;
+  setStat('statDedupPct', logical > 0 ? pct.toFixed(1) + '%' : '--');
+  setStat('statTotalRows', formatNumber(storage.total_rows));
+  setStat('statTotalTables', storage.total_tables !== undefined ? String(storage.total_tables) : '--');
+  setStat('statDiskSize', formatBytes(storage.disk_bytes));
+  setStat('statWalSize', formatBytes(storage.wal_bytes));
+
+  // Dedup bar
+  const barUnique = $('dedupBarUnique'), barSaved = $('dedupBarSaved');
+  if (barUnique && barSaved && logical > 0) {
+    const uPct = Math.max(1, (unique / logical) * 100);
+    const sPct = Math.max(0, 100 - uPct);
+    barUnique.style.width = uPct.toFixed(1) + '%';
+    barSaved.style.width = sPct.toFixed(1) + '%';
+    barUnique.title = 'Unique: ' + formatBytes(unique);
+    barSaved.title = 'Saved: ' + formatBytes(logical - unique);
   }
-  if ($('statDedupSaved')) $('statDedupSaved').textContent = formatBytes(storage.duplicate_bytes);
-  if ($('statLogicalBytes')) $('statLogicalBytes').textContent = formatBytes(storage.logical_bytes);
-  if ($('statUniqueBytes')) $('statUniqueBytes').textContent = formatBytes(storage.unique_bytes);
-  if ($('statInternedValues')) {
-    $('statInternedValues').textContent = Number.isFinite(storage.interned_values) ? String(storage.interned_values) : '--';
-  }
-  if ($('statUniqueValues')) {
-    $('statUniqueValues').textContent = Number.isFinite(storage.unique_values) ? String(storage.unique_values) : '--';
-  }
+
+  // MVCC & Compaction
+  const mvcc = s.mvcc || {};
+  setStat('statMvccVersions', formatNumber(mvcc.versions));
+  setStat('statDeltaChains', formatNumber(mvcc.delta_chains));
+  const compaction = s.compaction || {};
+  setStat('statCompactionRuns', compaction.runs !== undefined ? String(compaction.runs) : '--');
+  setStat('statCompactionStatus', compaction.status || (compaction.running ? 'Running' : 'Idle'));
+  setStat('statL0Files', compaction.l0_files !== undefined ? String(compaction.l0_files) : '--');
+  setStat('statStallRate', compaction.stall_rate !== undefined ? compaction.stall_rate.toFixed(2) + '%' : '--');
+
+  // Cache & Query
+  const cache = s.cache || {};
+  setStat('statCacheHit', Number.isFinite(cache.hit_pct) ? cache.hit_pct.toFixed(1) + '%' : '--');
+  setStat('statCacheSize', formatBytes(cache.size_bytes));
+  const query = s.query || {};
+  setStat('statSlowQueries', query.slow_count !== undefined ? String(query.slow_count) : '--');
+  setStat('statAvgLatency', Number.isFinite(query.avg_latency_ms) ? query.avg_latency_ms.toFixed(1) + ' ms' : '--');
+  setStat('statEtagHits', formatNumber(query.etag_hits));
+  setStat('statCoalesced', formatNumber(query.coalesced));
 }
+
+let autoRefreshInterval = null;
 
 async function loadStats() {
   const res = await call('stats.snapshot', {}, 'out');
   if (res && res.json && res.json.ok && res.json.result) { updateStats(res.json.result); setOut(res.json.result, 'out'); }
+}
+
+function toggleAutoRefresh() {
+  if (autoRefreshInterval) {
+    clearInterval(autoRefreshInterval);
+    autoRefreshInterval = null;
+    const btn = $('btnAutoRefreshStats');
+    if (btn) btn.textContent = 'Auto \u23F1';
+  } else {
+    autoRefreshInterval = setInterval(() => { if (STATE.connected) loadStats(); }, 5000);
+    const btn = $('btnAutoRefreshStats');
+    if (btn) btn.textContent = 'Stop \u23F9';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2183,6 +2259,94 @@ async function settingsSetKey() {
 async function settingsListAll() { await call('settings.list',{},'settingsOut'); }
 
 // ---------------------------------------------------------------------------
+// Engine Config
+// ---------------------------------------------------------------------------
+const ENGINE_TOGGLES = [
+  { id: 'engDedup',       key: 'engine.dedup.enabled' },
+  { id: 'engCompression', key: 'engine.compression.enabled' },
+  { id: 'engEncryption',  key: 'engine.encryption.enabled' },
+  { id: 'engMvcc',        key: 'engine.mvcc.enabled' },
+  { id: 'engDeltaChains', key: 'engine.delta_chains.enabled' },
+  { id: 'engTimeTravel',  key: 'engine.time_travel.enabled' },
+  { id: 'engAutoCompact', key: 'engine.compaction.auto' },
+  { id: 'engEnergyAware', key: 'engine.compaction.energy_aware' },
+  { id: 'engQueryCache',  key: 'engine.cache.enabled' },
+  { id: 'engCoalescing',  key: 'engine.coalescing.enabled' },
+  { id: 'engAutoParam',   key: 'engine.autoparameterize.enabled' },
+  { id: 'engAuditWal',    key: 'engine.audit_wal.enabled' },
+  { id: 'engDiffPrivacy', key: 'engine.differential_privacy.enabled' },
+  { id: 'engOblivious',   key: 'engine.oblivious.enabled' },
+  { id: 'engReplication',  key: 'engine.replication.enabled' },
+  { id: 'engCdc',         key: 'engine.cdc.enabled' },
+  { id: 'engQuic',        key: 'engine.quic.enabled' }
+];
+
+const ENGINE_FIELDS = [
+  { id: 'engStorageMode',   key: 'engine.storage_mode' },
+  { id: 'engRetentionDays', key: 'engine.time_travel.retention_days', type: 'number' },
+  { id: 'engMaxL0',         key: 'engine.compaction.max_l0_files', type: 'number' },
+  { id: 'engCacheSizeMb',   key: 'engine.cache.size_mb', type: 'number' }
+];
+
+async function engineLoadConfig() {
+  try {
+    const keys = [
+      ...ENGINE_TOGGLES.map(t => t.key),
+      ...ENGINE_FIELDS.map(f => f.key)
+    ];
+    const res = await call('settings.get', { keys }, 'engineOut');
+    if (!res?.json?.ok) return;
+    const cfg = res.json.result || {};
+    ENGINE_TOGGLES.forEach(t => {
+      const el = $(t.id);
+      if (el && cfg[t.key] !== undefined) el.checked = !!cfg[t.key];
+    });
+    ENGINE_FIELDS.forEach(f => {
+      const el = $(f.id);
+      if (el && cfg[f.key] !== undefined) el.value = String(cfg[f.key]);
+    });
+    setOut({ loaded: true, config: cfg }, 'engineOut');
+  } catch (e) { setOut({ error: String(e) }, 'engineOut'); }
+}
+
+async function engineSaveConfig() {
+  try {
+    const payload = {};
+    ENGINE_TOGGLES.forEach(t => {
+      const el = $(t.id);
+      if (el) payload[t.key] = el.checked;
+    });
+    ENGINE_FIELDS.forEach(f => {
+      const el = $(f.id);
+      if (!el) return;
+      if (f.type === 'number') payload[f.key] = parseInt(el.value, 10) || 0;
+      else payload[f.key] = el.value;
+    });
+    await call('settings.set', payload, 'engineOut');
+    setOut({ saved: true, config: payload }, 'engineOut');
+  } catch (e) { setOut({ error: String(e) }, 'engineOut'); }
+}
+
+function engineResetDefaults() {
+  const defaults = {
+    engDedup: true, engCompression: false, engEncryption: false,
+    engMvcc: true, engDeltaChains: false, engTimeTravel: false,
+    engAutoCompact: true, engEnergyAware: false,
+    engQueryCache: true, engCoalescing: false, engAutoParam: false,
+    engAuditWal: false, engDiffPrivacy: false, engOblivious: false,
+    engReplication: false, engCdc: false, engQuic: false
+  };
+  Object.entries(defaults).forEach(([id, val]) => {
+    const el = $(id); if (el) el.checked = val;
+  });
+  const fieldDefaults = { engStorageMode: 'row', engRetentionDays: '7', engMaxL0: '8', engCacheSizeMb: '256' };
+  Object.entries(fieldDefaults).forEach(([id, val]) => {
+    const el = $(id); if (el) el.value = val;
+  });
+  setOut({ reset: true, note: 'Defaults applied locally. Click Save to persist.' }, 'engineOut');
+}
+
+// ---------------------------------------------------------------------------
 // Users & Grants
 // ---------------------------------------------------------------------------
 async function userCreate() {
@@ -2781,12 +2945,19 @@ wire('btnCapabilities', loadCapabilities);
 wire('btnTransport', loadTransport);
 wire('btnShutdown', shutdownServer);
 
-// Overview quick actions
+// Overview quick actions & stats
 wire('btnQuickCreateDb', quickCreateDb);
 wire('btnQuickCreateTable', quickCreateTable);
 wire('btnQuickInsertRow', quickInsertRow);
 wire('btnQuickBrowseData', quickBrowseData);
 wire('btnQuickCluster', quickOpenCluster);
+wire('btnRefreshStats', loadStats);
+wire('btnAutoRefreshStats', toggleAutoRefresh);
+
+// Engine config
+wire('btnEngineLoad', engineLoadConfig);
+wire('btnEngineSave', engineSaveConfig);
+wire('btnEngineReset', engineResetDefaults);
 
 // Easy viewer
 wire('btnEasyReloadTree', async () => { await loadDbTree(); easyRefreshTargetsFromTree(); });

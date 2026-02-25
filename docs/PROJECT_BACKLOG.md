@@ -96,13 +96,15 @@ Phase 0 verification checklist:
 - [x] T121: SkeinAdmin pages: schema/data/sql workspace
 - [ ] T122: SkeinAdmin security: token UI + role-aware navigation
 - [x] T123: SkeinAdmin cluster page (cluster.*) + actions
-- [ ] T124: SkeinAdmin observability page (stats.*)
+- [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
+- [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations
+- [x] T126: SkeinAdmin Engine Config panel — checkbox toggles for dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC
 
 ## Phase 13 - Observability and server load statistics
 - [x] T130: stats.snapshot and basic counters in server
 - [ ] T131: query fingerprinting + top_queries / slow_queries
 - [x] T132: GET /metrics (Prometheus-style) + labels
-- [ ] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction
+- [x] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction — Overview dashboard with stat cards, dedup bar chart, auto-refresh
 
 ## Phase 14 - Cluster management and scale-out
 - [x] T140: Node identity (node_id) + cluster config model

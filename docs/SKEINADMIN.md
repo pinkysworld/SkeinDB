@@ -15,10 +15,11 @@ SkeinDB now ships an embedded SkeinAdmin build at:
 The same UI bundle powers both routes, with mode-aware navigation and controls.
 
 Recent UI updates:
-- Overview includes live dedup/storage metrics (`dedup_ratio`, logical vs unique bytes, interned values).
+- **Overview dashboard** now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage & deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC & compaction (versions, delta chains, L0 files, stall rate), query & cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
+- **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.
-- `/admin` now includes an **Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
+- `/admin` now includes a **phpMyAdmin-inspired Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
 - Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
 - Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop).
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
@@ -113,11 +114,15 @@ Security note:
 
 ## 4) UI sections (navigation)
 
-### 4.1 Overview
-- Server name/version
-- Uptime
-- Storage size
-- Role: standalone / primary / replica / router
+### 4.1 Overview (Dashboard)
+- **Server Info**: version, SkeinQL version, transport mode, ping latency, method count, database count
+- **Runtime**: uptime (human-readable), CPU %, RSS memory, QPS/TPS, open transactions, connections
+- **Storage & Deduplication**: dedup ratio, dedup enabled status, saved bytes, logical/unique bytes, interned/unique values, savings %, total rows, total tables, disk size, WAL size, visual bar chart showing unique vs saved breakdown
+- **MVCC & Compaction**: MVCC versions, delta chains, compaction runs, compaction status, L0 files, stall rate
+- **Query & Cache**: cache hit %, cache size, slow queries, avg latency, ETag hits, coalesced queries
+- **Auto-refresh**: manual refresh button + auto-refresh toggle (5s interval)
+- **Profiles**: save/load/delete connection profiles
+- **Feature Center**: quick-launch cards for all major panels
 
 ### 4.2 Easy Viewer
 - **Left sidebar** with collapsible database/table tree, filter input, New DB button, and reload
@@ -152,13 +157,22 @@ Security note:
 - Row edit/create/delete
 - CSV import/export
 
-### 4.6 Users & Privileges
+### 4.6 Engine Config
+- **Storage Engine**: deduplication on/off, compression, encryption at rest, storage mode (row/column/hybrid)
+- **MVCC & Versioning**: MVCC toggle, delta-chained values, time travel, version retention days
+- **Compaction**: auto compaction, energy-aware scheduling (R20), max L0 files threshold
+- **Cache & Query**: query cache, query coalescing, autoparameterization, cache size (MB)
+- **Audit & Security**: tamper-evident WAL (R06), differential privacy (R04), oblivious execution (R05)
+- **Replication & CDC**: replication toggle, CDC changefeeds, QUIC transport (R09)
+- Load/save/reset controls with immediate feedback via `settings.set`
+
+### 4.7 Users & Privileges
 - Create user
 - Reset credentials
 - Grant/revoke privileges
 - Show grants
 
-### 4.7 Maintenance
+### 4.8 Maintenance
 - Checkpoint
 - Compact/vacuum
 - Compaction policy (adaptive scheduler) + pause/resume
@@ -166,11 +180,11 @@ Security note:
 - Audit verification (hash-chained WAL)
 - Graceful shutdown trigger (admin action that checkpoints and marks cluster node offline)
 
-### 4.7.1 Time travel & replay
+### 4.8.1 Time travel & replay
 - Point-in-time query runner (as_of)
 - Replay bundle export/import/verify
 
-### 4.8 Server Load & Statistics
+### 4.9 Server Load & Statistics
 (See docs/OBSERVABILITY.md)
 - CPU, memory, disk, network
 - QPS, active sessions
@@ -181,7 +195,7 @@ Security note:
 - Autoparameterization hit rate
 - CDC subscriptions and lag (if enabled)
 
-### 4.9 Cluster Management
+### 4.10 Cluster Management
 (See docs/CLUSTERING.md)
 - Node list (health, role, lag)
 - Add node / remove node
@@ -189,17 +203,16 @@ Security note:
 - Shards and placement
 - Rebalance
 
-### 4.10 Security and Encryption
+### 4.11 Security and Encryption
 - Encryption mode (ENC_OFF / ENC_RANDOM / ENC_MLE_DB)
 - Key rotation and re-encryption progress
 
-### 4.11 CDC Subscriptions
+### 4.12 CDC Subscriptions
 - Table subscriptions
 - Prepared-query subscriptions
 - Lag and backlog
 
-
-### 4.12 Index Advisor
+### 4.13 Index Advisor
 (See docs/INDEX_ADVISOR.md)
 - Suggested indexes (ranked)
 - One-click apply (with progress)

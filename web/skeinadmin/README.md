@@ -16,7 +16,8 @@ Implemented navigation areas:
   - Condition-based search, column-builder create-table, CSV/SQL export
   - Operations: truncate table, drop table, drop database with confirmation
 - **Schema** / **Data** / **SQL Workspace**
-- **Server Load & Statistics** (QPS/TPS, latency, compaction, cache)
+- **Comprehensive Dashboard** (runtime, storage/dedup stats with bar chart, MVCC/compaction, query/cache metrics, auto-refresh)
+- **Engine Config** (toggle dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC via checkboxes)
 - **Admin lifecycle controls** (connect/disconnect + graceful `system.shutdown`)
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)
 - **Settings Manager** (`settings.get` / `settings.set`, including `cluster.state.v1`)
