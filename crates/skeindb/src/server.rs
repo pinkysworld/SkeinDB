@@ -751,6 +751,54 @@ fn parse_select_literal_query(sql: &str) -> Option<Vec<(String, MySqlLiteral)>> 
     Some(cols)
 }
 
+fn mysql_parse_select_found_rows_query(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    if rest.len() < "found_rows()".len() {
+        return None;
+    }
+    if !rest[..12].eq_ignore_ascii_case("found_rows()") {
+        return None;
+    }
+    let tail = rest[12..].trim();
+    if tail.is_empty() {
+        return Some("FOUND_ROWS()".to_string());
+    }
+    let tail_lower = tail.to_ascii_lowercase();
+    let alias = if tail_lower.starts_with("as ") {
+        clean_sql_ident(tail[3..].trim())
+    } else {
+        clean_sql_ident(tail)
+    };
+    if alias.is_empty() || alias.contains(char::is_whitespace) || alias.contains(',') {
+        return None;
+    }
+    Some(alias)
+}
+
+fn mysql_rewrite_sql_calc_found_rows(sql: &str) -> Option<String> {
+    const TOKEN: &str = "sql_calc_found_rows";
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim_start();
+    if rest.len() < TOKEN.len() || !rest[..TOKEN.len()].eq_ignore_ascii_case(TOKEN) {
+        return None;
+    }
+    if rest.len() > TOKEN.len() && !rest.as_bytes()[TOKEN.len()].is_ascii_whitespace() {
+        return None;
+    }
+    let tail = rest[TOKEN.len()..].trim_start();
+    if tail.is_empty() {
+        return None;
+    }
+    Some(format!("SELECT {}", tail))
+}
+
 fn mysql_push_lenenc_int(buf: &mut Vec<u8>, n: usize) {
     if n < 251 {
         buf.push(n as u8);
@@ -1221,6 +1269,7 @@ async fn handle_mysql_connection(
 
     let username = response.username;
     let mut default_db: Option<String> = None;
+    let mut last_found_rows: u64 = 0;
     let ok = mysql_ok_packet();
     mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
 
@@ -1258,63 +1307,94 @@ async fn handle_mysql_connection(
             }
             0x03 => {
                 let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
-                if let Some(cols) = parse_select_literal_query(&sql) {
-                    mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols).await?;
-                } else {
-                    let params = SqlExecParams {
-                        sql: sql.clone(),
-                        explain: false,
-                        default_db: default_db.clone(),
-                        result_format: Some(ResultFormat::RowsJson),
-                    };
-                    match sql_exec(&state, params).await {
-                        Ok(result) => {
-                            if result.get("statement").and_then(|v| v.as_str()) == Some("use") {
-                                default_db = result
-                                    .get("default_db")
-                                    .and_then(|v| v.as_str())
-                                    .map(|v| v.to_string());
-                            }
-                            match mysql_query_outcome_from_sql_exec(&result) {
-                                Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
-                                    mysql_send_text_result(
-                                        &mut stream,
-                                        cmd_seq.wrapping_add(1),
-                                        &columns,
-                                        &rows,
-                                    )
-                                    .await?;
-                                }
-                                Ok(MySqlQueryOutcome::Ok {
-                                    affected_rows,
-                                    last_insert_id,
-                                }) => {
-                                    let packet =
-                                        mysql_ok_packet_with(affected_rows, last_insert_id);
+                if let Some(column_name) = mysql_parse_select_found_rows_query(&sql) {
+                    let found_rows = i64::try_from(last_found_rows).unwrap_or(i64::MAX);
+                    mysql_send_literal_result(
+                        &mut stream,
+                        cmd_seq.wrapping_add(1),
+                        &[(column_name, MySqlLiteral::Int(found_rows))],
+                    )
+                    .await?;
+                    continue;
+                }
+
+                let rewritten = mysql_rewrite_sql_calc_found_rows(&sql);
+                let exec_sql = rewritten.clone().unwrap_or_else(|| sql.clone());
+                let calc_found_rows = rewritten.is_some();
+
+                if !calc_found_rows {
+                    if let Some(cols) = parse_select_literal_query(&exec_sql) {
+                        mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols)
+                            .await?;
+                        continue;
+                    }
+                }
+
+                let params = SqlExecParams {
+                    sql: exec_sql.clone(),
+                    explain: false,
+                    default_db: default_db.clone(),
+                    result_format: Some(ResultFormat::RowsJson),
+                };
+                match sql_exec(&state, params).await {
+                    Ok(result) => {
+                        if result.get("statement").and_then(|v| v.as_str()) == Some("use") {
+                            default_db = result
+                                .get("default_db")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                        }
+                        if calc_found_rows {
+                            match mysql_select_total_rows_without_limit(
+                                &state,
+                                &exec_sql,
+                                default_db.as_deref(),
+                            )
+                            .await
+                            {
+                                Ok(total) => last_found_rows = total,
+                                Err(err) => {
+                                    let (code, state_code, message) = mysql_error_from_rpc(&err);
+                                    let packet = mysql_err_packet(code, state_code, &message);
                                     mysql_write_packet(
                                         &mut stream,
                                         cmd_seq.wrapping_add(1),
                                         &packet,
                                     )
                                     .await?;
-                                }
-                                Err(message) => {
-                                    let packet = mysql_err_packet(1105, "HY000", &message);
-                                    mysql_write_packet(
-                                        &mut stream,
-                                        cmd_seq.wrapping_add(1),
-                                        &packet,
-                                    )
-                                    .await?;
+                                    continue;
                                 }
                             }
                         }
-                        Err(err) => {
-                            let (code, state_code, message) = mysql_error_from_rpc(&err);
-                            let packet = mysql_err_packet(code, state_code, &message);
-                            mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
+                        match mysql_query_outcome_from_sql_exec(&result) {
+                            Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+                                mysql_send_text_result(
+                                    &mut stream,
+                                    cmd_seq.wrapping_add(1),
+                                    &columns,
+                                    &rows,
+                                )
                                 .await?;
+                            }
+                            Ok(MySqlQueryOutcome::Ok {
+                                affected_rows,
+                                last_insert_id,
+                            }) => {
+                                let packet = mysql_ok_packet_with(affected_rows, last_insert_id);
+                                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
+                                    .await?;
+                            }
+                            Err(message) => {
+                                let packet = mysql_err_packet(1105, "HY000", &message);
+                                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
+                                    .await?;
+                            }
                         }
+                    }
+                    Err(err) => {
+                        let (code, state_code, message) = mysql_error_from_rpc(&err);
+                        let packet = mysql_err_packet(code, state_code, &message);
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
                     }
                 }
             }
@@ -4442,20 +4522,38 @@ fn parse_limit_clause(
     limit_sql: Option<&str>,
     offset_sql: Option<&str>,
 ) -> Result<Option<LimitClause>, RpcError> {
-    let limit =
-        match limit_sql {
-            Some(raw) => Some(raw.trim().parse::<u64>().map_err(|_| {
-                RpcError::new("invalid_request", "LIMIT must be an unsigned integer")
-            })?),
-            None => None,
-        };
-    let offset =
+    let mut limit = None::<u64>;
+    let mut offset =
         match offset_sql {
             Some(raw) => Some(raw.trim().parse::<u64>().map_err(|_| {
                 RpcError::new("invalid_request", "OFFSET must be an unsigned integer")
             })?),
             None => None,
         };
+    if let Some(raw) = limit_sql {
+        let raw = raw.trim();
+        if let Some((off_raw, lim_raw)) = raw.split_once(',') {
+            if offset.is_some() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "use either LIMIT offset,count or LIMIT ... OFFSET ..., not both",
+                ));
+            }
+            offset = Some(off_raw.trim().parse::<u64>().map_err(|_| {
+                RpcError::new(
+                    "invalid_request",
+                    "LIMIT offset must be an unsigned integer",
+                )
+            })?);
+            limit = Some(lim_raw.trim().parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "LIMIT count must be an unsigned integer")
+            })?);
+        } else {
+            limit = Some(raw.parse::<u64>().map_err(|_| {
+                RpcError::new("invalid_request", "LIMIT must be an unsigned integer")
+            })?);
+        }
+    }
     if limit.is_none() && offset.is_none() {
         Ok(None)
     } else {
@@ -5616,6 +5714,115 @@ async fn sql_exec_insert_on_duplicate(
         returning: None,
         etag: None,
     })
+}
+
+fn rows_json_result_len(result: &Value) -> Result<u64, RpcError> {
+    let rows = result
+        .get("rows")
+        .or_else(|| result.get("data").and_then(|v| v.get("rows")))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RpcError::new("internal", "query result missing rows"))?;
+    Ok(rows.len() as u64)
+}
+
+async fn mysql_select_total_rows_without_limit(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<u64, RpcError> {
+    let plan = parse_sql_plan(sql, default_db)?;
+    let SqlPlan::Select {
+        table,
+        mut projection,
+        where_expr,
+        order_by,
+        ..
+    } = plan
+    else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "SQL_CALC_FOUND_ROWS requires a SELECT statement",
+        ));
+    };
+
+    // SELECT literal expressions always produce exactly one row.
+    if table.db.is_empty() && table.table.is_empty() {
+        return Ok(1);
+    }
+
+    let eng = state.engine.read().await;
+    let no_limit = None;
+    if let Some(result) = information_schema_select_result(
+        &eng,
+        &table,
+        &projection,
+        &where_expr,
+        &order_by,
+        &no_limit,
+    )? {
+        return rows_json_result_len(&result);
+    }
+
+    if projection.is_empty() {
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        let names: Vec<String> = desc
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .collect();
+        if names.is_empty() {
+            return Err(RpcError::new("invalid_request", "table has no columns"));
+        }
+        projection = names
+            .into_iter()
+            .map(|name| SelectItem {
+                expr: Expr::Col {
+                    col: name,
+                    table: None,
+                },
+                r#as: None,
+            })
+            .collect();
+    }
+
+    let query = Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection,
+                from: Some(vec![TableRef::Base(table.clone())]),
+                r#where: where_expr,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by,
+        limit: None,
+        lock: None,
+    };
+    let result = eng
+        .query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )
+        .map_err(to_rpc_error)?;
+    let data = result
+        .data
+        .as_ref()
+        .ok_or_else(|| RpcError::new("internal", "query result missing data"))?;
+    rows_json_result_len(data)
 }
 
 async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
@@ -8482,6 +8689,43 @@ mod tests {
     #[test]
     fn parse_select_literal_query_rejects_from_clause() {
         assert!(parse_select_literal_query("SELECT 1 FROM app.users").is_none());
+    }
+
+    #[test]
+    fn mysql_parse_select_found_rows_query_roundtrip() {
+        assert_eq!(
+            mysql_parse_select_found_rows_query("SELECT FOUND_ROWS();").as_deref(),
+            Some("FOUND_ROWS()")
+        );
+        assert_eq!(
+            mysql_parse_select_found_rows_query("SELECT FOUND_ROWS() AS total;").as_deref(),
+            Some("total")
+        );
+        assert!(mysql_parse_select_found_rows_query("SELECT FOUND_ROWS(), 1").is_none());
+    }
+
+    #[test]
+    fn mysql_rewrite_sql_calc_found_rows_roundtrip() {
+        assert_eq!(
+            mysql_rewrite_sql_calc_found_rows(
+                "SELECT SQL_CALC_FOUND_ROWS id FROM comments ORDER BY id DESC LIMIT 0, 2;"
+            )
+            .as_deref(),
+            Some("SELECT id FROM comments ORDER BY id DESC LIMIT 0, 2")
+        );
+        assert!(mysql_rewrite_sql_calc_found_rows("SELECT id FROM comments").is_none());
+    }
+
+    #[test]
+    fn parse_select_plan_supports_mysql_limit_offset_count() {
+        let plan = parse_sql_plan("SELECT id FROM comments LIMIT 0, 2", Some("app"))
+            .expect("parse sql plan");
+        let SqlPlan::Select { limit, .. } = plan else {
+            panic!("expected select plan");
+        };
+        let limit = limit.expect("expected limit clause");
+        assert_eq!(limit.offset, Some(0));
+        assert_eq!(limit.limit, Some(2));
     }
 
     #[tokio::test]

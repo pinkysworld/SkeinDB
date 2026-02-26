@@ -42,7 +42,7 @@ Phase 0 verification checklist:
 - [x] T031: COM_QUERY SELECT literals
 - [x] T032: SQL translator (subset)
 - [x] T033: DDL/DML subset for corpus.sql
-- [ ] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
+- [x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
 
 ## Phase 4 — Web console
 - [x] T040: HTTP API `/api/v1/sql/exec`

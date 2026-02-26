@@ -344,6 +344,59 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn mysql_sql_calc_found_rows_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_sql_calc_found_rows_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS comments").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE comments (id BIGINT NOT NULL, comment_approved VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO comments (id, comment_approved) VALUES (1, '1'), (2, '0'), (3, '1'), (4, '1')",
+    )
+    .await?;
+    let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 4);
+
+    send_com_query(
+        &mut stream,
+        "SELECT SQL_CALC_FOUND_ROWS id FROM comments WHERE comment_approved = '1' ORDER BY id DESC LIMIT 0, 2",
+    )
+    .await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0].as_deref(), Some("4"));
+    assert_eq!(rows[1][0].as_deref(), Some("3"));
+
+    send_com_query(&mut stream, "SELECT FOUND_ROWS()").await?;
+    let found_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(found_rows.len(), 1);
+    assert_eq!(found_rows[0][0].as_deref(), Some("3"));
+
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
@@ -512,6 +565,9 @@ async fn read_mysql_text_result_rows(
     stream: &mut TcpStream,
 ) -> anyhow::Result<Vec<Vec<Option<String>>>> {
     let (_seq, column_count_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&column_count_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
     let mut cur = 0usize;
     let column_count = decode_lenenc_int(&column_count_payload, &mut cur)?;
     for _ in 0..column_count {
@@ -577,6 +633,23 @@ fn decode_mysql_ok_packet(payload: &[u8]) -> anyhow::Result<(u64, u64)> {
     let affected = decode_lenenc_int(payload, &mut cursor)? as u64;
     let last_insert_id = decode_lenenc_int(payload, &mut cursor)? as u64;
     Ok((affected, last_insert_id))
+}
+
+fn decode_mysql_err_packet(payload: &[u8]) -> Option<String> {
+    if payload.first().copied() != Some(0xff) || payload.len() < 3 {
+        return None;
+    }
+    let mut cursor = 3usize;
+    let mut state = None::<String>;
+    if payload.get(3).copied() == Some(b'#') && payload.len() >= 9 {
+        state = Some(String::from_utf8_lossy(&payload[4..9]).to_string());
+        cursor = 9;
+    }
+    let message = String::from_utf8_lossy(payload.get(cursor..).unwrap_or_default()).to_string();
+    Some(match state {
+        Some(code) => format!("[{}] {}", code, message),
+        None => message,
+    })
 }
 
 fn decode_lenenc_int(payload: &[u8], cursor: &mut usize) -> anyhow::Result<usize> {
