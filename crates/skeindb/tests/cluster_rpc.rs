@@ -264,21 +264,7 @@ async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
     let server = HttpHarness::start_with_mysql("mysql_handshake_roundtrip")?;
     wait_for_tcp(server.mysql_port())?;
 
-    let mut stream = TcpStream::connect(("127.0.0.1", server.mysql_port()))
-        .await
-        .context("connect mysql port")?;
-    let (seq, handshake) = read_mysql_packet(&mut stream).await?;
-    assert_eq!(seq, 0);
-    assert_eq!(handshake.first().copied(), Some(0x0a));
-    assert!(handshake
-        .windows(b"mysql_native_password".len())
-        .any(|w| w == b"mysql_native_password"));
-
-    let response = mysql_handshake_response_packet();
-    write_mysql_packet(&mut stream, 1, &response).await?;
-
-    let (_seq, auth_result) = read_mysql_packet(&mut stream).await?;
-    assert_eq!(auth_result.first().copied(), Some(0x00));
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
 
     let mut query = Vec::new();
     query.push(0x03);
@@ -300,6 +286,46 @@ async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
 
     let (_seq, eof2) = read_mysql_packet(&mut stream).await?;
     assert_eq!(eof2.first().copied(), Some(0xfe));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_com_query_sql_exec_subset")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE app").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE app").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE users (id bigint, name text, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO users (id, name) VALUES (1, 'Ada')",
+    )
+    .await?;
+    let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 1);
+
+    send_com_query(&mut stream, "SELECT id, name FROM users WHERE id = 1").await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_deref(), Some("1"));
+    assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+
     Ok(())
 }
 
@@ -441,6 +467,55 @@ async fn read_mysql_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8
     Ok((seq, payload))
 }
 
+async fn mysql_connect_and_auth(port: u16) -> anyhow::Result<TcpStream> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .context("connect mysql port")?;
+    let (seq, handshake) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(seq, 0);
+    assert_eq!(handshake.first().copied(), Some(0x0a));
+    assert!(handshake
+        .windows(b"mysql_native_password".len())
+        .any(|w| w == b"mysql_native_password"));
+
+    let response = mysql_handshake_response_packet();
+    write_mysql_packet(&mut stream, 1, &response).await?;
+
+    let (_seq, auth_result) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(auth_result.first().copied(), Some(0x00));
+    Ok(stream)
+}
+
+async fn send_com_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(sql.len() + 1);
+    payload.push(0x03);
+    payload.extend_from_slice(sql.as_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn read_mysql_text_result_rows(
+    stream: &mut TcpStream,
+) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let (_seq, column_count_payload) = read_mysql_packet(stream).await?;
+    let mut cur = 0usize;
+    let column_count = decode_lenenc_int(&column_count_payload, &mut cur)?;
+    for _ in 0..column_count {
+        let _ = read_mysql_packet(stream).await?;
+    }
+    let (_seq, eof1) = read_mysql_packet(stream).await?;
+    assert_eq!(eof1.first().copied(), Some(0xfe));
+
+    let mut rows = Vec::new();
+    loop {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
+            break;
+        }
+        rows.push(decode_mysql_text_row(&payload, column_count)?);
+    }
+    Ok(rows)
+}
+
 async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow!("payload too large"));
@@ -477,6 +552,16 @@ fn mysql_handshake_response_packet() -> Vec<u8> {
     payload.extend_from_slice(b"mysql_native_password");
     payload.push(0);
     payload
+}
+
+fn decode_mysql_ok_packet(payload: &[u8]) -> anyhow::Result<(u64, u64)> {
+    if payload.first().copied() != Some(0x00) {
+        return Err(anyhow!("not an OK packet"));
+    }
+    let mut cursor = 1usize;
+    let affected = decode_lenenc_int(payload, &mut cursor)? as u64;
+    let last_insert_id = decode_lenenc_int(payload, &mut cursor)? as u64;
+    Ok((affected, last_insert_id))
 }
 
 fn decode_lenenc_int(payload: &[u8], cursor: &mut usize) -> anyhow::Result<usize> {

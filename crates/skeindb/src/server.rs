@@ -433,6 +433,18 @@ enum MySqlLiteral {
     Null,
 }
 
+#[derive(Debug, Clone)]
+enum MySqlQueryOutcome {
+    Ok {
+        affected_rows: u64,
+        last_insert_id: u64,
+    },
+    ResultSet {
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+    },
+}
+
 fn mysql_seed(conn_id: u32) -> [u8; 20] {
     let mut seed = [0u8; 20];
     let mut x = now_unix_ms_u64()
@@ -819,6 +831,220 @@ fn mysql_row_packet(columns: &[(String, MySqlLiteral)]) -> Vec<u8> {
     payload
 }
 
+fn mysql_text_row_packet(row: &[Option<String>]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for cell in row {
+        match cell {
+            Some(text) => mysql_push_lenenc_bytes(&mut payload, text.as_bytes()),
+            None => payload.push(0xfb),
+        }
+    }
+    payload
+}
+
+fn mysql_json_value_text(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(v) => {
+            if *v {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn mysql_value_to_text(value: &Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(kind) = obj.get("t").and_then(|v| v.as_str()) {
+            if kind == "null" {
+                return None;
+            }
+            if kind == "bool" {
+                return obj.get("v").and_then(|v| v.as_bool()).map(|v| {
+                    if v {
+                        "1".to_string()
+                    } else {
+                        "0".to_string()
+                    }
+                });
+            }
+            if let Some(inner) = obj.get("v") {
+                return Some(mysql_json_value_text(inner));
+            }
+            if let Some(iso) = obj.get("iso").and_then(|v| v.as_str()) {
+                return Some(iso.to_string());
+            }
+            if let Some(b64) = obj.get("b64").and_then(|v| v.as_str()) {
+                return Some(b64.to_string());
+            }
+            return Some(value.to_string());
+        }
+    }
+    Some(mysql_json_value_text(value))
+}
+
+fn mysql_extract_result_data(
+    result: &Value,
+) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+    let data = result
+        .get("result")
+        .and_then(|v| v.get("data"))
+        .ok_or_else(|| "missing result.data".to_string())?;
+    let columns_json = data
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing result.data.columns".to_string())?;
+    let rows_json = data
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing result.data.rows".to_string())?;
+
+    let columns = columns_json
+        .iter()
+        .enumerate()
+        .map(|(idx, col)| {
+            col.get("name")
+                .and_then(|v| v.as_str())
+                .or_else(|| col.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("col{}", idx + 1))
+        })
+        .collect::<Vec<_>>();
+
+    let mut rows = Vec::with_capacity(rows_json.len());
+    for row in rows_json {
+        let arr = row
+            .as_array()
+            .ok_or_else(|| "result.data.rows entry must be an array".to_string())?;
+        let mut out = arr.iter().map(mysql_value_to_text).collect::<Vec<_>>();
+        while out.len() < columns.len() {
+            out.push(None);
+        }
+        rows.push(out);
+    }
+
+    Ok((columns, rows))
+}
+
+fn mysql_extract_show_columns_result(
+    result: &Value,
+) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+    let desc = result
+        .get("result")
+        .ok_or_else(|| "missing show_columns result".to_string())?;
+    let cols = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing show_columns columns".to_string())?;
+    let primary_key: HashSet<String> = desc
+        .get("primary_key")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|v| v.to_string())
+        .collect();
+
+    let mut rows = Vec::with_capacity(cols.len());
+    for col in cols {
+        let name = col
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let data_type = col
+            .get("type")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("string")
+            .to_string();
+        let is_nullable = if col
+            .get("nullable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
+            "YES"
+        } else {
+            "NO"
+        }
+        .to_string();
+        let key = if primary_key.contains(&name) {
+            "PRI".to_string()
+        } else {
+            "".to_string()
+        };
+        rows.push(vec![
+            Some(name),
+            Some(data_type),
+            Some(is_nullable),
+            Some(key),
+        ]);
+    }
+
+    Ok((
+        vec![
+            "Field".to_string(),
+            "Type".to_string(),
+            "Null".to_string(),
+            "Key".to_string(),
+        ],
+        rows,
+    ))
+}
+
+fn mysql_query_outcome_from_sql_exec(result: &Value) -> Result<MySqlQueryOutcome, String> {
+    let statement = result
+        .get("statement")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match statement {
+        "select" | "show_databases" | "show_tables" => {
+            let (columns, rows) = mysql_extract_result_data(result)?;
+            Ok(MySqlQueryOutcome::ResultSet { columns, rows })
+        }
+        "show_columns" => {
+            let (columns, rows) = mysql_extract_show_columns_result(result)?;
+            Ok(MySqlQueryOutcome::ResultSet { columns, rows })
+        }
+        "use" | "create_database" | "create_table" => Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        }),
+        "insert" | "update" | "delete" => Ok(MySqlQueryOutcome::Ok {
+            affected_rows: result
+                .get("write")
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            last_insert_id: result
+                .get("write")
+                .and_then(|v| v.get("last_insert_id"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        }),
+        _ => {
+            if let Ok((columns, rows)) = mysql_extract_result_data(result) {
+                return Ok(MySqlQueryOutcome::ResultSet { columns, rows });
+            }
+            if result.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(MySqlQueryOutcome::Ok {
+                    affected_rows: 0,
+                    last_insert_id: 0,
+                });
+            }
+            Err(format!("unsupported sql.exec statement '{}'", statement))
+        }
+    }
+}
+
 fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.push(MYSQL_PROTOCOL_VERSION);
@@ -844,10 +1070,14 @@ fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
 }
 
 fn mysql_ok_packet() -> Vec<u8> {
+    mysql_ok_packet_with(0, 0)
+}
+
+fn mysql_ok_packet_with(affected_rows: u64, last_insert_id: u64) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(0x00);
-    payload.push(0x00);
-    payload.push(0x00);
+    mysql_push_lenenc_int(&mut payload, affected_rows as usize);
+    mysql_push_lenenc_int(&mut payload, last_insert_id as usize);
     payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
     payload.extend_from_slice(&0u16.to_le_bytes());
     payload
@@ -919,7 +1149,40 @@ async fn mysql_send_literal_result(
     Ok(())
 }
 
-async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> anyhow::Result<()> {
+async fn mysql_send_text_result(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> anyhow::Result<()> {
+    let mut seq = start_seq;
+    let mut column_count = Vec::new();
+    mysql_push_lenenc_int(&mut column_count, columns.len());
+    mysql_write_packet(stream, seq, &column_count).await?;
+    seq = seq.wrapping_add(1);
+
+    for name in columns {
+        let packet = mysql_column_definition_packet(name, &MySqlLiteral::Str(String::new()));
+        mysql_write_packet(stream, seq, &packet).await?;
+        seq = seq.wrapping_add(1);
+    }
+
+    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    seq = seq.wrapping_add(1);
+    for row in rows {
+        let packet = mysql_text_row_packet(row);
+        mysql_write_packet(stream, seq, &packet).await?;
+        seq = seq.wrapping_add(1);
+    }
+    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    Ok(())
+}
+
+async fn handle_mysql_connection(
+    state: AppState,
+    mut stream: TcpStream,
+    connection_id: u32,
+) -> anyhow::Result<()> {
     let seed = mysql_seed(connection_id);
     let handshake = mysql_handshake_packet(connection_id, &seed);
     mysql_write_packet(&mut stream, 0, &handshake).await?;
@@ -957,6 +1220,7 @@ async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> a
     }
 
     let username = response.username;
+    let mut default_db: Option<String> = None;
     let ok = mysql_ok_packet();
     mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
 
@@ -997,12 +1261,61 @@ async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> a
                 if let Some(cols) = parse_select_literal_query(&sql) {
                     mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols).await?;
                 } else {
-                    let packet = mysql_err_packet(
-                        1064,
-                        "42000",
-                        "only SELECT literal queries are supported",
-                    );
-                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    let params = SqlExecParams {
+                        sql: sql.clone(),
+                        explain: false,
+                        default_db: default_db.clone(),
+                        result_format: Some(ResultFormat::RowsJson),
+                    };
+                    match sql_exec(&state, params).await {
+                        Ok(result) => {
+                            if result.get("statement").and_then(|v| v.as_str()) == Some("use") {
+                                default_db = result
+                                    .get("default_db")
+                                    .and_then(|v| v.as_str())
+                                    .map(|v| v.to_string());
+                            }
+                            match mysql_query_outcome_from_sql_exec(&result) {
+                                Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+                                    mysql_send_text_result(
+                                        &mut stream,
+                                        cmd_seq.wrapping_add(1),
+                                        &columns,
+                                        &rows,
+                                    )
+                                    .await?;
+                                }
+                                Ok(MySqlQueryOutcome::Ok {
+                                    affected_rows,
+                                    last_insert_id,
+                                }) => {
+                                    let packet =
+                                        mysql_ok_packet_with(affected_rows, last_insert_id);
+                                    mysql_write_packet(
+                                        &mut stream,
+                                        cmd_seq.wrapping_add(1),
+                                        &packet,
+                                    )
+                                    .await?;
+                                }
+                                Err(message) => {
+                                    let packet = mysql_err_packet(1105, "HY000", &message);
+                                    mysql_write_packet(
+                                        &mut stream,
+                                        cmd_seq.wrapping_add(1),
+                                        &packet,
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let (code, state_code, message) = mysql_error_from_rpc(&err);
+                            let packet = mysql_err_packet(code, state_code, &message);
+                            mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
+                                .await?;
+                        }
+                    }
                 }
             }
             _ => {
@@ -1015,6 +1328,7 @@ async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> a
 }
 
 async fn run_mysql_listener(
+    state: AppState,
     bind: String,
     mysql_port: u16,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -1041,8 +1355,9 @@ async fn run_mysql_listener(
                 };
                 let cid = connection_id;
                 connection_id = connection_id.wrapping_add(1).max(1);
+                let state = state.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_mysql_connection(stream, cid).await {
+                    if let Err(err) = handle_mysql_connection(state, stream, cid).await {
                         tracing::debug!(%peer_addr, ?err, "MySQL handshake failed");
                     }
                 });
@@ -1148,11 +1463,12 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let mysql_handle = if opts.mysql_port == 0 {
         None
     } else {
+        let state = app_state.clone();
         let bind = opts.bind.clone();
         let mysql_port = opts.mysql_port;
         let shutdown_rx = app_state.shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
-            if let Err(err) = run_mysql_listener(bind, mysql_port, shutdown_rx).await {
+            if let Err(err) = run_mysql_listener(state, bind, mysql_port, shutdown_rx).await {
                 tracing::error!(?err, "MySQL listener failed");
             }
         }))
@@ -1170,7 +1486,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         tracing::info!("MySQL listener disabled (--mysql 0)");
     } else {
         tracing::info!(
-            "MySQL listener enabled (minimal protocol surface: handshake + mysql_native_password auth)"
+            "MySQL listener enabled (handshake/auth + COM_QUERY subset via sql.exec translator)"
         );
     }
 
@@ -3713,6 +4029,18 @@ fn to_rpc_error(e: anyhow::Error) -> RpcError {
                 RpcError::new("internal", msg)
             }
         }
+    }
+}
+
+fn mysql_error_from_rpc(err: &RpcError) -> (u16, &'static str, String) {
+    match err.code.as_str() {
+        "invalid_request" => (1064, "42000", err.message.clone()),
+        "not_supported" => (1235, "42000", err.message.clone()),
+        "not_found" => (1146, "42S02", err.message.clone()),
+        "conflict" => (1213, "40001", err.message.clone()),
+        "forbidden" => (1044, "42000", err.message.clone()),
+        "unauthorized" => (1045, "28000", err.message.clone()),
+        _ => (1105, "HY000", err.message.clone()),
     }
 }
 

@@ -32,16 +32,21 @@ Even with protocol support, SQL dialect mismatches can break apps.
 ## Current status in this repository
 
 - The CLI `--mysql` listener now supports a **minimal MySQL wire handshake** with `mysql_native_password` auth exchange.
-- The listener also supports a minimal `COM_QUERY` subset for `SELECT` literal expressions (for example `SELECT 1`, `SELECT 'x'`).
+- The listener supports a `COM_QUERY` translation subset through `sql.exec` for:
+  - `SELECT` (including literal-only and simple table queries)
+  - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
+  - `USE`
+  - `CREATE DATABASE`, `CREATE TABLE`
+  - `INSERT`, `UPDATE`, `DELETE`
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
   - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
-1) expand `COM_QUERY` beyond literal `SELECT` into table-backed SELECT/INSERT/UPDATE/DELETE
-2) mapping to SkeinDB’s internal SkeinIR / SkeinQL execution
-3) broader SQL and function coverage with compatibility tests
+1) expand coverage to the corpus-level compatibility surface (`tests/compat/corpus.sql`)
+2) add missing MySQL semantics like `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()`
+3) broaden SQL and function compatibility with stricter parity tests
 
 ---
 
