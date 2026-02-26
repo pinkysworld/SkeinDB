@@ -139,6 +139,22 @@ curl -s http://127.0.0.1:8080/api/v1/sql/exec \
   -d '{"sql":"SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10"}'
 ```
 
+### 3.6 Transaction handles (SkeinQL)
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":8,"method":"tx.begin","params":{"read_only":true}}'
+```
+
+Commit:
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":9,"method":"tx.commit","params":{"tx_id":"tx_0000000000000001"}}'
+```
+
 ---
 
 ## 4) Storage + dedup stats

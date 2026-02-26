@@ -59,6 +59,7 @@ const REPLICATION_HEADER: &str = "x-skeindb-replication";
 const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
 const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
 static CLUSTER_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+static TX_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const ADMIN_INDEX_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -104,12 +105,20 @@ pub(crate) struct AppState {
     settings: Arc<Mutex<serde_json::Map<String, Value>>>,
     cluster: Arc<Mutex<ClusterStateModel>>,
     counters: Arc<Mutex<Counters>>,
+    txns: Arc<Mutex<HashMap<String, TxSession>>>,
 
     engine: Arc<RwLock<Engine>>,
     subs: Arc<Mutex<Subscriptions>>,
     coalesce: Arc<QueryCoalescer>,
     transport: TransportCapabilities,
     shutdown_tx: watch::Sender<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct TxSession {
+    id: String,
+    read_only: bool,
+    started_at_ms: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -418,6 +427,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             local_rpc_url,
         ))),
         counters: Arc::new(Mutex::new(Counters::default())),
+        txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
         subs: Arc::new(Mutex::new(Subscriptions::default())),
         coalesce: Arc::new(QueryCoalescer::default()),
@@ -1287,6 +1297,22 @@ pub(crate) async fn handle_rpc(
                 "system.shutdown" => request_server_shutdown(state),
                 "system.capabilities" => Ok(system_capabilities(state)),
                 "transport.capabilities" => Ok(transport_capabilities(state)),
+                "tx.begin" => {
+                    let p = if params.is_some() {
+                        parse_params::<TxBeginParams>(params.clone())?
+                    } else {
+                        TxBeginParams { read_only: false }
+                    };
+                    tx_begin(state, p)
+                }
+                "tx.commit" => {
+                    let p: TxFinishParams = parse_params(params.clone())?;
+                    tx_finish(state, p, "committed")
+                }
+                "tx.rollback" => {
+                    let p: TxFinishParams = parse_params(params.clone())?;
+                    tx_finish(state, p, "rolled_back")
+                }
                 "stats.snapshot" => Ok(stats_snapshot(state).await),
                 "stats.top_queries" => stats_top_queries(state, params.clone()),
                 "stats.slow_queries" => stats_slow_queries(state, params.clone()),
@@ -2899,6 +2925,17 @@ struct SqlExecParams {
     default_db: Option<String>,
     #[serde(default)]
     result_format: Option<ResultFormat>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TxBeginParams {
+    #[serde(default)]
+    read_only: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TxFinishParams {
+    tx_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4697,6 +4734,9 @@ fn is_read_only_method(method: &str) -> bool {
             | "system.version"
             | "system.capabilities"
             | "transport.capabilities"
+            | "tx.begin"
+            | "tx.commit"
+            | "tx.rollback"
             | "stats.snapshot"
             | "stats.top_queries"
             | "stats.slow_queries"
@@ -4755,6 +4795,47 @@ fn request_server_shutdown(state: &AppState) -> Result<Value, RpcError> {
     }))
 }
 
+fn tx_begin(state: &AppState, params: TxBeginParams) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let tx_id = format!("tx_{:016x}", TX_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let session = TxSession {
+        id: tx_id.clone(),
+        read_only: params.read_only,
+        started_at_ms: now,
+    };
+    state
+        .txns
+        .lock()
+        .unwrap()
+        .insert(tx_id.clone(), session.clone());
+    Ok(serde_json::json!({
+        "tx_id": tx_id,
+        "status": "open",
+        "read_only": session.read_only,
+        "started_at_ms": session.started_at_ms
+    }))
+}
+
+fn tx_finish(state: &AppState, params: TxFinishParams, mode: &str) -> Result<Value, RpcError> {
+    let tx_id = params.tx_id.trim().to_string();
+    if tx_id.is_empty() {
+        return Err(RpcError::new("invalid_request", "tx_id is required"));
+    }
+    let session = state
+        .txns
+        .lock()
+        .unwrap()
+        .remove(&tx_id)
+        .ok_or_else(|| RpcError::new("not_found", "unknown tx_id"))?;
+    Ok(serde_json::json!({
+        "tx_id": session.id,
+        "status": mode,
+        "read_only": session.read_only,
+        "started_at_ms": session.started_at_ms,
+        "finished_at_ms": now_unix_ms_u64()
+    }))
+}
+
 fn system_capabilities(state: &AppState) -> Value {
     let methods = vec![
         "system.ping",
@@ -4762,6 +4843,9 @@ fn system_capabilities(state: &AppState) -> Value {
         "system.shutdown",
         "system.capabilities",
         "transport.capabilities",
+        "tx.begin",
+        "tx.commit",
+        "tx.rollback",
         "stats.snapshot",
         "stats.top_queries",
         "stats.slow_queries",
@@ -5238,6 +5322,7 @@ mod tests {
                 local_rpc_url,
             ))),
             counters: Arc::new(Mutex::new(Counters::default())),
+            txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
             subs: Arc::new(Mutex::new(Subscriptions::default())),
             coalesce: Arc::new(QueryCoalescer::default()),
@@ -7053,6 +7138,13 @@ mod tests {
             .and_then(|v| v.as_array())
             .map(|m| m.iter().any(|method| method == "stats.top_queries"))
             .unwrap_or(false));
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "tx.begin"))
+            .unwrap_or(false));
 
         let transport = call_rpc(&state, "transport.capabilities", json!({})).await;
         assert!(transport.ok);
@@ -7088,6 +7180,69 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx.changed()).await??;
         assert!(*shutdown_rx.borrow());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tx_begin_commit_and_rollback_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("tx_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let begin = call_rpc(&state, "tx.begin", json!({"read_only": true})).await;
+        assert!(begin.ok);
+        let tx_id = begin
+            .result
+            .as_ref()
+            .and_then(|v| v.get("tx_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(!tx_id.is_empty());
+
+        let commit = call_rpc(&state, "tx.commit", json!({"tx_id": tx_id.clone()})).await;
+        assert!(commit.ok);
+        assert_eq!(
+            commit
+                .result
+                .as_ref()
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("committed")
+        );
+
+        let unknown = call_rpc(&state, "tx.rollback", json!({"tx_id": tx_id})).await;
+        assert!(!unknown.ok);
+        assert_eq!(
+            unknown
+                .error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or_default(),
+            "not_found"
+        );
+
+        let begin2 = call_rpc(&state, "tx.begin", json!({})).await;
+        assert!(begin2.ok);
+        let tx_id2 = begin2
+            .result
+            .as_ref()
+            .and_then(|v| v.get("tx_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let rollback = call_rpc(&state, "tx.rollback", json!({"tx_id": tx_id2})).await;
+        assert!(rollback.ok);
+        assert_eq!(
+            rollback
+                .result
+                .as_ref()
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("rolled_back")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

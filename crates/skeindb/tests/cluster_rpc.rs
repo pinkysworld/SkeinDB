@@ -223,6 +223,37 @@ async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("tx_rpc_roundtrip")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let begin = client.rpc("tx.begin", json!({"read_only": true})).await?;
+    assert!(begin.ok);
+    let tx_id = begin.result.expect("missing tx.begin result")["tx_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing tx_id"))?
+        .to_string();
+
+    let commit = client
+        .rpc("tx.commit", json!({"tx_id": tx_id.clone()}))
+        .await?;
+    assert!(commit.ok);
+    assert_eq!(
+        commit.result.expect("missing tx.commit result")["status"].as_str(),
+        Some("committed")
+    );
+
+    let rollback = client.rpc("tx.rollback", json!({"tx_id": tx_id})).await?;
+    assert!(!rollback.ok);
+    assert_eq!(
+        rollback.error.as_ref().map(|e| e.code.as_str()),
+        Some("not_found")
+    );
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,

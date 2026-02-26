@@ -11,7 +11,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **28 done / 77 open** (105 total)
+- `docs/PROJECT_BACKLOG.md`: **29 done / 76 open** (105 total)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open**
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -26,7 +26,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`), including virtual `information_schema.tables` and `information_schema.columns`. |
 | Phase 3 MySQL protocol | Planned | MySQL compatibility remains a top priority but is not complete in this scaffold. |
 | Phase 4 Web console | Partial | `/api/v1/sql/exec` HTTP endpoint is live and console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
-| Phase 5 SkeinQL API | Partial | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` are implemented; `tx.*` remains open. |
+| Phase 5 SkeinQL API | Implemented (baseline) | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` + `tx.begin/tx.commit/tx.rollback` are implemented. |
 | Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates + dependency-aware query paths exist. |
 | Phase 7 Delta values | Implemented (prototype) | DELTA kind, policy/metrics, and compaction behavior are implemented in ValueStore tests. |
 | Phase 8 Wasm extensions | Partial | Wasm plan compile/run + merge wasm registry exist; full UDF surface is still open. |

@@ -56,7 +56,7 @@ Phase 0 verification checklist:
 - [x] T051: Implement HTTP RPC endpoint POST /api/v1/rpc (system.ping, system.version)
 - [x] T052: Implement schema.* methods (list/describe/create/drop)
 - [x] T053: Implement query.select (single-table scan + filter + limit) over SkeinIR
-- [ ] T054: Implement tx.begin/commit/rollback via SkeinQL
+- [x] T054: Implement tx.begin/commit/rollback via SkeinQL
 
 ## Phase 6 - Cache-coherent HTTP queries (ETags)
 - [x] T060: Row ETags for data.get and If-Match support for data.update
