@@ -34,7 +34,7 @@ Phase 0 verification checklist:
 
 ## Phase 2 — SQL + virtual metadata
 - [x] T020: Catalog schema + TableDef
-- [ ] T021: information_schema.tables + columns
+- [x] T021: information_schema.tables + columns
 - [x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
 
 ## Phase 3 — MySQL protocol

@@ -201,6 +201,25 @@ async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0]["v"].as_u64(), Some(7));
     assert_eq!(rows[0][1]["v"].as_str(), Some("Mia"));
+
+    let resp = client
+        .sql_exec(json!({
+            "sql":"SELECT column_name FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'users' ORDER BY ordinal_position ASC"
+        }))
+        .await?;
+    assert!(resp.ok);
+    let col_rows = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.get("rows"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(col_rows.len(), 2);
+    assert_eq!(col_rows[0][0]["v"].as_str(), Some("id"));
+    assert_eq!(col_rows[1][0]["v"].as_str(), Some("name"));
     Ok(())
 }
 

@@ -124,6 +124,21 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
   }'
 ```
 
+### 3.5 SQL compatibility endpoint + information_schema
+
+The SQL compatibility helper endpoint is available at `POST /api/v1/sql/exec`.
+It now supports virtual metadata queries over:
+- `information_schema.tables`
+- `information_schema.columns`
+
+Example:
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/sql/exec \
+  -H 'content-type: application/json' \
+  -d '{"sql":"SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10"}'
+```
+
 ---
 
 ## 4) Storage + dedup stats

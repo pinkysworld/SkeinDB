@@ -4040,6 +4040,388 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
     }
 }
 
+fn lit_to_f64(lit: &Lit) -> Option<f64> {
+    match lit {
+        Lit::I64 { v } => Some(*v as f64),
+        Lit::U64 { v } => Some(*v as f64),
+        Lit::F64 { v } => Some(*v),
+        _ => None,
+    }
+}
+
+fn lit_cmp(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
+    if let (Some(af), Some(bf)) = (lit_to_f64(a), lit_to_f64(b)) {
+        return af.partial_cmp(&bf);
+    }
+    match (a, b) {
+        (Lit::Str { v: av }, Lit::Str { v: bv }) => Some(av.cmp(bv)),
+        (Lit::Bool { v: av }, Lit::Bool { v: bv }) => Some(av.cmp(bv)),
+        (Lit::Null, Lit::Null) => Some(std::cmp::Ordering::Equal),
+        _ => None,
+    }
+}
+
+fn lit_eq(a: &Lit, b: &Lit) -> bool {
+    lit_cmp(a, b)
+        .map(|ord| ord == std::cmp::Ordering::Equal)
+        .unwrap_or(false)
+}
+
+fn row_get_lit(row: &BTreeMap<String, Lit>, col: &str) -> Option<Lit> {
+    if let Some(v) = row.get(col) {
+        return Some(v.clone());
+    }
+    row.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(col))
+        .map(|(_, v)| v.clone())
+}
+
+fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<bool, RpcError> {
+    match expr {
+        Expr::Op {
+            op,
+            a,
+            b,
+            args: _,
+            list: _,
+            lo: _,
+            hi: _,
+        } => {
+            if op == "and" {
+                let left = a.as_ref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed WHERE expression")
+                })?;
+                let right = b.as_ref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed WHERE expression")
+                })?;
+                return Ok(eval_info_schema_expr(left, row)? && eval_info_schema_expr(right, row)?);
+            }
+
+            let left = match a.as_deref() {
+                Some(Expr::Col { col, .. }) => row_get_lit(row, col).unwrap_or(Lit::Null),
+                Some(Expr::Lit { lit }) => lit.clone(),
+                _ => {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        "information_schema WHERE supports only column/literal comparisons",
+                    ))
+                }
+            };
+            let right = match b.as_deref() {
+                Some(Expr::Col { col, .. }) => row_get_lit(row, col).unwrap_or(Lit::Null),
+                Some(Expr::Lit { lit }) => lit.clone(),
+                _ => {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        "information_schema WHERE supports only column/literal comparisons",
+                    ))
+                }
+            };
+
+            let ord = lit_cmp(&left, &right);
+            let out = match op.as_str() {
+                "eq" => lit_eq(&left, &right),
+                "ne" => !lit_eq(&left, &right),
+                "gt" => ord
+                    .map(|o| o == std::cmp::Ordering::Greater)
+                    .unwrap_or(false),
+                "ge" => ord
+                    .map(|o| o == std::cmp::Ordering::Greater || o == std::cmp::Ordering::Equal)
+                    .unwrap_or(false),
+                "lt" => ord.map(|o| o == std::cmp::Ordering::Less).unwrap_or(false),
+                "le" => ord
+                    .map(|o| o == std::cmp::Ordering::Less || o == std::cmp::Ordering::Equal)
+                    .unwrap_or(false),
+                _ => {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        format!("unsupported WHERE operator '{}'", op),
+                    ))
+                }
+            };
+            Ok(out)
+        }
+        Expr::Lit {
+            lit: Lit::Bool { v },
+        } => Ok(*v),
+        _ => Err(RpcError::new(
+            "not_supported",
+            "information_schema WHERE supports only simple predicates",
+        )),
+    }
+}
+
+fn projection_label(item: &SelectItem, idx: usize) -> String {
+    if let Some(alias) = item.r#as.as_ref() {
+        return alias.clone();
+    }
+    match &item.expr {
+        Expr::Col { col, .. } => col.clone(),
+        _ => format!("expr{}", idx + 1),
+    }
+}
+
+fn project_virtual_row(
+    row: &BTreeMap<String, Lit>,
+    projection: &[SelectItem],
+    fallback_cols: &[&str],
+) -> Result<(Vec<String>, Vec<Value>), RpcError> {
+    if projection.is_empty() {
+        let names = fallback_cols
+            .iter()
+            .map(|c| (*c).to_string())
+            .collect::<Vec<_>>();
+        let values = fallback_cols
+            .iter()
+            .map(|col| {
+                row_get_lit(row, col)
+                    .map(|lit| serde_json::to_value(lit).unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null)
+            })
+            .collect::<Vec<_>>();
+        return Ok((names, values));
+    }
+
+    let mut names = Vec::with_capacity(projection.len());
+    let mut values = Vec::with_capacity(projection.len());
+    for (idx, item) in projection.iter().enumerate() {
+        names.push(projection_label(item, idx));
+        let value = match &item.expr {
+            Expr::Col { col, .. } => row_get_lit(row, col)
+                .map(|lit| serde_json::to_value(lit).unwrap_or(Value::Null))
+                .unwrap_or(Value::Null),
+            Expr::Lit { lit } => serde_json::to_value(lit).unwrap_or(Value::Null),
+            _ => {
+                return Err(RpcError::new(
+                    "not_supported",
+                    "information_schema projection supports only columns and literals",
+                ))
+            }
+        };
+        values.push(value);
+    }
+    Ok((names, values))
+}
+
+fn sort_virtual_rows(
+    rows: &mut [BTreeMap<String, Lit>],
+    order_by: &[OrderBy],
+) -> Result<(), RpcError> {
+    if order_by.is_empty() {
+        return Ok(());
+    }
+    rows.sort_by(|a, b| {
+        for rule in order_by {
+            let Expr::Col { col, .. } = &rule.expr else {
+                continue;
+            };
+            let av = row_get_lit(a, col).unwrap_or(Lit::Null);
+            let bv = row_get_lit(b, col).unwrap_or(Lit::Null);
+            let ord = lit_cmp(&av, &bv).unwrap_or(std::cmp::Ordering::Equal);
+            let ord = match rule.dir.clone().unwrap_or(OrderDir::Asc) {
+                OrderDir::Asc => ord,
+                OrderDir::Desc => ord.reverse(),
+            };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+
+    for rule in order_by {
+        if !matches!(rule.expr, Expr::Col { .. }) {
+            return Err(RpcError::new(
+                "not_supported",
+                "information_schema ORDER BY supports only column references",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn information_schema_select_result(
+    eng: &Engine,
+    table: &BaseTableRef,
+    projection: &[SelectItem],
+    where_expr: &Option<Expr>,
+    order_by: &[OrderBy],
+    limit: &Option<LimitClause>,
+) -> Result<Option<Value>, RpcError> {
+    if !table.db.eq_ignore_ascii_case("information_schema") {
+        return Ok(None);
+    }
+
+    let mut rows: Vec<BTreeMap<String, Lit>> = Vec::new();
+    let all_cols: Vec<&str> = if table.table.eq_ignore_ascii_case("tables") {
+        for db in eng.list_databases() {
+            let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+            for t in tables {
+                let mut row = BTreeMap::new();
+                row.insert(
+                    "TABLE_CATALOG".to_string(),
+                    Lit::Str {
+                        v: "def".to_string(),
+                    },
+                );
+                row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: db.clone() });
+                row.insert("TABLE_NAME".to_string(), Lit::Str { v: t });
+                row.insert(
+                    "TABLE_TYPE".to_string(),
+                    Lit::Str {
+                        v: "BASE TABLE".to_string(),
+                    },
+                );
+                row.insert(
+                    "ENGINE".to_string(),
+                    Lit::Str {
+                        v: "SkeinDB".to_string(),
+                    },
+                );
+                row.insert("TABLE_ROWS".to_string(), Lit::U64 { v: 0 });
+                rows.push(row);
+            }
+        }
+        vec![
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "TABLE_TYPE",
+            "ENGINE",
+            "TABLE_ROWS",
+        ]
+    } else if table.table.eq_ignore_ascii_case("columns") {
+        for db in eng.list_databases() {
+            let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+            for t in tables {
+                let desc = eng.describe_table(&db, &t).map_err(to_rpc_error)?;
+                let pk: HashSet<String> = desc
+                    .get("primary_key")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                let cols = desc
+                    .get("columns")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for (idx, col) in cols.iter().enumerate() {
+                    let name = col
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let nullable = col
+                        .get("nullable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let data_type = col
+                        .get("type")
+                        .and_then(|v| v.get("kind"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("string")
+                        .to_string();
+                    let mut row = BTreeMap::new();
+                    row.insert(
+                        "TABLE_CATALOG".to_string(),
+                        Lit::Str {
+                            v: "def".to_string(),
+                        },
+                    );
+                    row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: db.clone() });
+                    row.insert("TABLE_NAME".to_string(), Lit::Str { v: t.clone() });
+                    row.insert("COLUMN_NAME".to_string(), Lit::Str { v: name.clone() });
+                    row.insert(
+                        "ORDINAL_POSITION".to_string(),
+                        Lit::U64 {
+                            v: (idx + 1) as u64,
+                        },
+                    );
+                    row.insert(
+                        "IS_NULLABLE".to_string(),
+                        Lit::Str {
+                            v: if nullable { "YES" } else { "NO" }.to_string(),
+                        },
+                    );
+                    row.insert("DATA_TYPE".to_string(), Lit::Str { v: data_type });
+                    row.insert(
+                        "COLUMN_KEY".to_string(),
+                        Lit::Str {
+                            v: if pk.contains(&name) { "PRI" } else { "" }.to_string(),
+                        },
+                    );
+                    rows.push(row);
+                }
+            }
+        }
+        vec![
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "COLUMN_NAME",
+            "ORDINAL_POSITION",
+            "IS_NULLABLE",
+            "DATA_TYPE",
+            "COLUMN_KEY",
+        ]
+    } else {
+        return Err(RpcError::new(
+            "not_supported",
+            format!(
+                "information_schema table '{}' is not supported yet",
+                table.table
+            ),
+        ));
+    };
+
+    if let Some(expr) = where_expr.as_ref() {
+        let mut filtered = Vec::with_capacity(rows.len());
+        for row in rows.into_iter() {
+            if eval_info_schema_expr(expr, &row)? {
+                filtered.push(row);
+            }
+        }
+        rows = filtered;
+    }
+
+    sort_virtual_rows(&mut rows, order_by)?;
+
+    if let Some(lim) = limit.as_ref() {
+        let offset = lim.offset.unwrap_or(0) as usize;
+        let take = lim.limit.unwrap_or(u64::MAX) as usize;
+        rows = rows.into_iter().skip(offset).take(take).collect();
+    }
+
+    let mut out_rows = Vec::new();
+    let mut out_cols: Option<Vec<String>> = None;
+    for row in rows.iter() {
+        let (cols, vals) = project_virtual_row(row, projection, &all_cols)?;
+        if out_cols.is_none() {
+            out_cols = Some(cols);
+        }
+        out_rows.push(vals);
+    }
+    if out_cols.is_none() {
+        let (cols, _) = project_virtual_row(&BTreeMap::new(), projection, &all_cols)?;
+        out_cols = Some(cols);
+    }
+    let columns = out_cols
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| serde_json::json!({ "name": name }))
+        .collect::<Vec<_>>();
+
+    Ok(Some(serde_json::json!({
+        "data": {
+            "columns": columns,
+            "rows": out_rows,
+        }
+    })))
+}
+
 async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
     let plan = parse_sql_plan(&params.sql, params.default_db.as_deref())?;
     if params.explain {
@@ -4091,6 +4473,20 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             }
 
             let eng = state.engine.read().await;
+            if let Some(result) = information_schema_select_result(
+                &eng,
+                &table,
+                &projection,
+                &where_expr,
+                &order_by,
+                &limit,
+            )? {
+                return Ok(serde_json::json!({
+                    "statement": "select",
+                    "read_only": true,
+                    "result": result
+                }));
+            }
             if projection.is_empty() {
                 let desc = eng
                     .describe_table(&table.db, &table.table)
@@ -4933,6 +5329,70 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0]["v"].as_u64(), Some(1));
         assert_eq!(rows[0][1]["v"].as_str(), Some("Nora"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_information_schema_tables_and_columns_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_information_schema");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
+        assert!(resp.ok);
+
+        let resp = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"CREATE TABLE app.users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let tables = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = 'app' AND table_name = 'users'"
+            }),
+        )
+        .await;
+        assert!(tables.ok);
+        let table_rows = tables
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(table_rows.len(), 1);
+        assert_eq!(table_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(table_rows[0][1]["v"].as_str(), Some("users"));
+
+        let columns = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT column_name FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'users' ORDER BY ordinal_position ASC"
+            }),
+        )
+        .await;
+        assert!(columns.ok);
+        let column_rows = columns
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(column_rows.len(), 2);
+        assert_eq!(column_rows[0][0]["v"].as_str(), Some("id"));
+        assert_eq!(column_rows[1][0]["v"].as_str(), Some("name"));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
