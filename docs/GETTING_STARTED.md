@@ -48,6 +48,7 @@ You can now access:
 - SkeinAdmin: `http://127.0.0.1:8080/admin`
 - SkeinQL JSON-RPC: `http://127.0.0.1:8080/api/v1/rpc`
 - Prepared-query GET endpoint: `http://127.0.0.1:8080/api/v1/q/<query_id>`
+- MySQL listener on `127.0.0.1:3306` (currently handshake/auth surface; SQL over MySQL is still expanding)
 
 ---
 

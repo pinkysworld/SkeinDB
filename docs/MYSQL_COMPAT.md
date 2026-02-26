@@ -31,16 +31,17 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 ## Current status in this repository
 
-- The CLI exposes a `--mysql` port, but **the MySQL protocol server is currently a placeholder** (see `crates/skeindb/src/main.rs`).
+- The CLI `--mysql` listener now supports a **minimal MySQL wire handshake** with `mysql_native_password` auth exchange.
+- The current listener only covers connection/auth setup; query execution over MySQL (`COM_QUERY`) is still pending.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
   - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
 
-If you want “drop-in MySQL for real apps”, the next concrete milestone is to implement:
-1) a minimal MySQL handshake + auth
-2) COM_QUERY for a subset of SELECT/INSERT/UPDATE/DELETE
-3) mapping to SkeinDB’s internal SkeinIR / SkeinQL execution
+If you want “drop-in MySQL for real apps”, the next concrete milestones are:
+1) `COM_QUERY` for a subset of SELECT/INSERT/UPDATE/DELETE
+2) mapping to SkeinDB’s internal SkeinIR / SkeinQL execution
+3) broader SQL and function coverage with compatibility tests
 
 ---
 
@@ -81,4 +82,3 @@ A staged plan that keeps SkeinDB single-binary:
 5) **Performance work**
    - prepared statement caching
    - vectorized execution path for common scans
-

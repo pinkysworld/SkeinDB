@@ -64,8 +64,6 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the server (HTTP SkeinQL + embedded consoles).
-    ///
-    /// Note: MySQL protocol is still a placeholder in this scaffold.
     Serve {
         /// Data directory
         #[arg(long, default_value = "./data")]
@@ -79,7 +77,7 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
 
-        /// MySQL port (placeholder until MySQL protocol is implemented)
+        /// MySQL protocol port (0 disables listener)
         #[arg(long, default_value_t = 3306)]
         mysql: u16,
 

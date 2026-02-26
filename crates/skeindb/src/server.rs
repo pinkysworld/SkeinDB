@@ -19,6 +19,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 use sysinfo::{Pid, System};
 
 use skeindb_skeinql::{
@@ -52,7 +53,11 @@ use skeindb_skeinql::{
 use crate::engine::{ColumnSchema, Engine, Subscriptions};
 use crate::quic;
 
-use tokio::sync::{watch, RwLock};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::{watch, RwLock},
+};
 use tower_http::cors::{Any, CorsLayer};
 
 const REPLICATION_HEADER: &str = "x-skeindb-replication";
@@ -69,6 +74,27 @@ const ADMIN_MAIN_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../web/skeinadmin/src/main.js"
 ));
+const MYSQL_PROTOCOL_VERSION: u8 = 0x0a;
+const MYSQL_SERVER_VERSION: &str = "8.0.0-skeindb";
+const MYSQL_AUTH_PLUGIN: &str = "mysql_native_password";
+const MYSQL_STATUS_AUTOCOMMIT: u16 = 0x0002;
+const MYSQL_CAP_LONG_PASSWORD: u32 = 0x0000_0001;
+const MYSQL_CAP_CONNECT_WITH_DB: u32 = 0x0000_0008;
+const MYSQL_CAP_PROTOCOL_41: u32 = 0x0000_0200;
+const MYSQL_CAP_SSL: u32 = 0x0000_0800;
+const MYSQL_CAP_SECURE_CONNECTION: u32 = 0x0000_8000;
+const MYSQL_CAP_PLUGIN_AUTH: u32 = 0x0008_0000;
+const MYSQL_CAP_CONNECT_ATTRS: u32 = 0x0010_0000;
+const MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA: u32 = 0x0020_0000;
+const MYSQL_CAP_DEPRECATE_EOF: u32 = 0x0100_0000;
+const MYSQL_SERVER_CAPABILITIES: u32 = MYSQL_CAP_LONG_PASSWORD
+    | MYSQL_CAP_CONNECT_WITH_DB
+    | MYSQL_CAP_PROTOCOL_41
+    | MYSQL_CAP_SECURE_CONNECTION
+    | MYSQL_CAP_PLUGIN_AUTH
+    | MYSQL_CAP_CONNECT_ATTRS
+    | MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA
+    | MYSQL_CAP_DEPRECATE_EOF;
 
 fn admin_index_html() -> &'static str {
     ADMIN_INDEX_HTML
@@ -392,6 +418,344 @@ impl QueryCoalescer {
     }
 }
 
+#[derive(Debug)]
+struct MySqlHandshakeResponse {
+    capabilities: u32,
+    username: String,
+    auth_response: Vec<u8>,
+    auth_plugin: Option<String>,
+}
+
+fn mysql_seed(conn_id: u32) -> [u8; 20] {
+    let mut seed = [0u8; 20];
+    let mut x = now_unix_ms_u64()
+        .wrapping_add((conn_id as u64) << 17)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for b in &mut seed {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) & 0x7f) as u8;
+    }
+    seed
+}
+
+fn mysql_hash(input: &[u8]) -> [u8; 20] {
+    let mut h = Sha1::new();
+    h.update(input);
+    let digest = h.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&digest[..20]);
+    out
+}
+
+fn mysql_native_password_scramble(password: &str, seed: &[u8]) -> Vec<u8> {
+    if password.is_empty() {
+        return Vec::new();
+    }
+    let stage1 = mysql_hash(password.as_bytes());
+    let stage2 = mysql_hash(&stage1);
+    let mut combined = Vec::with_capacity(seed.len() + stage2.len());
+    combined.extend_from_slice(seed);
+    combined.extend_from_slice(&stage2);
+    let digest = mysql_hash(&combined);
+    let mut out = vec![0u8; stage1.len()];
+    for i in 0..stage1.len() {
+        out[i] = stage1[i] ^ digest[i];
+    }
+    out
+}
+
+fn mysql_validate_native_password(password: &str, seed: &[u8], auth_response: &[u8]) -> bool {
+    if password.is_empty() {
+        return auth_response.is_empty();
+    }
+    let expected = mysql_native_password_scramble(password, seed);
+    expected == auth_response
+}
+
+fn parse_lenenc_int(payload: &[u8], cursor: &mut usize) -> Result<usize, String> {
+    if *cursor >= payload.len() {
+        return Err("missing length-encoded integer".to_string());
+    }
+    let first = payload[*cursor];
+    *cursor += 1;
+    match first {
+        0x00..=0xfa => Ok(first as usize),
+        0xfc => {
+            if *cursor + 2 > payload.len() {
+                return Err("truncated length-encoded integer".to_string());
+            }
+            let n = u16::from_le_bytes([payload[*cursor], payload[*cursor + 1]]) as usize;
+            *cursor += 2;
+            Ok(n)
+        }
+        0xfd => {
+            if *cursor + 3 > payload.len() {
+                return Err("truncated length-encoded integer".to_string());
+            }
+            let n = (payload[*cursor] as usize)
+                | ((payload[*cursor + 1] as usize) << 8)
+                | ((payload[*cursor + 2] as usize) << 16);
+            *cursor += 3;
+            Ok(n)
+        }
+        0xfe => {
+            if *cursor + 8 > payload.len() {
+                return Err("truncated length-encoded integer".to_string());
+            }
+            let n = u64::from_le_bytes([
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+                payload[*cursor + 4],
+                payload[*cursor + 5],
+                payload[*cursor + 6],
+                payload[*cursor + 7],
+            ]);
+            *cursor += 8;
+            if n > usize::MAX as u64 {
+                return Err("length-encoded integer too large".to_string());
+            }
+            Ok(n as usize)
+        }
+        _ => Err("unsupported length-encoded integer marker".to_string()),
+    }
+}
+
+fn parse_mysql_handshake_response(payload: &[u8]) -> Result<MySqlHandshakeResponse, String> {
+    if payload.len() < 32 {
+        return Err("handshake response too short".to_string());
+    }
+    let capabilities = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let mut cursor = 4 + 4 + 1 + 23;
+
+    let username_end = payload[cursor..]
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or_else(|| "missing username terminator".to_string())?;
+    let username_bytes = &payload[cursor..cursor + username_end];
+    let username = String::from_utf8(username_bytes.to_vec())
+        .map_err(|_| "username must be utf-8".to_string())?;
+    cursor += username_end + 1;
+
+    let auth_response = if capabilities & MYSQL_CAP_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
+        let len = parse_lenenc_int(payload, &mut cursor)?;
+        if cursor + len > payload.len() {
+            return Err("truncated auth response".to_string());
+        }
+        let bytes = payload[cursor..cursor + len].to_vec();
+        cursor += len;
+        bytes
+    } else if capabilities & MYSQL_CAP_SECURE_CONNECTION != 0 {
+        if cursor >= payload.len() {
+            return Err("missing auth response length".to_string());
+        }
+        let len = payload[cursor] as usize;
+        cursor += 1;
+        if cursor + len > payload.len() {
+            return Err("truncated auth response".to_string());
+        }
+        let bytes = payload[cursor..cursor + len].to_vec();
+        cursor += len;
+        bytes
+    } else {
+        let end = payload[cursor..]
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or_else(|| "missing auth response terminator".to_string())?;
+        let bytes = payload[cursor..cursor + end].to_vec();
+        cursor += end + 1;
+        bytes
+    };
+
+    if capabilities & MYSQL_CAP_CONNECT_WITH_DB != 0 {
+        let db_end = payload[cursor..]
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or_else(|| "missing db terminator".to_string())?;
+        cursor += db_end + 1;
+    }
+
+    let auth_plugin = if capabilities & MYSQL_CAP_PLUGIN_AUTH != 0 {
+        let plugin_end = payload[cursor..]
+            .iter()
+            .position(|b| *b == 0)
+            .ok_or_else(|| "missing auth plugin terminator".to_string())?;
+        let plugin_bytes = &payload[cursor..cursor + plugin_end];
+        Some(
+            String::from_utf8(plugin_bytes.to_vec())
+                .map_err(|_| "auth plugin must be utf-8".to_string())?,
+        )
+    } else {
+        None
+    };
+
+    Ok(MySqlHandshakeResponse {
+        capabilities,
+        username,
+        auth_response,
+        auth_plugin,
+    })
+}
+
+fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(96);
+    payload.push(MYSQL_PROTOCOL_VERSION);
+    payload.extend_from_slice(MYSQL_SERVER_VERSION.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&connection_id.to_le_bytes());
+    payload.extend_from_slice(&seed[..8]);
+    payload.push(0);
+    payload.extend_from_slice(&(MYSQL_SERVER_CAPABILITIES as u16).to_le_bytes());
+    payload.push(0x21);
+    payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
+    payload.extend_from_slice(&((MYSQL_SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
+    payload.push((seed.len() + 1) as u8);
+    payload.extend_from_slice(&[0u8; 10]);
+    let mut part2 = seed[8..].to_vec();
+    if part2.len() < 13 {
+        part2.resize(13, 0);
+    }
+    payload.extend_from_slice(&part2);
+    payload.extend_from_slice(MYSQL_AUTH_PLUGIN.as_bytes());
+    payload.push(0);
+    payload
+}
+
+fn mysql_ok_packet() -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(0x00);
+    payload.push(0x00);
+    payload.push(0x00);
+    payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload
+}
+
+fn mysql_err_packet(code: u16, sql_state: &str, message: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(0xff);
+    payload.extend_from_slice(&code.to_le_bytes());
+    payload.push(b'#');
+    let mut state = [b'H', b'Y', b'0', b'0', b'0'];
+    for (idx, byte) in sql_state.as_bytes().iter().take(5).enumerate() {
+        state[idx] = *byte;
+    }
+    payload.extend_from_slice(&state);
+    payload.extend_from_slice(message.as_bytes());
+    payload
+}
+
+async fn mysql_write_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
+    if payload.len() > 0x00ff_ffff {
+        return Err(anyhow::anyhow!("mysql payload too large"));
+    }
+    let len = payload.len();
+    let header = [
+        (len & 0xff) as u8,
+        ((len >> 8) & 0xff) as u8,
+        ((len >> 16) & 0xff) as u8,
+        seq,
+    ];
+    stream.write_all(&header).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn mysql_read_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    let len = (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
+    let seq = header[3];
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+    Ok((seq, payload))
+}
+
+async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> anyhow::Result<()> {
+    let seed = mysql_seed(connection_id);
+    let handshake = mysql_handshake_packet(connection_id, &seed);
+    mysql_write_packet(&mut stream, 0, &handshake).await?;
+
+    let (seq, response_payload) = mysql_read_packet(&mut stream).await?;
+    let response = match parse_mysql_handshake_response(&response_payload) {
+        Ok(parsed) => parsed,
+        Err(reason) => {
+            let packet = mysql_err_packet(1047, "08S01", &format!("malformed handshake: {reason}"));
+            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+            return Ok(());
+        }
+    };
+
+    if response.capabilities & MYSQL_CAP_SSL != 0 {
+        let packet = mysql_err_packet(1047, "08S01", "TLS is not supported on this listener");
+        mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+        return Ok(());
+    }
+
+    if let Some(plugin) = response.auth_plugin.as_deref() {
+        if plugin != MYSQL_AUTH_PLUGIN {
+            let packet = mysql_err_packet(1251, "08004", "unsupported auth plugin");
+            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+            return Ok(());
+        }
+    }
+
+    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
+        if !mysql_validate_native_password(&expected_password, &seed, &response.auth_response) {
+            let packet = mysql_err_packet(1045, "28000", "access denied");
+            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+            return Ok(());
+        }
+    }
+
+    let _ = response.username;
+    let ok = mysql_ok_packet();
+    mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
+    Ok(())
+}
+
+async fn run_mysql_listener(
+    bind: String,
+    mysql_port: u16,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if mysql_port == 0 {
+        return Ok(());
+    }
+    let addr = format!("{}:{}", bind, mysql_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!(mysql_addr = %addr, "MySQL listening");
+    let mut connection_id: u32 = 1;
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                break;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = match accepted {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(?err, "MySQL accept failed");
+                        continue;
+                    }
+                };
+                let cid = connection_id;
+                connection_id = connection_id.wrapping_add(1).max(1);
+                tokio::spawn(async move {
+                    if let Err(err) = handle_mysql_connection(stream, cid).await {
+                        tracing::debug!(%peer_addr, ?err, "MySQL handshake failed");
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     let http_addr: SocketAddr = format!("{}:{}", opts.bind, opts.http_port).parse()?;
 
@@ -485,6 +849,18 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     } else {
         None
     };
+    let mysql_handle = if opts.mysql_port == 0 {
+        None
+    } else {
+        let bind = opts.bind.clone();
+        let mysql_port = opts.mysql_port;
+        let shutdown_rx = app_state.shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            if let Err(err) = run_mysql_listener(bind, mysql_port, shutdown_rx).await {
+                tracing::error!(?err, "MySQL listener failed");
+            }
+        }))
+    };
 
     tracing::info!(
         bind = %opts.bind,
@@ -494,9 +870,13 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         storage_mode = %opts.storage_mode,
         "SkeinDB server starting"
     );
-    tracing::warn!(
-        "MySQL protocol is still a placeholder in this scaffold. SkeinQL HTTP is live at /api/v1/rpc"
-    );
+    if opts.mysql_port == 0 {
+        tracing::info!("MySQL listener disabled (--mysql 0)");
+    } else {
+        tracing::info!(
+            "MySQL listener enabled (minimal protocol surface: handshake + mysql_native_password auth)"
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     tracing::info!(%http_addr, "HTTP listening");
@@ -518,6 +898,9 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .await?;
 
     if let Some(handle) = quic_handle {
+        handle.abort();
+    }
+    if let Some(handle) = mysql_handle {
         handle.abort();
     }
 
@@ -7246,6 +7629,45 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[test]
+    fn mysql_handshake_packet_advertises_native_auth() {
+        let seed = [42u8; 20];
+        let packet = mysql_handshake_packet(7, &seed);
+        assert_eq!(packet.first().copied(), Some(MYSQL_PROTOCOL_VERSION));
+        assert!(packet
+            .windows(MYSQL_AUTH_PLUGIN.len())
+            .any(|w| w == MYSQL_AUTH_PLUGIN.as_bytes()));
+    }
+
+    #[test]
+    fn mysql_native_password_validation_roundtrip() {
+        let seed = [9u8; 20];
+        let scramble = mysql_native_password_scramble("secret", &seed);
+        assert!(mysql_validate_native_password("secret", &seed, &scramble));
+        assert!(!mysql_validate_native_password("wrong", &seed, &scramble));
+    }
+
+    #[test]
+    fn parse_mysql_handshake_response_secure_connection() {
+        let mut payload = Vec::new();
+        let caps = MYSQL_CAP_PROTOCOL_41 | MYSQL_CAP_SECURE_CONNECTION | MYSQL_CAP_PLUGIN_AUTH;
+        payload.extend_from_slice(&caps.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.push(0x21);
+        payload.extend_from_slice(&[0u8; 23]);
+        payload.extend_from_slice(b"root");
+        payload.push(0);
+        payload.push(3);
+        payload.extend_from_slice(b"abc");
+        payload.extend_from_slice(MYSQL_AUTH_PLUGIN.as_bytes());
+        payload.push(0);
+
+        let parsed = parse_mysql_handshake_response(&payload).expect("parse handshake response");
+        assert_eq!(parsed.username, "root");
+        assert_eq!(parsed.auth_response, b"abc");
+        assert_eq!(parsed.auth_plugin.as_deref(), Some(MYSQL_AUTH_PLUGIN));
     }
 
     #[tokio::test]

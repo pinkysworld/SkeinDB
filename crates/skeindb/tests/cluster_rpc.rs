@@ -10,6 +10,10 @@ use anyhow::{anyhow, Context};
 use serde_json::json;
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 static CLUSTER_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -254,26 +258,68 @@ async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_handshake_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", server.mysql_port()))
+        .await
+        .context("connect mysql port")?;
+    let (seq, handshake) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(seq, 0);
+    assert_eq!(handshake.first().copied(), Some(0x0a));
+    assert!(handshake
+        .windows(b"mysql_native_password".len())
+        .any(|w| w == b"mysql_native_password"));
+
+    let response = mysql_handshake_response_packet();
+    write_mysql_packet(&mut stream, 1, &response).await?;
+
+    let (_seq, auth_result) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(auth_result.first().copied(), Some(0x00));
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
+    mysql_port: u16,
 }
 
 impl HttpHarness {
     fn start(label: &str) -> anyhow::Result<Self> {
+        Self::start_with_mysql_port(label, 0)
+    }
+
+    fn start_with_mysql(label: &str) -> anyhow::Result<Self> {
+        let mysql_port = free_tcp_port();
+        Self::start_with_mysql_port(label, mysql_port)
+    }
+
+    fn start_with_mysql_port(label: &str, mysql_port: u16) -> anyhow::Result<Self> {
         let dir = temp_dir(label);
         let http_port = free_tcp_port();
         let cluster_port = free_tcp_port();
-        let child = spawn_server(&dir, http_port, cluster_port)?;
+        let child = spawn_server(&dir, http_port, cluster_port, mysql_port)?;
         let _guard = ChildGuard::new(child);
 
         wait_for_health(http_port)?;
 
-        Ok(Self { _guard, http_port })
+        Ok(Self {
+            _guard,
+            http_port,
+            mysql_port,
+        })
     }
 
     fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.http_port)
+    }
+
+    fn mysql_port(&self) -> u16 {
+        self.mysql_port
     }
 }
 
@@ -353,6 +399,65 @@ fn wait_for_health(port: u16) -> anyhow::Result<()> {
     Err(anyhow!("server did not become healthy on {}", url))
 }
 
+fn wait_for_tcp(port: u16) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(anyhow!("tcp listener did not open on {}", port))
+}
+
+async fn read_mysql_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    let len = (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
+    let seq = header[3];
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+    Ok((seq, payload))
+}
+
+async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
+    if payload.len() > 0x00ff_ffff {
+        return Err(anyhow!("payload too large"));
+    }
+    let len = payload.len();
+    let header = [
+        (len & 0xff) as u8,
+        ((len >> 8) & 0xff) as u8,
+        ((len >> 16) & 0xff) as u8,
+        seq,
+    ];
+    stream.write_all(&header).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+fn mysql_handshake_response_packet() -> Vec<u8> {
+    const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+
+    let flags =
+        CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.push(0x21);
+    payload.extend_from_slice(&[0u8; 23]);
+    payload.extend_from_slice(b"root");
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(b"mysql_native_password");
+    payload.push(0);
+    payload
+}
+
 fn free_tcp_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .expect("bind tcp")
@@ -361,7 +466,12 @@ fn free_tcp_port() -> u16 {
         .port()
 }
 
-fn spawn_server(dir: &PathBuf, http_port: u16, cluster_port: u16) -> anyhow::Result<Child> {
+fn spawn_server(
+    dir: &PathBuf,
+    http_port: u16,
+    cluster_port: u16,
+    mysql_port: u16,
+) -> anyhow::Result<Child> {
     let bin = env!("CARGO_BIN_EXE_skeindb");
     Command::new(bin)
         .arg("serve")
@@ -372,7 +482,7 @@ fn spawn_server(dir: &PathBuf, http_port: u16, cluster_port: u16) -> anyhow::Res
         .arg("--http")
         .arg(http_port.to_string())
         .arg("--mysql")
-        .arg("0")
+        .arg(mysql_port.to_string())
         .arg("--cluster-port")
         .arg(cluster_port.to_string())
         .stdout(Stdio::null())

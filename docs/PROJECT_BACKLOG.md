@@ -38,7 +38,7 @@ Phase 0 verification checklist:
 - [x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
 
 ## Phase 3 — MySQL protocol
-- [ ] T030: Handshake + mysql_native_password
+- [x] T030: Handshake + mysql_native_password
 - [ ] T031: COM_QUERY SELECT literals
 - [ ] T032: SQL translator (subset)
 - [ ] T033: DDL/DML subset for corpus.sql
