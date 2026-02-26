@@ -102,7 +102,7 @@ Phase 0 verification checklist:
 
 ## Phase 13 - Observability and server load statistics
 - [x] T130: stats.snapshot and basic counters in server
-- [ ] T131: query fingerprinting + top_queries / slow_queries
+- [x] T131: query fingerprinting + top_queries / slow_queries
 - [x] T132: GET /metrics (Prometheus-style) + labels
 - [x] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction — Overview dashboard with stat cards, dedup bar chart, auto-refresh
 

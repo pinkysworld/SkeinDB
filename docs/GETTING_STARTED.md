@@ -151,6 +151,22 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
   -d '{"jsonrpc":"2.0","id":5,"method":"stats.snapshot","params":{}}'
 ```
 
+Top query fingerprints (by total time/count/latency):
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"stats.top_queries","params":{"limit":10,"sort_by":"total_ms"}}'
+```
+
+Recent slow queries:
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":7,"method":"stats.slow_queries","params":{"min_ms":200,"limit":20}}'
+```
+
 ---
 
 ## 5) QueryPatch (delta updates)

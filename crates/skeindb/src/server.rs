@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -276,7 +276,75 @@ impl ClusterStateModel {
 struct Counters {
     total_rpc: u64,
     per_method: HashMap<String, u64>,
+    query_stats: HashMap<String, QueryStatsAgg>,
+    query_log: VecDeque<QuerySample>,
 }
+
+#[derive(Debug, Clone)]
+struct QueryStatsAgg {
+    method: String,
+    count: u64,
+    error_count: u64,
+    total_ms: u64,
+    max_ms: u64,
+    rows_returned: u64,
+    last_status: u16,
+    last_seen_ms: u64,
+    latency_samples_ms: VecDeque<u64>,
+}
+
+impl QueryStatsAgg {
+    fn new(method: String) -> Self {
+        Self {
+            method,
+            count: 0,
+            error_count: 0,
+            total_ms: 0,
+            max_ms: 0,
+            rows_returned: 0,
+            last_status: 200,
+            last_seen_ms: 0,
+            latency_samples_ms: VecDeque::new(),
+        }
+    }
+
+    fn record(&mut self, duration_ms: u64, status: u16, ok: bool, rows_returned: u64, now_ms: u64) {
+        self.count = self.count.saturating_add(1);
+        self.total_ms = self.total_ms.saturating_add(duration_ms);
+        self.max_ms = self.max_ms.max(duration_ms);
+        self.rows_returned = self.rows_returned.saturating_add(rows_returned);
+        self.last_status = status;
+        self.last_seen_ms = now_ms;
+        if !ok {
+            self.error_count = self.error_count.saturating_add(1);
+        }
+        self.latency_samples_ms.push_back(duration_ms);
+        while self.latency_samples_ms.len() > QUERY_LATENCY_SAMPLE_CAPACITY {
+            self.latency_samples_ms.pop_front();
+        }
+    }
+
+    fn avg_ms(&self) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        self.total_ms as f64 / self.count as f64
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuerySample {
+    ts_ms: u64,
+    method: String,
+    fingerprint: String,
+    duration_ms: u64,
+    status: u16,
+    ok: bool,
+    rows_returned: u64,
+}
+
+const QUERY_LATENCY_SAMPLE_CAPACITY: usize = 256;
+const QUERY_LOG_CAPACITY: usize = 1024;
 
 #[derive(Default)]
 struct QueryCoalescer {
@@ -792,6 +860,255 @@ fn escape_label(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn canonicalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                if let Some(v) = map.get(&key) {
+                    out.insert(key, canonicalize_json(v));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+fn query_fingerprint(method: &str, params: Option<&Value>) -> String {
+    let canonical = serde_json::json!({
+        "method": method,
+        "params": params.map(canonicalize_json).unwrap_or(Value::Null),
+    });
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let digest = skeindb_core::audit_hash256(&bytes);
+    hex_encode(&digest)
+}
+
+fn query_rows_returned(result: Option<&Value>) -> u64 {
+    let Some(value) = result else {
+        return 0;
+    };
+
+    if let Some(rows) = value
+        .get("result")
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.get("rows"))
+        .and_then(|v| v.as_array())
+    {
+        return rows.len() as u64;
+    }
+
+    if let Some(rows) = value
+        .get("data")
+        .and_then(|v| v.get("rows"))
+        .and_then(|v| v.as_array())
+    {
+        return rows.len() as u64;
+    }
+
+    if let Some(rows) = value
+        .get("result")
+        .and_then(|v| v.get("rows"))
+        .and_then(|v| v.as_array())
+    {
+        return rows.len() as u64;
+    }
+
+    0
+}
+
+fn percentile_ms(samples: &VecDeque<u64>, percentile: f64) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted: Vec<u64> = samples.iter().copied().collect();
+    sorted.sort_unstable();
+    let max_idx = sorted.len().saturating_sub(1);
+    let rank = ((percentile.clamp(0.0, 100.0) / 100.0) * max_idx as f64).round() as usize;
+    sorted[rank.min(max_idx)]
+}
+
+fn observe_rpc_call(
+    state: &AppState,
+    method: &str,
+    params: Option<&Value>,
+    status: StatusCode,
+    ok: bool,
+    result: Option<&Value>,
+    elapsed: std::time::Duration,
+) {
+    let now_ms = now_unix_ms_u64();
+    let duration_ms = elapsed.as_millis().max(1) as u64;
+    let fingerprint = query_fingerprint(method, params);
+    let rows_returned = query_rows_returned(result);
+
+    let mut counters = state.counters.lock().unwrap();
+    let agg = counters
+        .query_stats
+        .entry(fingerprint.clone())
+        .or_insert_with(|| QueryStatsAgg::new(method.to_string()));
+    agg.record(duration_ms, status.as_u16(), ok, rows_returned, now_ms);
+
+    counters.query_log.push_back(QuerySample {
+        ts_ms: now_ms,
+        method: method.to_string(),
+        fingerprint,
+        duration_ms,
+        status: status.as_u16(),
+        ok,
+        rows_returned,
+    });
+    while counters.query_log.len() > QUERY_LOG_CAPACITY {
+        counters.query_log.pop_front();
+    }
+}
+
+fn stats_top_queries(state: &AppState, params: Option<Value>) -> Result<Value, RpcError> {
+    #[derive(Clone)]
+    struct Row {
+        method: String,
+        fingerprint: String,
+        count: u64,
+        error_count: u64,
+        total_ms: u64,
+        avg_ms: f64,
+        p95_ms: u64,
+        max_ms: u64,
+        rows_returned: u64,
+        last_status: u16,
+        last_seen_ms: u64,
+    }
+
+    let limit = params
+        .as_ref()
+        .and_then(|v| v.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .clamp(1, 100) as usize;
+
+    let sort_by = params
+        .as_ref()
+        .and_then(|v| v.get("sort_by"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("total_ms");
+
+    let mut rows = {
+        let counters = state.counters.lock().unwrap();
+        counters
+            .query_stats
+            .iter()
+            .map(|(fingerprint, agg)| Row {
+                method: agg.method.clone(),
+                fingerprint: fingerprint.clone(),
+                count: agg.count,
+                error_count: agg.error_count,
+                total_ms: agg.total_ms,
+                avg_ms: agg.avg_ms(),
+                p95_ms: percentile_ms(&agg.latency_samples_ms, 95.0),
+                max_ms: agg.max_ms,
+                rows_returned: agg.rows_returned,
+                last_status: agg.last_status,
+                last_seen_ms: agg.last_seen_ms,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    rows.sort_by(|a, b| {
+        let ord = match sort_by {
+            "count" => b.count.cmp(&a.count),
+            "avg_ms" => b
+                .avg_ms
+                .partial_cmp(&a.avg_ms)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            "p95_ms" => b.p95_ms.cmp(&a.p95_ms),
+            "max_ms" => b.max_ms.cmp(&a.max_ms),
+            _ => b.total_ms.cmp(&a.total_ms),
+        };
+        ord.then_with(|| b.count.cmp(&a.count))
+            .then_with(|| b.last_seen_ms.cmp(&a.last_seen_ms))
+    });
+
+    let queries: Vec<Value> = rows
+        .into_iter()
+        .take(limit)
+        .map(|row| {
+            serde_json::json!({
+                "method": row.method,
+                "fingerprint": row.fingerprint,
+                "count": row.count,
+                "error_count": row.error_count,
+                "total_ms": row.total_ms,
+                "avg_ms": row.avg_ms,
+                "p95_ms": row.p95_ms,
+                "max_ms": row.max_ms,
+                "rows_returned": row.rows_returned,
+                "last_status": row.last_status,
+                "last_seen_ms": row.last_seen_ms,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "limit": limit,
+        "sort_by": sort_by,
+        "queries": queries,
+    }))
+}
+
+fn stats_slow_queries(state: &AppState, params: Option<Value>) -> Result<Value, RpcError> {
+    let limit = params
+        .as_ref()
+        .and_then(|v| v.get("limit"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .clamp(1, 200) as usize;
+    let min_ms = params
+        .as_ref()
+        .and_then(|v| v.get("min_ms"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200);
+
+    let queries = {
+        let counters = state.counters.lock().unwrap();
+        counters
+            .query_log
+            .iter()
+            .rev()
+            .filter(|sample| sample.duration_ms >= min_ms)
+            .take(limit)
+            .map(|sample| {
+                serde_json::json!({
+                    "ts_ms": sample.ts_ms,
+                    "method": sample.method,
+                    "fingerprint": sample.fingerprint,
+                    "duration_ms": sample.duration_ms,
+                    "status": sample.status,
+                    "ok": sample.ok,
+                    "rows_returned": sample.rows_returned,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(serde_json::json!({
+        "limit": limit,
+        "min_ms": min_ms,
+        "queries": queries,
+    }))
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RpcPolicy {
     pub(crate) read_only: bool,
@@ -817,6 +1134,8 @@ pub(crate) async fn handle_rpc(
     req: RpcRequest,
     policy: RpcPolicy,
 ) -> RpcOutcome {
+    let started_at = Instant::now();
+
     // Bump counters
     {
         let mut c = state.counters.lock().unwrap();
@@ -834,6 +1153,15 @@ pub(crate) async fn handle_rpc(
             let resp: RpcResponse = RpcResponse::err(
                 req.id.clone(),
                 RpcError::new("unauthorized", "Missing/invalid bearer token"),
+            );
+            observe_rpc_call(
+                state,
+                &req.method,
+                req.params.as_ref(),
+                StatusCode::UNAUTHORIZED,
+                false,
+                None,
+                started_at.elapsed(),
             );
             return RpcOutcome {
                 status: StatusCode::UNAUTHORIZED,
@@ -854,6 +1182,15 @@ pub(crate) async fn handle_rpc(
                 ),
             ),
         );
+        observe_rpc_call(
+            state,
+            &req.method,
+            req.params.as_ref(),
+            StatusCode::OK,
+            false,
+            None,
+            started_at.elapsed(),
+        );
         return RpcOutcome {
             status: StatusCode::OK,
             response: Some(resp),
@@ -869,6 +1206,15 @@ pub(crate) async fn handle_rpc(
         .unwrap_or(false);
     if policy.read_only && !is_read_only_method(&method) && !sql_read_only {
         if req.id.is_none() {
+            observe_rpc_call(
+                state,
+                &method,
+                params.as_ref(),
+                StatusCode::NO_CONTENT,
+                false,
+                None,
+                started_at.elapsed(),
+            );
             return RpcOutcome {
                 status: StatusCode::NO_CONTENT,
                 response: None,
@@ -877,6 +1223,15 @@ pub(crate) async fn handle_rpc(
         let resp: RpcResponse = RpcResponse::err(
             req.id.clone(),
             RpcError::new("forbidden", "read-only requests cannot perform writes"),
+        );
+        observe_rpc_call(
+            state,
+            &method,
+            params.as_ref(),
+            StatusCode::OK,
+            false,
+            None,
+            started_at.elapsed(),
         );
         return RpcOutcome {
             status: StatusCode::OK,
@@ -887,12 +1242,30 @@ pub(crate) async fn handle_rpc(
         enforce_cluster_write_guard(state, &method, params.as_ref(), is_replication_request)
     {
         if req.id.is_none() {
+            observe_rpc_call(
+                state,
+                &method,
+                params.as_ref(),
+                StatusCode::NO_CONTENT,
+                false,
+                None,
+                started_at.elapsed(),
+            );
             return RpcOutcome {
                 status: StatusCode::NO_CONTENT,
                 response: None,
             };
         }
         let resp: RpcResponse = RpcResponse::err(req.id.clone(), err);
+        observe_rpc_call(
+            state,
+            &method,
+            params.as_ref(),
+            StatusCode::OK,
+            false,
+            None,
+            started_at.elapsed(),
+        );
         return RpcOutcome {
             status: StatusCode::OK,
             response: Some(resp),
@@ -915,6 +1288,8 @@ pub(crate) async fn handle_rpc(
                 "system.capabilities" => Ok(system_capabilities(state)),
                 "transport.capabilities" => Ok(transport_capabilities(state)),
                 "stats.snapshot" => Ok(stats_snapshot(state).await),
+                "stats.top_queries" => stats_top_queries(state, params.clone()),
+                "stats.slow_queries" => stats_slow_queries(state, params.clone()),
                 "settings.get" => handle_settings_get(state, params.clone()),
                 "settings.set" => handle_settings_set(state, params.clone()),
                 // --------------------
@@ -1775,6 +2150,21 @@ pub(crate) async fn handle_rpc(
             }
         }
     }
+
+    let status = if req.id.is_none() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    observe_rpc_call(
+        state,
+        &method,
+        params.as_ref(),
+        status,
+        result.is_ok(),
+        result.as_ref().ok(),
+        started_at.elapsed(),
+    );
 
     // Notification: no response body.
     if req.id.is_none() {
@@ -3912,6 +4302,8 @@ fn is_read_only_method(method: &str) -> bool {
             | "system.capabilities"
             | "transport.capabilities"
             | "stats.snapshot"
+            | "stats.top_queries"
+            | "stats.slow_queries"
             | "settings.get"
             | "cluster.status"
             | "cluster.nodes"
@@ -3975,6 +4367,8 @@ fn system_capabilities(state: &AppState) -> Value {
         "system.capabilities",
         "transport.capabilities",
         "stats.snapshot",
+        "stats.top_queries",
+        "stats.slow_queries",
         "settings.get",
         "settings.set",
         "cluster.status",
@@ -4097,13 +4491,33 @@ async fn stats_snapshot(state: &AppState) -> Value {
         eng.storage_stats_snapshot()
     };
     let cluster = state.cluster.lock().unwrap();
+    let (total_rpc, fingerprint_count, query_samples, qps) = {
+        let c = state.counters.lock().unwrap();
+        let total = c.total_rpc;
+        let qps = if uptime_s == 0 {
+            total as f64
+        } else {
+            total as f64 / uptime_s as f64
+        };
+        (
+            total,
+            c.query_stats.len() as u64,
+            c.query_log.len() as u64,
+            qps,
+        )
+    };
 
     serde_json::json!({
         "uptime_s": uptime_s,
         "sessions": {"active": 0, "total": 0},
-        "qps": 0,
+        "qps": qps,
         "tps": 0,
         "process": {"cpu_pct": cpu_pct, "rss_bytes": rss_bytes},
+        "query": {
+            "tracked_calls": total_rpc,
+            "fingerprints": fingerprint_count,
+            "recent_samples": query_samples
+        },
         "storage": {
             "wal_bytes": storage.wal_bytes,
             "dedup_ratio": storage.dedup_ratio,
@@ -6172,6 +6586,13 @@ mod tests {
             .and_then(|v| v.as_array())
             .map(|m| m.iter().any(|method| method == "system.shutdown"))
             .unwrap_or(false));
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "stats.top_queries"))
+            .unwrap_or(false));
 
         let transport = call_rpc(&state, "transport.capabilities", json!({})).await;
         assert!(transport.ok);
@@ -6300,6 +6721,71 @@ mod tests {
         assert!(duplicate > 0);
         assert!(ratio > 1.0);
         assert!(interned > 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_top_and_slow_queries_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_top_slow_queries");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        for _ in 0..3 {
+            let resp = call_rpc(&state, "system.ping", json!({})).await;
+            assert!(resp.ok);
+        }
+        let resp = call_rpc(&state, "system.version", json!({})).await;
+        assert!(resp.ok);
+
+        let top = call_rpc(
+            &state,
+            "stats.top_queries",
+            json!({"limit": 5, "sort_by": "count"}),
+        )
+        .await;
+        assert!(top.ok);
+        let top_queries = top
+            .result
+            .as_ref()
+            .and_then(|v| v.get("queries"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!top_queries.is_empty());
+        let ping = top_queries
+            .iter()
+            .find(|q| q.get("method").and_then(|v| v.as_str()) == Some("system.ping"))
+            .expect("system.ping should be tracked");
+        assert!(ping.get("count").and_then(|v| v.as_u64()).unwrap_or(0) >= 3);
+        assert_eq!(
+            ping.get("fingerprint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len()),
+            Some(64)
+        );
+
+        let slow = call_rpc(
+            &state,
+            "stats.slow_queries",
+            json!({"limit": 20, "min_ms": 0}),
+        )
+        .await;
+        assert!(slow.ok);
+        let slow_queries = slow
+            .result
+            .as_ref()
+            .and_then(|v| v.get("queries"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(slow_queries.iter().any(|q| {
+            q.get("method")
+                .and_then(|v| v.as_str())
+                .map(|m| m == "system.ping")
+                .unwrap_or(false)
+        }));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

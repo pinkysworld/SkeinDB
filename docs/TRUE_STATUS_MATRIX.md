@@ -11,7 +11,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **26 done / 79 open** (105 total)
+- `docs/PROJECT_BACKLOG.md`: **27 done / 78 open** (105 total)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open**
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -34,7 +34,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 10 Row/column snapshots | Partial | Snapshot build/read/incremental paths exist; optimizer coverage still evolving. |
 | Phase 11 Compat telemetry + migration | Partial | Migration intent/rewrite surfaces exist (`migration.*`), full telemetry suite remains open. |
 | Phase 12 SkeinAdmin | Partial | SkeinAdmin is embedded and functional; security/observability hardening remains open. |
-| Phase 13 Observability | Partial | `stats.snapshot` and `/metrics` exist, including live dedup storage metrics (`dedup_ratio`, logical/unique/duplicate bytes); deeper slow/top query surfaces remain open. |
+| Phase 13 Observability | Partial | `stats.snapshot`, `stats.top_queries`, `stats.slow_queries`, and `/metrics` exist, including live dedup storage metrics (`dedup_ratio`, logical/unique/duplicate bytes); deeper latency histogram surfaces remain open. |
 | Phase 14 Cluster scale-out | Partial (advanced) | Node identity, fanout replication, shard metadata, and cluster RPCs are implemented. |
 | Phase 15 Perf improvements | Planned | Interned-column/late-mat/vectorized pipeline items remain backlog work. |
 | Phase 16 Query coalescing | Partial | In-flight coalescing exists (not yet complete for all planned entry points). |
