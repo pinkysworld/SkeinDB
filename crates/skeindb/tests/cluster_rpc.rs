@@ -279,6 +279,27 @@ async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
 
     let (_seq, auth_result) = read_mysql_packet(&mut stream).await?;
     assert_eq!(auth_result.first().copied(), Some(0x00));
+
+    let mut query = Vec::new();
+    query.push(0x03);
+    query.extend_from_slice(b"SELECT 1 AS one, 'x' AS two");
+    write_mysql_packet(&mut stream, 0, &query).await?;
+
+    let (_seq, column_count_payload) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(column_count_payload.first().copied(), Some(2));
+
+    let (_seq, _col1) = read_mysql_packet(&mut stream).await?;
+    let (_seq, _col2) = read_mysql_packet(&mut stream).await?;
+    let (_seq, eof1) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(eof1.first().copied(), Some(0xfe));
+
+    let (_seq, row_payload) = read_mysql_packet(&mut stream).await?;
+    let row = decode_mysql_text_row(&row_payload, 2)?;
+    assert_eq!(row[0].as_deref(), Some("1"));
+    assert_eq!(row[1].as_deref(), Some("x"));
+
+    let (_seq, eof2) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(eof2.first().copied(), Some(0xfe));
     Ok(())
 }
 
@@ -456,6 +477,80 @@ fn mysql_handshake_response_packet() -> Vec<u8> {
     payload.extend_from_slice(b"mysql_native_password");
     payload.push(0);
     payload
+}
+
+fn decode_lenenc_int(payload: &[u8], cursor: &mut usize) -> anyhow::Result<usize> {
+    if *cursor >= payload.len() {
+        return Err(anyhow!("truncated lenenc int"));
+    }
+    let first = payload[*cursor];
+    *cursor += 1;
+    match first {
+        0x00..=0xfa => Ok(first as usize),
+        0xfc => {
+            if *cursor + 2 > payload.len() {
+                return Err(anyhow!("truncated lenenc int"));
+            }
+            let n = u16::from_le_bytes([payload[*cursor], payload[*cursor + 1]]) as usize;
+            *cursor += 2;
+            Ok(n)
+        }
+        0xfd => {
+            if *cursor + 3 > payload.len() {
+                return Err(anyhow!("truncated lenenc int"));
+            }
+            let n = (payload[*cursor] as usize)
+                | ((payload[*cursor + 1] as usize) << 8)
+                | ((payload[*cursor + 2] as usize) << 16);
+            *cursor += 3;
+            Ok(n)
+        }
+        0xfe => {
+            if *cursor + 8 > payload.len() {
+                return Err(anyhow!("truncated lenenc int"));
+            }
+            let n = u64::from_le_bytes([
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+                payload[*cursor + 4],
+                payload[*cursor + 5],
+                payload[*cursor + 6],
+                payload[*cursor + 7],
+            ]);
+            *cursor += 8;
+            if n > usize::MAX as u64 {
+                return Err(anyhow!("lenenc too large"));
+            }
+            Ok(n as usize)
+        }
+        _ => Err(anyhow!("invalid lenenc marker")),
+    }
+}
+
+fn decode_mysql_text_row(payload: &[u8], cols: usize) -> anyhow::Result<Vec<Option<String>>> {
+    let mut out = Vec::with_capacity(cols);
+    let mut cursor = 0usize;
+    for _ in 0..cols {
+        if cursor >= payload.len() {
+            return Err(anyhow!("truncated row payload"));
+        }
+        if payload[cursor] == 0xfb {
+            out.push(None);
+            cursor += 1;
+            continue;
+        }
+        let len = decode_lenenc_int(payload, &mut cursor)?;
+        if cursor + len > payload.len() {
+            return Err(anyhow!("truncated row value"));
+        }
+        let v = String::from_utf8(payload[cursor..cursor + len].to_vec())
+            .context("decode row field utf8")?;
+        cursor += len;
+        out.push(Some(v));
+    }
+    Ok(out)
 }
 
 fn free_tcp_port() -> u16 {

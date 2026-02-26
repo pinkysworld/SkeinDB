@@ -426,6 +426,13 @@ struct MySqlHandshakeResponse {
     auth_plugin: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MySqlLiteral {
+    Int(i64),
+    Str(String),
+    Null,
+}
+
 fn mysql_seed(conn_id: u32) -> [u8; 20] {
     let mut seed = [0u8; 20];
     let mut x = now_unix_ms_u64()
@@ -600,6 +607,218 @@ fn parse_mysql_handshake_response(payload: &[u8]) -> Result<MySqlHandshakeRespon
     })
 }
 
+fn find_ascii_ci_outside_quotes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    let mut in_string = false;
+    let mut i = 0usize;
+    while i + needle.len() <= haystack.len() {
+        let ch = haystack[i];
+        if ch == b'\'' {
+            if in_string && i + 1 < haystack.len() && haystack[i + 1] == b'\'' {
+                i += 2;
+                continue;
+            }
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string
+            && haystack[i..i + needle.len()]
+                .iter()
+                .zip(needle.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_select_expressions(input: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            cur.push(ch);
+            if in_string && chars.peek().copied() == Some('\'') {
+                cur.push('\'');
+                chars.next();
+                continue;
+            }
+            in_string = !in_string;
+            continue;
+        }
+        if ch == ',' && !in_string {
+            let item = cur.trim();
+            if item.is_empty() {
+                return None;
+            }
+            out.push(item.to_string());
+            cur.clear();
+            continue;
+        }
+        cur.push(ch);
+    }
+    if in_string {
+        return None;
+    }
+    let tail = cur.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    out.push(tail.to_string());
+    Some(out)
+}
+
+fn parse_sql_string_literal(input: &str) -> Option<String> {
+    if input.len() < 2 || !input.starts_with('\'') || !input.ends_with('\'') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = input[1..input.len() - 1].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.peek().copied() == Some('\'') {
+            out.push('\'');
+            chars.next();
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
+fn parse_select_literal_query(sql: &str) -> Option<Vec<(String, MySqlLiteral)>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    if trimmed.len() < 7 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if find_ascii_ci_outside_quotes(rest.as_bytes(), b" from ").is_some() {
+        return None;
+    }
+
+    let exprs = split_select_expressions(rest)?;
+    let mut cols = Vec::with_capacity(exprs.len());
+    for (idx, expr) in exprs.iter().enumerate() {
+        let bytes = expr.as_bytes();
+        let (value_src, alias_src) =
+            if let Some(as_pos) = find_ascii_ci_outside_quotes(bytes, b" as ") {
+                (
+                    expr[..as_pos].trim(),
+                    Some(expr[as_pos + 4..].trim().to_string()),
+                )
+            } else {
+                (expr.trim(), None)
+            };
+        let alias = alias_src
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| format!("col{}", idx + 1));
+
+        let lit = if value_src.eq_ignore_ascii_case("null") {
+            MySqlLiteral::Null
+        } else if let Some(v) = parse_sql_string_literal(value_src) {
+            MySqlLiteral::Str(v)
+        } else if let Ok(v) = value_src.parse::<i64>() {
+            MySqlLiteral::Int(v)
+        } else {
+            return None;
+        };
+        cols.push((alias, lit));
+    }
+    Some(cols)
+}
+
+fn mysql_push_lenenc_int(buf: &mut Vec<u8>, n: usize) {
+    if n < 251 {
+        buf.push(n as u8);
+    } else if n <= 0xffff {
+        buf.push(0xfc);
+        buf.extend_from_slice(&(n as u16).to_le_bytes());
+    } else if n <= 0x00ff_ffff {
+        buf.push(0xfd);
+        buf.push((n & 0xff) as u8);
+        buf.push(((n >> 8) & 0xff) as u8);
+        buf.push(((n >> 16) & 0xff) as u8);
+    } else {
+        buf.push(0xfe);
+        buf.extend_from_slice(&(n as u64).to_le_bytes());
+    }
+}
+
+fn mysql_push_lenenc_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    mysql_push_lenenc_int(buf, bytes.len());
+    buf.extend_from_slice(bytes);
+}
+
+fn mysql_column_type(lit: &MySqlLiteral) -> u8 {
+    match lit {
+        MySqlLiteral::Int(_) => 0x08,
+        MySqlLiteral::Str(_) => 0xfd,
+        MySqlLiteral::Null => 0x06,
+    }
+}
+
+fn mysql_literal_text(lit: &MySqlLiteral) -> Option<String> {
+    match lit {
+        MySqlLiteral::Int(v) => Some(v.to_string()),
+        MySqlLiteral::Str(v) => Some(v.clone()),
+        MySqlLiteral::Null => None,
+    }
+}
+
+fn mysql_column_definition_packet(name: &str, lit: &MySqlLiteral) -> Vec<u8> {
+    let mut payload = Vec::new();
+    mysql_push_lenenc_bytes(&mut payload, b"def");
+    mysql_push_lenenc_bytes(&mut payload, b"");
+    mysql_push_lenenc_bytes(&mut payload, b"");
+    mysql_push_lenenc_bytes(&mut payload, b"");
+    mysql_push_lenenc_bytes(&mut payload, name.as_bytes());
+    mysql_push_lenenc_bytes(&mut payload, name.as_bytes());
+    payload.push(0x0c);
+    payload.extend_from_slice(&0x21u16.to_le_bytes());
+    let len = match lit {
+        MySqlLiteral::Int(_) => 20u32,
+        MySqlLiteral::Str(v) => v.len().max(1) as u32,
+        MySqlLiteral::Null => 4u32,
+    };
+    payload.extend_from_slice(&len.to_le_bytes());
+    payload.push(mysql_column_type(lit));
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&[0u8; 2]);
+    payload
+}
+
+fn mysql_eof_packet() -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(0xfe);
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
+    payload
+}
+
+fn mysql_row_packet(columns: &[(String, MySqlLiteral)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for (_, lit) in columns {
+        match mysql_literal_text(lit) {
+            Some(text) => mysql_push_lenenc_bytes(&mut payload, text.as_bytes()),
+            None => payload.push(0xfb),
+        }
+    }
+    payload
+}
+
 fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.push(MYSQL_PROTOCOL_VERSION);
@@ -675,6 +894,31 @@ async fn mysql_read_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8
     Ok((seq, payload))
 }
 
+async fn mysql_send_literal_result(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    columns: &[(String, MySqlLiteral)],
+) -> anyhow::Result<()> {
+    let mut seq = start_seq;
+    let mut column_count = Vec::new();
+    mysql_push_lenenc_int(&mut column_count, columns.len());
+    mysql_write_packet(stream, seq, &column_count).await?;
+    seq = seq.wrapping_add(1);
+
+    for (name, lit) in columns {
+        let packet = mysql_column_definition_packet(name, lit);
+        mysql_write_packet(stream, seq, &packet).await?;
+        seq = seq.wrapping_add(1);
+    }
+
+    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    seq = seq.wrapping_add(1);
+    mysql_write_packet(stream, seq, &mysql_row_packet(columns)).await?;
+    seq = seq.wrapping_add(1);
+    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    Ok(())
+}
+
 async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> anyhow::Result<()> {
     let seed = mysql_seed(connection_id);
     let handshake = mysql_handshake_packet(connection_id, &seed);
@@ -712,10 +956,62 @@ async fn handle_mysql_connection(mut stream: TcpStream, connection_id: u32) -> a
         }
     }
 
-    let _ = response.username;
+    let username = response.username;
     let ok = mysql_ok_packet();
     mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
-    Ok(())
+
+    loop {
+        let (cmd_seq, command_payload) = match mysql_read_packet(&mut stream).await {
+            Ok(packet) => packet,
+            Err(err) => {
+                let disconnect = err
+                    .downcast_ref::<std::io::Error>()
+                    .map(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::BrokenPipe
+                        )
+                    })
+                    .unwrap_or(false);
+                if disconnect {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
+        if command_payload.is_empty() {
+            continue;
+        }
+        match command_payload[0] {
+            0x01 => {
+                return Ok(());
+            }
+            0x0e => {
+                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                    .await?;
+            }
+            0x03 => {
+                let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
+                if let Some(cols) = parse_select_literal_query(&sql) {
+                    mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols).await?;
+                } else {
+                    let packet = mysql_err_packet(
+                        1064,
+                        "42000",
+                        "only SELECT literal queries are supported",
+                    );
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                }
+            }
+            _ => {
+                let packet = mysql_err_packet(1047, "08S01", "unsupported command");
+                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+            }
+        }
+        tracing::debug!(user = %username, "processed MySQL command");
+    }
 }
 
 async fn run_mysql_listener(
@@ -7668,6 +7964,24 @@ mod tests {
         assert_eq!(parsed.username, "root");
         assert_eq!(parsed.auth_response, b"abc");
         assert_eq!(parsed.auth_plugin.as_deref(), Some(MYSQL_AUTH_PLUGIN));
+    }
+
+    #[test]
+    fn parse_select_literal_query_roundtrip() {
+        let parsed = parse_select_literal_query("SELECT 1 AS one, 'x' AS two, NULL")
+            .expect("parse select literal");
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].0, "one");
+        assert_eq!(parsed[0].1, MySqlLiteral::Int(1));
+        assert_eq!(parsed[1].0, "two");
+        assert_eq!(parsed[1].1, MySqlLiteral::Str("x".to_string()));
+        assert_eq!(parsed[2].0, "col3");
+        assert_eq!(parsed[2].1, MySqlLiteral::Null);
+    }
+
+    #[test]
+    fn parse_select_literal_query_rejects_from_clause() {
+        assert!(parse_select_literal_query("SELECT 1 FROM app.users").is_none());
     }
 
     #[tokio::test]

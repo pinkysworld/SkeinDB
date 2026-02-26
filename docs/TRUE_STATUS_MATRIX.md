@@ -11,7 +11,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **30 done / 75 open** (105 total)
+- `docs/PROJECT_BACKLOG.md`: **31 done / 74 open** (105 total)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open**
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -24,7 +24,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 0 Repo setup | Implemented | T001/T002/T003 are complete in runtime and tests: VarU/CRC/value ID primitives, FileHeader read/write, and RecordFrame append/iterate (`crates/skeindb-core/src/lib.rs`, `crates/skeindb-core/tests/phase0_format.rs`). |
 | Phase 1 Storage core | Partial | Prototype engine persists JSON state and now includes ValueID-backed row ref encoding for table files (`format_version: 2`); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`), including virtual `information_schema.tables` and `information_schema.columns`. |
-| Phase 3 MySQL protocol | Partial | Minimal wire listener now performs handshake + `mysql_native_password` auth exchange; COM_QUERY and SQL translation coverage remain open. |
+| Phase 3 MySQL protocol | Partial | Minimal wire listener now performs handshake + `mysql_native_password` auth exchange and supports `COM_QUERY` for `SELECT` literal expressions; broader SQL translation/coverage remain open. |
 | Phase 4 Web console | Partial | `/api/v1/sql/exec` HTTP endpoint is live and console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
 | Phase 5 SkeinQL API | Implemented (baseline) | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` + `tx.begin/tx.commit/tx.rollback` are implemented. |
 | Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates + dependency-aware query paths exist. |
