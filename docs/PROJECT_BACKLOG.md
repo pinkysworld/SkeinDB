@@ -41,7 +41,7 @@ Phase 0 verification checklist:
 - [x] T030: Handshake + mysql_native_password
 - [x] T031: COM_QUERY SELECT literals
 - [x] T032: SQL translator (subset)
-- [ ] T033: DDL/DML subset for corpus.sql
+- [x] T033: DDL/DML subset for corpus.sql
 - [ ] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
 
 ## Phase 4 — Web console

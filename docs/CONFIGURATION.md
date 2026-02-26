@@ -80,7 +80,7 @@ When `--mysql` is non-zero, SkeinDB also starts a MySQL protocol listener.
 Current coverage:
 - connection handshake
 - `mysql_native_password` auth exchange
-- `COM_QUERY` SQL translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/INSERT/UPDATE/DELETE`)
+- `COM_QUERY` SQL translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE`)
 
 `COM_QUERY` and broader SQL compatibility are still tracked in the project backlog.
 

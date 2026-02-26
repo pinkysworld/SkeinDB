@@ -1014,7 +1014,7 @@ fn mysql_query_outcome_from_sql_exec(result: &Value) -> Result<MySqlQueryOutcome
             let (columns, rows) = mysql_extract_show_columns_result(result)?;
             Ok(MySqlQueryOutcome::ResultSet { columns, rows })
         }
-        "use" | "create_database" | "create_table" => Ok(MySqlQueryOutcome::Ok {
+        "use" | "create_database" | "create_table" | "drop_table" => Ok(MySqlQueryOutcome::Ok {
             affected_rows: 0,
             last_insert_id: 0,
         }),
@@ -3942,10 +3942,23 @@ enum SqlVerb {
     Use,
     CreateDatabase,
     CreateTable,
+    DropTable,
     Insert,
     Update,
     Delete,
     Unsupported,
+}
+
+#[derive(Debug, Clone)]
+enum InsertDupValue {
+    Literal(Lit),
+    ValuesRef(String),
+}
+
+#[derive(Debug, Clone)]
+struct InsertDupAssign {
+    target_col: String,
+    value: InsertDupValue,
 }
 
 #[derive(Debug, Clone)]
@@ -3977,9 +3990,15 @@ enum SqlPlan {
         primary_key: Vec<String>,
         if_not_exists: bool,
     },
+    DropTable {
+        table: BaseTableRef,
+        if_exists: bool,
+    },
     Insert {
         table: BaseTableRef,
+        columns: Vec<String>,
         rows: Vec<BTreeMap<String, Lit>>,
+        on_duplicate: Option<Vec<InsertDupAssign>>,
     },
     Update {
         table: BaseTableRef,
@@ -4086,6 +4105,8 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::CreateDatabase
     } else if lower.starts_with("create table ") {
         SqlVerb::CreateTable
+    } else if lower.starts_with("drop table ") {
+        SqlVerb::DropTable
     } else if lower.starts_with("insert into ") {
         SqlVerb::Insert
     } else if lower.starts_with("update ") {
@@ -4795,20 +4816,51 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
     })
 }
 
-fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
-    let lower = sql.to_ascii_lowercase();
-    if find_keyword_top_level(&lower, "on duplicate key").is_some() {
-        return Err(RpcError::new(
-            "not_supported",
-            "ON DUPLICATE KEY UPDATE is not supported in sql.exec yet",
-        ));
+fn parse_drop_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[10..].trim();
+    let mut if_exists = false;
+    if tail.to_ascii_lowercase().starts_with("if exists ") {
+        if_exists = true;
+        tail = tail[10..].trim();
     }
+    let table = parse_table_ref(tail, default_db)?;
+    Ok(SqlPlan::DropTable { table, if_exists })
+}
+
+fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
     let values_idx = find_keyword_top_level(tail, "values").ok_or_else(|| {
         RpcError::new("invalid_request", "INSERT currently requires VALUES syntax")
     })?;
     let head = tail[..values_idx].trim();
-    let values_sql = tail[values_idx + 6..].trim();
+    let mut values_sql = tail[values_idx + 6..].trim();
+    let mut on_duplicate = None::<Vec<InsertDupAssign>>;
+    if let Some(idx) = find_keyword_top_level(values_sql, "on duplicate key update") {
+        let update_clause = values_sql[idx + "on duplicate key update".len()..].trim();
+        values_sql = values_sql[..idx].trim();
+        let mut assigns = Vec::new();
+        for assign in split_csv_top_level(update_clause) {
+            let Some(eq_idx) = assign.find('=') else {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    format!("invalid ON DUPLICATE assignment '{}'", assign),
+                ));
+            };
+            let target_col = clean_sql_ident(assign[..eq_idx].trim());
+            let rhs = assign[eq_idx + 1..].trim();
+            let value = if rhs.len() > 8
+                && rhs[..7].eq_ignore_ascii_case("values(")
+                && rhs.ends_with(')')
+            {
+                let src = clean_sql_ident(&rhs[7..rhs.len() - 1]);
+                InsertDupValue::ValuesRef(src)
+            } else {
+                InsertDupValue::Literal(parse_sql_lit(rhs)?)
+            };
+            assigns.push(InsertDupAssign { target_col, value });
+        }
+        on_duplicate = Some(assigns);
+    }
 
     let open_idx = head.find('(').ok_or_else(|| {
         RpcError::new(
@@ -4906,7 +4958,12 @@ fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         }
         rows.push(row);
     }
-    Ok(SqlPlan::Insert { table, rows })
+    Ok(SqlPlan::Insert {
+        table,
+        columns: cols,
+        rows,
+        on_duplicate,
+    })
 }
 
 fn parse_update_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
@@ -5032,12 +5089,13 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Use => parse_use_plan(normalized),
         SqlVerb::CreateDatabase => parse_create_database_plan(normalized),
         SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
+        SqlVerb::DropTable => parse_drop_table_plan(normalized, default_db),
         SqlVerb::Insert => parse_insert_plan(normalized, default_db),
         SqlVerb::Update => parse_update_plan(normalized, default_db),
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
         SqlVerb::Unsupported => Err(RpcError::new(
             "not_supported",
-            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/INSERT/UPDATE/DELETE",
+            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE",
         )),
     }
 }
@@ -5051,6 +5109,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::UseDb { .. } => "use",
         SqlPlan::CreateDatabase { .. } => "create_database",
         SqlPlan::CreateTable { .. } => "create_table",
+        SqlPlan::DropTable { .. } => "drop_table",
         SqlPlan::Insert { .. } => "insert",
         SqlPlan::Update { .. } => "update",
         SqlPlan::Delete { .. } => "delete",
@@ -5077,6 +5136,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
     match parse_sql_plan(sql, default_db) {
         Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
         Ok(SqlPlan::CreateTable { table, .. })
+        | Ok(SqlPlan::DropTable { table, .. })
         | Ok(SqlPlan::Insert { table, .. })
         | Ok(SqlPlan::Update { table, .. })
         | Ok(SqlPlan::Delete { table, .. }) => (Some(table.db), Some(table.table)),
@@ -5466,6 +5526,98 @@ fn information_schema_select_result(
     })))
 }
 
+fn insert_dup_value_from_row(row: &BTreeMap<String, Lit>, value: &InsertDupValue) -> Lit {
+    match value {
+        InsertDupValue::Literal(lit) => lit.clone(),
+        InsertDupValue::ValuesRef(src_col) => row.get(src_col).cloned().unwrap_or(Lit::Null),
+    }
+}
+
+async fn sql_exec_insert_on_duplicate(
+    state: &AppState,
+    table: BaseTableRef,
+    columns: Vec<String>,
+    rows: Vec<BTreeMap<String, Lit>>,
+    assigns: Vec<InsertDupAssign>,
+) -> Result<crate::engine::WriteResult, RpcError> {
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "INSERT column list cannot be empty",
+        ));
+    }
+    if assigns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ON DUPLICATE KEY UPDATE requires at least one assignment",
+        ));
+    }
+
+    let key_col = columns[0].clone();
+    let mut eng = state.engine.write().await;
+    let mut affected = 0u64;
+    let mut last_insert_id = 0u64;
+
+    for row in rows {
+        let key_lit = row.get(&key_col).cloned().ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                format!(
+                    "ON DUPLICATE emulation requires first INSERT column '{}' in each row",
+                    key_col
+                ),
+            )
+        })?;
+
+        let mut set = BTreeMap::new();
+        for assign in &assigns {
+            if assign.target_col.is_empty() {
+                continue;
+            }
+            set.insert(
+                assign.target_col.clone(),
+                insert_dup_value_from_row(&row, &assign.value),
+            );
+        }
+
+        let where_expr = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: key_col.clone(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit { lit: key_lit })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+
+        let updated = eng
+            .data_update(&table, &where_expr, &set, Some(1), None, &[])
+            .map_err(to_rpc_error)?;
+        if updated.affected > 0 {
+            affected = affected.saturating_add(updated.affected);
+            continue;
+        }
+
+        let inserted = eng
+            .data_insert(&table, vec![row], None)
+            .map_err(to_rpc_error)?;
+        affected = affected.saturating_add(inserted.affected);
+        if inserted.last_insert_id != 0 {
+            last_insert_id = inserted.last_insert_id;
+        }
+    }
+
+    Ok(crate::engine::WriteResult {
+        affected,
+        last_insert_id,
+        returning: None,
+        etag: None,
+    })
+}
+
 async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
     let plan = parse_sql_plan(&params.sql, params.default_db.as_deref())?;
     if params.explain {
@@ -5688,9 +5840,29 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "if_not_exists": if_not_exists
             }))
         }
-        SqlPlan::Insert { table, rows } => {
+        SqlPlan::DropTable { table, if_exists } => {
             let mut eng = state.engine.write().await;
-            let r = eng.data_insert(&table, rows, None).map_err(to_rpc_error)?;
+            eng.drop_table(&table.db, &table.table, if_exists)
+                .map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "drop_table",
+                "ok": true,
+                "table": table,
+                "if_exists": if_exists
+            }))
+        }
+        SqlPlan::Insert {
+            table,
+            columns,
+            rows,
+            on_duplicate,
+        } => {
+            let r = if let Some(assigns) = on_duplicate {
+                sql_exec_insert_on_duplicate(state, table.clone(), columns, rows, assigns).await?
+            } else {
+                let mut eng = state.engine.write().await;
+                eng.data_insert(&table, rows, None).map_err(to_rpc_error)?
+            };
             Ok(serde_json::json!({
                 "statement": "insert",
                 "ok": true,
@@ -8638,6 +8810,118 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_corpus_ddl_dml_subset_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_corpus_subset");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let create_db = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE DATABASE IF NOT EXISTS skein_test"
+            }),
+        )
+        .await;
+        assert!(create_db.ok);
+
+        let drop_existing = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "DROP TABLE IF EXISTS wp_options",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(drop_existing.ok);
+
+        let create_table = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, option_name VARCHAR(191) NOT NULL, option_value LONGTEXT NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(create_table.ok);
+
+        let insert = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.com', 'yes')",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(insert.ok);
+
+        let upsert = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.net', 'yes') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = VALUES(autoload)",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(upsert.ok);
+        assert_eq!(
+            upsert
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        let select = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT option_value FROM wp_options WHERE option_name = 'siteurl'",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(select.ok);
+        let rows = select
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            rows.first()
+                .and_then(|r| r.as_array())
+                .and_then(|r| r.first())
+                .and_then(|v| v.get("v"))
+                .and_then(|v| v.as_str()),
+            Some("https://example.net")
+        );
+
+        let drop_table = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "DROP TABLE IF EXISTS wp_options",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(drop_table.ok);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

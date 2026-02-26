@@ -296,17 +296,21 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     wait_for_tcp(server.mysql_port())?;
     let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
 
-    send_com_query(&mut stream, "CREATE DATABASE app").await?;
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
     let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
 
-    send_com_query(&mut stream, "USE app").await?;
+    send_com_query(&mut stream, "USE skein_test").await?;
     let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
 
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_options").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
     send_com_query(
         &mut stream,
-        "CREATE TABLE users (id bigint, name text, PRIMARY KEY (id))",
+        "CREATE TABLE wp_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, option_name VARCHAR(191) NOT NULL, option_value LONGTEXT NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci",
     )
     .await?;
     let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
@@ -314,17 +318,28 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
 
     send_com_query(
         &mut stream,
-        "INSERT INTO users (id, name) VALUES (1, 'Ada')",
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.com', 'yes')",
     )
     .await?;
     let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 1);
 
-    send_com_query(&mut stream, "SELECT id, name FROM users WHERE id = 1").await?;
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.net', 'yes') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = VALUES(autoload)",
+    )
+    .await?;
+    let (_seq, ok_upsert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_upsert)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
     let rows = read_mysql_text_result_rows(&mut stream).await?;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0][0].as_deref(), Some("1"));
-    assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+    assert_eq!(rows[0][0].as_deref(), Some("https://example.net"));
 
     Ok(())
 }

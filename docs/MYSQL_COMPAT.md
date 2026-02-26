@@ -36,16 +36,17 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SELECT` (including literal-only and simple table queries)
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
-  - `CREATE DATABASE`, `CREATE TABLE`
+  - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
   - `INSERT`, `UPDATE`, `DELETE`
+  - `INSERT ... ON DUPLICATE KEY UPDATE` (corpus-oriented emulation)
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
   - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
-1) expand coverage to the corpus-level compatibility surface (`tests/compat/corpus.sql`)
-2) add missing MySQL semantics like `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()`
+1) finish the remaining corpus compatibility gaps (notably `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()`)
+2) tighten MySQL semantic parity for edge cases and unsupported SHOW variants
 3) broaden SQL and function compatibility with stricter parity tests
 
 ---
