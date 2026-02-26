@@ -193,6 +193,7 @@ async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
         .result
         .as_ref()
         .and_then(|v| v.get("result"))
+        .and_then(|v| v.get("data"))
         .and_then(|v| v.get("rows"))
         .and_then(|v| v.as_array())
         .cloned()

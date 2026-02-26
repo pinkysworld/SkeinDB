@@ -46,7 +46,7 @@ use skeindb_skeinql::{
         BaseTableRef, Expr, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache,
         ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
     },
-    RpcError, RpcRequest, RpcResponse, SKEINQL_VERSION,
+    RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
 
 use crate::engine::{ColumnSchema, Engine, Subscriptions};
@@ -1813,7 +1813,7 @@ async fn sql_exec_http_handler(
     let params = match serde_json::to_value(params) {
         Ok(v) => v,
         Err(err) => {
-            let resp = RpcResponse::err(
+            let resp: RpcResponse = RpcResponse::err(
                 None,
                 RpcError::new("invalid_request", format!("invalid sql payload: {err}")),
             );
@@ -1822,7 +1822,9 @@ async fn sql_exec_http_handler(
     };
     let req = RpcRequest {
         skeinql: SKEINQL_VERSION.to_string(),
-        id: None,
+        // HTTP SQL endpoint expects a response body, so use a synthetic id
+        // instead of notification semantics (id = None).
+        id: Some(RpcId::Str("sql.exec.http".to_string())),
         method: "sql.exec".to_string(),
         params: Some(params),
     };
@@ -4509,6 +4511,7 @@ mod tests {
             .result
             .as_ref()
             .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
             .and_then(|v| v.get("rows"))
             .and_then(|v| v.as_array())
             .cloned()
