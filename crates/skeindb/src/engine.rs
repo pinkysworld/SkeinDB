@@ -5288,11 +5288,12 @@ impl Engine {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let ref_plan = plan_value_refs_for_rows(&tdata.rows);
         let mut seen_refs = HashSet::new();
         let rows = tdata
             .rows
             .iter()
-            .map(|entry| encode_row_entry_disk(entry, &mut seen_refs))
+            .map(|entry| encode_row_entry_disk(entry, &mut seen_refs, &ref_plan))
             .collect();
         let disk = TableRowsDisk {
             format_version: TABLE_ROWS_FORMAT_VERSION,
@@ -9825,10 +9826,14 @@ fn value_kind_from_label(raw: &str) -> Option<ValueKind> {
     }
 }
 
-fn encode_row_entry_disk(entry: &RowEntry, seen_refs: &mut HashSet<ValueId>) -> RowEntryDisk {
+fn encode_row_entry_disk(
+    entry: &RowEntry,
+    seen_refs: &mut HashSet<ValueId>,
+    ref_plan: &HashSet<ValueId>,
+) -> RowEntryDisk {
     let mut row = BTreeMap::new();
     for (k, v) in entry.row.iter() {
-        row.insert(k.clone(), encode_lit_for_disk(v, seen_refs));
+        row.insert(k.clone(), encode_lit_for_disk(v, seen_refs, ref_plan));
     }
     RowEntryDisk {
         row,
@@ -9837,29 +9842,106 @@ fn encode_row_entry_disk(entry: &RowEntry, seen_refs: &mut HashSet<ValueId>) -> 
     }
 }
 
-fn encode_lit_for_disk(lit: &Lit, seen_refs: &mut HashSet<ValueId>) -> serde_json::Value {
+fn encode_lit_for_disk(
+    lit: &Lit,
+    seen_refs: &mut HashSet<ValueId>,
+    ref_plan: &HashSet<ValueId>,
+) -> serde_json::Value {
     let lit_json = serde_json::to_value(lit).unwrap_or(serde_json::Value::Null);
     let Some(item) = value_store_item(lit) else {
         return lit_json;
     };
+    if !ref_plan.contains(&item.id) {
+        return lit_json;
+    }
 
     let include_lit = seen_refs.insert(item.id);
+    encode_value_ref_json(
+        item.kind,
+        item.id,
+        if include_lit { Some(lit_json) } else { None },
+    )
+}
+
+fn encode_value_ref_json(
+    kind: ValueKind,
+    id: ValueId,
+    lit: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
     payload.insert(
         "kind".to_string(),
-        serde_json::Value::String(value_kind_label(item.kind).to_string()),
+        serde_json::Value::String(value_kind_label(kind).to_string()),
     );
-    payload.insert("id".to_string(), serde_json::Value::String(hex16(&item.id)));
-    if include_lit {
-        payload.insert("lit".to_string(), lit_json);
+    payload.insert("id".to_string(), serde_json::Value::String(hex16(&id)));
+    if let Some(lit) = lit {
+        payload.insert("lit".to_string(), lit);
     }
-
     let mut out = serde_json::Map::new();
     out.insert(
         TABLE_ROW_VALUE_REF_KEY.to_string(),
         serde_json::Value::Object(payload),
     );
     serde_json::Value::Object(out)
+}
+
+#[derive(Debug)]
+struct ValueRefCandidate {
+    kind: ValueKind,
+    id: ValueId,
+    lit_json: serde_json::Value,
+    inline_len: usize,
+    count: usize,
+}
+
+fn value_ref_json_len(kind: ValueKind, id: ValueId, lit: Option<&serde_json::Value>) -> usize {
+    let encoded = encode_value_ref_json(kind, id, lit.cloned());
+    serde_json::to_vec(&encoded)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX / 4)
+}
+
+fn plan_value_refs_for_rows(rows: &[RowEntry]) -> HashSet<ValueId> {
+    let mut candidates = HashMap::<ValueId, ValueRefCandidate>::new();
+    for entry in rows.iter() {
+        for lit in entry.row.values() {
+            let Some(item) = value_store_item(lit) else {
+                continue;
+            };
+            let lit_json = serde_json::to_value(lit).unwrap_or(serde_json::Value::Null);
+            let inline_len = serde_json::to_vec(&lit_json)
+                .map(|bytes| bytes.len())
+                .unwrap_or(usize::MAX / 4);
+            candidates
+                .entry(item.id)
+                .and_modify(|candidate| {
+                    candidate.count = candidate.count.saturating_add(1);
+                })
+                .or_insert(ValueRefCandidate {
+                    kind: item.kind,
+                    id: item.id,
+                    lit_json,
+                    inline_len,
+                    count: 1,
+                });
+        }
+    }
+
+    let mut use_refs = HashSet::new();
+    for candidate in candidates.values() {
+        if candidate.count < 2 {
+            continue;
+        }
+        let seed_len = value_ref_json_len(candidate.kind, candidate.id, Some(&candidate.lit_json));
+        let compact_len = value_ref_json_len(candidate.kind, candidate.id, None);
+        let inline_total = (candidate.inline_len as u128) * (candidate.count as u128);
+        let refs_total =
+            (seed_len as u128) + ((candidate.count as u128 - 1) * (compact_len as u128));
+        if refs_total < inline_total {
+            use_refs.insert(candidate.id);
+        }
+    }
+    use_refs
 }
 
 fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> {
@@ -18454,6 +18536,7 @@ mod tests {
     fn table_rows_file_stores_value_refs() -> anyhow::Result<()> {
         let dir = temp_dir("table_rows_value_refs");
         let mut engine = Engine::open(&dir)?;
+        let large_payload = "same".repeat(80);
         engine.create_table(
             "app",
             "events",
@@ -18487,7 +18570,7 @@ mod tests {
                     (
                         "payload",
                         Lit::Str {
-                            v: "same".to_string(),
+                            v: large_payload.clone(),
                         },
                     ),
                 ]),
@@ -18496,7 +18579,7 @@ mod tests {
                     (
                         "payload",
                         Lit::Str {
-                            v: "same".to_string(),
+                            v: large_payload.clone(),
                         },
                     ),
                 ]),
@@ -18556,12 +18639,89 @@ mod tests {
                 vec![Lit::U64 { v: 2 }],
             )?
             .row;
-        assert_eq!(
-            row.get("payload"),
-            Some(&Lit::Str {
-                v: "same".to_string()
-            })
-        );
+        assert_eq!(row.get("payload"), Some(&Lit::Str { v: large_payload }));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn table_rows_file_skips_unprofitable_value_refs() -> anyhow::Result<()> {
+        let dir = temp_dir("table_rows_skip_small_refs");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "same".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let path = engine.table_path("app", "events");
+        let raw = fs::read_to_string(&path)?;
+        let doc: serde_json::Value = serde_json::from_str(&raw)?;
+        let mut ref_count = 0usize;
+        let rows = doc
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for row in rows.into_iter() {
+            let payload = row
+                .get("row")
+                .and_then(|r| r.get("payload"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let Some(obj) = payload.as_object() else {
+                continue;
+            };
+            if obj.get(TABLE_ROW_VALUE_REF_KEY).is_some() {
+                ref_count = ref_count.saturating_add(1);
+            }
+        }
+        assert_eq!(ref_count, 0);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

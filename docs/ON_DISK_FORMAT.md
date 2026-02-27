@@ -281,6 +281,8 @@ Format:
 
 Rules:
 - `"$skein_ref".id` is a 32-char hex ValueID.
+- Encoders should use `"$skein_ref"` adaptively: emit refs only when repeated values
+  produce net byte savings for that table snapshot.
 - The first occurrence of a ValueID in a table file should include `lit` seed data.
 - Later duplicates may omit `lit` and reference only `id`.
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.

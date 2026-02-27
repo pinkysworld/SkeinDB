@@ -22,7 +22,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase | Current status | Notes / evidence |
 |---|---|---|
 | Phase 0 Repo setup | Implemented | T001/T002/T003 are complete in runtime and tests: VarU/CRC/value ID primitives, FileHeader read/write, and RecordFrame append/iterate (`crates/skeindb-core/src/lib.rs`, `crates/skeindb-core/tests/phase0_format.rs`). |
-| Phase 1 Storage core | Partial | Prototype engine persists JSON state and now includes ValueID-backed row ref encoding for table files (`format_version: 2`); full MANIFEST/WAL/LSM pipeline remains open. |
+| Phase 1 Storage core | Partial | Prototype engine persists JSON state and includes adaptive ValueID-backed row ref encoding for table files (`format_version: 2`, emits `"$skein_ref"` only when byte-profitable); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`), including virtual `information_schema.tables` and `information_schema.columns`. |
 | Phase 3 MySQL protocol | Implemented (baseline) | Wire listener performs handshake + `mysql_native_password` auth exchange and supports `COM_QUERY` through the SQL-translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE`, `INSERT ... ON DUPLICATE KEY UPDATE`, and `SQL_CALC_FOUND_ROWS` + `FOUND_ROWS()`) with corpus-oriented integration coverage. |
 | Phase 4 Web console | Partial | `/api/v1/sql/exec` HTTP endpoint is live and console scaffold + schema/sql workspace exist (`web/skeinadmin`). |

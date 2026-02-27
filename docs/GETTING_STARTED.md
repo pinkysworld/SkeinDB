@@ -166,6 +166,8 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
 - `storage.unique_bytes`: unique bytes after content-addressed dedup
 - `storage.duplicate_bytes`: bytes saved by dedup
 - `storage.interned_values`: unique values currently interned
+- Table row encoding uses adaptive ValueID refs: repeated values are emitted as
+  `"$skein_ref"` only when that lowers bytes on disk for the current table snapshot.
 
 Optional persistence mode (default is `hybrid`):
 - `--storage-mode json`: write/read `tables/<db>/<table>.json`
