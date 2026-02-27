@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "next_id": 7,
+  "records": [
+    {
+      "id": 1,
+      "ts_ms": 1772019581636,
+      "db": "1",
+      "table": "test",
+      "op": "insert",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 1
+        }
+      ],
+      "change_seq": 1,
+      "prev_hash": "genesis",
+      "hash": "0796ac67042bda52eb8fff3e36e47b21"
+    },
+    {
+      "id": 2,
+      "ts_ms": 1772019633635,
+      "db": "1",
+      "table": "test",
+      "op": "insert",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 2
+        }
+      ],
+      "change_seq": 2,
+      "prev_hash": "0796ac67042bda52eb8fff3e36e47b21",
+      "hash": "d5099f884c4d3d037df3682e6002376e"
+    },
+    {
+      "id": 3,
+      "ts_ms": 1772019633638,
+      "db": "1",
+      "table": "test",
+      "op": "insert",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 3
+        }
+      ],
+      "change_seq": 3,
+      "prev_hash": "d5099f884c4d3d037df3682e6002376e",
+      "hash": "02895858549b22a54cbf0e84851f0ad6"
+    },
+    {
+      "id": 4,
+      "ts_ms": 1772019633640,
+      "db": "1",
+      "table": "test",
+      "op": "insert",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 4
+        }
+      ],
+      "change_seq": 4,
+      "prev_hash": "02895858549b22a54cbf0e84851f0ad6",
+      "hash": "f68be1add283724e77cfdb896bd794ce"
+    },
+    {
+      "id": 5,
+      "ts_ms": 1772019653047,
+      "db": "2",
+      "table": "test",
+      "op": "insert",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 1
+        }
+      ],
+      "change_seq": 5,
+      "prev_hash": "f68be1add283724e77cfdb896bd794ce",
+      "hash": "57a939615fe0de951380d72fe6f46425"
+    },
+    {
+      "id": 6,
+      "ts_ms": 1772019670589,
+      "db": "2",
+      "table": "test",
+      "op": "update",
+      "pk": [
+        {
+          "t": "u64",
+          "v": 1
+        }
+      ],
+      "change_seq": 6,
+      "prev_hash": "57a939615fe0de951380d72fe6f46425",
+      "hash": "65425ab37cd2bc1fdfe23efebef91db7"
+    }
+  ]
+}

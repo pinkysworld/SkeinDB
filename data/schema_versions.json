@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "versions": [
+    {
+      "db": "1",
+      "table": "test",
+      "version": 1
+    },
+    {
+      "db": "2",
+      "table": "test",
+      "version": 1
+    }
+  ]
+}

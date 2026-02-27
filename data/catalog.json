@@ -1,0 +1,68 @@
+{
+  "databases": {
+    "2": {
+      "tables": {
+        "test": {
+          "columns": [
+            {
+              "name": "id",
+              "type": {
+                "kind": "i64"
+              },
+              "nullable": false,
+              "auto_increment": true
+            },
+            {
+              "name": "name",
+              "type": {
+                "kind": "string"
+              },
+              "nullable": false,
+              "auto_increment": false
+            }
+          ],
+          "primary_key": [
+            "id"
+          ],
+          "compat_mysql": null,
+          "table_version": 2,
+          "auto_inc_next": {
+            "id": 2
+          }
+        }
+      }
+    },
+    "1": {
+      "tables": {
+        "test": {
+          "columns": [
+            {
+              "name": "id",
+              "type": {
+                "kind": "i64"
+              },
+              "nullable": false,
+              "auto_increment": true
+            },
+            {
+              "name": "name",
+              "type": {
+                "kind": "string"
+              },
+              "nullable": false,
+              "auto_increment": false
+            }
+          ],
+          "primary_key": [
+            "id"
+          ],
+          "compat_mysql": null,
+          "table_version": 4,
+          "auto_inc_next": {
+            "id": 5
+          }
+        }
+      }
+    }
+  }
+}

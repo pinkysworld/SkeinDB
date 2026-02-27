@@ -1,0 +1,28 @@
+{
+  "cluster.enabled": false,
+  "cluster.state.v1": {
+    "cluster_id": "cluster-1771951817456",
+    "enabled": false,
+    "join_tokens": [],
+    "local_node_id": "node-127-0-0-1-9090",
+    "nodes": [
+      {
+        "joined_at_ms": 1771951817456,
+        "last_seen_ms": 1772019526922,
+        "node_id": "node-127-0-0-1-9090",
+        "role": "primary",
+        "rpc_url": "http://127.0.0.1:8080",
+        "status": "online"
+      }
+    ],
+    "primary_node_id": "node-127-0-0-1-9090",
+    "replication": {
+      "applied_ops": 0,
+      "failed_ops": 0,
+      "last_error": null,
+      "last_updated_ms": 1771951817456,
+      "shipped_ops": 0
+    },
+    "shards": []
+  }
+}

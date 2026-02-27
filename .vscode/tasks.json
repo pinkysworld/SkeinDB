@@ -1,0 +1,20 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Git: Stage, Commit, and Push website changes",
+			"type": "shell",
+			"command": "git add site/index.html docs/site/index.html docs/site/docs.html docs/PROJECT_BACKLOG.md && git commit -F .git-commit-msg.tmp && rm .git-commit-msg.tmp && git push"
+		},
+		{
+			"label": "Git Commit",
+			"type": "shell",
+			"command": "git commit -F .git-commit-msg.tmp"
+		},
+		{
+			"label": "Git: Verify & Push",
+			"type": "shell",
+			"command": "git log --oneline -3 && echo '---' && git push"
+		}
+	]
+}
