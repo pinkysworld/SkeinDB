@@ -11,8 +11,8 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **34 done / 71 open** (105 total)
-- `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open**
+- `docs/PROJECT_BACKLOG.md`: **48 done / 70 open** (118 total)
+- `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
@@ -24,7 +24,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 0 Repo setup | Implemented | T001/T002/T003 are complete in runtime and tests: VarU/CRC/value ID primitives, FileHeader read/write, and RecordFrame append/iterate (`crates/skeindb-core/src/lib.rs`, `crates/skeindb-core/tests/phase0_format.rs`). |
 | Phase 1 Storage core | Partial | Prototype engine persists JSON state and includes adaptive ValueID-backed row ref encoding for table files (`format_version: 2`, emits `"$skein_ref"` only when byte-profitable); full MANIFEST/WAL/LSM pipeline remains open. |
 | Phase 2 SQL + metadata | Partial | Catalog + minimal CREATE/INSERT/SELECT paths are implemented (`engine`, `sql.exec`), including virtual `information_schema.tables` and `information_schema.columns`. |
-| Phase 3 MySQL protocol | Implemented (baseline) | Wire listener performs handshake + `mysql_native_password` auth exchange and supports `COM_QUERY` through the SQL-translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/ALTER TABLE ... ADD COLUMN/DROP TABLE/INSERT/UPDATE/DELETE`, `INSERT IGNORE`, `REPLACE`, `INSERT ... ON DUPLICATE KEY UPDATE`, `DISTINCT`, simple `INNER JOIN`, and `SQL_CALC_FOUND_ROWS` + `FOUND_ROWS()`). The MySQL layer now also preserves MySQL-style column defaults for `CREATE TABLE` / `ALTER TABLE`, surfaces them through `SHOW FULL COLUMNS` / `SHOW CREATE TABLE`, and uses a corpus-oriented leading-column duplicate-key emulation for WordPress-like `wp_options` traffic. `tests/compat/corpus.sql` runs end-to-end over the MySQL listener in integration tests. |
+| Phase 3 MySQL protocol | Implemented (baseline) | Wire listener performs handshake + `mysql_native_password` auth exchange and supports `COM_QUERY` through the SQL-translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/ALTER TABLE ... ADD COLUMN/DROP TABLE/INSERT/UPDATE/DELETE`, `INSERT IGNORE`, `REPLACE`, `INSERT ... ON DUPLICATE KEY UPDATE`, `DISTINCT`, simple `INNER JOIN`, and `SQL_CALC_FOUND_ROWS` + `FOUND_ROWS()`). The MySQL layer now also preserves MySQL-style column defaults for `CREATE TABLE` / `ALTER TABLE`, surfaces them through `SHOW FULL COLUMNS` / `SHOW CREATE TABLE`, and uses a corpus-oriented leading-column duplicate-key emulation for WordPress-like `wp_options` traffic. `tests/compat/corpus.sql` runs end-to-end over the MySQL listener in integration tests, while follow-on backlog items `T035`-`T037` track parity gaps that still separate this from a full MySQL replacement. |
 | Phase 4 Web console | Partial | `/api/v1/sql/exec` HTTP endpoint is live and console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
 | Phase 5 SkeinQL API | Implemented (baseline) | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` + `tx.begin/tx.commit/tx.rollback` are implemented. |
 | Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates + dependency-aware query paths exist. |

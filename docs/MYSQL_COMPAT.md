@@ -56,7 +56,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
-  - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
+  - A shipped but intentionally narrow **SQL→SkeinQL translation layer** now provides the current MySQL-ish subset; broader parity work is still ongoing.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) replace the current leading-column duplicate emulation with real secondary-index / unique-key enforcement

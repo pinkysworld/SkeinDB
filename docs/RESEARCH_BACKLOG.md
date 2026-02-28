@@ -6,11 +6,12 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
-## Reality sync (2026-02-24)
+## Reality sync (2026-02-28)
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
 - Checklist below: remains open for hardening, stronger benchmarks, and publication-grade evaluation.
+- This sync does not promote any research checklist items; it only reconfirms that runtime prototype coverage and checklist status still intentionally differ.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
