@@ -44,8 +44,9 @@ use skeindb_skeinql::{
         WasmPlanRunParams,
     },
     types::{
-        BaseTableRef, Expr, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache,
-        ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
+        BaseTableRef, Expr, JoinRef, JoinTableRef, JoinType, LimitClause, Lit, OrderBy, OrderDir,
+        Query, QueryBody, QueryCache, ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc,
+        WireHints,
     },
     RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
@@ -934,6 +935,54 @@ fn mysql_type_desc_display(desc: &Value) -> String {
     }
 }
 
+fn mysql_desc_column_default(desc: &Value, name: &str) -> Option<Lit> {
+    desc.get("compat_mysql")
+        .and_then(|v| v.get("column_defaults"))
+        .and_then(|v| v.get(name))
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+fn mysql_default_cell_value(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(if *v { "1" } else { "0" }.to_string()),
+        Lit::I64 { v } => Some(v.to_string()),
+        Lit::U64 { v } => Some(v.to_string()),
+        Lit::F64 { v } => Some(v.to_string()),
+        Lit::Dec { v } => Some(v.clone()),
+        Lit::Str { v } => Some(v.clone()),
+        Lit::Date { iso } => Some(iso.clone()),
+        Lit::Time { iso } => Some(iso.clone()),
+        Lit::Datetime { iso } => Some(iso.clone()),
+        Lit::Uuid { v } => Some(v.clone()),
+        Lit::Bytes { .. } | Lit::Json { .. } | Lit::Embedding { .. } => None,
+    }
+}
+
+fn mysql_render_default_lit(lit: &Lit) -> String {
+    match lit {
+        Lit::Null => "NULL".to_string(),
+        Lit::Bool { v } => {
+            if *v {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        Lit::I64 { v } => v.to_string(),
+        Lit::U64 { v } => v.to_string(),
+        Lit::F64 { v } => v.to_string(),
+        Lit::Dec { v } => v.clone(),
+        Lit::Str { v } => format!("'{}'", v.replace('\'', "''")),
+        Lit::Date { iso } => format!("'{}'", iso.replace('\'', "''")),
+        Lit::Time { iso } => format!("'{}'", iso.replace('\'', "''")),
+        Lit::Datetime { iso } => format!("'{}'", iso.replace('\'', "''")),
+        Lit::Uuid { v } => format!("'{}'", v.replace('\'', "''")),
+        Lit::Bytes { .. } | Lit::Json { .. } | Lit::Embedding { .. } => "NULL".to_string(),
+    }
+}
+
 fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
     let columns = if full {
         vec![
@@ -1001,6 +1050,8 @@ fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
             } else {
                 String::new()
             };
+            let default = mysql_desc_column_default(desc, &name)
+                .and_then(|lit| mysql_default_cell_value(&lit));
             if full {
                 vec![
                     Some(name),
@@ -1008,7 +1059,7 @@ fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
                     Some("utf8mb4_general_ci".to_string()),
                     Some(is_nullable),
                     Some(key),
-                    None,
+                    default,
                     Some(extra),
                     Some("select,insert,update,references".to_string()),
                     Some(String::new()),
@@ -1019,7 +1070,7 @@ fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
                     Some(data_type),
                     Some(is_nullable),
                     Some(key),
-                    None,
+                    default,
                     Some(extra),
                 ]
             }
@@ -1166,6 +1217,10 @@ fn mysql_render_create_table(table_name: &str, desc: &Value) -> String {
             .unwrap_or(true)
         {
             line.push_str(" NOT NULL");
+        }
+        if let Some(default) = mysql_desc_column_default(desc, name) {
+            line.push_str(" DEFAULT ");
+            line.push_str(&mysql_render_default_lit(&default));
         }
         if col
             .get("auto_increment")
@@ -1359,9 +1414,16 @@ async fn mysql_try_compat_query_outcome(
         let prefix_len = if full { 16 } else { 11 };
         let tail = trimmed[prefix_len..].trim();
         let like_idx = find_keyword_top_level(tail, "like");
-        let scope_sql = like_idx.map(|idx| tail[..idx].trim()).unwrap_or(tail);
+        let where_idx = find_keyword_top_level(tail, "where");
+        let stop_idx = [like_idx, where_idx]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(tail.len());
+        let scope_sql = tail[..stop_idx].trim();
         let like_pattern =
             like_idx.and_then(|idx| parse_sql_string_literal(tail[idx + 4..].trim()));
+        let where_sql = where_idx.map(|idx| tail[idx + 5..].trim());
 
         let db = if scope_sql.is_empty() {
             default_db.map(clean_sql_ident).filter(|db| !db.is_empty())
@@ -1383,6 +1445,22 @@ async fn mysql_try_compat_query_outcome(
                 "SHOW TABLES requires FROM <db> or a selected database",
             )
         })?;
+
+        if let Some(where_sql) = where_sql {
+            let normalized = where_sql
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            let accepted = normalized == "table_type = 'base table'"
+                || normalized == "table_type='base table'";
+            if !full || !accepted {
+                return Err(RpcError::new(
+                    "not_supported",
+                    "SHOW FULL TABLES WHERE currently supports only Table_type = 'BASE TABLE'",
+                ));
+            }
+        }
 
         let eng = state.engine.read().await;
         let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
@@ -1872,11 +1950,13 @@ fn mysql_query_outcome_from_sql_exec(result: &Value) -> Result<MySqlQueryOutcome
             let (columns, rows) = mysql_extract_show_columns_result(result)?;
             Ok(MySqlQueryOutcome::ResultSet { columns, rows })
         }
-        "use" | "create_database" | "create_table" | "drop_table" => Ok(MySqlQueryOutcome::Ok {
-            affected_rows: 0,
-            last_insert_id: 0,
-        }),
-        "insert" | "update" | "delete" => Ok(MySqlQueryOutcome::Ok {
+        "use" | "create_database" | "create_table" | "alter_table" | "drop_table" => {
+            Ok(MySqlQueryOutcome::Ok {
+                affected_rows: 0,
+                last_insert_id: 0,
+            })
+        }
+        "insert" | "replace" | "update" | "delete" => Ok(MySqlQueryOutcome::Ok {
             affected_rows: result
                 .get("write")
                 .and_then(|v| v.get("affected"))
@@ -4935,11 +5015,21 @@ enum SqlVerb {
     Use,
     CreateDatabase,
     CreateTable,
+    AlterTable,
     DropTable,
     Insert,
+    InsertIgnore,
+    Replace,
     Update,
     Delete,
     Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertMode {
+    Insert,
+    Ignore,
+    Replace,
 }
 
 #[derive(Debug, Clone)]
@@ -4957,7 +5047,8 @@ struct InsertDupAssign {
 #[derive(Debug, Clone)]
 enum SqlPlan {
     Select {
-        table: BaseTableRef,
+        from: Option<TableRef>,
+        distinct: bool,
         projection: Vec<SelectItem>,
         where_expr: Option<Expr>,
         order_by: Vec<OrderBy>,
@@ -4982,12 +5073,19 @@ enum SqlPlan {
         columns: Vec<SchemaColumnInfo>,
         primary_key: Vec<String>,
         if_not_exists: bool,
+        compat_mysql: Option<Value>,
+    },
+    AlterTableAddColumn {
+        table: BaseTableRef,
+        column: SchemaColumnInfo,
+        default: Option<Lit>,
     },
     DropTable {
         table: BaseTableRef,
         if_exists: bool,
     },
     Insert {
+        mode: InsertMode,
         table: BaseTableRef,
         columns: Vec<String>,
         rows: Vec<BTreeMap<String, Lit>>,
@@ -5098,10 +5196,16 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::CreateDatabase
     } else if lower.starts_with("create table ") {
         SqlVerb::CreateTable
+    } else if lower.starts_with("alter table ") {
+        SqlVerb::AlterTable
     } else if lower.starts_with("drop table ") {
         SqlVerb::DropTable
+    } else if lower.starts_with("insert ignore into ") {
+        SqlVerb::InsertIgnore
     } else if lower.starts_with("insert into ") {
         SqlVerb::Insert
+    } else if lower.starts_with("replace into ") {
+        SqlVerb::Replace
     } else if lower.starts_with("update ") {
         SqlVerb::Update
     } else if lower.starts_with("delete from ") {
@@ -5236,8 +5340,27 @@ fn split_top_level_and(input: &str) -> Vec<String> {
     parts
 }
 
-fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef, RpcError> {
-    let cleaned = clean_sql_ident(name);
+fn parse_base_table_ref_with_alias(
+    input: &str,
+    default_db: Option<&str>,
+    allow_alias: bool,
+) -> Result<BaseTableRef, RpcError> {
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let (name_raw, alias) = match tokens.as_slice() {
+        [] => ("", None),
+        [name] => (*name, None),
+        [name, alias] if allow_alias => (*name, Some(clean_sql_ident(alias))),
+        [name, as_kw, alias] if allow_alias && as_kw.eq_ignore_ascii_case("as") => {
+            (*name, Some(clean_sql_ident(alias)))
+        }
+        _ => {
+            return Err(RpcError::new(
+                "not_supported",
+                format!("unsupported table reference '{}'", input.trim()),
+            ))
+        }
+    };
+    let cleaned = clean_sql_ident(name_raw);
     if cleaned.is_empty() {
         return Err(RpcError::new("invalid_request", "missing table name"));
     }
@@ -5245,7 +5368,7 @@ fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef,
         return Ok(BaseTableRef {
             db: clean_sql_ident(db),
             table: clean_sql_ident(table),
-            r#as: None,
+            r#as: alias.filter(|s| !s.is_empty()),
         });
     }
     let db = default_db
@@ -5260,8 +5383,88 @@ fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef,
     Ok(BaseTableRef {
         db,
         table: cleaned,
-        r#as: None,
+        r#as: alias.filter(|s| !s.is_empty()),
     })
+}
+
+fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef, RpcError> {
+    let mut table = parse_base_table_ref_with_alias(name, default_db, false)?;
+    table.r#as = None;
+    Ok(table)
+}
+
+fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRef, RpcError> {
+    let input = input.trim();
+    for (token, join_type) in [
+        (" left join ", JoinType::Left),
+        (" inner join ", JoinType::Inner),
+        (" join ", JoinType::Inner),
+    ] {
+        if let Some(idx) = find_ascii_ci_outside_quotes(input.as_bytes(), token.as_bytes()) {
+            let left_sql = input[..idx].trim();
+            let right_tail = input[idx + token.len()..].trim();
+            let on_idx = find_keyword_top_level(right_tail, "on").ok_or_else(|| {
+                RpcError::new("not_supported", "JOIN currently requires an ON predicate")
+            })?;
+            let right_sql = right_tail[..on_idx].trim();
+            let on_sql = right_tail[on_idx + 2..].trim();
+            let on = parse_where_expr(on_sql)?;
+            return Ok(TableRef::Join(JoinTableRef {
+                join: JoinRef {
+                    join_type,
+                    left: Box::new(TableRef::Base(parse_base_table_ref_with_alias(
+                        left_sql, default_db, true,
+                    )?)),
+                    right: Box::new(TableRef::Base(parse_base_table_ref_with_alias(
+                        right_sql, default_db, true,
+                    )?)),
+                    on,
+                },
+            }));
+        }
+    }
+    Ok(TableRef::Base(parse_base_table_ref_with_alias(
+        input, default_db, true,
+    )?))
+}
+
+fn parse_sql_column_ref(raw: &str) -> Option<(String, Option<String>)> {
+    let cleaned = clean_sql_ident(raw);
+    if cleaned.is_empty() || cleaned == "*" {
+        return None;
+    }
+    if let Some((table, col)) = cleaned.rsplit_once('.') {
+        let col = clean_sql_ident(col);
+        if col.is_empty() {
+            return None;
+        }
+        let table = clean_sql_ident(table);
+        return Some((col, (!table.is_empty()).then_some(table)));
+    }
+    Some((cleaned, None))
+}
+
+fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
+    let s = raw.trim();
+    let is_lit = s.starts_with('\'')
+        || s.starts_with('"')
+        || s.eq_ignore_ascii_case("null")
+        || s.eq_ignore_ascii_case("true")
+        || s.eq_ignore_ascii_case("false")
+        || s.parse::<i64>().is_ok()
+        || s.parse::<f64>().is_ok();
+    if is_lit {
+        return Ok(Expr::Lit {
+            lit: parse_sql_lit(s)?,
+        });
+    }
+    if let Some((col, table)) = parse_sql_column_ref(s) {
+        return Ok(Expr::Col { col, table });
+    }
+    Err(RpcError::new(
+        "not_supported",
+        format!("unsupported SQL expression '{}'", raw.trim()),
+    ))
 }
 
 fn parse_sql_lit(raw: &str) -> Result<Lit, RpcError> {
@@ -5295,17 +5498,62 @@ fn parse_sql_lit(raw: &str) -> Result<Lit, RpcError> {
     Ok(Lit::Str { v: s.to_string() })
 }
 
+fn parse_sql_leading_lit(raw: &str) -> Result<Lit, RpcError> {
+    let s = raw.trim_start();
+    if s.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "DEFAULT requires a literal value",
+        ));
+    }
+    let bytes = s.as_bytes();
+    if matches!(bytes[0], b'\'' | b'"') {
+        let quote = bytes[0];
+        let mut idx = 1usize;
+        while idx < bytes.len() {
+            if bytes[idx] == quote {
+                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
+                    idx += 2;
+                    continue;
+                }
+                return parse_sql_lit(&s[..=idx]);
+            }
+            idx += 1;
+        }
+        return Err(RpcError::new(
+            "invalid_request",
+            "unterminated quoted DEFAULT literal",
+        ));
+    }
+    let token_end = s.find(char::is_whitespace).unwrap_or(s.len());
+    parse_sql_lit(&s[..token_end])
+}
+
+fn parse_column_default_clause(definition: &str) -> Result<Option<Lit>, RpcError> {
+    let Some(idx) = find_keyword_top_level(definition, "default") else {
+        return Ok(None);
+    };
+    let tail = definition[idx + 7..].trim_start();
+    if tail.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "DEFAULT requires a literal value",
+        ));
+    }
+    Ok(Some(parse_sql_leading_lit(tail)?))
+}
+
 fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
     let clause = clause.trim();
     if let Some(idx) = find_keyword_top_level(clause, "is") {
         let left = clause[..idx].trim();
         let right = clause[idx + 2..].trim();
-        let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
-        if !col.is_empty() {
+        let left_expr = parse_sql_scalar_expr(left)?;
+        if matches!(left_expr, Expr::Col { .. }) {
             if right.eq_ignore_ascii_case("null") {
                 return Ok(Expr::Op {
                     op: "is_null".to_string(),
-                    a: Some(Box::new(Expr::Col { col, table: None })),
+                    a: Some(Box::new(left_expr)),
                     b: None,
                     args: None,
                     list: None,
@@ -5316,7 +5564,7 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
             if right.eq_ignore_ascii_case("not null") {
                 let is_null = Expr::Op {
                     op: "is_null".to_string(),
-                    a: Some(Box::new(Expr::Col { col, table: None })),
+                    a: Some(Box::new(left_expr)),
                     b: None,
                     args: None,
                     list: None,
@@ -5338,23 +5586,18 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
     if let Some(idx) = find_keyword_top_level(clause, "in") {
         let left = clause[..idx].trim();
         let right = clause[idx + 2..].trim();
-        let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
-        if !col.is_empty() && right.starts_with('(') && right.ends_with(')') {
+        let left_expr = parse_sql_scalar_expr(left)?;
+        if matches!(left_expr, Expr::Col { .. }) && right.starts_with('(') && right.ends_with(')') {
             let values = split_csv_top_level(&right[1..right.len() - 1])
                 .into_iter()
-                .map(|part| parse_sql_lit(&part))
+                .map(|part| parse_sql_scalar_expr(&part))
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok(Expr::Op {
                 op: "in".to_string(),
-                a: Some(Box::new(Expr::Col { col, table: None })),
+                a: Some(Box::new(left_expr)),
                 b: None,
                 args: None,
-                list: Some(
-                    values
-                        .into_iter()
-                        .map(|lit| Expr::Lit { lit })
-                        .collect::<Vec<_>>(),
-                ),
+                list: Some(values),
                 lo: None,
                 hi: None,
             });
@@ -5367,13 +5610,10 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
         let left = clause[..idx].trim();
         let right = clause[idx + op.len()..].trim();
         if !left.is_empty() && !right.is_empty() {
-            let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
             return Ok(Expr::Op {
                 op: op.to_string(),
-                a: Some(Box::new(Expr::Col { col, table: None })),
-                b: Some(Box::new(Expr::Lit {
-                    lit: parse_sql_lit(right)?,
-                })),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
                 args: None,
                 list: None,
                 lo: None,
@@ -5436,13 +5676,10 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
                             format!("invalid predicate '{}'", clause),
                         ));
                     }
-                    let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
                     return Ok(Expr::Op {
                         op: op.to_string(),
-                        a: Some(Box::new(Expr::Col { col, table: None })),
-                        b: Some(Box::new(Expr::Lit {
-                            lit: parse_sql_lit(right)?,
-                        })),
+                        a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                        b: Some(Box::new(parse_sql_scalar_expr(right)?)),
                         args: None,
                         list: None,
                         lo: None,
@@ -5494,10 +5731,9 @@ fn parse_order_by(order_sql: &str) -> Result<Vec<OrderBy>, RpcError> {
         let Some(col_tok) = toks.next() else {
             continue;
         };
-        let col = clean_sql_ident(col_tok.rsplit('.').next().unwrap_or(col_tok));
-        if col.is_empty() {
+        let Some((col, table)) = parse_sql_column_ref(col_tok) else {
             continue;
-        }
+        };
         let dir = match toks.next().map(|t| t.to_ascii_lowercase()) {
             Some(d) if d == "desc" => Some(OrderDir::Desc),
             Some(d) if d == "asc" => Some(OrderDir::Asc),
@@ -5510,7 +5746,7 @@ fn parse_order_by(order_sql: &str) -> Result<Vec<OrderBy>, RpcError> {
             None => Some(OrderDir::Asc),
         };
         out.push(OrderBy {
-            expr: Expr::Col { col, table: None },
+            expr: Expr::Col { col, table },
             dir,
         });
     }
@@ -5576,27 +5812,13 @@ fn parse_select_projection_item(raw: &str) -> Result<SelectItem, RpcError> {
             "not_supported",
             "wildcard projection is resolved separately",
         ));
-    } else if let Ok(lit) = parse_sql_lit(expr_raw) {
-        // parse_sql_lit returns Str for bare identifiers, so handle identifiers first.
-        if expr_raw.starts_with('\'')
-            || expr_raw.starts_with('"')
-            || expr_raw.eq_ignore_ascii_case("null")
-            || expr_raw.eq_ignore_ascii_case("true")
-            || expr_raw.eq_ignore_ascii_case("false")
-            || expr_raw.parse::<i64>().is_ok()
-            || expr_raw.parse::<f64>().is_ok()
-        {
-            Expr::Lit { lit }
-        } else {
-            let col = clean_sql_ident(expr_raw.rsplit('.').next().unwrap_or(expr_raw));
-            if col.is_empty() {
-                return Err(RpcError::new(
-                    "invalid_request",
-                    format!("invalid SELECT projection '{}'", raw),
-                ));
-            }
-            Expr::Col { col, table: None }
-        }
+    } else if expr_raw.ends_with(".*") {
+        return Err(RpcError::new(
+            "not_supported",
+            "qualified wildcard projection is not supported yet",
+        ));
+    } else if let Ok(expr) = parse_sql_scalar_expr(expr_raw) {
+        expr
     } else {
         return Err(RpcError::new(
             "not_supported",
@@ -5612,6 +5834,14 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         .strip_prefix("SELECT ")
         .or_else(|| rest.strip_prefix("select "))
         .ok_or_else(|| RpcError::new("invalid_request", "invalid SELECT statement"))?;
+    let mut distinct = false;
+    if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("distinct") {
+        let tail = rest[8..].trim_start();
+        if tail.len() != rest.len() {
+            distinct = true;
+            rest = tail;
+        }
+    }
     let from_idx = find_keyword_top_level(rest, "from");
     if from_idx.is_none() {
         let mut projection = Vec::new();
@@ -5619,11 +5849,8 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
             projection.push(parse_select_projection_item(&part)?);
         }
         return Ok(SqlPlan::Select {
-            table: BaseTableRef {
-                db: String::new(),
-                table: String::new(),
-                r#as: None,
-            },
+            from: None,
+            distinct,
             projection,
             where_expr: None,
             order_by: Vec::new(),
@@ -5641,7 +5868,7 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         .unwrap_or(rem.len());
     let table_sql = rem[..next_idx].trim();
     rem = rem[next_idx..].trim();
-    let table = parse_table_ref(table_sql, default_db)?;
+    let from = parse_from_table_ref(table_sql, default_db)?;
 
     let mut where_sql = None::<String>;
     let mut order_sql = None::<String>;
@@ -5705,7 +5932,8 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
     };
 
     Ok(SqlPlan::Select {
-        table,
+        from: Some(from),
+        distinct,
         projection,
         where_expr: parse_where_expr(where_sql.as_deref().unwrap_or_default())?,
         order_by: parse_order_by(order_sql.as_deref().unwrap_or_default())?,
@@ -5857,6 +6085,7 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
     let defs = &tail[open_idx + 1..close_idx];
     let mut columns = Vec::new();
     let mut primary_key = Vec::new();
+    let mut mysql_defaults = serde_json::Map::new();
     for part in split_csv_top_level(defs) {
         let p = part.trim();
         let p_lower = p.to_ascii_lowercase();
@@ -5892,12 +6121,16 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         let unsigned = toks.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
         let nullable = !p_lower.contains("not null");
         let auto_increment = p_lower.contains("auto_increment");
+        let default = parse_column_default_clause(p)?;
         columns.push(SchemaColumnInfo {
-            name,
+            name: name.clone(),
             r#type: sql_type_to_desc(type_tok, unsigned),
             nullable,
             auto_increment,
         });
+        if let Some(default) = default {
+            mysql_defaults.insert(name, serde_json::to_value(default).unwrap_or(Value::Null));
+        }
     }
     if columns.is_empty() {
         return Err(RpcError::new(
@@ -5905,11 +6138,68 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
             "CREATE TABLE must define at least one column",
         ));
     }
+    let compat_mysql = if mysql_defaults.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "column_defaults": mysql_defaults,
+        }))
+    };
     Ok(SqlPlan::CreateTable {
         table,
         columns,
         primary_key,
         if_not_exists,
+        compat_mysql,
+    })
+}
+
+fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let tail = sql[11..].trim();
+    let add_idx = find_keyword_top_level(tail, "add").ok_or_else(|| {
+        RpcError::new(
+            "not_supported",
+            "ALTER TABLE currently supports only ADD COLUMN",
+        )
+    })?;
+    let table = parse_table_ref(tail[..add_idx].trim(), default_db)?;
+    let mut clause = tail[add_idx + 3..].trim();
+    if clause.len() >= 6 && clause[..6].eq_ignore_ascii_case("column") {
+        clause = clause[6..].trim_start();
+    }
+    let parts: Vec<&str> = clause.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD COLUMN requires a name and type",
+        ));
+    }
+    let name = clean_sql_ident(parts[0]);
+    let type_tok = parts[1];
+    let clause_lower = clause.to_ascii_lowercase();
+    if clause_lower.contains(" after ") || clause_lower.ends_with(" first") {
+        return Err(RpcError::new(
+            "not_supported",
+            "ALTER TABLE ADD COLUMN position clauses are not supported yet",
+        ));
+    }
+    let unsigned = parts.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
+    let nullable = !clause_lower.contains("not null");
+    let auto_increment = clause_lower.contains("auto_increment");
+    let default = find_keyword_top_level(clause, "default")
+        .map(|idx| clause[idx + 7..].trim())
+        .filter(|raw| !raw.is_empty())
+        .map(parse_sql_lit)
+        .transpose()?;
+    Ok(SqlPlan::AlterTableAddColumn {
+        table,
+        column: SchemaColumnInfo {
+            name,
+            r#type: sql_type_to_desc(type_tok, unsigned),
+            nullable,
+            auto_increment,
+        },
+        default,
     })
 }
 
@@ -5924,8 +6214,17 @@ fn parse_drop_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan,
     Ok(SqlPlan::DropTable { table, if_exists })
 }
 
-fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
-    let tail = sql[11..].trim();
+fn parse_insert_plan(
+    sql: &str,
+    default_db: Option<&str>,
+    mode: InsertMode,
+) -> Result<SqlPlan, RpcError> {
+    let prefix_len = match mode {
+        InsertMode::Insert => 11,
+        InsertMode::Ignore => 18,
+        InsertMode::Replace => 12,
+    };
+    let tail = sql[prefix_len..].trim();
     let values_idx = find_keyword_top_level(tail, "values").ok_or_else(|| {
         RpcError::new("invalid_request", "INSERT currently requires VALUES syntax")
     })?;
@@ -6056,6 +6355,7 @@ fn parse_insert_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         rows.push(row);
     }
     Ok(SqlPlan::Insert {
+        mode,
         table,
         columns: cols,
         rows,
@@ -6186,8 +6486,11 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Use => parse_use_plan(normalized),
         SqlVerb::CreateDatabase => parse_create_database_plan(normalized),
         SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
+        SqlVerb::AlterTable => parse_alter_table_plan(normalized, default_db),
         SqlVerb::DropTable => parse_drop_table_plan(normalized, default_db),
-        SqlVerb::Insert => parse_insert_plan(normalized, default_db),
+        SqlVerb::Insert => parse_insert_plan(normalized, default_db, InsertMode::Insert),
+        SqlVerb::InsertIgnore => parse_insert_plan(normalized, default_db, InsertMode::Ignore),
+        SqlVerb::Replace => parse_insert_plan(normalized, default_db, InsertMode::Replace),
         SqlVerb::Update => parse_update_plan(normalized, default_db),
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
         SqlVerb::Unsupported => Err(RpcError::new(
@@ -6206,8 +6509,12 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::UseDb { .. } => "use",
         SqlPlan::CreateDatabase { .. } => "create_database",
         SqlPlan::CreateTable { .. } => "create_table",
+        SqlPlan::AlterTableAddColumn { .. } => "alter_table",
         SqlPlan::DropTable { .. } => "drop_table",
-        SqlPlan::Insert { .. } => "insert",
+        SqlPlan::Insert { mode, .. } => match mode {
+            InsertMode::Replace => "replace",
+            _ => "insert",
+        },
         SqlPlan::Update { .. } => "update",
         SqlPlan::Delete { .. } => "delete",
     }
@@ -6233,6 +6540,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
     match parse_sql_plan(sql, default_db) {
         Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
         Ok(SqlPlan::CreateTable { table, .. })
+        | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
         | Ok(SqlPlan::Insert { table, .. })
         | Ok(SqlPlan::Update { table, .. })
@@ -6715,6 +7023,251 @@ async fn sql_exec_insert_on_duplicate(
     })
 }
 
+fn and_expr(left: Expr, right: Expr) -> Expr {
+    Expr::Op {
+        op: "and".to_string(),
+        a: Some(Box::new(left)),
+        b: Some(Box::new(right)),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }
+}
+
+fn eq_expr(col: String, lit: Lit) -> Expr {
+    Expr::Op {
+        op: "eq".to_string(),
+        a: Some(Box::new(Expr::Col { col, table: None })),
+        b: Some(Box::new(Expr::Lit { lit })),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }
+}
+
+fn pk_where_expr_from_row(
+    pk_cols: &[String],
+    row: &BTreeMap<String, Lit>,
+) -> Result<Expr, RpcError> {
+    let mut expr = None::<Expr>;
+    for col in pk_cols {
+        let lit = row.get(col).cloned().ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                format!("row is missing primary key column '{}'", col),
+            )
+        })?;
+        let next = eq_expr(col.clone(), lit);
+        expr = Some(match expr {
+            Some(prev) => and_expr(prev, next),
+            None => next,
+        });
+    }
+    expr.ok_or_else(|| RpcError::new("invalid_request", "table has no primary key"))
+}
+
+fn sql_exec_row_exists(
+    eng: &Engine,
+    table: &BaseTableRef,
+    probe_col: &str,
+    where_expr: &Expr,
+) -> Result<bool, RpcError> {
+    let query = Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection: vec![SelectItem {
+                    expr: Expr::Col {
+                        col: probe_col.to_string(),
+                        table: None,
+                    },
+                    r#as: None,
+                }],
+                from: Some(vec![TableRef::Base(table.clone())]),
+                r#where: Some(where_expr.clone()),
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: Some(LimitClause {
+            limit: Some(1),
+            offset: None,
+        }),
+        lock: None,
+    };
+    let result = eng
+        .query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )
+        .map_err(to_rpc_error)?;
+    let data = result
+        .data
+        .as_ref()
+        .ok_or_else(|| RpcError::new("internal", "query result missing data"))?;
+    Ok(rows_json_result_len(data)? > 0)
+}
+
+async fn sql_exec_insert_ignore(
+    state: &AppState,
+    table: BaseTableRef,
+    columns: Vec<String>,
+    rows: Vec<BTreeMap<String, Lit>>,
+) -> Result<crate::engine::WriteResult, RpcError> {
+    let mut eng = state.engine.write().await;
+    let mut affected = 0u64;
+    let mut last_insert_id = 0u64;
+    let key_col = columns.first().cloned();
+
+    for row in rows {
+        if let Some(key_col) = key_col.as_ref() {
+            if let Some(key_lit) = row.get(key_col).cloned() {
+                let where_expr = eq_expr(key_col.clone(), key_lit);
+                if sql_exec_row_exists(&eng, &table, key_col, &where_expr)? {
+                    continue;
+                }
+            }
+        }
+        match eng.data_insert(&table, vec![row], None) {
+            Ok(inserted) => {
+                affected = affected.saturating_add(inserted.affected);
+                if inserted.last_insert_id != 0 {
+                    last_insert_id = inserted.last_insert_id;
+                }
+            }
+            Err(err) if err.to_string() == "conflict" => {}
+            Err(err) => return Err(to_rpc_error(err)),
+        }
+    }
+
+    Ok(crate::engine::WriteResult {
+        affected,
+        last_insert_id,
+        returning: None,
+        etag: None,
+    })
+}
+
+async fn sql_exec_replace_into(
+    state: &AppState,
+    table: BaseTableRef,
+    columns: Vec<String>,
+    rows: Vec<BTreeMap<String, Lit>>,
+) -> Result<crate::engine::WriteResult, RpcError> {
+    let pk_cols = {
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        desc.get("primary_key")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let mut eng = state.engine.write().await;
+    let mut affected = 0u64;
+    let mut last_insert_id = 0u64;
+    let key_col = columns.first().cloned();
+
+    for row in rows {
+        if let Some(key_col) = key_col.as_ref() {
+            if let Some(key_lit) = row.get(key_col).cloned() {
+                let where_expr = eq_expr(key_col.clone(), key_lit);
+                if sql_exec_row_exists(&eng, &table, key_col, &where_expr)? {
+                    let updated = eng
+                        .data_update(&table, &where_expr, &row, Some(1), None, &[])
+                        .map_err(to_rpc_error)?;
+                    if updated.affected > 0 {
+                        affected = affected.saturating_add(2);
+                        continue;
+                    }
+                }
+            }
+        }
+        match eng.data_insert(&table, vec![row.clone()], None) {
+            Ok(inserted) => {
+                affected = affected.saturating_add(inserted.affected);
+                if inserted.last_insert_id != 0 {
+                    last_insert_id = inserted.last_insert_id;
+                }
+            }
+            Err(err) if err.to_string() == "conflict" => {
+                let where_expr = pk_where_expr_from_row(&pk_cols, &row)?;
+                let updated = eng
+                    .data_update(&table, &where_expr, &row, Some(1), None, &[])
+                    .map_err(to_rpc_error)?;
+                if updated.affected > 0 {
+                    affected = affected.saturating_add(2);
+                } else {
+                    let inserted = eng
+                        .data_insert(&table, vec![row], None)
+                        .map_err(to_rpc_error)?;
+                    affected = affected.saturating_add(inserted.affected);
+                    if inserted.last_insert_id != 0 {
+                        last_insert_id = inserted.last_insert_id;
+                    }
+                }
+            }
+            Err(err) => return Err(to_rpc_error(err)),
+        }
+    }
+
+    Ok(crate::engine::WriteResult {
+        affected,
+        last_insert_id,
+        returning: None,
+        etag: None,
+    })
+}
+
+async fn sql_exec_alter_table_add_column(
+    state: &AppState,
+    table: BaseTableRef,
+    column: SchemaColumnInfo,
+    default: Option<Lit>,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    let status = eng
+        .schema_merge_status(SchemaMergeStatusParams {
+            table: table.clone(),
+        })
+        .map_err(to_rpc_error)?;
+    let proposed = eng
+        .schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: status.current_version,
+            changes: vec![skeindb_skeinql::methods::SchemaChangeOp::AddColumn {
+                name: column.name,
+                r#type: column.r#type,
+                nullable: column.nullable,
+                auto_increment: column.auto_increment,
+                default,
+            }],
+            message: Some("sql.exec ALTER TABLE ADD COLUMN".to_string()),
+        })
+        .map_err(to_rpc_error)?;
+    eng.schema_apply_merge(SchemaApplyMergeParams {
+        table,
+        change_ids: Some(vec![proposed.change_id]),
+    })
+    .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 fn rows_json_result_len(result: &Value) -> Result<u64, RpcError> {
     let rows = result
         .get("rows")
@@ -6731,7 +7284,8 @@ async fn mysql_select_total_rows_without_limit(
 ) -> Result<u64, RpcError> {
     let plan = parse_sql_plan(sql, default_db)?;
     let SqlPlan::Select {
-        table,
+        from,
+        distinct,
         mut projection,
         where_expr,
         order_by,
@@ -6745,24 +7299,33 @@ async fn mysql_select_total_rows_without_limit(
     };
 
     // SELECT literal expressions always produce exactly one row.
-    if table.db.is_empty() && table.table.is_empty() {
+    if from.is_none() {
         return Ok(1);
     }
+    let from = from.expect("checked above");
 
     let eng = state.engine.read().await;
     let no_limit = None;
-    if let Some(result) = information_schema_select_result(
-        &eng,
-        &table,
-        &projection,
-        &where_expr,
-        &order_by,
-        &no_limit,
-    )? {
-        return rows_json_result_len(&result);
+    if let TableRef::Base(table) = &from {
+        if let Some(result) = information_schema_select_result(
+            &eng,
+            table,
+            &projection,
+            &where_expr,
+            &order_by,
+            &no_limit,
+        )? {
+            return rows_json_result_len(&result);
+        }
     }
 
     if projection.is_empty() {
+        let TableRef::Base(table) = &from else {
+            return Err(RpcError::new(
+                "not_supported",
+                "SQL_CALC_FOUND_ROWS with wildcard joins is not supported yet",
+            ));
+        };
         let desc = eng
             .describe_table(&table.db, &table.table)
             .map_err(to_rpc_error)?;
@@ -6793,9 +7356,9 @@ async fn mysql_select_total_rows_without_limit(
         with: Vec::new(),
         body: Box::new(QueryBody::Select {
             select: Box::new(SelectBody {
-                distinct: None,
+                distinct: distinct.then_some(true),
                 projection,
-                from: Some(vec![TableRef::Base(table.clone())]),
+                from: Some(vec![from]),
                 r#where: where_expr,
                 group_by: None,
                 having: None,
@@ -6835,14 +7398,15 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
     }
     match plan {
         SqlPlan::Select {
-            table,
+            from,
+            distinct,
             mut projection,
             where_expr,
             order_by,
             limit,
         } => {
             // SELECT without FROM for simple literals (e.g. SELECT 1)
-            if table.db.is_empty() && table.table.is_empty() {
+            if from.is_none() {
                 let mut columns = Vec::new();
                 let mut row = Vec::new();
                 for (idx, item) in projection.iter().enumerate() {
@@ -6875,53 +7439,63 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             }
 
             let eng = state.engine.read().await;
-            if let Some(result) = information_schema_select_result(
-                &eng,
-                &table,
-                &projection,
-                &where_expr,
-                &order_by,
-                &limit,
-            )? {
-                return Ok(serde_json::json!({
-                    "statement": "select",
-                    "read_only": true,
-                    "result": result
-                }));
+            let from = from.expect("checked Some above");
+            if let TableRef::Base(table) = &from {
+                if let Some(result) = information_schema_select_result(
+                    &eng,
+                    table,
+                    &projection,
+                    &where_expr,
+                    &order_by,
+                    &limit,
+                )? {
+                    return Ok(serde_json::json!({
+                        "statement": "select",
+                        "read_only": true,
+                        "result": result
+                    }));
+                }
             }
             if projection.is_empty() {
-                let desc = eng
-                    .describe_table(&table.db, &table.table)
-                    .map_err(to_rpc_error)?;
-                let names: Vec<String> = desc
-                    .get("columns")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string())
-                    .collect();
-                if names.is_empty() {
-                    return Err(RpcError::new("invalid_request", "table has no columns"));
+                if let TableRef::Base(table) = &from {
+                    let desc = eng
+                        .describe_table(&table.db, &table.table)
+                        .map_err(to_rpc_error)?;
+                    let names: Vec<String> = desc
+                        .get("columns")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
+                    if names.is_empty() {
+                        return Err(RpcError::new("invalid_request", "table has no columns"));
+                    }
+                    projection = names
+                        .into_iter()
+                        .map(|name| SelectItem {
+                            expr: Expr::Col {
+                                col: name,
+                                table: None,
+                            },
+                            r#as: None,
+                        })
+                        .collect();
+                } else {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        "wildcard projection over joins is not supported yet",
+                    ));
                 }
-                projection = names
-                    .into_iter()
-                    .map(|name| SelectItem {
-                        expr: Expr::Col {
-                            col: name,
-                            table: None,
-                        },
-                        r#as: None,
-                    })
-                    .collect();
             }
             let query = Query {
                 with: Vec::new(),
                 body: Box::new(QueryBody::Select {
                     select: Box::new(SelectBody {
-                        distinct: None,
+                        distinct: distinct.then_some(true),
                         projection,
-                        from: Some(vec![TableRef::Base(table.clone())]),
+                        from: Some(vec![from.clone()]),
                         r#where: where_expr,
                         group_by: None,
                         having: None,
@@ -7019,6 +7593,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             columns,
             primary_key,
             if_not_exists,
+            compat_mysql,
         } => {
             let cols: Vec<ColumnSchema> = columns
                 .iter()
@@ -7036,7 +7611,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 cols,
                 primary_key,
                 if_not_exists,
-                None,
+                compat_mysql,
             )
             .map_err(to_rpc_error)?;
             Ok(serde_json::json!({
@@ -7044,6 +7619,20 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "ok": true,
                 "table": table,
                 "if_not_exists": if_not_exists
+            }))
+        }
+        SqlPlan::AlterTableAddColumn {
+            table,
+            column,
+            default,
+        } => {
+            sql_exec_alter_table_add_column(state, table.clone(), column.clone(), default).await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "add_column",
+                "column": column.name
             }))
         }
         SqlPlan::DropTable { table, if_exists } => {
@@ -7058,6 +7647,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             }))
         }
         SqlPlan::Insert {
+            mode,
             table,
             columns,
             rows,
@@ -7066,11 +7656,24 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             let r = if let Some(assigns) = on_duplicate {
                 sql_exec_insert_on_duplicate(state, table.clone(), columns, rows, assigns).await?
             } else {
-                let mut eng = state.engine.write().await;
-                eng.data_insert(&table, rows, None).map_err(to_rpc_error)?
+                match mode {
+                    InsertMode::Insert => {
+                        let mut eng = state.engine.write().await;
+                        eng.data_insert(&table, rows, None).map_err(to_rpc_error)?
+                    }
+                    InsertMode::Ignore => {
+                        sql_exec_insert_ignore(state, table.clone(), columns.clone(), rows).await?
+                    }
+                    InsertMode::Replace => {
+                        sql_exec_replace_into(state, table.clone(), columns.clone(), rows).await?
+                    }
+                }
             };
             Ok(serde_json::json!({
-                "statement": "insert",
+                "statement": match mode {
+                    InsertMode::Replace => "replace",
+                    _ => "insert",
+                },
                 "ok": true,
                 "table": table,
                 "write": r
@@ -10324,6 +10927,297 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(null_rows.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_supports_insert_ignore_replace_distinct_join_and_alter_table(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_wordpress_shapes");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        assert!(
+            call_rpc(
+                &state,
+                "sql.exec",
+                json!({"sql":"CREATE DATABASE IF NOT EXISTS wp"})
+            )
+            .await
+            .ok
+        );
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_options (option_id BIGINT NOT NULL AUTO_INCREMENT, option_name VARCHAR(64) NOT NULL, option_value VARCHAR(64) NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id))",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_options (option_name, option_value) VALUES ('timezone_string', 'UTC')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let created_default = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT autoload FROM wp_options WHERE option_name = 'timezone_string'",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(created_default.ok);
+        let created_default_rows = created_default
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(created_default_rows[0][0]["v"].as_str(), Some("yes"));
+
+        let ignored_option = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT IGNORE INTO wp_options (option_name, option_value) VALUES ('timezone_string', 'Europe/Berlin')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(ignored_option.ok);
+        assert_eq!(
+            ignored_option
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
+
+        let replaced_option = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "REPLACE INTO wp_options (option_name, option_value, autoload) VALUES ('timezone_string', 'Europe/Berlin', 'no')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(replaced_option.ok);
+        assert_eq!(
+            replaced_option
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+
+        let replaced_option_rows = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT option_value, autoload FROM wp_options WHERE option_name = 'timezone_string'",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(replaced_option_rows.ok);
+        let replaced_option_rows = replaced_option_rows
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            replaced_option_rows[0][0]["v"].as_str(),
+            Some("Europe/Berlin")
+        );
+        assert_eq!(replaced_option_rows[0][1]["v"].as_str(), Some("no"));
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let ignored = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(ignored.ok);
+        assert_eq!(
+            ignored
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        let replaced = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(replaced.ok);
+        assert_eq!(
+            replaced
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let distinct = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT DISTINCT post_author FROM wp_posts ORDER BY post_author ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(distinct.ok);
+        let distinct_rows = distinct
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(distinct_rows.len(), 2);
+
+        let join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT DISTINCT p.post_author AS author_id, u.name FROM wp_posts AS p INNER JOIN wp_users AS u ON p.post_author = u.id WHERE u.status = 'active' ORDER BY p.post_author ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(join.ok);
+        let join_rows = join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(join_rows.len(), 2);
+        assert_eq!(join_rows[0][0]["v"].as_i64(), Some(1));
+        assert_eq!(join_rows[0][1]["v"].as_str(), Some("Ada"));
+        assert_eq!(join_rows[1][0]["v"].as_i64(), Some(3));
+        assert_eq!(join_rows[1][1]["v"].as_str(), Some("Linus"));
+
+        let altered = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT post_title FROM wp_posts WHERE id = 10",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(altered.ok);
+        let altered_rows = altered
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(altered_rows[0][0]["v"].as_str(), Some("untitled"));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

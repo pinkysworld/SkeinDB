@@ -318,6 +318,49 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
 
     send_com_query(
         &mut stream,
+        "INSERT INTO wp_options (option_name, option_value) VALUES ('home', 'https://example.com')",
+    )
+    .await?;
+    let (_seq, ok_insert_default) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_default)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT autoload FROM wp_options WHERE option_name = 'home'",
+    )
+    .await?;
+    let default_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(default_rows.len(), 1);
+    assert_eq!(default_rows[0][0].as_deref(), Some("yes"));
+
+    send_com_query(
+        &mut stream,
+        "INSERT IGNORE INTO wp_options (option_name, option_value) VALUES ('home', 'https://ignored.example')",
+    )
+    .await?;
+    let (_seq, ok_ignore_home) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_ignore_home)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "REPLACE INTO wp_options (option_name, option_value, autoload) VALUES ('home', 'https://example.net', 'no')",
+    )
+    .await?;
+    let (_seq, ok_replace_home) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_replace_home)?.0, 2);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value, autoload FROM wp_options WHERE option_name = 'home'",
+    )
+    .await?;
+    let home_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(home_rows.len(), 1);
+    assert_eq!(home_rows[0][0].as_deref(), Some("https://example.net"));
+    assert_eq!(home_rows[0][1].as_deref(), Some("no"));
+
+    send_com_query(
+        &mut stream,
         "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.com', 'yes')",
     )
     .await?;
@@ -404,6 +447,8 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     wait_for_tcp(server.mysql_port())?;
     let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
     let mut txn_select_index = 0usize;
+    let mut timezone_value_index = 0usize;
+    let mut timezone_autoload_index = 0usize;
 
     for statement in compat_corpus_statements() {
         send_com_query(&mut stream, &statement).await?;
@@ -457,6 +502,13 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 2),
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show full tables from skein_test where table_type = 'base table'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][1].as_deref(), Some("BASE TABLE"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show table status from skein_test like 'wp_posts'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -468,6 +520,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 4);
                     assert_eq!(rows[0].len(), 9);
+                    assert_eq!(rows[3][5].as_deref(), Some("yes"));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -491,6 +544,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     let ddl = rows[0][1].as_deref().unwrap_or_default();
                     assert!(ddl.contains("CREATE TABLE"));
                     assert!(ddl.contains("PRIMARY KEY"));
+                    assert!(ddl.contains("DEFAULT 'publish'"));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -522,7 +576,47 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         Some("https://example.com")
                             | Some("https://example.org")
                             | Some("https://example.net")
+                            | Some("https://example.replace")
                     ));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='siteurl'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    assert!(matches!(
+                        value,
+                        Some("https://example.net") | Some("https://example.replace")
+                    ));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select autoload from wp_options where option_name='timezone_string'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    timezone_autoload_index += 1;
+                    let expected = match timezone_autoload_index {
+                        1 => Some("yes"),
+                        2 => Some("no"),
+                        _ => panic!("unexpected timezone autoload select count"),
+                    };
+                    assert_eq!(rows[0][0].as_deref(), expected);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='timezone_string'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    timezone_value_index += 1;
+                    let expected = match timezone_value_index {
+                        1 => Some("UTC"),
+                        2 => Some("Europe/Berlin"),
+                        _ => panic!("unexpected timezone value select count"),
+                    };
+                    assert_eq!(rows[0][0].as_deref(), expected);
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -599,6 +693,61 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
         }
     }
     assert_eq!(txn_select_index, 3);
+    assert_eq!(timezone_value_index, 2);
+    assert_eq!(timezone_autoload_index, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_wp_style_join")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS wp",
+        "USE wp",
+        "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+        "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
+        "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
+        "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
+        "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+        "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet, got {:?}", other),
+        }
+    }
+
+    send_com_query(&mut stream, "SELECT post_title FROM wp_posts WHERE id = 10").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("untitled"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT DISTINCT p.post_author AS author_id, u.name FROM wp_posts AS p INNER JOIN wp_users AS u ON p.post_author = u.id WHERE u.status = 'active' ORDER BY p.post_author ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+            assert_eq!(rows[1][0].as_deref(), Some("3"));
+            assert_eq!(rows[1][1].as_deref(), Some("Linus"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
 
     Ok(())
 }

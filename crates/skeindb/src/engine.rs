@@ -6784,6 +6784,7 @@ fn execute_select(
         anyhow::bail!("set operations not implemented in this prototype");
     };
     let SelectBody {
+        distinct,
         projection,
         from,
         r#where,
@@ -6819,93 +6820,96 @@ fn execute_select(
                 .limit
                 .as_ref()
                 .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
-            if let (Some((limit, offset)), Some(hint)) = (
-                has_limit,
-                vector_order_prefilter_hint(&query.order_by, args),
-            ) {
-                let key = TableKey {
-                    db: base.db.clone(),
-                    table: base.table.clone(),
-                };
-                if !engine.views.contains_key(&key)
-                    && engine.oblivious_policy_for(base).level == "off"
-                {
-                    let required = limit.saturating_add(offset);
-                    if required > 0 {
-                        let (schema, tdata) = engine.get_table(base)?;
-                        if let Some(candidates) = vector_prefilter_candidates(
-                            schema,
-                            tdata,
-                            &hint.column,
-                            &hint.query_vec,
-                        ) {
-                            if candidates.len() as u64 >= required {
-                                let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
-                                let columns = projection_columns(projection);
-                                let order = &query.order_by;
-                                let mut rows = Vec::new();
-                                let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
-                                let mut rows_scanned = 0u64;
-                                for idx in candidates.iter() {
-                                    let Some(entry) = tdata.rows.get(*idx) else {
-                                        continue;
-                                    };
-                                    if entry.deleted {
-                                        continue;
-                                    }
-                                    rows_scanned = rows_scanned.saturating_add(1);
-                                    let ctx = row_ctx_from_row(&alias, &entry.row);
-                                    if let Some(pred) = r#where {
-                                        if !eval_predicate(
-                                            pred,
-                                            &BTreeMap::new(),
-                                            Some(&ctx),
-                                            args,
-                                        )? {
+            if !distinct.unwrap_or(false) {
+                if let (Some((limit, offset)), Some(hint)) = (
+                    has_limit,
+                    vector_order_prefilter_hint(&query.order_by, args),
+                ) {
+                    let key = TableKey {
+                        db: base.db.clone(),
+                        table: base.table.clone(),
+                    };
+                    if !engine.views.contains_key(&key)
+                        && engine.oblivious_policy_for(base).level == "off"
+                    {
+                        let required = limit.saturating_add(offset);
+                        if required > 0 {
+                            let (schema, tdata) = engine.get_table(base)?;
+                            if let Some(candidates) = vector_prefilter_candidates(
+                                schema,
+                                tdata,
+                                &hint.column,
+                                &hint.query_vec,
+                            ) {
+                                if candidates.len() as u64 >= required {
+                                    let alias =
+                                        base.r#as.clone().unwrap_or_else(|| base.table.clone());
+                                    let columns = projection_columns(projection);
+                                    let order = &query.order_by;
+                                    let mut rows = Vec::new();
+                                    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+                                    let mut rows_scanned = 0u64;
+                                    for idx in candidates.iter() {
+                                        let Some(entry) = tdata.rows.get(*idx) else {
+                                            continue;
+                                        };
+                                        if entry.deleted {
                                             continue;
                                         }
+                                        rows_scanned = rows_scanned.saturating_add(1);
+                                        let ctx = row_ctx_from_row(&alias, &entry.row);
+                                        if let Some(pred) = r#where {
+                                            if !eval_predicate(
+                                                pred,
+                                                &BTreeMap::new(),
+                                                Some(&ctx),
+                                                args,
+                                            )? {
+                                                continue;
+                                            }
+                                        }
+                                        let mut out_row = Vec::new();
+                                        for item in projection.iter() {
+                                            out_row.push(eval_expr(
+                                                &item.expr,
+                                                &BTreeMap::new(),
+                                                Some(&ctx),
+                                                args,
+                                            )?);
+                                        }
+                                        if order.is_empty() {
+                                            rows.push(out_row);
+                                        } else {
+                                            let keys = eval_order_keys(order, &ctx, args)?;
+                                            items.push((keys, out_row));
+                                        }
                                     }
-                                    let mut out_row = Vec::new();
-                                    for item in projection.iter() {
-                                        out_row.push(eval_expr(
-                                            &item.expr,
-                                            &BTreeMap::new(),
-                                            Some(&ctx),
-                                            args,
-                                        )?);
+
+                                    if !order.is_empty() {
+                                        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+                                        rows = items.into_iter().map(|(_, row)| row).collect();
                                     }
-                                    if order.is_empty() {
-                                        rows.push(out_row);
-                                    } else {
-                                        let keys = eval_order_keys(order, &ctx, args)?;
-                                        items.push((keys, out_row));
+
+                                    if let Some(limit) = &query.limit {
+                                        let off = limit.offset.unwrap_or(0) as usize;
+                                        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+                                        let end = (off + lim).min(rows.len());
+                                        rows = if off >= rows.len() {
+                                            Vec::new()
+                                        } else {
+                                            rows[off..end].to_vec()
+                                        };
                                     }
-                                }
 
-                                if !order.is_empty() {
-                                    items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
-                                    rows = items.into_iter().map(|(_, row)| row).collect();
-                                }
+                                    if let Some(info) = snapshot_info.as_ref() {
+                                        engine.observe_and_plan_snapshot(info, rows_scanned);
+                                    }
+                                    if !index_infos.is_empty() {
+                                        engine.observe_index_advisor(&index_infos, rows_scanned);
+                                    }
 
-                                if let Some(limit) = &query.limit {
-                                    let off = limit.offset.unwrap_or(0) as usize;
-                                    let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
-                                    let end = (off + lim).min(rows.len());
-                                    rows = if off >= rows.len() {
-                                        Vec::new()
-                                    } else {
-                                        rows[off..end].to_vec()
-                                    };
+                                    return Ok((columns, rows));
                                 }
-
-                                if let Some(info) = snapshot_info.as_ref() {
-                                    engine.observe_and_plan_snapshot(info, rows_scanned);
-                                }
-                                if !index_infos.is_empty() {
-                                    engine.observe_index_advisor(&index_infos, rows_scanned);
-                                }
-
-                                return Ok((columns, rows));
                             }
                         }
                     }
@@ -6993,6 +6997,10 @@ fn execute_select(
         rows = items.into_iter().map(|(_, row)| row).collect();
     }
 
+    if distinct.unwrap_or(false) {
+        rows = dedup_select_rows(rows);
+    }
+
     // LIMIT/OFFSET
     if let Some(limit) = &query.limit {
         let off = limit.offset.unwrap_or(0) as usize;
@@ -7015,6 +7023,18 @@ fn execute_select(
     Ok((columns, rows))
 }
 
+fn dedup_select_rows(rows: Vec<Vec<Lit>>) -> Vec<Vec<Lit>> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        let key = serde_json::to_vec(&row).unwrap_or_default();
+        if seen.insert(key) {
+            out.push(row);
+        }
+    }
+    out
+}
+
 fn execute_select_with_keys(
     engine: &Engine,
     query: &Query,
@@ -7026,6 +7046,7 @@ fn execute_select_with_keys(
         anyhow::bail!("not_patchable");
     };
     let SelectBody {
+        distinct,
         projection,
         from,
         r#where,
@@ -7035,7 +7056,7 @@ fn execute_select_with_keys(
     } = select.as_ref();
 
     // Patchability: only simple single-table SELECTs with primary keys.
-    if group_by.is_some() || having.is_some() {
+    if distinct.unwrap_or(false) || group_by.is_some() || having.is_some() {
         anyhow::bail!("not_patchable");
     }
 
@@ -9824,11 +9845,46 @@ fn apply_defaults_and_autoinc(
             *next += 1;
             continue;
         }
+        if let Some(default) = mysql_compat_column_default(schema, &col.name) {
+            row.insert(col.name.clone(), default);
+            continue;
+        }
         if col.nullable {
             row.insert(col.name.clone(), Lit::Null);
         }
     }
     Ok(())
+}
+
+fn mysql_compat_column_default(schema: &TableSchema, column: &str) -> Option<Lit> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("column_defaults"))
+        .and_then(|v| v.get(column))
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    defaults.insert(
+        column.to_string(),
+        serde_json::to_value(default).unwrap_or(serde_json::Value::Null),
+    );
+    root.insert(
+        "column_defaults".to_string(),
+        serde_json::Value::Object(defaults),
+    );
+    schema.compat_mysql = Some(serde_json::Value::Object(root));
 }
 
 #[derive(Debug, Clone)]
@@ -11770,6 +11826,9 @@ fn apply_schema_change(
                     }
                 }
                 schema.auto_inc_next.insert(name.clone(), next_id);
+            }
+            if let Some(default) = default.as_ref() {
+                set_mysql_compat_column_default(schema, name, default);
             }
             schema.columns.push(ColumnSchema {
                 name: name.clone(),

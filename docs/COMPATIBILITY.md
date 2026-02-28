@@ -27,17 +27,20 @@ SkeinDB adoption strategy:
 
 ### DDL
 - CREATE DATABASE / DROP DATABASE / USE
-- CREATE TABLE (PK, UNIQUE, KEY)
-- ALTER TABLE (add/drop column, add/drop index)
+- CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
+- `UNIQUE KEY` / `KEY` clauses are accepted in common MySQL DDL shapes but are not yet enforced as real secondary indexes
+- ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT`)
 - DROP TABLE
 
 ### DML
-- INSERT / INSERT IGNORE
+- INSERT / INSERT IGNORE / REPLACE
 - INSERT ... ON DUPLICATE KEY UPDATE
-- UPDATE/DELETE with WHERE (optional LIMIT)
-- SELECT with WHERE / ORDER BY / LIMIT
-- INNER JOIN + LEFT JOIN
-- GROUP BY + aggregates
+- `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` currently emulate duplicate detection using the leading insert column (plus PK conflicts), which matches key WordPress shapes like `wp_options`
+- UPDATE/DELETE with simple WHERE
+- SELECT with WHERE / ORDER BY / LIMIT / OFFSET
+- SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
+- INNER JOIN (simple single-join shapes); LEFT/RIGHT/FULL joins are not implemented yet
+- GROUP BY + aggregates remain mostly open beyond the current `COUNT(*)` compatibility shim
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 
 ### SHOW / metadata
@@ -51,7 +54,8 @@ SkeinDB adoption strategy:
 - SHOW GRANTS
 
 ### INFORMATION_SCHEMA
-- tables, columns, statistics, engines, user_privileges
+- `tables`, `columns`
+- richer compatibility views such as `statistics`, `engines`, and `user_privileges` remain backlog work
 
 ---
 
@@ -62,7 +66,8 @@ Add queries there first, then implement.
 
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
-That corpus now includes WordPress-style bootstrap, metadata, and pagination/count queries.
+That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
+and pagination/count queries.
 
 ---
 

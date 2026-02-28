@@ -40,6 +40,7 @@ CREATE TABLE wp_posts (
 SHOW DATABASES;
 SHOW TABLES FROM skein_test;
 SHOW FULL TABLES FROM skein_test;
+SHOW FULL TABLES FROM skein_test WHERE Table_type = 'BASE TABLE';
 SHOW TABLES FROM skein_test LIKE 'wp_%';
 
 SHOW TABLE STATUS FROM skein_test LIKE 'wp_posts';
@@ -64,13 +65,26 @@ VALUES
   ('home', 'https://example.com', 'yes'),
   ('blogname', 'SkeinDB Test', 'yes');
 
+INSERT INTO wp_options (option_name, option_value)
+VALUES ('timezone_string', 'UTC');
+
 SELECT option_name, option_value FROM wp_options WHERE autoload = 'yes' ORDER BY option_name;
 SELECT option_name FROM wp_options WHERE option_name IN ('siteurl', 'home') ORDER BY option_name;
 SELECT option_value FROM wp_options WHERE option_name = 'siteurl';
 SELECT option_value FROM wp_options WHERE option_name = 'home';
+SELECT autoload FROM wp_options WHERE option_name='timezone_string';
+INSERT IGNORE INTO wp_options (option_name, option_value)
+VALUES ('timezone_string', 'Europe/Berlin');
+SELECT option_value FROM wp_options WHERE option_name='timezone_string';
+REPLACE INTO wp_options (option_name, option_value, autoload)
+VALUES ('timezone_string', 'Europe/Berlin', 'no');
+SELECT option_value FROM wp_options WHERE option_name='timezone_string';
+SELECT autoload FROM wp_options WHERE option_name='timezone_string';
 
 UPDATE wp_options SET option_value='https://example.org' WHERE option_name='siteurl';
 UPDATE wp_options SET option_value='https://example.org' WHERE option_name='home';
+INSERT IGNORE INTO wp_options (option_id, option_name, option_value, autoload)
+VALUES (1, 'siteurl', 'https://ignored.example', 'yes');
 
 SELECT option_value FROM wp_options WHERE option_name = 'siteurl';
 SELECT option_value FROM wp_options WHERE option_name = 'home';
@@ -80,6 +94,11 @@ VALUES ('siteurl', 'https://example.net', 'yes')
 ON DUPLICATE KEY UPDATE
   option_value = VALUES(option_value),
   autoload = VALUES(autoload);
+
+SELECT option_value FROM wp_options WHERE option_name='siteurl';
+
+REPLACE INTO wp_options (option_id, option_name, option_value, autoload)
+VALUES (1, 'siteurl', 'https://example.replace', 'yes');
 
 SELECT option_value FROM wp_options WHERE option_name='siteurl';
 

@@ -33,12 +33,13 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 - The CLI `--mysql` listener now supports a **minimal MySQL wire handshake** with `mysql_native_password` auth exchange.
 - The listener supports a `COM_QUERY` translation subset through `sql.exec` for:
-  - `SELECT` (including literal-only and simple table queries)
+  - `SELECT` (literal-only, single-table, and simple `INNER JOIN` queries)
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
-  - `INSERT`, `UPDATE`, `DELETE`
-  - `INSERT ... ON DUPLICATE KEY UPDATE` (corpus-oriented emulation)
+  - `ALTER TABLE ... ADD COLUMN`
+  - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
+  - `INSERT ... ON DUPLICATE KEY UPDATE` (leading-column emulation)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
@@ -46,6 +47,9 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
   - `COUNT(*)` result emulation for simple single-table selects
+  - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
+  - `DISTINCT`, `IN (...)`, `LIKE`, and `IS NULL` / `IS NOT NULL` for common WordPress query shapes
+  - corpus-oriented duplicate-key emulation on the leading insert column for `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`)
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
   - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
@@ -55,8 +59,8 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
-1) replace the wire-layer metadata shims with deeper parser/engine parity (especially richer `SHOW CREATE TABLE` / index metadata)
-2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus
+1) replace the current leading-column duplicate emulation with real secondary-index / unique-key enforcement
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (joins, subqueries, aggregates, `ALTER TABLE` variants)
 3) improve prepared-statement and optimizer parity for production drivers
 
 ---
