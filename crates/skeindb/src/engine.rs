@@ -7918,6 +7918,32 @@ fn eval_expr(
                     let le = cmp_lit(&va, &hi)? != std::cmp::Ordering::Greater;
                     Ok(Lit::Bool { v: ge && le })
                 }
+                "like" | "ilike" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires string-like lhs"))?;
+                    let pattern = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires string-like rhs"))?;
+                    Ok(Lit::Bool {
+                        v: like_pattern_matches(&subject, &pattern, op == "ilike"),
+                    })
+                }
+                "is_null" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("is_null requires a"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    Ok(Lit::Bool {
+                        v: matches!(va, Lit::Null),
+                    })
+                }
                 _ => anyhow::bail!("unsupported op: {op}"),
             }
         }
@@ -8022,6 +8048,62 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
         (Lit::U64 { v: x }, Lit::I64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
         _ => Ok(Ordering::Equal),
     }
+}
+
+fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(if *v { "1".to_string() } else { "0".to_string() }),
+        Lit::I64 { v } => Some(v.to_string()),
+        Lit::U64 { v } => Some(v.to_string()),
+        Lit::F64 { v } => Some(v.to_string()),
+        Lit::Dec { v } => Some(v.clone()),
+        Lit::Str { v } => Some(v.clone()),
+        Lit::Bytes { b64 } => Some(b64.clone()),
+        Lit::Json { v } => Some(v.to_string()),
+        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => Some(iso.clone()),
+        Lit::Uuid { v } => Some(v.clone()),
+        Lit::Embedding { .. } => None,
+    }
+}
+
+fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
+    let (subject, pattern) = if case_insensitive {
+        (
+            subject.to_ascii_lowercase().into_bytes(),
+            pattern.to_ascii_lowercase().into_bytes(),
+        )
+    } else {
+        (subject.as_bytes().to_vec(), pattern.as_bytes().to_vec())
+    };
+    let (mut si, mut pi) = (0usize, 0usize);
+    let (mut star_pi, mut star_si) = (None::<usize>, 0usize);
+
+    while si < subject.len() {
+        if pi < pattern.len() && (pattern[pi] == b'_' || pattern[pi] == subject[si]) {
+            si += 1;
+            pi += 1;
+            continue;
+        }
+        if pi < pattern.len() && pattern[pi] == b'%' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_si = si;
+            continue;
+        }
+        if let Some(saved_pi) = star_pi {
+            pi = saved_pi + 1;
+            star_si += 1;
+            si = star_si;
+            continue;
+        }
+        return false;
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'%' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 #[derive(Debug)]

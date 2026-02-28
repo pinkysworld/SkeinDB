@@ -40,14 +40,23 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `INSERT`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (corpus-oriented emulation)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
+- The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
+  - `SELECT VERSION()` and `SELECT DATABASE()`
+  - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`
+  - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
+  - `DESCRIBE` / `SHOW KEYS`
+  - `COUNT(*)` result emulation for simple single-table selects
+  - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
+  - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
+- `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
   - A planned **SQL→SkeinQL translation layer** will provide MySQL-ish SQL parsing and mapping.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
-1) tighten MySQL semantic parity for edge cases and unsupported SHOW variants
-2) broaden SQL and function compatibility with stricter parity tests
+1) replace the wire-layer metadata shims with deeper parser/engine parity (especially richer `SHOW CREATE TABLE` / index metadata)
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus
 3) improve prepared-statement and optimizer parity for production drivers
 
 ---
