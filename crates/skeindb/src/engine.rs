@@ -1270,7 +1270,7 @@ impl Engine {
             "table": table,
             "columns": columns,
             "primary_key": schema.primary_key,
-            "indexes": [],
+            "indexes": mysql_compat_indexes_json(schema),
             "compat_mysql": schema.compat_mysql,
         }))
     }
@@ -1551,6 +1551,9 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
+                if mysql_compat_unique_conflict(schema, tdata, &row, None).is_some() {
+                    anyhow::bail!("conflict");
+                }
 
                 // Build PK
                 let pk = extract_pk(schema, &row)?;
@@ -1633,36 +1636,40 @@ impl Engine {
         {
             let (schema, tdata) = self.get_table_mut(table)?;
 
-            for entry in tdata.rows.iter_mut() {
-                if entry.deleted {
+            for idx in 0..tdata.rows.len() {
+                if tdata.rows[idx].deleted {
                     continue;
                 }
-                if !eval_predicate(predicate, &entry.row, None, args)? {
+                let current_row = tdata.rows[idx].row.clone();
+                if !eval_predicate(predicate, &current_row, None, args)? {
                     continue;
                 }
 
                 if let Some(tag) = if_match {
-                    let current = row_etag(&entry.row, entry.version);
+                    let current = row_etag(&tdata.rows[idx].row, tdata.rows[idx].version);
                     if current != tag {
                         anyhow::bail!("conflict");
                     }
                 }
 
-                let mut new_row = entry.row.clone();
+                let mut new_row = current_row;
                 for (k, v) in set.iter() {
                     new_row.insert(k.clone(), v.clone());
                 }
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                entry.row = new_row;
-                entry.version = next_row_version(schema);
+                if mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx)).is_some() {
+                    anyhow::bail!("conflict");
+                }
+                tdata.rows[idx].row = new_row;
+                tdata.rows[idx].version = next_row_version(schema);
                 affected += 1;
 
-                let pk = extract_pk(schema, &entry.row).ok();
+                let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
                 change_pks.push(pk);
-                collect_value_store_items(&entry.row, &mut intern_items);
-                snapshot_rows.push(entry.row.clone());
+                collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
+                snapshot_rows.push(tdata.rows[idx].row.clone());
 
                 if let Some(lim) = limit {
                     if affected >= lim {
@@ -9864,6 +9871,99 @@ fn mysql_compat_column_default(schema: &TableSchema, column: &str) -> Option<Lit
         .and_then(|v| v.get(column))
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok())
+}
+
+#[derive(Debug, Clone)]
+struct CompatIndexDef {
+    name: String,
+    columns: Vec<String>,
+    unique: bool,
+}
+
+fn mysql_compat_index_defs(schema: &TableSchema) -> Vec<CompatIndexDef> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("indexes"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(mysql_compat_index_from_value)
+        .collect()
+}
+
+fn mysql_compat_indexes_json(schema: &TableSchema) -> Vec<serde_json::Value> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("indexes"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn mysql_compat_index_from_value(value: &serde_json::Value) -> Option<CompatIndexDef> {
+    let name = value.get("name").and_then(|v| v.as_str())?.to_string();
+    let columns = value
+        .get("columns")
+        .and_then(|v| v.as_array())?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return None;
+    }
+    Some(CompatIndexDef {
+        name,
+        columns,
+        unique: value
+            .get("unique")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[String]) -> bool {
+    let mut compared = false;
+    for column in columns {
+        let Some(left) = row.get(column) else {
+            return false;
+        };
+        let Some(right) = other.get(column) else {
+            return false;
+        };
+        if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+            return false;
+        }
+        compared = true;
+        if left != right {
+            return false;
+        }
+    }
+    compared
+}
+
+fn mysql_compat_unique_conflict(
+    schema: &TableSchema,
+    tdata: &TableData,
+    row: &RowObject,
+    skip_idx: Option<usize>,
+) -> Option<String> {
+    for index in mysql_compat_index_defs(schema)
+        .into_iter()
+        .filter(|index| index.unique)
+    {
+        for (idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted || skip_idx == Some(idx) {
+                continue;
+            }
+            if row_matches_compat_index(row, &entry.row, &index.columns) {
+                return Some(index.name);
+            }
+        }
+    }
+    None
 }
 
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {

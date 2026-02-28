@@ -316,6 +316,20 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
 
+    send_com_query(&mut stream, "SHOW INDEX FROM wp_options").await?;
+    let index_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(index_rows.len(), 2);
+    assert_eq!(index_rows[0][2].as_deref(), Some("PRIMARY"));
+    assert_eq!(index_rows[1][1].as_deref(), Some("0"));
+    assert_eq!(index_rows[1][2].as_deref(), Some("option_name"));
+    assert_eq!(index_rows[1][4].as_deref(), Some("option_name"));
+
+    send_com_query(&mut stream, "SHOW FULL COLUMNS FROM wp_options").await?;
+    let column_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(column_rows.len(), 4);
+    assert_eq!(column_rows[1][0].as_deref(), Some("option_name"));
+    assert_eq!(column_rows[1][4].as_deref(), Some("UNI"));
+
     send_com_query(
         &mut stream,
         "INSERT INTO wp_options (option_name, option_value) VALUES ('home', 'https://example.com')",
@@ -358,6 +372,16 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     assert_eq!(home_rows.len(), 1);
     assert_eq!(home_rows[0][0].as_deref(), Some("https://example.net"));
     assert_eq!(home_rows[0][1].as_deref(), Some("no"));
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('home', 'https://duplicate.example', 'yes')",
+    )
+    .await?;
+    let (_seq, duplicate_err) = read_mysql_packet(&mut stream).await?;
+    let duplicate_err = decode_mysql_err_packet(&duplicate_err)
+        .ok_or_else(|| anyhow!("expected error packet for duplicate insert"))?;
+    assert!(duplicate_err.contains("conflict"));
 
     send_com_query(
         &mut stream,
@@ -520,7 +544,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 4);
                     assert_eq!(rows[0].len(), 9);
+                    assert_eq!(rows[1][4].as_deref(), Some("UNI"));
                     assert_eq!(rows[3][5].as_deref(), Some("yes"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert_eq!(rows[1][1].as_deref(), Some("0"));
+                    assert_eq!(rows[1][2].as_deref(), Some("option_name"));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -528,6 +562,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 MysqlResponse::Rows(rows) => {
                     assert!(!rows.is_empty());
                     assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert!(rows.iter().any(|row| row[2].as_deref() == Some("post_status")));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -538,12 +573,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show create table wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("UNIQUE KEY `option_name` (`option_name`)"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show create table wp_posts" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
                     let ddl = rows[0][1].as_deref().unwrap_or_default();
                     assert!(ddl.contains("CREATE TABLE"));
                     assert!(ddl.contains("PRIMARY KEY"));
+                    assert!(ddl.contains("KEY `post_status` (`post_status`)"));
                     assert!(ddl.contains("DEFAULT 'publish'"));
                 }
                 other => panic!("expected result set, got {:?}", other),

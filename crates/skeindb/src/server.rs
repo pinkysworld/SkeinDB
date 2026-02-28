@@ -983,6 +983,32 @@ fn mysql_render_default_lit(lit: &Lit) -> String {
     }
 }
 
+fn mysql_desc_indexes(desc: &Value) -> Vec<(String, Vec<String>, bool)> {
+    desc.get("indexes")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|index| {
+            let name = index.get("name").and_then(|v| v.as_str())?.to_string();
+            let columns = index
+                .get("columns")
+                .and_then(|v| v.as_array())?
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                return None;
+            }
+            let unique = index
+                .get("unique")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Some((name, columns, unique))
+        })
+        .collect()
+}
+
 fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
     let columns = if full {
         vec![
@@ -1014,6 +1040,7 @@ fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
         .filter_map(|v| v.as_str())
         .map(|v| v.to_string())
         .collect();
+    let index_defs = mysql_desc_indexes(desc);
     let rows = desc
         .get("columns")
         .and_then(|v| v.as_array())
@@ -1038,6 +1065,16 @@ fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
             .to_string();
             let key = if primary_key.contains(&name) {
                 "PRI".to_string()
+            } else if index_defs
+                .iter()
+                .any(|(_, columns, unique)| *unique && columns.iter().any(|col| col == &name))
+            {
+                "UNI".to_string()
+            } else if index_defs
+                .iter()
+                .any(|(_, columns, _)| columns.iter().any(|col| col == &name))
+            {
+                "MUL".to_string()
             } else {
                 String::new()
             };
@@ -1106,6 +1143,7 @@ fn mysql_show_index_outcome(table_name: &str, desc: &Value) -> MySqlQueryOutcome
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let compat_indexes = mysql_desc_indexes(desc);
     for (idx, column_name) in pk.iter().filter_map(|v| v.as_str()).enumerate() {
         let nullable = columns_desc
             .iter()
@@ -1127,6 +1165,30 @@ fn mysql_show_index_outcome(table_name: &str, desc: &Value) -> MySqlQueryOutcome
             Some(String::new()),
             Some(String::new()),
         ]);
+    }
+    for (index_name, index_columns, unique) in compat_indexes {
+        for (idx, column_name) in index_columns.iter().enumerate() {
+            let nullable = columns_desc
+                .iter()
+                .find(|col| col.get("name").and_then(|v| v.as_str()) == Some(column_name.as_str()))
+                .and_then(|col| col.get("nullable").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            rows.push(vec![
+                Some(table_name.to_string()),
+                Some(if unique { "0" } else { "1" }.to_string()),
+                Some(index_name.clone()),
+                Some((idx + 1).to_string()),
+                Some(column_name.clone()),
+                Some("A".to_string()),
+                Some("0".to_string()),
+                None,
+                None,
+                Some(if nullable { "YES" } else { "NO" }.to_string()),
+                Some("BTREE".to_string()),
+                Some(String::new()),
+                Some(String::new()),
+            ]);
+        }
     }
     MySqlQueryOutcome::ResultSet { columns, rows }
 }
@@ -1244,6 +1306,18 @@ fn mysql_render_create_table(table_name: &str, desc: &Value) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         defs.push(format!("  PRIMARY KEY ({keys})"));
+    }
+    for (index_name, columns, unique) in mysql_desc_indexes(desc) {
+        let cols = columns
+            .iter()
+            .map(|col| mysql_quote_ident(col))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let prefix = if unique { "UNIQUE KEY" } else { "KEY" };
+        defs.push(format!(
+            "  {prefix} {} ({cols})",
+            mysql_quote_ident(&index_name)
+        ));
     }
     format!(
         "CREATE TABLE {} (\n{}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
@@ -6060,6 +6134,91 @@ fn sql_type_to_desc(token: &str, unsigned: bool) -> TypeDesc {
     }
 }
 
+fn parse_create_table_index_def(definition: &str) -> Result<Option<Value>, RpcError> {
+    let mut rest = definition.trim();
+    let mut lower = rest.to_ascii_lowercase();
+    if lower.starts_with("constraint ") {
+        let Some(first_ws) = rest.find(char::is_whitespace) else {
+            return Err(RpcError::new(
+                "invalid_request",
+                format!("invalid index definition '{}'", definition),
+            ));
+        };
+        let tail = rest[first_ws..].trim_start();
+        let second_ws = tail.find(char::is_whitespace).ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                format!("invalid index definition '{}'", definition),
+            )
+        })?;
+        rest = tail[second_ws..].trim_start();
+        lower = rest.to_ascii_lowercase();
+    }
+
+    let unique = if lower.starts_with("unique key ") {
+        rest = rest[10..].trim_start();
+        true
+    } else if lower.starts_with("unique index ") {
+        rest = rest[12..].trim_start();
+        true
+    } else if lower.starts_with("unique ") {
+        rest = rest[6..].trim_start();
+        true
+    } else if lower.starts_with("key ") {
+        rest = rest[3..].trim_start();
+        false
+    } else if lower.starts_with("index ") {
+        rest = rest[5..].trim_start();
+        false
+    } else {
+        return Ok(None);
+    };
+
+    let Some(open_idx) = rest.find('(') else {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("index definition missing columns '{}'", definition),
+        ));
+    };
+    let Some(close_idx) = rest.rfind(')') else {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("index definition missing closing ')' '{}'", definition),
+        ));
+    };
+    let name_raw = rest[..open_idx].trim();
+    let columns = split_csv_top_level(&rest[open_idx + 1..close_idx])
+        .into_iter()
+        .map(|col| clean_sql_ident(&col))
+        .filter(|col| !col.is_empty())
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!(
+                "index definition requires at least one column '{}'",
+                definition
+            ),
+        ));
+    }
+    let name = if name_raw.is_empty() {
+        columns.join("_")
+    } else {
+        clean_sql_ident(name_raw)
+    };
+    if name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("index definition requires a name '{}'", definition),
+        ));
+    }
+    Ok(Some(serde_json::json!({
+        "name": name,
+        "columns": columns,
+        "unique": unique,
+    })))
+}
+
 fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let mut tail = sql[12..].trim();
     let mut if_not_exists = false;
@@ -6086,6 +6245,7 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
     let mut columns = Vec::new();
     let mut primary_key = Vec::new();
     let mut mysql_defaults = serde_json::Map::new();
+    let mut mysql_indexes = Vec::new();
     for part in split_csv_top_level(defs) {
         let p = part.trim();
         let p_lower = p.to_ascii_lowercase();
@@ -6102,11 +6262,11 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
             }
             continue;
         }
-        if p_lower.starts_with("key ")
-            || p_lower.starts_with("unique key")
-            || p_lower.starts_with("index ")
-            || p_lower.starts_with("constraint ")
-        {
+        if let Some(index) = parse_create_table_index_def(p)? {
+            mysql_indexes.push(index);
+            continue;
+        }
+        if p_lower.starts_with("constraint ") {
             continue;
         }
         let toks: Vec<&str> = p.split_whitespace().collect();
@@ -6138,12 +6298,17 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
             "CREATE TABLE must define at least one column",
         ));
     }
-    let compat_mysql = if mysql_defaults.is_empty() {
+    let mut compat_mysql = serde_json::Map::new();
+    if !mysql_defaults.is_empty() {
+        compat_mysql.insert("column_defaults".to_string(), Value::Object(mysql_defaults));
+    }
+    if !mysql_indexes.is_empty() {
+        compat_mysql.insert("indexes".to_string(), Value::Array(mysql_indexes));
+    }
+    let compat_mysql = if compat_mysql.is_empty() {
         None
     } else {
-        Some(serde_json::json!({
-            "column_defaults": mysql_defaults,
-        }))
+        Some(Value::Object(compat_mysql))
     };
     Ok(SqlPlan::CreateTable {
         table,
@@ -10981,6 +11146,70 @@ mod tests {
         )
         .await
         .ok);
+
+        let create_unique = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_unique_options (option_id BIGINT NOT NULL AUTO_INCREMENT, option_name VARCHAR(64) NOT NULL, option_value VARCHAR(64) NOT NULL, PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name))",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(create_unique.ok);
+
+        let unique_desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "wp",
+                "table": "wp_unique_options"
+            }),
+        )
+        .await;
+        assert!(unique_desc.ok);
+        let indexes = unique_desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("option_name")
+        );
+        assert_eq!(
+            indexes[0].get("unique").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_unique_options (option_name, option_value) VALUES ('siteurl', 'https://example.com')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let duplicate_unique = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_unique_options (option_name, option_value) VALUES ('siteurl', 'https://duplicate.example')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(!duplicate_unique.ok);
+        assert_eq!(
+            duplicate_unique.error.as_ref().map(|e| e.code.as_str()),
+            Some("conflict")
+        );
 
         assert!(call_rpc(
             &state,

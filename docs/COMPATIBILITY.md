@@ -28,14 +28,15 @@ SkeinDB adoption strategy:
 ### DDL
 - CREATE DATABASE / DROP DATABASE / USE
 - CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
-- `UNIQUE KEY` / `KEY` clauses are accepted in common MySQL DDL shapes but are not yet enforced as real secondary indexes
+- `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
+- `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
 - ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT`)
 - DROP TABLE
 
 ### DML
 - INSERT / INSERT IGNORE / REPLACE
 - INSERT ... ON DUPLICATE KEY UPDATE
-- `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` currently emulate duplicate detection using the leading insert column (plus PK conflicts), which matches key WordPress shapes like `wp_options`
+- `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` still rely on leading-insert-column compatibility logic for replacement/update behavior, but duplicate writes now also fail against declared `UNIQUE KEY` definitions
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`

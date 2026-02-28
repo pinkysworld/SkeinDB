@@ -45,8 +45,10 @@ SHOW TABLES FROM skein_test LIKE 'wp_%';
 
 SHOW TABLE STATUS FROM skein_test LIKE 'wp_posts';
 SHOW FULL COLUMNS FROM wp_options;
+SHOW INDEX FROM wp_options;
 SHOW INDEX FROM wp_posts;
 SHOW KEYS FROM wp_posts;
+SHOW CREATE TABLE wp_options;
 SHOW CREATE TABLE wp_posts;
 DESCRIBE wp_posts;
 
