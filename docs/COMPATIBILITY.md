@@ -36,7 +36,7 @@ SkeinDB adoption strategy:
 ### DML
 - INSERT / INSERT IGNORE / REPLACE
 - INSERT ... ON DUPLICATE KEY UPDATE
-- `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` still rely on leading-insert-column compatibility logic for replacement/update behavior, but duplicate writes now also fail against declared `UNIQUE KEY` definitions
+- `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata; the implementation remains scan-based rather than backed by a true secondary index structure
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`

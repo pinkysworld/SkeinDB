@@ -408,6 +408,58 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].as_deref(), Some("https://example.net"));
 
+    send_com_query(
+        &mut stream,
+        "SELECT option_id FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let original_id_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(original_id_rows.len(), 1);
+    let original_id = original_id_rows[0][0].clone();
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.shuffle', 'siteurl', 'no') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = VALUES(autoload)",
+    )
+    .await?;
+    let (_seq, ok_shuffled_upsert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_shuffled_upsert)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let shuffled_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(shuffled_rows.len(), 1);
+    assert_eq!(
+        shuffled_rows[0][0].as_deref(),
+        Some("https://example.shuffle")
+    );
+    assert_eq!(shuffled_rows[0][1].as_deref(), Some("no"));
+
+    send_com_query(
+        &mut stream,
+        "REPLACE INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.replace', 'siteurl', 'yes')",
+    )
+    .await?;
+    let (_seq, ok_shuffled_replace) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_shuffled_replace)?.0, 2);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_id, option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let replaced_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(replaced_rows.len(), 1);
+    assert_ne!(replaced_rows[0][0], original_id);
+    assert_eq!(
+        replaced_rows[0][1].as_deref(),
+        Some("https://example.replace")
+    );
+    assert_eq!(replaced_rows[0][2].as_deref(), Some("yes"));
+
     Ok(())
 }
 
@@ -473,6 +525,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     let mut txn_select_index = 0usize;
     let mut timezone_value_index = 0usize;
     let mut timezone_autoload_index = 0usize;
+    let mut siteurl_pair_index = 0usize;
 
     for statement in compat_corpus_statements() {
         send_com_query(&mut stream, &statement).await?;
@@ -639,6 +692,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select option_value, autoload from wp_options where option_name='siteurl'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        siteurl_pair_index += 1;
+                        let expected = match siteurl_pair_index {
+                            1 => (Some("https://example.shuffle"), Some("no")),
+                            2 => (Some("https://example.replace-shuffled"), Some("yes")),
+                            _ => panic!("unexpected siteurl pair select count"),
+                        };
+                        assert_eq!(rows[0][0].as_deref(), expected.0);
+                        assert_eq!(rows[0][1].as_deref(), expected.1);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select autoload from wp_options where option_name='timezone_string'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -740,6 +809,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     assert_eq!(txn_select_index, 3);
     assert_eq!(timezone_value_index, 2);
     assert_eq!(timezone_autoload_index, 2);
+    assert_eq!(siteurl_pair_index, 2);
 
     Ok(())
 }

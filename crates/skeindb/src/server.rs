@@ -1009,6 +1009,48 @@ fn mysql_desc_indexes(desc: &Value) -> Vec<(String, Vec<String>, bool)> {
         .collect()
 }
 
+fn mysql_desc_primary_key(desc: &Value) -> Vec<String> {
+    desc.get("primary_key")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn mysql_row_lookup_expr(row: &BTreeMap<String, Lit>, columns: &[String]) -> Option<Expr> {
+    let mut expr = None::<Expr>;
+    for col in columns {
+        let lit = row.get(col)?.clone();
+        if matches!(lit, Lit::Null) {
+            return None;
+        }
+        let next = eq_expr(col.clone(), lit);
+        expr = Some(match expr {
+            Some(prev) => and_expr(prev, next),
+            None => next,
+        });
+    }
+    expr
+}
+
+fn mysql_conflict_predicates_for_row(desc: &Value, row: &BTreeMap<String, Lit>) -> Vec<Expr> {
+    let mut predicates = Vec::new();
+    if let Some(expr) = mysql_row_lookup_expr(row, &mysql_desc_primary_key(desc)) {
+        predicates.push(expr);
+    }
+    for (_index_name, columns, unique) in mysql_desc_indexes(desc) {
+        if !unique {
+            continue;
+        }
+        if let Some(expr) = mysql_row_lookup_expr(row, &columns) {
+            predicates.push(expr);
+        }
+    }
+    predicates
+}
+
 fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
     let columns = if full {
         vec![
@@ -7123,22 +7165,14 @@ async fn sql_exec_insert_on_duplicate(
         ));
     }
 
-    let key_col = columns[0].clone();
     let mut eng = state.engine.write().await;
+    let desc = eng
+        .describe_table(&table.db, &table.table)
+        .map_err(to_rpc_error)?;
     let mut affected = 0u64;
     let mut last_insert_id = 0u64;
 
     for row in rows {
-        let key_lit = row.get(&key_col).cloned().ok_or_else(|| {
-            RpcError::new(
-                "invalid_request",
-                format!(
-                    "ON DUPLICATE emulation requires first INSERT column '{}' in each row",
-                    key_col
-                ),
-            )
-        })?;
-
         let mut set = BTreeMap::new();
         for assign in &assigns {
             if assign.target_col.is_empty() {
@@ -7150,33 +7184,33 @@ async fn sql_exec_insert_on_duplicate(
             );
         }
 
-        let where_expr = Expr::Op {
-            op: "eq".to_string(),
-            a: Some(Box::new(Expr::Col {
-                col: key_col.clone(),
-                table: None,
-            })),
-            b: Some(Box::new(Expr::Lit { lit: key_lit })),
-            args: None,
-            list: None,
-            lo: None,
-            hi: None,
-        };
-
-        let updated = eng
-            .data_update(&table, &where_expr, &set, Some(1), None, &[])
-            .map_err(to_rpc_error)?;
-        if updated.affected > 0 {
-            affected = affected.saturating_add(updated.affected);
-            continue;
-        }
-
-        let inserted = eng
-            .data_insert(&table, vec![row], None)
-            .map_err(to_rpc_error)?;
-        affected = affected.saturating_add(inserted.affected);
-        if inserted.last_insert_id != 0 {
-            last_insert_id = inserted.last_insert_id;
+        match eng.data_insert(&table, vec![row.clone()], None) {
+            Ok(inserted) => {
+                affected = affected.saturating_add(inserted.affected);
+                if inserted.last_insert_id != 0 {
+                    last_insert_id = inserted.last_insert_id;
+                }
+            }
+            Err(err) if err.to_string() == "conflict" => {
+                let mut updated = false;
+                for where_expr in mysql_conflict_predicates_for_row(&desc, &row) {
+                    let result = eng
+                        .data_update(&table, &where_expr, &set, Some(1), None, &[])
+                        .map_err(to_rpc_error)?;
+                    if result.affected > 0 {
+                        affected = affected.saturating_add(result.affected);
+                        updated = true;
+                        break;
+                    }
+                }
+                if !updated {
+                    return Err(RpcError::new(
+                        "conflict",
+                        "ON DUPLICATE KEY UPDATE could not locate the conflicting row",
+                    ));
+                }
+            }
+            Err(err) => return Err(to_rpc_error(err)),
         }
     }
 
@@ -7210,27 +7244,6 @@ fn eq_expr(col: String, lit: Lit) -> Expr {
         lo: None,
         hi: None,
     }
-}
-
-fn pk_where_expr_from_row(
-    pk_cols: &[String],
-    row: &BTreeMap<String, Lit>,
-) -> Result<Expr, RpcError> {
-    let mut expr = None::<Expr>;
-    for col in pk_cols {
-        let lit = row.get(col).cloned().ok_or_else(|| {
-            RpcError::new(
-                "invalid_request",
-                format!("row is missing primary key column '{}'", col),
-            )
-        })?;
-        let next = eq_expr(col.clone(), lit);
-        expr = Some(match expr {
-            Some(prev) => and_expr(prev, next),
-            None => next,
-        });
-    }
-    expr.ok_or_else(|| RpcError::new("invalid_request", "table has no primary key"))
 }
 
 fn sql_exec_row_exists(
@@ -7326,43 +7339,17 @@ async fn sql_exec_insert_ignore(
 async fn sql_exec_replace_into(
     state: &AppState,
     table: BaseTableRef,
-    columns: Vec<String>,
+    _columns: Vec<String>,
     rows: Vec<BTreeMap<String, Lit>>,
 ) -> Result<crate::engine::WriteResult, RpcError> {
-    let pk_cols = {
-        let eng = state.engine.read().await;
-        let desc = eng
-            .describe_table(&table.db, &table.table)
-            .map_err(to_rpc_error)?;
-        desc.get("primary_key")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-    };
-
     let mut eng = state.engine.write().await;
+    let desc = eng
+        .describe_table(&table.db, &table.table)
+        .map_err(to_rpc_error)?;
     let mut affected = 0u64;
     let mut last_insert_id = 0u64;
-    let key_col = columns.first().cloned();
 
     for row in rows {
-        if let Some(key_col) = key_col.as_ref() {
-            if let Some(key_lit) = row.get(key_col).cloned() {
-                let where_expr = eq_expr(key_col.clone(), key_lit);
-                if sql_exec_row_exists(&eng, &table, key_col, &where_expr)? {
-                    let updated = eng
-                        .data_update(&table, &where_expr, &row, Some(1), None, &[])
-                        .map_err(to_rpc_error)?;
-                    if updated.affected > 0 {
-                        affected = affected.saturating_add(2);
-                        continue;
-                    }
-                }
-            }
-        }
         match eng.data_insert(&table, vec![row.clone()], None) {
             Ok(inserted) => {
                 affected = affected.saturating_add(inserted.affected);
@@ -7371,20 +7358,28 @@ async fn sql_exec_replace_into(
                 }
             }
             Err(err) if err.to_string() == "conflict" => {
-                let where_expr = pk_where_expr_from_row(&pk_cols, &row)?;
-                let updated = eng
-                    .data_update(&table, &where_expr, &row, Some(1), None, &[])
-                    .map_err(to_rpc_error)?;
-                if updated.affected > 0 {
-                    affected = affected.saturating_add(2);
-                } else {
-                    let inserted = eng
-                        .data_insert(&table, vec![row], None)
+                let conflict_predicates = mysql_conflict_predicates_for_row(&desc, &row);
+                if conflict_predicates.is_empty() {
+                    return Err(RpcError::new(
+                        "conflict",
+                        "REPLACE could not locate the conflicting row",
+                    ));
+                }
+
+                let mut deleted = 0u64;
+                for where_expr in conflict_predicates {
+                    let removed = eng
+                        .data_delete(&table, &where_expr, None, &[])
                         .map_err(to_rpc_error)?;
-                    affected = affected.saturating_add(inserted.affected);
-                    if inserted.last_insert_id != 0 {
-                        last_insert_id = inserted.last_insert_id;
-                    }
+                    deleted = deleted.saturating_add(removed.affected);
+                }
+
+                let inserted = eng
+                    .data_insert(&table, vec![row], None)
+                    .map_err(to_rpc_error)?;
+                affected = affected.saturating_add(deleted.saturating_add(inserted.affected));
+                if inserted.last_insert_id != 0 {
+                    last_insert_id = inserted.last_insert_id;
                 }
             }
             Err(err) => return Err(to_rpc_error(err)),
@@ -10976,6 +10971,125 @@ mod tests {
             Some("https://example.net")
         );
 
+        let original_id = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT option_id FROM wp_options WHERE option_name = 'siteurl'",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(original_id.ok);
+        let original_id = original_id
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.as_array())
+            .and_then(|row| row.first())
+            .and_then(|v| v.get("v"))
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .unwrap_or_default();
+
+        let shuffled_upsert = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.shuffle', 'siteurl', 'no') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = VALUES(autoload)",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(shuffled_upsert.ok);
+        assert_eq!(
+            shuffled_upsert
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        let shuffled_select = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(shuffled_select.ok);
+        let shuffled_rows = shuffled_select
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            shuffled_rows[0][0]["v"].as_str(),
+            Some("https://example.shuffle")
+        );
+        assert_eq!(shuffled_rows[0][1]["v"].as_str(), Some("no"));
+
+        let shuffled_replace = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "REPLACE INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.replace', 'siteurl', 'yes')",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(shuffled_replace.ok);
+        assert_eq!(
+            shuffled_replace
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("affected"))
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+
+        let replaced_select = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT option_id, option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+                "default_db": "skein_test"
+            }),
+        )
+        .await;
+        assert!(replaced_select.ok);
+        let replaced_rows = replaced_select
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let replaced_id = replaced_rows[0][0]["v"]
+            .as_u64()
+            .or_else(|| replaced_rows[0][0]["v"].as_i64().map(|n| n as u64))
+            .unwrap_or_default();
+        assert_ne!(replaced_id, original_id);
+        assert_eq!(
+            replaced_rows[0][1]["v"].as_str(),
+            Some("https://example.replace")
+        );
+        assert_eq!(replaced_rows[0][2]["v"].as_str(), Some("yes"));
+
         let drop_table = call_rpc(
             &state,
             "sql.exec",
@@ -11140,7 +11254,7 @@ mod tests {
             &state,
             "sql.exec",
             json!({
-                "sql": "CREATE TABLE wp_options (option_id BIGINT NOT NULL AUTO_INCREMENT, option_name VARCHAR(64) NOT NULL, option_value VARCHAR(64) NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id))",
+                "sql": "CREATE TABLE wp_options (option_id BIGINT NOT NULL AUTO_INCREMENT, option_name VARCHAR(64) NOT NULL, option_value VARCHAR(64) NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name))",
                 "default_db": "wp"
             }),
         )

@@ -99,6 +99,19 @@ ON DUPLICATE KEY UPDATE
 
 SELECT option_value FROM wp_options WHERE option_name='siteurl';
 
+INSERT INTO wp_options (option_value, option_name, autoload)
+VALUES ('https://example.shuffle', 'siteurl', 'no')
+ON DUPLICATE KEY UPDATE
+  option_value = VALUES(option_value),
+  autoload = VALUES(autoload);
+
+SELECT option_value, autoload FROM wp_options WHERE option_name='siteurl';
+
+REPLACE INTO wp_options (option_value, option_name, autoload)
+VALUES ('https://example.replace-shuffled', 'siteurl', 'yes');
+
+SELECT option_value, autoload FROM wp_options WHERE option_name='siteurl';
+
 REPLACE INTO wp_options (option_id, option_name, option_value, autoload)
 VALUES (1, 'siteurl', 'https://example.replace', 'yes');
 

@@ -39,7 +39,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
   - `ALTER TABLE ... ADD COLUMN`
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
-  - `INSERT ... ON DUPLICATE KEY UPDATE` (leading-column emulation)
+  - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
@@ -50,7 +50,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL, surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)`, `LIKE`, and `IS NULL` / `IS NOT NULL` for common WordPress query shapes
-  - scan-based `UNIQUE KEY` enforcement for inserts/updates, plus corpus-oriented duplicate-key emulation on the leading insert column for `INSERT IGNORE`, `REPLACE`, and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`)
+  - scan-based `UNIQUE KEY` enforcement for inserts/updates, plus declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
   - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
@@ -60,7 +60,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - A shipped but intentionally narrow **SQL→SkeinQL translation layer** now provides the current MySQL-ish subset; broader parity work is still ongoing.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
-1) replace the current scan-based / leading-column duplicate compatibility logic with true secondary-index-backed unique-key enforcement
+1) replace the current scan-based duplicate compatibility logic with true secondary-index-backed unique-key enforcement
 2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (joins, subqueries, aggregates, `ALTER TABLE` variants)
 3) improve prepared-statement and optimizer parity for production drivers
 

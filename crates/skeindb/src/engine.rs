@@ -1558,7 +1558,13 @@ impl Engine {
                 // Build PK
                 let pk = extract_pk(schema, &row)?;
                 let pk_key_s = pk_key(&pk);
-                if tdata.pk_index.contains_key(&pk_key_s) {
+                let pk_conflict = tdata
+                    .pk_index
+                    .get(&pk_key_s)
+                    .and_then(|idx| tdata.rows.get(*idx))
+                    .map(|entry| !entry.deleted)
+                    .unwrap_or(false);
+                if pk_conflict {
                     anyhow::bail!("conflict");
                 }
 
