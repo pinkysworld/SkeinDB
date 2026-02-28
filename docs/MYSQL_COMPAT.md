@@ -42,7 +42,10 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
+  - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
+  - `DESCRIBE` / `SHOW KEYS`
+  - `COUNT(*)` result emulation for simple single-table selects
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
   - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.

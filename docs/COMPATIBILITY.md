@@ -62,6 +62,7 @@ Add queries there first, then implement.
 
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
+That corpus now includes WordPress-style bootstrap, metadata, and pagination/count queries.
 
 ---
 

@@ -439,6 +439,20 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select @@sql_mode" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@lower_case_table_names" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show tables from skein_test like 'wp_%'" => match response {
                 MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 2),
                 other => panic!("expected result set, got {:?}", other),
@@ -464,6 +478,13 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show keys from wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show create table wp_posts" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -473,6 +494,23 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "describe wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 5);
+                    assert_eq!(rows[0][0].as_deref(), Some("ID"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_name from wp_options where option_name in ('siteurl', 'home') order by option_name" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("home"));
+                        assert_eq!(rows[1][0].as_deref(), Some("siteurl"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select option_value from wp_options where option_name = 'siteurl'" => match response {
                 MysqlResponse::Rows(rows) => {
                     let value = rows
@@ -488,6 +526,25 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select count(*) as publish_count from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_status like 'pub%' order by id desc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("5"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select found_rows()" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][0].as_deref(), Some("4"));

@@ -3,9 +3,14 @@
 SELECT 1;
 SELECT VERSION();
 SELECT DATABASE();
+SELECT @@sql_mode;
+SELECT @@lower_case_table_names;
 
 SHOW VARIABLES LIKE 'sql_mode';
 SHOW VARIABLES LIKE 'lower_case_table_names';
+
+SET NAMES utf8mb4;
+SET SESSION sql_mode = '';
 
 CREATE DATABASE IF NOT EXISTS skein_test;
 USE skein_test;
@@ -40,7 +45,9 @@ SHOW TABLES FROM skein_test LIKE 'wp_%';
 SHOW TABLE STATUS FROM skein_test LIKE 'wp_posts';
 SHOW FULL COLUMNS FROM wp_options;
 SHOW INDEX FROM wp_posts;
+SHOW KEYS FROM wp_posts;
 SHOW CREATE TABLE wp_posts;
+DESCRIBE wp_posts;
 
 SELECT table_name
   FROM information_schema.tables
@@ -58,6 +65,7 @@ VALUES
   ('blogname', 'SkeinDB Test', 'yes');
 
 SELECT option_name, option_value FROM wp_options WHERE autoload = 'yes' ORDER BY option_name;
+SELECT option_name FROM wp_options WHERE option_name IN ('siteurl', 'home') ORDER BY option_name;
 SELECT option_value FROM wp_options WHERE option_name = 'siteurl';
 SELECT option_value FROM wp_options WHERE option_name = 'home';
 
@@ -82,6 +90,16 @@ VALUES
   (2, '2020-01-03 00:00:00', 'publish', 'World'),
   (2, '2020-01-04 00:00:00', 'publish', 'More'),
   (3, '2020-01-05 00:00:00', 'publish', 'Even More');
+
+SELECT COUNT(*) AS publish_count
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT ID
+  FROM wp_posts
+ WHERE post_status LIKE 'pub%'
+ ORDER BY ID DESC
+ LIMIT 0, 2;
 
 SELECT SQL_CALC_FOUND_ROWS ID
   FROM wp_posts

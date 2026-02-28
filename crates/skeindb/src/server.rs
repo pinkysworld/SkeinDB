@@ -704,6 +704,38 @@ fn parse_sql_string_literal(input: &str) -> Option<String> {
     Some(out)
 }
 
+fn mysql_normalize_session_var_name(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('@')
+        .trim_start_matches('@')
+        .trim()
+        .trim_start_matches("global.")
+        .trim_start_matches("GLOBAL.")
+        .trim_start_matches("session.")
+        .trim_start_matches("SESSION.")
+        .trim_start_matches("local.")
+        .trim_start_matches("LOCAL.")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
+    match mysql_normalize_session_var_name(raw).as_str() {
+        "sql_mode" => Some(MySqlLiteral::Str(String::new())),
+        "lower_case_table_names" => Some(MySqlLiteral::Int(0)),
+        "version_comment" => Some(MySqlLiteral::Str("SkeinDB compatibility layer".to_string())),
+        "tx_isolation" | "transaction_isolation" => {
+            Some(MySqlLiteral::Str("REPEATABLE-READ".to_string()))
+        }
+        "character_set_client" | "character_set_connection" | "character_set_results" => {
+            Some(MySqlLiteral::Str("utf8mb4".to_string()))
+        }
+        "collation_connection" => Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string())),
+        "autocommit" => Some(MySqlLiteral::Int(1)),
+        _ => None,
+    }
+}
+
 fn parse_select_literal_query(
     sql: &str,
     default_db: Option<&str>,
@@ -749,6 +781,8 @@ fn parse_select_literal_query(
                 Some(db) if !db.trim().is_empty() => MySqlLiteral::Str(db.trim().to_string()),
                 _ => MySqlLiteral::Null,
             }
+        } else if value_src.starts_with("@@") {
+            mysql_session_var_value(value_src)?
         } else if let Some(v) = parse_sql_string_literal(value_src) {
             MySqlLiteral::Str(v)
         } else if let Ok(v) = value_src.parse::<i64>() {
@@ -783,6 +817,42 @@ fn mysql_parse_set_autocommit(sql: &str) -> Option<bool> {
         "1" => Some(true),
         _ => None,
     }
+}
+
+fn mysql_is_session_compat_set(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("set ") {
+        return false;
+    }
+    let rest = trimmed[4..].trim();
+    let rest_lower = rest.to_ascii_lowercase();
+    if rest_lower.starts_with("names ") {
+        return true;
+    }
+
+    let normalized = rest_lower
+        .strip_prefix("@@session.")
+        .or_else(|| rest_lower.strip_prefix("@@local."))
+        .or_else(|| rest_lower.strip_prefix("@@"))
+        .or_else(|| rest_lower.strip_prefix("session "))
+        .or_else(|| rest_lower.strip_prefix("local "))
+        .unwrap_or(rest_lower.as_str())
+        .trim_start();
+
+    [
+        "sql_mode",
+        "character_set_client",
+        "character_set_connection",
+        "character_set_results",
+        "collation_connection",
+        "wait_timeout",
+    ]
+    .iter()
+    .any(|name| normalized.starts_with(name))
 }
 
 fn mysql_is_begin(sql: &str) -> bool {
@@ -1010,6 +1080,72 @@ fn mysql_show_index_outcome(table_name: &str, desc: &Value) -> MySqlQueryOutcome
     MySqlQueryOutcome::ResultSet { columns, rows }
 }
 
+fn mysql_parse_count_query(sql: &str) -> Option<(String, String)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    let from_idx = find_keyword_top_level(rest, "from")?;
+    let projection = rest[..from_idx].trim();
+    let projection_lower = projection.to_ascii_lowercase();
+    let (count_expr, alias_raw) = if let Some(idx) = find_keyword_top_level(projection, "as") {
+        (projection[..idx].trim(), Some(projection[idx + 2..].trim()))
+    } else {
+        (projection, None)
+    };
+    let count_lower = count_expr
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if !matches!(count_lower.as_str(), "count(*)" | "count(1)") {
+        return None;
+    }
+    let alias = alias_raw
+        .map(clean_sql_ident)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            if projection_lower.contains("count(1)") {
+                "COUNT(1)".to_string()
+            } else {
+                "COUNT(*)".to_string()
+            }
+        });
+    let mut from_tail = rest[from_idx..].trim().to_string();
+    let truncate_at = ["order by", "limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(&from_tail, keyword))
+        .min()
+        .unwrap_or(from_tail.len());
+    from_tail.truncate(truncate_at);
+    let from_tail = from_tail.trim().to_string();
+    (!from_tail.is_empty()).then_some((alias, format!("SELECT * {from_tail}")))
+}
+
+async fn mysql_try_count_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let Some((alias, transformed_sql)) = mysql_parse_count_query(sql) else {
+        return Ok(None);
+    };
+    let params = SqlExecParams {
+        sql: transformed_sql,
+        explain: false,
+        default_db: default_db.map(|db| db.to_string()),
+        result_format: Some(ResultFormat::RowsJson),
+    };
+    let result = sql_exec(state, params).await?;
+    let (_, rows) =
+        mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
+    Ok(Some(MySqlQueryOutcome::ResultSet {
+        columns: vec![alias],
+        rows: vec![vec![Some(rows.len().to_string())]],
+    }))
+}
+
 fn mysql_render_create_table(table_name: &str, desc: &Value) -> String {
     let mut defs = Vec::new();
     let columns = desc
@@ -1138,6 +1274,10 @@ async fn mysql_try_compat_query_outcome(
         return Ok(None);
     }
     let lower = trimmed.to_ascii_lowercase();
+
+    if let Some(result) = mysql_try_count_query_outcome(state, trimmed, default_db).await? {
+        return Ok(Some(result));
+    }
 
     if lower.starts_with("show variables like ") {
         let name = parse_sql_string_literal(trimmed[20..].trim())
@@ -1367,6 +1507,17 @@ async fn mysql_try_compat_query_outcome(
         return Ok(Some(mysql_show_columns_outcome(&desc, full)));
     }
 
+    if lower.starts_with("describe ") || lower.starts_with("desc ") {
+        let prefix_len = if lower.starts_with("describe ") { 9 } else { 5 };
+        let tail = trimmed[prefix_len..].trim();
+        let table = parse_table_ref(tail, default_db)?;
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        return Ok(Some(mysql_show_columns_outcome(&desc, false)));
+    }
+
     if lower.starts_with("show index from ") || lower.starts_with("show indexes from ") {
         let prefix_len = if lower.starts_with("show indexes from ") {
             18
@@ -1375,6 +1526,15 @@ async fn mysql_try_compat_query_outcome(
         };
         let tail = trimmed[prefix_len..].trim();
         let table = parse_table_ref(tail, default_db)?;
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        return Ok(Some(mysql_show_index_outcome(&table.table, &desc)));
+    }
+
+    if lower.starts_with("show keys from ") {
+        let table = parse_table_ref(trimmed[14..].trim(), default_db)?;
         let eng = state.engine.read().await;
         let desc = eng
             .describe_table(&table.db, &table.table)
@@ -1966,6 +2126,11 @@ async fn handle_mysql_connection(
                         tx_active = false;
                         tx_undo_sql.clear();
                     }
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                        .await?;
+                    continue;
+                }
+                if mysql_is_session_compat_set(&sql) {
                     mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
                         .await?;
                     continue;
@@ -5131,6 +5296,92 @@ fn parse_sql_lit(raw: &str) -> Result<Lit, RpcError> {
 }
 
 fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
+    let clause = clause.trim();
+    if let Some(idx) = find_keyword_top_level(clause, "is") {
+        let left = clause[..idx].trim();
+        let right = clause[idx + 2..].trim();
+        let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
+        if !col.is_empty() {
+            if right.eq_ignore_ascii_case("null") {
+                return Ok(Expr::Op {
+                    op: "is_null".to_string(),
+                    a: Some(Box::new(Expr::Col { col, table: None })),
+                    b: None,
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                });
+            }
+            if right.eq_ignore_ascii_case("not null") {
+                let is_null = Expr::Op {
+                    op: "is_null".to_string(),
+                    a: Some(Box::new(Expr::Col { col, table: None })),
+                    b: None,
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                };
+                return Ok(Expr::Op {
+                    op: "not".to_string(),
+                    a: Some(Box::new(is_null)),
+                    b: None,
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                });
+            }
+        }
+    }
+    if let Some(idx) = find_keyword_top_level(clause, "in") {
+        let left = clause[..idx].trim();
+        let right = clause[idx + 2..].trim();
+        let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
+        if !col.is_empty() && right.starts_with('(') && right.ends_with(')') {
+            let values = split_csv_top_level(&right[1..right.len() - 1])
+                .into_iter()
+                .map(|part| parse_sql_lit(&part))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Expr::Op {
+                op: "in".to_string(),
+                a: Some(Box::new(Expr::Col { col, table: None })),
+                b: None,
+                args: None,
+                list: Some(
+                    values
+                        .into_iter()
+                        .map(|lit| Expr::Lit { lit })
+                        .collect::<Vec<_>>(),
+                ),
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+    if let Some((idx, op)) = [("like", "like"), ("ilike", "ilike")]
+        .into_iter()
+        .find_map(|(token, op)| find_keyword_top_level(clause, token).map(|idx| (idx, op)))
+    {
+        let left = clause[..idx].trim();
+        let right = clause[idx + op.len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            let col = clean_sql_ident(left.rsplit('.').next().unwrap_or(left));
+            return Ok(Expr::Op {
+                op: op.to_string(),
+                a: Some(Box::new(Expr::Col { col, table: None })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: parse_sql_lit(right)?,
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+
     let bytes = clause.as_bytes();
     let mut i = 0usize;
     let mut depth = 0u32;
@@ -9424,11 +9675,11 @@ mod tests {
     #[test]
     fn parse_select_literal_query_roundtrip() {
         let parsed = parse_select_literal_query(
-            "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db",
+            "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db, @@sql_mode AS mode",
             Some("app"),
         )
         .expect("parse select literal");
-        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed.len(), 6);
         assert_eq!(parsed[0].0, "one");
         assert_eq!(parsed[0].1, MySqlLiteral::Int(1));
         assert_eq!(parsed[1].0, "two");
@@ -9442,6 +9693,8 @@ mod tests {
         );
         assert_eq!(parsed[4].0, "db");
         assert_eq!(parsed[4].1, MySqlLiteral::Str("app".to_string()));
+        assert_eq!(parsed[5].0, "mode");
+        assert_eq!(parsed[5].1, MySqlLiteral::Str(String::new()));
     }
 
     #[test]
@@ -9460,10 +9713,34 @@ mod tests {
     }
 
     #[test]
+    fn mysql_is_session_compat_set_accepts_wordpress_bootstrap_sets() {
+        assert!(mysql_is_session_compat_set("SET NAMES utf8mb4"));
+        assert!(mysql_is_session_compat_set("SET SESSION sql_mode = ''"));
+        assert!(mysql_is_session_compat_set(
+            "SET @@session.character_set_results = 'utf8mb4'"
+        ));
+        assert!(!mysql_is_session_compat_set("SET time_zone = '+00:00'"));
+    }
+
+    #[test]
     fn mysql_like_matches_supports_percent_and_underscore() {
         assert!(mysql_like_matches("wp_posts", "wp_%"));
         assert!(mysql_like_matches("wp_posts", "wp_post_"));
         assert!(!mysql_like_matches("wp_posts", "wp_option_"));
+    }
+
+    #[test]
+    fn mysql_parse_count_query_roundtrip() {
+        let parsed = mysql_parse_count_query(
+            "SELECT COUNT(*) AS publish_count FROM wp_posts WHERE post_status = 'publish' ORDER BY id DESC LIMIT 10",
+        )
+        .expect("parse count query");
+        assert_eq!(parsed.0, "publish_count");
+        assert_eq!(
+            parsed.1,
+            "SELECT * FROM wp_posts WHERE post_status = 'publish'"
+        );
+        assert!(mysql_parse_count_query("SELECT id FROM wp_posts").is_none());
     }
 
     #[test]
@@ -9941,6 +10218,112 @@ mod tests {
         )
         .await;
         assert!(drop_table.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_supports_in_like_and_is_null_predicates() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_wordpress_predicates");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let create_db = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE DATABASE IF NOT EXISTS wp"
+            }),
+        )
+        .await;
+        assert!(create_db.ok);
+
+        let create_table = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, post_title TEXT NOT NULL, post_excerpt TEXT, PRIMARY KEY (id))",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(create_table.ok);
+
+        let insert = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_posts (id, post_status, post_title, post_excerpt) VALUES (1, 'publish', 'Hello', NULL), (2, 'draft', 'Draft', 'Preview'), (3, 'publish', 'World', NULL)",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(insert.ok);
+
+        let in_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_status IN ('publish', 'private') ORDER BY id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(in_query.ok);
+        let in_rows = in_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(in_rows.len(), 2);
+
+        let like_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_status LIKE 'pub%' ORDER BY id DESC LIMIT 1",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(like_query.ok);
+        let like_rows = like_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(like_rows.len(), 1);
+        assert_eq!(like_rows[0][0]["v"].as_i64(), Some(3));
+
+        let null_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_excerpt IS NULL ORDER BY id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(null_query.ok);
+        let null_rows = null_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(null_rows.len(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
