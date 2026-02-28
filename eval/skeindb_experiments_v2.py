@@ -3,12 +3,6 @@
 SkeinDB Experimental Evaluation Harness — v2 (Adaptive Refs)
 =============================================================
 
-Updated to model the adaptive ValueID ref planning introduced in commit c1d9d84:
-  "Optimize adaptive dedup refs and document row encoding"
-
-The new code (plan_value_refs_for_rows) only emits $skein_ref when the ref
-encoding is actually smaller than inline storage for a given table snapshot.
-This eliminates the negative dedup ratios seen in v1 for small-value columns.
 
 Encoding model:
   Inline:  just the JSON-serialized value (e.g. 42 → "42", "active" → "\"active\"")
