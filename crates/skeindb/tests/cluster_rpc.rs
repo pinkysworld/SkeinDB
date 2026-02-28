@@ -397,6 +397,155 @@ async fn mysql_sql_calc_found_rows_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_compat_corpus_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+    let mut txn_select_index = 0usize;
+
+    for statement in compat_corpus_statements() {
+        send_com_query(&mut stream, &statement).await?;
+        let response = read_mysql_response(&mut stream)
+            .await
+            .with_context(|| format!("execute statement: {}", statement))?;
+        let normalized = statement
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+
+        match normalized.as_str() {
+            "select 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select version()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][0].as_deref(), Some("8.0.0-skeindb"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select database()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0], None);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show tables from skein_test like 'wp_%'" => match response {
+                MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 2),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show table status from skein_test like 'wp_posts'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("wp_posts"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show full columns from wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 4);
+                    assert_eq!(rows[0].len(), 9);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show create table wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("PRIMARY KEY"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name = 'siteurl'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    assert!(matches!(
+                        value,
+                        Some("https://example.com")
+                            | Some("https://example.org")
+                            | Some("https://example.net")
+                    ));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select found_rows()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][0].as_deref(), Some("4"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='txn_test'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    txn_select_index += 1;
+                    let expected = match txn_select_index {
+                        1 => Some("1"),
+                        2 => None,
+                        3 => Some("2"),
+                        _ => panic!("unexpected txn_test select count"),
+                    };
+                    assert_eq!(value, expected);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show status like 'threads_connected'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][1].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show engines" => match response {
+                MysqlResponse::Rows(rows) => assert!(!rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show grants" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(
+                        rows[0][0].as_deref(),
+                        Some("GRANT ALL PRIVILEGES ON *.* TO 'root'@'%'")
+                    );
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            _ => match response {
+                MysqlResponse::Ok {
+                    affected_rows,
+                    last_insert_id,
+                } => {
+                    let _ = (affected_rows, last_insert_id);
+                }
+                MysqlResponse::Rows(_) => {}
+            },
+        }
+    }
+    assert_eq!(txn_select_index, 3);
+
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
@@ -585,6 +734,103 @@ async fn read_mysql_text_result_rows(
         rows.push(decode_mysql_text_row(&payload, column_count)?);
     }
     Ok(rows)
+}
+
+#[derive(Debug)]
+enum MysqlResponse {
+    Ok {
+        affected_rows: u64,
+        last_insert_id: u64,
+    },
+    Rows(Vec<Vec<Option<String>>>),
+}
+
+async fn read_mysql_text_result_rows_after_first_packet(
+    stream: &mut TcpStream,
+    column_count_payload: Vec<u8>,
+) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let mut cur = 0usize;
+    let column_count = decode_lenenc_int(&column_count_payload, &mut cur)?;
+    for _ in 0..column_count {
+        let _ = read_mysql_packet(stream).await?;
+    }
+    let (_seq, eof1) = read_mysql_packet(stream).await?;
+    assert_eq!(eof1.first().copied(), Some(0xfe));
+
+    let mut rows = Vec::new();
+    loop {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
+            break;
+        }
+        rows.push(decode_mysql_text_row(&payload, column_count)?);
+    }
+    Ok(rows)
+}
+
+async fn read_mysql_response(stream: &mut TcpStream) -> anyhow::Result<MysqlResponse> {
+    let (_seq, first_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&first_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
+    if first_payload.first().copied() == Some(0x00) {
+        let (affected_rows, last_insert_id) = decode_mysql_ok_packet(&first_payload)?;
+        return Ok(MysqlResponse::Ok {
+            affected_rows,
+            last_insert_id,
+        });
+    }
+    let rows = read_mysql_text_result_rows_after_first_packet(stream, first_payload).await?;
+    Ok(MysqlResponse::Rows(rows))
+}
+
+fn compat_corpus_statements() -> Vec<String> {
+    let corpus = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/compat/corpus.sql"
+    ));
+    let mut cleaned = String::new();
+    for line in corpus.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut chars = cleaned.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match quote {
+            Some(q) if ch == q => {
+                if q == '\'' && chars.peek().copied() == Some('\'') {
+                    current.push('\'');
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == ';' => {
+                let stmt = current.trim().to_string();
+                if !stmt.is_empty() {
+                    statements.push(stmt);
+                }
+                current.clear();
+            }
+            None => {}
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+    statements
 }
 
 async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {

@@ -704,7 +704,10 @@ fn parse_sql_string_literal(input: &str) -> Option<String> {
     Some(out)
 }
 
-fn parse_select_literal_query(sql: &str) -> Option<Vec<(String, MySqlLiteral)>> {
+fn parse_select_literal_query(
+    sql: &str,
+    default_db: Option<&str>,
+) -> Option<Vec<(String, MySqlLiteral)>> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
         return None;
@@ -739,6 +742,13 @@ fn parse_select_literal_query(sql: &str) -> Option<Vec<(String, MySqlLiteral)>> 
 
         let lit = if value_src.eq_ignore_ascii_case("null") {
             MySqlLiteral::Null
+        } else if value_src.eq_ignore_ascii_case("version()") {
+            MySqlLiteral::Str(MYSQL_SERVER_VERSION.to_string())
+        } else if value_src.eq_ignore_ascii_case("database()") {
+            match default_db {
+                Some(db) if !db.trim().is_empty() => MySqlLiteral::Str(db.trim().to_string()),
+                _ => MySqlLiteral::Null,
+            }
         } else if let Some(v) = parse_sql_string_literal(value_src) {
             MySqlLiteral::Str(v)
         } else if let Ok(v) = value_src.parse::<i64>() {
@@ -749,6 +759,646 @@ fn parse_select_literal_query(sql: &str) -> Option<Vec<(String, MySqlLiteral)>> 
         cols.push((alias, lit));
     }
     Some(cols)
+}
+
+fn mysql_parse_set_autocommit(sql: &str) -> Option<bool> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("set ") {
+        return None;
+    }
+    let rest = trimmed[4..].trim();
+    let rest_lower = rest.to_ascii_lowercase();
+    let key = "autocommit";
+    if !rest_lower.starts_with(key) {
+        return None;
+    }
+    let tail = rest[key.len()..].trim_start();
+    let tail = tail.strip_prefix('=').unwrap_or(tail).trim();
+    match tail {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn mysql_is_begin(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    trimmed.eq_ignore_ascii_case("begin")
+        || trimmed.eq_ignore_ascii_case("begin work")
+        || trimmed.eq_ignore_ascii_case("start transaction")
+}
+
+fn mysql_is_commit(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    trimmed.eq_ignore_ascii_case("commit") || trimmed.eq_ignore_ascii_case("commit work")
+}
+
+fn mysql_is_rollback(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    trimmed.eq_ignore_ascii_case("rollback") || trimmed.eq_ignore_ascii_case("rollback work")
+}
+
+fn mysql_quote_ident(ident: &str) -> String {
+    format!("`{}`", ident.replace('`', "``"))
+}
+
+fn mysql_like_matches(value: &str, pattern: &str) -> bool {
+    let value = value.to_ascii_lowercase().into_bytes();
+    let pattern = pattern.to_ascii_lowercase().into_bytes();
+    let (mut vi, mut pi) = (0usize, 0usize);
+    let (mut star_pi, mut star_vi) = (None::<usize>, 0usize);
+
+    while vi < value.len() {
+        if pi < pattern.len() && (pattern[pi] == b'_' || pattern[pi] == value[vi]) {
+            vi += 1;
+            pi += 1;
+            continue;
+        }
+        if pi < pattern.len() && pattern[pi] == b'%' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_vi = vi;
+            continue;
+        }
+        if let Some(saved_pi) = star_pi {
+            pi = saved_pi + 1;
+            star_vi += 1;
+            vi = star_vi;
+            continue;
+        }
+        return false;
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'%' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+fn mysql_type_desc_display(desc: &Value) -> String {
+    let kind = desc
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("string")
+        .to_ascii_lowercase();
+    let max = desc.get("max").and_then(|v| v.as_u64());
+    match kind.as_str() {
+        "u64" => "bigint unsigned".to_string(),
+        "i64" => "bigint".to_string(),
+        "f64" => "double".to_string(),
+        "datetime" => "datetime".to_string(),
+        "date" => "date".to_string(),
+        "time" => "time".to_string(),
+        "json" => "json".to_string(),
+        "bytes" => "blob".to_string(),
+        "bool" => "tinyint(1)".to_string(),
+        "string" => match max {
+            Some(len) => format!("varchar({len})"),
+            None => "longtext".to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+fn mysql_show_columns_outcome(desc: &Value, full: bool) -> MySqlQueryOutcome {
+    let columns = if full {
+        vec![
+            "Field".to_string(),
+            "Type".to_string(),
+            "Collation".to_string(),
+            "Null".to_string(),
+            "Key".to_string(),
+            "Default".to_string(),
+            "Extra".to_string(),
+            "Privileges".to_string(),
+            "Comment".to_string(),
+        ]
+    } else {
+        vec![
+            "Field".to_string(),
+            "Type".to_string(),
+            "Null".to_string(),
+            "Key".to_string(),
+            "Default".to_string(),
+            "Extra".to_string(),
+        ]
+    };
+    let primary_key: HashSet<String> = desc
+        .get("primary_key")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|v| v.to_string())
+        .collect();
+    let rows = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .map(|col| {
+            let name = col
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let data_type = mysql_type_desc_display(col.get("type").unwrap_or(&Value::Null));
+            let is_nullable = if col
+                .get("nullable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+            {
+                "YES"
+            } else {
+                "NO"
+            }
+            .to_string();
+            let key = if primary_key.contains(&name) {
+                "PRI".to_string()
+            } else {
+                String::new()
+            };
+            let extra = if col
+                .get("auto_increment")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                "auto_increment".to_string()
+            } else {
+                String::new()
+            };
+            if full {
+                vec![
+                    Some(name),
+                    Some(data_type),
+                    Some("utf8mb4_general_ci".to_string()),
+                    Some(is_nullable),
+                    Some(key),
+                    None,
+                    Some(extra),
+                    Some("select,insert,update,references".to_string()),
+                    Some(String::new()),
+                ]
+            } else {
+                vec![
+                    Some(name),
+                    Some(data_type),
+                    Some(is_nullable),
+                    Some(key),
+                    None,
+                    Some(extra),
+                ]
+            }
+        })
+        .collect();
+    MySqlQueryOutcome::ResultSet { columns, rows }
+}
+
+fn mysql_show_index_outcome(table_name: &str, desc: &Value) -> MySqlQueryOutcome {
+    let columns = vec![
+        "Table".to_string(),
+        "Non_unique".to_string(),
+        "Key_name".to_string(),
+        "Seq_in_index".to_string(),
+        "Column_name".to_string(),
+        "Collation".to_string(),
+        "Cardinality".to_string(),
+        "Sub_part".to_string(),
+        "Packed".to_string(),
+        "Null".to_string(),
+        "Index_type".to_string(),
+        "Comment".to_string(),
+        "Index_comment".to_string(),
+    ];
+    let mut rows = Vec::new();
+    let pk = desc
+        .get("primary_key")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let columns_desc = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (idx, column_name) in pk.iter().filter_map(|v| v.as_str()).enumerate() {
+        let nullable = columns_desc
+            .iter()
+            .find(|col| col.get("name").and_then(|v| v.as_str()) == Some(column_name))
+            .and_then(|col| col.get("nullable").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        rows.push(vec![
+            Some(table_name.to_string()),
+            Some("0".to_string()),
+            Some("PRIMARY".to_string()),
+            Some((idx + 1).to_string()),
+            Some(column_name.to_string()),
+            Some("A".to_string()),
+            Some("0".to_string()),
+            None,
+            None,
+            Some(if nullable { "YES" } else { "NO" }.to_string()),
+            Some("BTREE".to_string()),
+            Some(String::new()),
+            Some(String::new()),
+        ]);
+    }
+    MySqlQueryOutcome::ResultSet { columns, rows }
+}
+
+fn mysql_render_create_table(table_name: &str, desc: &Value) -> String {
+    let mut defs = Vec::new();
+    let columns = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for col in columns {
+        let name = col.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let mut line = format!(
+            "  {} {}",
+            mysql_quote_ident(name),
+            mysql_type_desc_display(col.get("type").unwrap_or(&Value::Null))
+        );
+        if !col
+            .get("nullable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
+            line.push_str(" NOT NULL");
+        }
+        if col
+            .get("auto_increment")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            line.push_str(" AUTO_INCREMENT");
+        }
+        defs.push(line);
+    }
+    let pk = desc
+        .get("primary_key")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !pk.is_empty() {
+        let keys = pk
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(mysql_quote_ident)
+            .collect::<Vec<_>>()
+            .join(", ");
+        defs.push(format!("  PRIMARY KEY ({keys})"));
+    }
+    format!(
+        "CREATE TABLE {} (\n{}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        mysql_quote_ident(table_name),
+        defs.join(",\n")
+    )
+}
+
+async fn mysql_build_insert_undo_sql(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+    result: &Value,
+) -> Option<String> {
+    let affected = result
+        .get("write")
+        .and_then(|v| v.get("affected"))
+        .and_then(|v| v.as_u64())?;
+    if affected != 1 {
+        return None;
+    }
+    let last_insert_id = result
+        .get("write")
+        .and_then(|v| v.get("last_insert_id"))
+        .and_then(|v| v.as_u64())?;
+    if last_insert_id == 0 {
+        return None;
+    }
+    let SqlPlan::Insert { table, .. } = parse_sql_plan(sql, default_db).ok()? else {
+        return None;
+    };
+    let eng = state.engine.read().await;
+    let desc = eng.describe_table(&table.db, &table.table).ok()?;
+    let pk = desc.get("primary_key").and_then(|v| v.as_array())?;
+    if pk.len() != 1 {
+        return None;
+    }
+    let pk_name = pk.first().and_then(|v| v.as_str())?;
+    let auto_increment = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .any(|col| {
+            col.get("name").and_then(|v| v.as_str()) == Some(pk_name)
+                && col
+                    .get("auto_increment")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        });
+    if !auto_increment {
+        return None;
+    }
+    Some(format!(
+        "DELETE FROM {}.{} WHERE {} = {} LIMIT 1",
+        mysql_quote_ident(&table.db),
+        mysql_quote_ident(&table.table),
+        mysql_quote_ident(pk_name),
+        last_insert_id
+    ))
+}
+
+async fn mysql_rollback_transaction(state: &AppState, undo_sql: &[String]) -> Result<(), RpcError> {
+    for sql in undo_sql.iter().rev() {
+        let params = SqlExecParams {
+            sql: sql.clone(),
+            explain: false,
+            default_db: None,
+            result_format: Some(ResultFormat::RowsJson),
+        };
+        sql_exec(state, params).await?;
+    }
+    Ok(())
+}
+
+async fn mysql_try_compat_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+
+    if lower.starts_with("show variables like ") {
+        let name = parse_sql_string_literal(trimmed[20..].trim())
+            .unwrap_or_else(|| clean_sql_ident(&trimmed[20..]));
+        let value = match name.to_ascii_lowercase().as_str() {
+            "sql_mode" => Some(String::new()),
+            "lower_case_table_names" => Some("0".to_string()),
+            _ => None,
+        };
+        let rows = value
+            .into_iter()
+            .map(|v| vec![Some(name.clone()), Some(v)])
+            .collect();
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec!["Variable_name".to_string(), "Value".to_string()],
+            rows,
+        }));
+    }
+
+    if lower.starts_with("show status like ") {
+        let name = parse_sql_string_literal(trimmed[17..].trim())
+            .unwrap_or_else(|| clean_sql_ident(&trimmed[17..]));
+        let value = match name.to_ascii_lowercase().as_str() {
+            "threads_connected" => Some("1".to_string()),
+            _ => None,
+        };
+        let rows = value
+            .into_iter()
+            .map(|v| vec![Some(name.clone()), Some(v)])
+            .collect();
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec!["Variable_name".to_string(), "Value".to_string()],
+            rows,
+        }));
+    }
+
+    if lower == "show engines" {
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec![
+                "Engine".to_string(),
+                "Support".to_string(),
+                "Comment".to_string(),
+                "Transactions".to_string(),
+                "XA".to_string(),
+                "Savepoints".to_string(),
+            ],
+            rows: vec![
+                vec![
+                    Some("InnoDB".to_string()),
+                    Some("DEFAULT".to_string()),
+                    Some("SkeinDB compatibility engine".to_string()),
+                    Some("YES".to_string()),
+                    Some("NO".to_string()),
+                    Some("NO".to_string()),
+                ],
+                vec![
+                    Some("SKEIN".to_string()),
+                    Some("YES".to_string()),
+                    Some("Native SkeinDB execution".to_string()),
+                    Some("YES".to_string()),
+                    Some("NO".to_string()),
+                    Some("NO".to_string()),
+                ],
+            ],
+        }));
+    }
+
+    if lower == "show grants" {
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec!["Grants for root@%".to_string()],
+            rows: vec![vec![Some(
+                "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%'".to_string(),
+            )]],
+        }));
+    }
+
+    if lower.starts_with("show full tables") || lower.starts_with("show tables") {
+        let full = lower.starts_with("show full tables");
+        let prefix_len = if full { 16 } else { 11 };
+        let tail = trimmed[prefix_len..].trim();
+        let like_idx = find_keyword_top_level(tail, "like");
+        let scope_sql = like_idx.map(|idx| tail[..idx].trim()).unwrap_or(tail);
+        let like_pattern =
+            like_idx.and_then(|idx| parse_sql_string_literal(tail[idx + 4..].trim()));
+
+        let db = if scope_sql.is_empty() {
+            default_db.map(clean_sql_ident).filter(|db| !db.is_empty())
+        } else {
+            let scope_lower = scope_sql.to_ascii_lowercase();
+            if scope_lower.starts_with("from ") || scope_lower.starts_with("in ") {
+                let name = clean_sql_ident(scope_sql[4..].trim());
+                (!name.is_empty()).then_some(name)
+            } else {
+                return Err(RpcError::new(
+                    "not_supported",
+                    "SHOW TABLES supports only optional FROM/IN and LIKE clauses",
+                ));
+            }
+        }
+        .ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                "SHOW TABLES requires FROM <db> or a selected database",
+            )
+        })?;
+
+        let eng = state.engine.read().await;
+        let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+        let rows = tables
+            .into_iter()
+            .filter(|table| {
+                like_pattern
+                    .as_deref()
+                    .map(|pattern| mysql_like_matches(table, pattern))
+                    .unwrap_or(true)
+            })
+            .map(|table| {
+                if full {
+                    vec![Some(table), Some("BASE TABLE".to_string())]
+                } else {
+                    vec![Some(table)]
+                }
+            })
+            .collect();
+        let mut columns = vec![format!("Tables_in_{db}")];
+        if full {
+            columns.push("Table_type".to_string());
+        }
+        return Ok(Some(MySqlQueryOutcome::ResultSet { columns, rows }));
+    }
+
+    if lower.starts_with("show table status") {
+        let tail = trimmed[17..].trim();
+        let like_idx = find_keyword_top_level(tail, "like");
+        let scope_sql = like_idx.map(|idx| tail[..idx].trim()).unwrap_or(tail);
+        let like_pattern =
+            like_idx.and_then(|idx| parse_sql_string_literal(tail[idx + 4..].trim()));
+
+        let db = if scope_sql.is_empty() {
+            default_db.map(clean_sql_ident).filter(|db| !db.is_empty())
+        } else {
+            let scope_lower = scope_sql.to_ascii_lowercase();
+            if scope_lower.starts_with("from ") || scope_lower.starts_with("in ") {
+                let name = clean_sql_ident(scope_sql[4..].trim());
+                (!name.is_empty()).then_some(name)
+            } else {
+                return Err(RpcError::new(
+                    "not_supported",
+                    "SHOW TABLE STATUS supports only optional FROM/IN and LIKE clauses",
+                ));
+            }
+        }
+        .ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                "SHOW TABLE STATUS requires FROM <db> or a selected database",
+            )
+        })?;
+
+        let eng = state.engine.read().await;
+        let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+        let rows = tables
+            .into_iter()
+            .filter(|table| {
+                like_pattern
+                    .as_deref()
+                    .map(|pattern| mysql_like_matches(table, pattern))
+                    .unwrap_or(true)
+            })
+            .map(|table| {
+                vec![
+                    Some(table),
+                    Some("InnoDB".to_string()),
+                    Some("10".to_string()),
+                    Some("Dynamic".to_string()),
+                    Some("0".to_string()),
+                    Some("0".to_string()),
+                    Some("0".to_string()),
+                    Some("0".to_string()),
+                    Some("0".to_string()),
+                    Some("0".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("utf8mb4_general_ci".to_string()),
+                    None,
+                    Some(String::new()),
+                    Some("compatibility metadata".to_string()),
+                ]
+            })
+            .collect();
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec![
+                "Name".to_string(),
+                "Engine".to_string(),
+                "Version".to_string(),
+                "Row_format".to_string(),
+                "Rows".to_string(),
+                "Avg_row_length".to_string(),
+                "Data_length".to_string(),
+                "Max_data_length".to_string(),
+                "Index_length".to_string(),
+                "Data_free".to_string(),
+                "Auto_increment".to_string(),
+                "Create_time".to_string(),
+                "Update_time".to_string(),
+                "Check_time".to_string(),
+                "Collation".to_string(),
+                "Checksum".to_string(),
+                "Create_options".to_string(),
+                "Comment".to_string(),
+            ],
+            rows,
+        }));
+    }
+
+    if lower.starts_with("show columns from ") || lower.starts_with("show full columns from ") {
+        let full = lower.starts_with("show full columns from ");
+        let SqlPlan::ShowColumns { table } = parse_show_plan(trimmed, default_db)? else {
+            return Ok(None);
+        };
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        return Ok(Some(mysql_show_columns_outcome(&desc, full)));
+    }
+
+    if lower.starts_with("show index from ") || lower.starts_with("show indexes from ") {
+        let prefix_len = if lower.starts_with("show indexes from ") {
+            18
+        } else {
+            15
+        };
+        let tail = trimmed[prefix_len..].trim();
+        let table = parse_table_ref(tail, default_db)?;
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        return Ok(Some(mysql_show_index_outcome(&table.table, &desc)));
+    }
+
+    if lower.starts_with("show create table ") {
+        let tail = trimmed[18..].trim();
+        let table = parse_table_ref(tail, default_db)?;
+        let eng = state.engine.read().await;
+        let desc = eng
+            .describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?;
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec!["Table".to_string(), "Create Table".to_string()],
+            rows: vec![vec![
+                Some(table.table.clone()),
+                Some(mysql_render_create_table(&table.table, &desc)),
+            ]],
+        }));
+    }
+
+    Ok(None)
 }
 
 fn mysql_parse_select_found_rows_query(sql: &str) -> Option<String> {
@@ -1270,6 +1920,9 @@ async fn handle_mysql_connection(
     let username = response.username;
     let mut default_db: Option<String> = None;
     let mut last_found_rows: u64 = 0;
+    let mut autocommit = true;
+    let mut tx_active = false;
+    let mut tx_undo_sql = Vec::<String>::new();
     let ok = mysql_ok_packet();
     mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
 
@@ -1307,6 +1960,51 @@ async fn handle_mysql_connection(
             }
             0x03 => {
                 let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
+                if let Some(enabled) = mysql_parse_set_autocommit(&sql) {
+                    autocommit = enabled;
+                    if autocommit {
+                        tx_active = false;
+                        tx_undo_sql.clear();
+                    }
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                        .await?;
+                    continue;
+                }
+                if mysql_is_begin(&sql) {
+                    tx_active = true;
+                    tx_undo_sql.clear();
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                        .await?;
+                    continue;
+                }
+                if mysql_is_commit(&sql) {
+                    tx_active = false;
+                    tx_undo_sql.clear();
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                        .await?;
+                    continue;
+                }
+                if mysql_is_rollback(&sql) {
+                    match mysql_rollback_transaction(&state, &tx_undo_sql).await {
+                        Ok(()) => {
+                            tx_active = false;
+                            tx_undo_sql.clear();
+                            mysql_write_packet(
+                                &mut stream,
+                                cmd_seq.wrapping_add(1),
+                                &mysql_ok_packet(),
+                            )
+                            .await?;
+                        }
+                        Err(err) => {
+                            let (code, state_code, message) = mysql_error_from_rpc(&err);
+                            let packet = mysql_err_packet(code, state_code, &message);
+                            mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
+                                .await?;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(column_name) = mysql_parse_select_found_rows_query(&sql) {
                     let found_rows = i64::try_from(last_found_rows).unwrap_or(i64::MAX);
                     mysql_send_literal_result(
@@ -1317,13 +2015,41 @@ async fn handle_mysql_connection(
                     .await?;
                     continue;
                 }
+                match mysql_try_compat_query_outcome(&state, &sql, default_db.as_deref()).await {
+                    Ok(Some(MySqlQueryOutcome::ResultSet { columns, rows })) => {
+                        mysql_send_text_result(
+                            &mut stream,
+                            cmd_seq.wrapping_add(1),
+                            &columns,
+                            &rows,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Ok(Some(MySqlQueryOutcome::Ok {
+                        affected_rows,
+                        last_insert_id,
+                    })) => {
+                        let packet = mysql_ok_packet_with(affected_rows, last_insert_id);
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        let (code, state_code, message) = mysql_error_from_rpc(&err);
+                        let packet = mysql_err_packet(code, state_code, &message);
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                        continue;
+                    }
+                }
 
                 let rewritten = mysql_rewrite_sql_calc_found_rows(&sql);
                 let exec_sql = rewritten.clone().unwrap_or_else(|| sql.clone());
                 let calc_found_rows = rewritten.is_some();
 
                 if !calc_found_rows {
-                    if let Some(cols) = parse_select_literal_query(&exec_sql) {
+                    if let Some(cols) = parse_select_literal_query(&exec_sql, default_db.as_deref())
+                    {
                         mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols)
                             .await?;
                         continue;
@@ -1363,6 +2089,28 @@ async fn handle_mysql_connection(
                                     )
                                     .await?;
                                     continue;
+                                }
+                            }
+                        }
+                        let statement = result
+                            .get("statement")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let transactional_write =
+                            matches!(statement, "insert" | "update" | "delete")
+                                && (!autocommit || tx_active);
+                        if transactional_write {
+                            tx_active = true;
+                            if statement == "insert" {
+                                if let Some(undo_sql) = mysql_build_insert_undo_sql(
+                                    &state,
+                                    &exec_sql,
+                                    default_db.as_deref(),
+                                    &result,
+                                )
+                                .await
+                                {
+                                    tx_undo_sql.push(undo_sql);
                                 }
                             }
                         }
@@ -8675,20 +9423,47 @@ mod tests {
 
     #[test]
     fn parse_select_literal_query_roundtrip() {
-        let parsed = parse_select_literal_query("SELECT 1 AS one, 'x' AS two, NULL")
-            .expect("parse select literal");
-        assert_eq!(parsed.len(), 3);
+        let parsed = parse_select_literal_query(
+            "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db",
+            Some("app"),
+        )
+        .expect("parse select literal");
+        assert_eq!(parsed.len(), 5);
         assert_eq!(parsed[0].0, "one");
         assert_eq!(parsed[0].1, MySqlLiteral::Int(1));
         assert_eq!(parsed[1].0, "two");
         assert_eq!(parsed[1].1, MySqlLiteral::Str("x".to_string()));
         assert_eq!(parsed[2].0, "col3");
         assert_eq!(parsed[2].1, MySqlLiteral::Null);
+        assert_eq!(parsed[3].0, "version");
+        assert_eq!(
+            parsed[3].1,
+            MySqlLiteral::Str(MYSQL_SERVER_VERSION.to_string())
+        );
+        assert_eq!(parsed[4].0, "db");
+        assert_eq!(parsed[4].1, MySqlLiteral::Str("app".to_string()));
     }
 
     #[test]
     fn parse_select_literal_query_rejects_from_clause() {
-        assert!(parse_select_literal_query("SELECT 1 FROM app.users").is_none());
+        assert!(parse_select_literal_query("SELECT 1 FROM app.users", None).is_none());
+    }
+
+    #[test]
+    fn mysql_parse_set_autocommit_roundtrip() {
+        assert_eq!(mysql_parse_set_autocommit("SET autocommit=0"), Some(false));
+        assert_eq!(
+            mysql_parse_set_autocommit("SET autocommit = 1;"),
+            Some(true)
+        );
+        assert_eq!(mysql_parse_set_autocommit("SET sql_mode=''"), None);
+    }
+
+    #[test]
+    fn mysql_like_matches_supports_percent_and_underscore() {
+        assert!(mysql_like_matches("wp_posts", "wp_%"));
+        assert!(mysql_like_matches("wp_posts", "wp_post_"));
+        assert!(!mysql_like_matches("wp_posts", "wp_option_"));
     }
 
     #[test]

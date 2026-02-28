@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-01-17
+Last updated: 2026-02-28
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -23,7 +23,7 @@ SkeinDB adoption strategy:
 
 ---
 
-## 2) v0.1 SQL surface (target)
+## 2) v0.1 SQL surface (current baseline)
 
 ### DDL
 - CREATE DATABASE / DROP DATABASE / USE
@@ -59,6 +59,9 @@ SkeinDB adoption strategy:
 
 The file `tests/compat/corpus.sql` is the primary compatibility driver.
 Add queries there first, then implement.
+
+The MySQL integration suite now executes that corpus end-to-end over the wire listener,
+so the checked-in corpus is the enforced baseline for compatibility work.
 
 ---
 
