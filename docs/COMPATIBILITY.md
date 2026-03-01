@@ -40,6 +40,7 @@ SkeinDB adoption strategy:
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
+- Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN and LEFT JOIN (simple single-join shapes); RIGHT/FULL joins are not implemented yet
 - GROUP BY + aggregates remain mostly open beyond the current `COUNT(*)` compatibility shim
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()

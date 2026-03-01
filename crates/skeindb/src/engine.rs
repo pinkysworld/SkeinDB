@@ -7865,8 +7865,24 @@ fn eval_predicate(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<bool> {
+    Ok(matches!(
+        eval_predicate_truth(expr, row, ctx, args)?,
+        Some(true)
+    ))
+}
+
+fn eval_predicate_truth(
+    expr: &Expr,
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<Option<bool>> {
     let v = eval_expr(expr, row, ctx, args)?;
-    Ok(matches!(v, Lit::Bool { v: true }))
+    Ok(match v {
+        Lit::Bool { v } => Some(v),
+        Lit::Null => None,
+        _ => Some(false),
+    })
 }
 
 fn eval_expr(
@@ -7956,8 +7972,10 @@ fn eval_expr(
                     let inner = a
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("not requires a"))?;
-                    let v = eval_predicate(inner, row, ctx, args)?;
-                    Ok(Lit::Bool { v: !v })
+                    match eval_predicate_truth(inner, row, ctx, args)? {
+                        Some(v) => Ok(Lit::Bool { v: !v }),
+                        None => Ok(Lit::Null),
+                    }
                 }
                 "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
                     let aa = a
@@ -7968,6 +7986,9 @@ fn eval_expr(
                         .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
                     let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
                     let ord = cmp_lit(&va, &vb)?;
                     let out = match op {
                         "eq" => ord == std::cmp::Ordering::Equal,
@@ -7983,16 +8004,28 @@ fn eval_expr(
                 "in" => {
                     let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("in requires a"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
+                    if matches!(va, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
                     let xs = list
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("in requires list"))?;
+                    let mut saw_null = false;
                     for x in xs {
                         let vx = eval_expr(x, row, ctx, args)?;
+                        if matches!(vx, Lit::Null) {
+                            saw_null = true;
+                            continue;
+                        }
                         if cmp_lit(&va, &vx)? == std::cmp::Ordering::Equal {
                             return Ok(Lit::Bool { v: true });
                         }
                     }
-                    Ok(Lit::Bool { v: false })
+                    if saw_null {
+                        Ok(Lit::Null)
+                    } else {
+                        Ok(Lit::Bool { v: false })
+                    }
                 }
                 "between" => {
                     let aa = a
@@ -8007,6 +8040,10 @@ fn eval_expr(
                     let va = eval_expr(aa, row, ctx, args)?;
                     let lo = eval_expr(vlo, row, ctx, args)?;
                     let hi = eval_expr(vhi, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(lo, Lit::Null) || matches!(hi, Lit::Null)
+                    {
+                        return Ok(Lit::Null);
+                    }
                     let ge = cmp_lit(&va, &lo)? != std::cmp::Ordering::Less;
                     let le = cmp_lit(&va, &hi)? != std::cmp::Ordering::Greater;
                     Ok(Lit::Bool { v: ge && le })
@@ -8020,6 +8057,9 @@ fn eval_expr(
                         .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
                     let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
                     let subject = lit_to_string_for_like(&va)
                         .ok_or_else(|| anyhow::anyhow!("{op} requires string-like lhs"))?;
                     let pattern = lit_to_string_for_like(&vb)
@@ -8106,12 +8146,19 @@ fn eval_and_list(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<Lit> {
+    let mut saw_null = false;
     for x in xs {
-        if !eval_predicate(x, row, ctx, args)? {
-            return Ok(Lit::Bool { v: false });
+        match eval_predicate_truth(x, row, ctx, args)? {
+            Some(true) => {}
+            Some(false) => return Ok(Lit::Bool { v: false }),
+            None => saw_null = true,
         }
     }
-    Ok(Lit::Bool { v: true })
+    if saw_null {
+        Ok(Lit::Null)
+    } else {
+        Ok(Lit::Bool { v: true })
+    }
 }
 
 fn eval_or_list(
@@ -8120,12 +8167,19 @@ fn eval_or_list(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<Lit> {
+    let mut saw_null = false;
     for x in xs {
-        if eval_predicate(x, row, ctx, args)? {
-            return Ok(Lit::Bool { v: true });
+        match eval_predicate_truth(x, row, ctx, args)? {
+            Some(true) => return Ok(Lit::Bool { v: true }),
+            Some(false) => {}
+            None => saw_null = true,
         }
     }
-    Ok(Lit::Bool { v: false })
+    if saw_null {
+        Ok(Lit::Null)
+    } else {
+        Ok(Lit::Bool { v: false })
+    }
 }
 
 fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
@@ -17094,6 +17148,162 @@ mod tests {
 
         let (_cols, rows) = execute_select(&engine, &query, &[])?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 9 }, Lit::Null]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_treats_null_predicates_as_unknown() -> anyhow::Result<()> {
+        let dir = temp_dir("null_predicate_truth");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "title".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "excerpt".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "Hello".to_string(),
+                        },
+                    ),
+                    ("excerpt", Lit::Null),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "Draft".to_string(),
+                        },
+                    ),
+                    (
+                        "excerpt",
+                        Lit::Str {
+                            v: "Preview".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "World".to_string(),
+                        },
+                    ),
+                    ("excerpt", Lit::Null),
+                ]),
+            ],
+            None,
+        )?;
+
+        let eq_null = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                },
+                Expr::Lit { lit: Lit::Null },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &eq_null, &[])?;
+        assert!(rows.is_empty());
+
+        let like_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "like".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "P%".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, rows) = execute_select(&engine, &like_query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
+
+        let in_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "in".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                })),
+                b: None,
+                args: None,
+                list: Some(vec![
+                    Expr::Lit {
+                        lit: Lit::Str {
+                            v: "Preview".to_string(),
+                        },
+                    },
+                    Expr::Lit { lit: Lit::Null },
+                ]),
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, rows) = execute_select(&engine, &in_query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

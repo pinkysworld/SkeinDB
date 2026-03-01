@@ -702,6 +702,20 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select p.id from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login = 'ada' order by p.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_title = null order by id asc" => match response {
+                MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select option_value, autoload from wp_options where option_name='siteurl'" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -894,6 +908,20 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0][0].as_deref(), Some("13"));
             assert_eq!(rows[0][1], None);
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name = 'Ada' ORDER BY p.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[1][0].as_deref(), Some("11"));
         }
         other => panic!("expected result set, got {:?}", other),
     }

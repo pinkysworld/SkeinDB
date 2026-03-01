@@ -11207,6 +11207,71 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(null_rows.len(), 2);
 
+        let eq_null_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_excerpt = NULL ORDER BY id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(eq_null_query.ok);
+        let eq_null_rows = eq_null_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(eq_null_rows.is_empty());
+
+        let nullable_like_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_excerpt LIKE 'P%' ORDER BY id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(nullable_like_query.ok);
+        let nullable_like_rows = nullable_like_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(nullable_like_rows.len(), 1);
+        assert_eq!(nullable_like_rows[0][0]["v"].as_i64(), Some(2));
+
+        let nullable_in_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT id FROM wp_posts WHERE post_excerpt IN ('Preview', NULL) ORDER BY id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(nullable_in_query.ok);
+        let nullable_in_rows = nullable_in_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(nullable_in_rows.len(), 1);
+        assert_eq!(nullable_in_rows[0][0]["v"].as_i64(), Some(2));
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -11574,6 +11639,29 @@ mod tests {
         assert_eq!(left_join_rows.len(), 1);
         assert_eq!(left_join_rows[0][0]["v"].as_i64(), Some(13));
         assert_eq!(left_join_rows[0][1]["t"].as_str(), Some("null"));
+
+        let left_join_eq = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT p.id FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name = 'Ada' ORDER BY p.id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(left_join_eq.ok);
+        let left_join_eq_rows = left_join_eq
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(left_join_eq_rows.len(), 2);
+        assert_eq!(left_join_eq_rows[0][0]["v"].as_i64(), Some(10));
+        assert_eq!(left_join_eq_rows[1][0]["v"].as_i64(), Some(11));
 
         let altered = call_rpc(
             &state,

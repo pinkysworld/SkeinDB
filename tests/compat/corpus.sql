@@ -144,6 +144,18 @@ SELECT p.post_author, u.user_login
  WHERE u.user_login IS NULL
  ORDER BY p.post_author ASC;
 
+SELECT p.ID
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE u.user_login = 'ada'
+ ORDER BY p.ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE post_title = NULL
+ ORDER BY ID ASC;
+
 SELECT COUNT(*) AS publish_count
   FROM wp_posts
  WHERE post_status = 'publish';
