@@ -17,6 +17,7 @@ USE skein_test;
 
 DROP TABLE IF EXISTS wp_options;
 DROP TABLE IF EXISTS wp_posts;
+DROP TABLE IF EXISTS wp_users;
 
 CREATE TABLE wp_options (
   option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -35,6 +36,12 @@ CREATE TABLE wp_posts (
   post_title TEXT NOT NULL,
   PRIMARY KEY (ID),
   KEY post_status (post_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+CREATE TABLE wp_users (
+  id BIGINT UNSIGNED NOT NULL,
+  user_login VARCHAR(60) NOT NULL,
+  PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
 
 SHOW DATABASES;
@@ -117,6 +124,11 @@ VALUES (1, 'siteurl', 'https://example.replace', 'yes');
 
 SELECT option_value FROM wp_options WHERE option_name='siteurl';
 
+INSERT INTO wp_users (id, user_login)
+VALUES
+  (1, 'ada'),
+  (2, 'grace');
+
 INSERT INTO wp_posts (post_author, post_date, post_status, post_title)
 VALUES
   (1, '2020-01-01 00:00:00', 'publish', 'Hello'),
@@ -124,6 +136,13 @@ VALUES
   (2, '2020-01-03 00:00:00', 'publish', 'World'),
   (2, '2020-01-04 00:00:00', 'publish', 'More'),
   (3, '2020-01-05 00:00:00', 'publish', 'Even More');
+
+SELECT p.post_author, u.user_login
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE u.user_login IS NULL
+ ORDER BY p.post_author ASC;
 
 SELECT COUNT(*) AS publish_count
   FROM wp_posts

@@ -576,12 +576,12 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 other => panic!("expected result set, got {:?}", other),
             },
             "show tables from skein_test like 'wp_%'" => match response {
-                MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 2),
+                MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 3),
                 other => panic!("expected result set, got {:?}", other),
             },
             "show full tables from skein_test where table_type = 'base table'" => match response {
                 MysqlResponse::Rows(rows) => {
-                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows.len(), 3);
                     assert_eq!(rows[0][1].as_deref(), Some("BASE TABLE"));
                 }
                 other => panic!("expected result set, got {:?}", other),
@@ -692,6 +692,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select p.post_author, u.user_login from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login is null order by p.post_author asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[0][1], None);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select option_value, autoload from wp_options where option_name='siteurl'" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -860,6 +870,30 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
             assert_eq!(rows[0][1].as_deref(), Some("Ada"));
             assert_eq!(rows[1][0].as_deref(), Some("3"));
             assert_eq!(rows[1][1].as_deref(), Some("Linus"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_posts (id, post_author, post_status) VALUES (13, 99, 'publish')",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name IS NULL ORDER BY p.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("13"));
+            assert_eq!(rows[0][1], None);
         }
         other => panic!("expected result set, got {:?}", other),
     }

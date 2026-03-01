@@ -11541,6 +11541,40 @@ mod tests {
         assert_eq!(join_rows[1][0]["v"].as_i64(), Some(3));
         assert_eq!(join_rows[1][1]["v"].as_str(), Some("Linus"));
 
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_posts (id, post_author, post_status) VALUES (13, 99, 'publish')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let left_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT p.id, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name IS NULL ORDER BY p.id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(left_join.ok);
+        let left_join_rows = left_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(left_join_rows.len(), 1);
+        assert_eq!(left_join_rows[0][0]["v"].as_i64(), Some(13));
+        assert_eq!(left_join_rows[0][1]["t"].as_str(), Some("null"));
+
         let altered = call_rpc(
             &state,
             "sql.exec",
