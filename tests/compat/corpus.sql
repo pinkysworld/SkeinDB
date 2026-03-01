@@ -127,7 +127,8 @@ SELECT option_value FROM wp_options WHERE option_name='siteurl';
 INSERT INTO wp_users (id, user_login)
 VALUES
   (1, 'ada'),
-  (2, 'grace');
+  (2, 'grace'),
+  (4, 'margaret');
 
 INSERT INTO wp_posts (post_author, post_date, post_status, post_title)
 VALUES
@@ -151,12 +152,27 @@ SELECT p.ID
  WHERE u.user_login = 'ada'
  ORDER BY p.ID ASC;
 
+SELECT u.id, p.ID
+  FROM wp_posts AS p
+  RIGHT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID IS NULL
+ ORDER BY u.id ASC;
+
 SELECT ID
   FROM wp_posts
  WHERE post_title = NULL
  ORDER BY ID ASC;
 
 SELECT COUNT(*) AS publish_count
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT COUNT(post_author) AS author_count
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT SUM(post_author) AS author_sum
   FROM wp_posts
  WHERE post_status = 'publish';
 

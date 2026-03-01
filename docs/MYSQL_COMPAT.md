@@ -33,7 +33,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 - The CLI `--mysql` listener now supports a **minimal MySQL wire handshake** with `mysql_native_password` auth exchange.
 - The listener supports a `COM_QUERY` translation subset through `sql.exec` for:
-  - `SELECT` (literal-only, single-table, and simple `INNER JOIN` / `LEFT JOIN` queries)
+  - `SELECT` (literal-only, single-table, and simple `INNER JOIN` / `LEFT JOIN` / `RIGHT JOIN` queries)
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
@@ -41,12 +41,20 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
+- The MySQL wire layer also now includes a **basic prepared-statement baseline**:
+  - `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, and `COM_STMT_CLOSE`
+  - `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, and baseline `COM_STMT_FETCH`
+  - `?` placeholders are rebound into the same SQL-translation path as `COM_QUERY`
+  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including base-table `SELECT *` on a single table)
+  - prepared `SELECT` responses are returned over the binary row protocol
+  - read-only server-side cursor execution now works for prepared result sets
+  - deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, stricter cursor/driver semantics) remains follow-on work
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
   - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
-  - `COUNT(*)` result emulation for simple single-table selects
+  - simple aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on single-result aggregate queries
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL, surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)`, `LIKE`, and `IS NULL` / `IS NOT NULL` for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
@@ -62,7 +70,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) replace the current scan-based duplicate compatibility logic with true secondary-index-backed unique-key enforcement
 2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (joins, subqueries, aggregates, `ALTER TABLE` variants)
-3) improve prepared-statement and optimizer parity for production drivers
+3) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers
 
 ---
 

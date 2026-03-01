@@ -3,7 +3,7 @@
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
 
-## Reality sync (2026-02-28)
+## Reality sync (2026-03-01)
 
 This file now reflects a stricter distinction:
 - `[x]` = implemented and exercised in runtime/tests.
@@ -45,8 +45,8 @@ Phase 0 verification checklist:
 - [x] T033: DDL/DML subset for corpus.sql
 - [x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
 - [ ] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics
-- [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (more joins, subqueries, aggregates, `ALTER TABLE` variants)
-- [ ] T037: COM_STMT_PREPARE / COM_STMT_EXECUTE + result-metadata parity for common MySQL drivers
+- [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (more joins, subqueries, `GROUP BY`/richer aggregates, `ALTER TABLE` variants)
+- [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage)
 
 ## Phase 4 — Web console
 - [x] T040: HTTP API `/api/v1/sql/exec`

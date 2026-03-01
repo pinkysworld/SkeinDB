@@ -79,6 +79,8 @@ const MYSQL_PROTOCOL_VERSION: u8 = 0x0a;
 const MYSQL_SERVER_VERSION: &str = "8.0.0-skeindb";
 const MYSQL_AUTH_PLUGIN: &str = "mysql_native_password";
 const MYSQL_STATUS_AUTOCOMMIT: u16 = 0x0002;
+const MYSQL_STATUS_CURSOR_EXISTS: u16 = 0x0040;
+const MYSQL_STATUS_LAST_ROW_SENT: u16 = 0x0080;
 const MYSQL_CAP_LONG_PASSWORD: u32 = 0x0000_0001;
 const MYSQL_CAP_CONNECT_WITH_DB: u32 = 0x0000_0008;
 const MYSQL_CAP_PROTOCOL_41: u32 = 0x0000_0200;
@@ -424,6 +426,7 @@ struct MySqlHandshakeResponse {
     capabilities: u32,
     username: String,
     auth_response: Vec<u8>,
+    database: Option<String>,
     auth_plugin: Option<String>,
 }
 
@@ -444,6 +447,78 @@ enum MySqlQueryOutcome {
         columns: Vec<String>,
         rows: Vec<Vec<Option<String>>>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlStmtColumnType {
+    LongLong,
+    Double,
+    VarString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlStmtParamType {
+    type_code: u8,
+    unsigned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MySqlStmtPrepareColumn {
+    name: String,
+    column_type: MySqlStmtColumnType,
+}
+
+#[derive(Debug, Clone)]
+struct MySqlPreparedCursor {
+    column_types: Vec<MySqlStmtColumnType>,
+    rows: Vec<Vec<Option<String>>>,
+    next_row: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MySqlPreparedStatement {
+    sql: String,
+    param_count: u16,
+    result_columns: Vec<MySqlStmtPrepareColumn>,
+    param_types: Vec<MySqlStmtParamType>,
+    long_data: HashMap<u16, Vec<u8>>,
+    cursor: Option<MySqlPreparedCursor>,
+}
+
+#[derive(Debug)]
+struct MySqlSessionState {
+    default_db: Option<String>,
+    last_found_rows: u64,
+    autocommit: bool,
+    tx_active: bool,
+    tx_undo_sql: Vec<String>,
+}
+
+type MySqlWireError = (u16, &'static str, String);
+
+impl MySqlPreparedStatement {
+    fn new(sql: String, param_count: u16, result_columns: Vec<MySqlStmtPrepareColumn>) -> Self {
+        Self {
+            sql,
+            param_count,
+            result_columns,
+            param_types: Vec::new(),
+            long_data: HashMap::new(),
+            cursor: None,
+        }
+    }
+}
+
+impl MySqlSessionState {
+    fn new(default_db: Option<String>) -> Self {
+        Self {
+            default_db,
+            last_found_rows: 0,
+            autocommit: true,
+            tx_active: false,
+            tx_undo_sql: Vec::new(),
+        }
+    }
 }
 
 fn mysql_seed(conn_id: u32) -> [u8; 20] {
@@ -544,6 +619,340 @@ fn parse_lenenc_int(payload: &[u8], cursor: &mut usize) -> Result<usize, String>
     }
 }
 
+fn parse_lenenc_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], String> {
+    let len = parse_lenenc_int(payload, cursor)?;
+    if *cursor + len > payload.len() {
+        return Err("truncated length-encoded bytes".to_string());
+    }
+    let bytes = &payload[*cursor..*cursor + len];
+    *cursor += len;
+    Ok(bytes)
+}
+
+fn mysql_count_placeholders(sql: &str) -> u16 {
+    let bytes = sql.as_bytes();
+    let mut quote = 0u8;
+    let mut count = 0u16;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'?' => count = count.saturating_add(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    count
+}
+
+fn mysql_stmt_param_is_null(null_bitmap: &[u8], idx: usize) -> bool {
+    let byte = idx / 8;
+    let bit = idx % 8;
+    null_bitmap
+        .get(byte)
+        .map(|b| (b & (1u8 << bit)) != 0)
+        .unwrap_or(false)
+}
+
+fn mysql_decode_time_lit(payload: &[u8], cursor: &mut usize) -> Result<Lit, String> {
+    if *cursor >= payload.len() {
+        return Err("truncated TIME parameter".to_string());
+    }
+    let len = payload[*cursor] as usize;
+    *cursor += 1;
+    if len == 0 {
+        return Ok(Lit::Time {
+            iso: "00:00:00".to_string(),
+        });
+    }
+    if !matches!(len, 8 | 12) || *cursor + len > payload.len() {
+        return Err("unsupported TIME parameter payload".to_string());
+    }
+    let negative = payload[*cursor] != 0;
+    let days = u32::from_le_bytes([
+        payload[*cursor + 1],
+        payload[*cursor + 2],
+        payload[*cursor + 3],
+        payload[*cursor + 4],
+    ]);
+    let hours = payload[*cursor + 5] as u32 + days.saturating_mul(24);
+    let minutes = payload[*cursor + 6];
+    let seconds = payload[*cursor + 7];
+    let micros = if len == 12 {
+        u32::from_le_bytes([
+            payload[*cursor + 8],
+            payload[*cursor + 9],
+            payload[*cursor + 10],
+            payload[*cursor + 11],
+        ])
+    } else {
+        0
+    };
+    *cursor += len;
+    let mut iso = format!(
+        "{}{:02}:{:02}:{:02}",
+        if negative { "-" } else { "" },
+        hours,
+        minutes,
+        seconds
+    );
+    if micros > 0 {
+        iso.push_str(&format!(".{:06}", micros));
+    }
+    Ok(Lit::Time { iso })
+}
+
+fn mysql_decode_dateish_lit(
+    payload: &[u8],
+    cursor: &mut usize,
+    datetime_like: bool,
+) -> Result<Lit, String> {
+    if *cursor >= payload.len() {
+        return Err("truncated date-like parameter".to_string());
+    }
+    let len = payload[*cursor] as usize;
+    *cursor += 1;
+    if len == 0 {
+        return Ok(if datetime_like {
+            Lit::Datetime {
+                iso: "0000-00-00 00:00:00".to_string(),
+            }
+        } else {
+            Lit::Date {
+                iso: "0000-00-00".to_string(),
+            }
+        });
+    }
+    let valid = if datetime_like {
+        matches!(len, 4 | 7 | 11)
+    } else {
+        len == 4
+    };
+    if !valid || *cursor + len > payload.len() {
+        return Err("unsupported date-like parameter payload".to_string());
+    }
+    let year = u16::from_le_bytes([payload[*cursor], payload[*cursor + 1]]);
+    let month = payload[*cursor + 2];
+    let day = payload[*cursor + 3];
+    let hour = if len >= 7 { payload[*cursor + 4] } else { 0 };
+    let minute = if len >= 7 { payload[*cursor + 5] } else { 0 };
+    let second = if len >= 7 { payload[*cursor + 6] } else { 0 };
+    let micros = if len == 11 {
+        u32::from_le_bytes([
+            payload[*cursor + 7],
+            payload[*cursor + 8],
+            payload[*cursor + 9],
+            payload[*cursor + 10],
+        ])
+    } else {
+        0
+    };
+    *cursor += len;
+    if datetime_like {
+        let mut iso = format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}");
+        if micros > 0 {
+            iso.push_str(&format!(".{:06}", micros));
+        }
+        Ok(Lit::Datetime { iso })
+    } else {
+        Ok(Lit::Date {
+            iso: format!("{year:04}-{month:02}-{day:02}"),
+        })
+    }
+}
+
+fn mysql_decode_stmt_param_lit(
+    param_type: MySqlStmtParamType,
+    payload: &[u8],
+    cursor: &mut usize,
+    long_data: Option<Vec<u8>>,
+) -> Result<Lit, String> {
+    if let Some(bytes) = long_data {
+        return Ok(Lit::Str {
+            v: String::from_utf8_lossy(&bytes).to_string(),
+        });
+    }
+
+    match param_type.type_code {
+        0x00 | 0x06 => Ok(Lit::Null),
+        0x01 => {
+            if *cursor + 1 > payload.len() {
+                return Err("truncated TINY parameter".to_string());
+            }
+            let raw = payload[*cursor];
+            *cursor += 1;
+            Ok(if param_type.unsigned {
+                Lit::U64 { v: raw as u64 }
+            } else {
+                Lit::I64 {
+                    v: i8::from_le_bytes([raw]) as i64,
+                }
+            })
+        }
+        0x02 | 0x0d => {
+            if *cursor + 2 > payload.len() {
+                return Err("truncated SHORT parameter".to_string());
+            }
+            let raw = [payload[*cursor], payload[*cursor + 1]];
+            *cursor += 2;
+            Ok(if param_type.unsigned {
+                Lit::U64 {
+                    v: u16::from_le_bytes(raw) as u64,
+                }
+            } else {
+                Lit::I64 {
+                    v: i16::from_le_bytes(raw) as i64,
+                }
+            })
+        }
+        0x03 | 0x09 => {
+            if *cursor + 4 > payload.len() {
+                return Err("truncated LONG parameter".to_string());
+            }
+            let raw = [
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+            ];
+            *cursor += 4;
+            Ok(if param_type.unsigned {
+                Lit::U64 {
+                    v: u32::from_le_bytes(raw) as u64,
+                }
+            } else {
+                Lit::I64 {
+                    v: i32::from_le_bytes(raw) as i64,
+                }
+            })
+        }
+        0x08 => {
+            if *cursor + 8 > payload.len() {
+                return Err("truncated LONGLONG parameter".to_string());
+            }
+            let raw = [
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+                payload[*cursor + 4],
+                payload[*cursor + 5],
+                payload[*cursor + 6],
+                payload[*cursor + 7],
+            ];
+            *cursor += 8;
+            Ok(if param_type.unsigned {
+                Lit::U64 {
+                    v: u64::from_le_bytes(raw),
+                }
+            } else {
+                Lit::I64 {
+                    v: i64::from_le_bytes(raw),
+                }
+            })
+        }
+        0x04 => {
+            if *cursor + 4 > payload.len() {
+                return Err("truncated FLOAT parameter".to_string());
+            }
+            let raw = [
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+            ];
+            *cursor += 4;
+            Ok(Lit::F64 {
+                v: f32::from_le_bytes(raw) as f64,
+            })
+        }
+        0x05 => {
+            if *cursor + 8 > payload.len() {
+                return Err("truncated DOUBLE parameter".to_string());
+            }
+            let raw = [
+                payload[*cursor],
+                payload[*cursor + 1],
+                payload[*cursor + 2],
+                payload[*cursor + 3],
+                payload[*cursor + 4],
+                payload[*cursor + 5],
+                payload[*cursor + 6],
+                payload[*cursor + 7],
+            ];
+            *cursor += 8;
+            Ok(Lit::F64 {
+                v: f64::from_le_bytes(raw),
+            })
+        }
+        0x07 | 0x0c => mysql_decode_dateish_lit(payload, cursor, true),
+        0x0a => mysql_decode_dateish_lit(payload, cursor, false),
+        0x0b => mysql_decode_time_lit(payload, cursor),
+        0x0f | 0xf5 | 0xfd | 0xfe | 0xf9 | 0xfa | 0xfb | 0xfc | 0xf6 | 0x10 => {
+            let bytes = parse_lenenc_bytes(payload, cursor)?;
+            Ok(Lit::Str {
+                v: String::from_utf8_lossy(bytes).to_string(),
+            })
+        }
+        other => Err(format!("unsupported prepared parameter type 0x{other:02x}")),
+    }
+}
+
+fn mysql_substitute_stmt_sql(sql: &str, params: &[Lit]) -> Result<String, String> {
+    let bytes = sql.as_bytes();
+    let mut quote = 0u8;
+    let mut out = String::with_capacity(sql.len().saturating_add(params.len() * 4));
+    let mut i = 0usize;
+    let mut param_idx = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            out.push(b as char);
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                out.push(b as char);
+            }
+            b'?' => {
+                let lit = params
+                    .get(param_idx)
+                    .ok_or_else(|| "not enough prepared parameters".to_string())?;
+                out.push_str(&mysql_render_default_lit(lit));
+                param_idx += 1;
+            }
+            _ => out.push(b as char),
+        }
+        i += 1;
+    }
+    if param_idx != params.len() {
+        return Err("too many prepared parameters".to_string());
+    }
+    Ok(out)
+}
+
 fn parse_mysql_handshake_response(payload: &[u8]) -> Result<MySqlHandshakeResponse, String> {
     if payload.len() < 32 {
         return Err("handshake response too short".to_string());
@@ -590,13 +999,19 @@ fn parse_mysql_handshake_response(payload: &[u8]) -> Result<MySqlHandshakeRespon
         bytes
     };
 
-    if capabilities & MYSQL_CAP_CONNECT_WITH_DB != 0 {
+    let database = if capabilities & MYSQL_CAP_CONNECT_WITH_DB != 0 {
         let db_end = payload[cursor..]
             .iter()
             .position(|b| *b == 0)
             .ok_or_else(|| "missing db terminator".to_string())?;
+        let db_bytes = &payload[cursor..cursor + db_end];
         cursor += db_end + 1;
-    }
+        let db =
+            String::from_utf8(db_bytes.to_vec()).map_err(|_| "db must be utf-8".to_string())?;
+        (!db.is_empty()).then_some(db)
+    } else {
+        None
+    };
 
     let auth_plugin = if capabilities & MYSQL_CAP_PLUGIN_AUTH != 0 {
         let plugin_end = payload[cursor..]
@@ -616,6 +1031,7 @@ fn parse_mysql_handshake_response(payload: &[u8]) -> Result<MySqlHandshakeRespon
         capabilities,
         username,
         auth_response,
+        database,
         auth_plugin,
     })
 }
@@ -1235,7 +1651,16 @@ fn mysql_show_index_outcome(table_name: &str, desc: &Value) -> MySqlQueryOutcome
     MySqlQueryOutcome::ResultSet { columns, rows }
 }
 
-fn mysql_parse_count_query(sql: &str) -> Option<(String, String)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCompatAggregateOp {
+    CountRows,
+    CountNonNull,
+    Sum,
+}
+
+fn mysql_parse_simple_aggregate_query(
+    sql: &str,
+) -> Option<(String, String, MySqlCompatAggregateOp)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
         return None;
@@ -1243,30 +1668,57 @@ fn mysql_parse_count_query(sql: &str) -> Option<(String, String)> {
     let rest = trimmed[6..].trim();
     let from_idx = find_keyword_top_level(rest, "from")?;
     let projection = rest[..from_idx].trim();
-    let projection_lower = projection.to_ascii_lowercase();
-    let (count_expr, alias_raw) = if let Some(idx) = find_keyword_top_level(projection, "as") {
+    let (aggregate_expr, alias_raw) = if let Some(idx) = find_keyword_top_level(projection, "as") {
         (projection[..idx].trim(), Some(projection[idx + 2..].trim()))
     } else {
         (projection, None)
     };
-    let count_lower = count_expr
+    let aggregate_lower = aggregate_expr
         .chars()
         .filter(|ch| !ch.is_ascii_whitespace())
         .collect::<String>()
         .to_ascii_lowercase();
-    if !matches!(count_lower.as_str(), "count(*)" | "count(1)") {
-        return None;
-    }
-    let alias = alias_raw
-        .map(clean_sql_ident)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| {
-            if projection_lower.contains("count(1)") {
+    let (select_expr, default_alias, op) =
+        if matches!(aggregate_lower.as_str(), "count(*)" | "count(1)") {
+            let default_alias = if aggregate_lower == "count(1)" {
                 "COUNT(1)".to_string()
             } else {
                 "COUNT(*)".to_string()
-            }
-        });
+            };
+            (
+                "*".to_string(),
+                default_alias,
+                MySqlCompatAggregateOp::CountRows,
+            )
+        } else if aggregate_lower.starts_with("count(") && aggregate_lower.ends_with(')') {
+            let arg = aggregate_expr[6..aggregate_expr.len() - 1].trim();
+            let (col, table) = parse_sql_column_ref(arg)?;
+            let select_expr = table
+                .map(|table| format!("{table}.{col}"))
+                .unwrap_or(col.clone());
+            (
+                select_expr.clone(),
+                format!("COUNT({select_expr})"),
+                MySqlCompatAggregateOp::CountNonNull,
+            )
+        } else if aggregate_lower.starts_with("sum(") && aggregate_lower.ends_with(')') {
+            let arg = aggregate_expr[4..aggregate_expr.len() - 1].trim();
+            let (col, table) = parse_sql_column_ref(arg)?;
+            let select_expr = table
+                .map(|table| format!("{table}.{col}"))
+                .unwrap_or(col.clone());
+            (
+                select_expr.clone(),
+                format!("SUM({select_expr})"),
+                MySqlCompatAggregateOp::Sum,
+            )
+        } else {
+            return None;
+        };
+    let alias = alias_raw
+        .map(clean_sql_ident)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default_alias);
     let mut from_tail = rest[from_idx..].trim().to_string();
     let truncate_at = ["order by", "limit", "offset"]
         .iter()
@@ -1275,15 +1727,18 @@ fn mysql_parse_count_query(sql: &str) -> Option<(String, String)> {
         .unwrap_or(from_tail.len());
     from_tail.truncate(truncate_at);
     let from_tail = from_tail.trim().to_string();
-    (!from_tail.is_empty()).then_some((alias, format!("SELECT * {from_tail}")))
+    if from_tail.is_empty() {
+        return None;
+    }
+    Some((alias, format!("SELECT {select_expr} {from_tail}"), op))
 }
 
-async fn mysql_try_count_query_outcome(
+async fn mysql_try_simple_aggregate_query_outcome(
     state: &AppState,
     sql: &str,
     default_db: Option<&str>,
 ) -> Result<Option<MySqlQueryOutcome>, RpcError> {
-    let Some((alias, transformed_sql)) = mysql_parse_count_query(sql) else {
+    let Some((alias, transformed_sql, op)) = mysql_parse_simple_aggregate_query(sql) else {
         return Ok(None);
     };
     let params = SqlExecParams {
@@ -1295,9 +1750,47 @@ async fn mysql_try_count_query_outcome(
     let result = sql_exec(state, params).await?;
     let (_, rows) =
         mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
+    let value = match op {
+        MySqlCompatAggregateOp::CountRows => Some(rows.len().to_string()),
+        MySqlCompatAggregateOp::CountNonNull => Some(
+            rows.iter()
+                .filter(|row| row.first().and_then(|value| value.as_ref()).is_some())
+                .count()
+                .to_string(),
+        ),
+        MySqlCompatAggregateOp::Sum => {
+            let mut total = 0.0f64;
+            let mut saw_value = false;
+            let mut all_i64 = true;
+            for row in &rows {
+                let Some(raw) = row.first().and_then(|value| value.as_deref()) else {
+                    continue;
+                };
+                saw_value = true;
+                if let Ok(value) = raw.parse::<i64>() {
+                    total += value as f64;
+                } else if let Ok(value) = raw.parse::<f64>() {
+                    all_i64 = false;
+                    total += value;
+                } else {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        "SUM compatibility currently supports only numeric result values",
+                    ));
+                }
+            }
+            if !saw_value {
+                None
+            } else if all_i64 {
+                Some((total as i64).to_string())
+            } else {
+                Some(total.to_string())
+            }
+        }
+    };
     Ok(Some(MySqlQueryOutcome::ResultSet {
         columns: vec![alias],
-        rows: vec![vec![Some(rows.len().to_string())]],
+        rows: vec![vec![value]],
     }))
 }
 
@@ -1446,7 +1939,9 @@ async fn mysql_try_compat_query_outcome(
     }
     let lower = trimmed.to_ascii_lowercase();
 
-    if let Some(result) = mysql_try_count_query_outcome(state, trimmed, default_db).await? {
+    if let Some(result) =
+        mysql_try_simple_aggregate_query_outcome(state, trimmed, default_db).await?
+    {
         return Ok(Some(result));
     }
 
@@ -1841,7 +2336,7 @@ fn mysql_literal_text(lit: &MySqlLiteral) -> Option<String> {
     }
 }
 
-fn mysql_column_definition_packet(name: &str, lit: &MySqlLiteral) -> Vec<u8> {
+fn mysql_column_definition_packet_with_type(name: &str, column_type: u8, len: u32) -> Vec<u8> {
     let mut payload = Vec::new();
     mysql_push_lenenc_bytes(&mut payload, b"def");
     mysql_push_lenenc_bytes(&mut payload, b"");
@@ -1851,36 +2346,33 @@ fn mysql_column_definition_packet(name: &str, lit: &MySqlLiteral) -> Vec<u8> {
     mysql_push_lenenc_bytes(&mut payload, name.as_bytes());
     payload.push(0x0c);
     payload.extend_from_slice(&0x21u16.to_le_bytes());
-    let len = match lit {
-        MySqlLiteral::Int(_) => 20u32,
-        MySqlLiteral::Str(v) => v.len().max(1) as u32,
-        MySqlLiteral::Null => 4u32,
-    };
     payload.extend_from_slice(&len.to_le_bytes());
-    payload.push(mysql_column_type(lit));
+    payload.push(column_type);
     payload.extend_from_slice(&0u16.to_le_bytes());
     payload.push(0);
     payload.extend_from_slice(&[0u8; 2]);
     payload
 }
 
-fn mysql_eof_packet() -> Vec<u8> {
+fn mysql_column_definition_packet(name: &str, lit: &MySqlLiteral) -> Vec<u8> {
+    let len = match lit {
+        MySqlLiteral::Int(_) => 20u32,
+        MySqlLiteral::Str(v) => v.len().max(1) as u32,
+        MySqlLiteral::Null => 4u32,
+    };
+    mysql_column_definition_packet_with_type(name, mysql_column_type(lit), len)
+}
+
+fn mysql_eof_packet_with_status(status_flags: u16) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(0xfe);
     payload.extend_from_slice(&0u16.to_le_bytes());
-    payload.extend_from_slice(&MYSQL_STATUS_AUTOCOMMIT.to_le_bytes());
+    payload.extend_from_slice(&status_flags.to_le_bytes());
     payload
 }
 
-fn mysql_row_packet(columns: &[(String, MySqlLiteral)]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for (_, lit) in columns {
-        match mysql_literal_text(lit) {
-            Some(text) => mysql_push_lenenc_bytes(&mut payload, text.as_bytes()),
-            None => payload.push(0xfb),
-        }
-    }
-    payload
+fn mysql_eof_packet() -> Vec<u8> {
+    mysql_eof_packet_with_status(MYSQL_STATUS_AUTOCOMMIT)
 }
 
 fn mysql_text_row_packet(row: &[Option<String>]) -> Vec<u8> {
@@ -1892,6 +2384,241 @@ fn mysql_text_row_packet(row: &[Option<String>]) -> Vec<u8> {
         }
     }
     payload
+}
+
+fn mysql_stmt_column_type_code(kind: MySqlStmtColumnType) -> u8 {
+    match kind {
+        MySqlStmtColumnType::LongLong => 0x08,
+        MySqlStmtColumnType::Double => 0x05,
+        MySqlStmtColumnType::VarString => 0xfd,
+    }
+}
+
+fn mysql_stmt_column_type_for_mysql_literal(lit: &MySqlLiteral) -> MySqlStmtColumnType {
+    match lit {
+        MySqlLiteral::Int(_) => MySqlStmtColumnType::LongLong,
+        MySqlLiteral::Str(_) | MySqlLiteral::Null => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_column_type_for_lit(lit: &Lit) -> MySqlStmtColumnType {
+    match lit {
+        Lit::Bool { .. } | Lit::I64 { .. } | Lit::U64 { .. } => MySqlStmtColumnType::LongLong,
+        Lit::F64 { .. } => MySqlStmtColumnType::Double,
+        Lit::Null
+        | Lit::Dec { .. }
+        | Lit::Str { .. }
+        | Lit::Date { .. }
+        | Lit::Time { .. }
+        | Lit::Datetime { .. }
+        | Lit::Uuid { .. }
+        | Lit::Bytes { .. }
+        | Lit::Json { .. }
+        | Lit::Embedding { .. } => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_column_type_from_desc_column(column: &Value) -> MySqlStmtColumnType {
+    match column
+        .get("type")
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("string")
+    {
+        "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
+        "f64" => MySqlStmtColumnType::Double,
+        _ => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
+    base.r#as.as_deref().unwrap_or(&base.table)
+}
+
+fn mysql_stmt_prepare_columns_from_select(
+    from: Option<&TableRef>,
+    projection: &[SelectItem],
+    base_desc: Option<&Value>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some(cols) = from
+        .and_then(|from| match from {
+            TableRef::Base(base) => Some(base),
+            _ => None,
+        })
+        .zip(base_desc)
+        .filter(|_| projection.is_empty())
+        .map(|(_, desc)| {
+            desc.get("columns")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+    {
+        return cols
+            .into_iter()
+            .filter_map(|column| {
+                let name = column.get("name").and_then(|v| v.as_str())?.to_string();
+                Some(MySqlStmtPrepareColumn {
+                    name,
+                    column_type: mysql_stmt_column_type_from_desc_column(&column),
+                })
+            })
+            .collect();
+    }
+
+    let base = from.and_then(|from| match from {
+        TableRef::Base(base) => Some(base),
+        _ => None,
+    });
+    projection
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let column_type = match &item.expr {
+                Expr::Lit { lit } => mysql_stmt_column_type_for_lit(lit),
+                Expr::Col { col, table } => {
+                    if let Some((base, desc)) = base.zip(base_desc) {
+                        let matches_base = table
+                            .as_deref()
+                            .map(|table_name| {
+                                table_name.eq_ignore_ascii_case(&base.table)
+                                    || table_name
+                                        .eq_ignore_ascii_case(mysql_stmt_base_table_alias(base))
+                            })
+                            .unwrap_or(true);
+                        if matches_base {
+                            desc.get("columns")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                                .find(|column| {
+                                    column
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|name| name.eq_ignore_ascii_case(col))
+                                        .unwrap_or(false)
+                                })
+                                .map(mysql_stmt_column_type_from_desc_column)
+                                .unwrap_or(MySqlStmtColumnType::VarString)
+                        } else {
+                            MySqlStmtColumnType::VarString
+                        }
+                    } else {
+                        MySqlStmtColumnType::VarString
+                    }
+                }
+                _ => MySqlStmtColumnType::VarString,
+            };
+            MySqlStmtPrepareColumn {
+                name: projection_label(item, idx),
+                column_type,
+            }
+        })
+        .collect()
+}
+
+async fn mysql_stmt_prepare_columns(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some(cols) = parse_select_literal_query(sql, default_db) {
+        return cols
+            .into_iter()
+            .map(|(name, lit)| MySqlStmtPrepareColumn {
+                name,
+                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
+            })
+            .collect();
+    }
+
+    let Ok(SqlPlan::Select {
+        from, projection, ..
+    }) = parse_sql_plan(sql, default_db)
+    else {
+        return Vec::new();
+    };
+
+    let base_desc = match from.as_ref() {
+        Some(TableRef::Base(base)) => {
+            let eng = state.engine.read().await;
+            eng.describe_table(&base.db, &base.table).ok()
+        }
+        _ => None,
+    };
+    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, base_desc.as_ref())
+}
+
+fn mysql_stmt_infer_column_types(
+    rows: &[Vec<Option<String>>],
+    column_count: usize,
+) -> Vec<MySqlStmtColumnType> {
+    let mut kinds = vec![MySqlStmtColumnType::LongLong; column_count];
+    for (col_idx, kind) in kinds.iter_mut().enumerate().take(column_count) {
+        let mut saw_value = false;
+        let mut all_i64 = true;
+        let mut all_f64 = true;
+        for row in rows {
+            let Some(cell) = row.get(col_idx).and_then(|v| v.as_deref()) else {
+                continue;
+            };
+            saw_value = true;
+            if cell.parse::<i64>().is_err() {
+                all_i64 = false;
+            }
+            if cell.parse::<f64>().is_err() {
+                all_f64 = false;
+            }
+            if !all_i64 && !all_f64 {
+                break;
+            }
+        }
+        *kind = if !saw_value {
+            MySqlStmtColumnType::VarString
+        } else if all_i64 {
+            MySqlStmtColumnType::LongLong
+        } else if all_f64 {
+            MySqlStmtColumnType::Double
+        } else {
+            MySqlStmtColumnType::VarString
+        };
+    }
+    kinds
+}
+
+fn mysql_binary_row_packet(
+    row: &[Option<String>],
+    column_types: &[MySqlStmtColumnType],
+) -> Result<Vec<u8>, String> {
+    let null_bitmap_len = (column_types.len() + 7 + 2) / 8;
+    let mut payload = Vec::new();
+    payload.push(0x00);
+    payload.resize(1 + null_bitmap_len, 0);
+    for (idx, kind) in column_types.iter().enumerate() {
+        let Some(value) = row.get(idx).and_then(|v| v.as_deref()) else {
+            let bit = idx + 2;
+            payload[1 + (bit / 8)] |= 1u8 << (bit % 8);
+            continue;
+        };
+        match kind {
+            MySqlStmtColumnType::LongLong => {
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid prepared integer result '{value}'"))?;
+                payload.extend_from_slice(&parsed.to_le_bytes());
+            }
+            MySqlStmtColumnType::Double => {
+                let parsed = value
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid prepared float result '{value}'"))?;
+                payload.extend_from_slice(&parsed.to_le_bytes());
+            }
+            MySqlStmtColumnType::VarString => {
+                mysql_push_lenenc_bytes(&mut payload, value.as_bytes())
+            }
+        }
+    }
+    Ok(payload)
 }
 
 fn mysql_json_value_text(value: &Value) -> String {
@@ -2099,6 +2826,209 @@ fn mysql_query_outcome_from_sql_exec(result: &Value) -> Result<MySqlQueryOutcome
     }
 }
 
+fn mysql_parse_stmt_execute_params(
+    payload: &[u8],
+    statement: &mut MySqlPreparedStatement,
+) -> Result<(Vec<Lit>, bool), String> {
+    if payload.len() < 10 {
+        return Err("COM_STMT_EXECUTE payload too short".to_string());
+    }
+    let flags = payload[5];
+    let cursor_read_only = match flags {
+        0x00 => false,
+        0x01 => true,
+        _ => return Err("only COM_STMT_EXECUTE read-only cursor mode is supported".to_string()),
+    };
+    let mut cursor = 10usize;
+    let param_count = statement.param_count as usize;
+    if param_count == 0 {
+        statement.long_data.clear();
+        return Ok((Vec::new(), cursor_read_only));
+    }
+
+    let null_bitmap_len = param_count.div_ceil(8);
+    if cursor + null_bitmap_len > payload.len() {
+        return Err("truncated COM_STMT_EXECUTE null bitmap".to_string());
+    }
+    let null_bitmap = &payload[cursor..cursor + null_bitmap_len];
+    cursor += null_bitmap_len;
+    if cursor >= payload.len() {
+        return Err("missing COM_STMT_EXECUTE new-params flag".to_string());
+    }
+    let new_params_bound = payload[cursor];
+    cursor += 1;
+
+    let param_types = if new_params_bound != 0 {
+        let needed = param_count
+            .checked_mul(2)
+            .ok_or_else(|| "parameter metadata too large".to_string())?;
+        if cursor + needed > payload.len() {
+            return Err("truncated COM_STMT_EXECUTE parameter types".to_string());
+        }
+        let mut types = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            let type_code = payload[cursor];
+            let unsigned = payload[cursor + 1] & 0x80 != 0;
+            cursor += 2;
+            types.push(MySqlStmtParamType {
+                type_code,
+                unsigned,
+            });
+        }
+        statement.param_types = types.clone();
+        types
+    } else if statement.param_types.len() == param_count {
+        statement.param_types.clone()
+    } else {
+        return Err("COM_STMT_EXECUTE requires parameter types on first execution".to_string());
+    };
+
+    let mut params = Vec::with_capacity(param_count);
+    for (idx, param_type) in param_types.into_iter().enumerate() {
+        let long_data = statement.long_data.remove(&(idx as u16));
+        if mysql_stmt_param_is_null(null_bitmap, idx) {
+            params.push(Lit::Null);
+            continue;
+        }
+        let lit = mysql_decode_stmt_param_lit(param_type, payload, &mut cursor, long_data)?;
+        params.push(lit);
+    }
+    statement.long_data.clear();
+    Ok((params, cursor_read_only))
+}
+
+async fn mysql_execute_sql(
+    state: &AppState,
+    sql: &str,
+    session: &mut MySqlSessionState,
+) -> Result<MySqlQueryOutcome, MySqlWireError> {
+    if let Some(enabled) = mysql_parse_set_autocommit(sql) {
+        session.autocommit = enabled;
+        if session.autocommit {
+            session.tx_active = false;
+            session.tx_undo_sql.clear();
+        }
+        return Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        });
+    }
+    if mysql_is_session_compat_set(sql) {
+        return Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        });
+    }
+    if mysql_is_begin(sql) {
+        session.tx_active = true;
+        session.tx_undo_sql.clear();
+        return Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        });
+    }
+    if mysql_is_commit(sql) {
+        session.tx_active = false;
+        session.tx_undo_sql.clear();
+        return Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        });
+    }
+    if mysql_is_rollback(sql) {
+        match mysql_rollback_transaction(state, &session.tx_undo_sql).await {
+            Ok(()) => {
+                session.tx_active = false;
+                session.tx_undo_sql.clear();
+                return Ok(MySqlQueryOutcome::Ok {
+                    affected_rows: 0,
+                    last_insert_id: 0,
+                });
+            }
+            Err(err) => return Err(mysql_error_from_rpc(&err)),
+        }
+    }
+    if let Some(column_name) = mysql_parse_select_found_rows_query(sql) {
+        let found_rows = i64::try_from(session.last_found_rows).unwrap_or(i64::MAX);
+        return Ok(MySqlQueryOutcome::ResultSet {
+            columns: vec![column_name],
+            rows: vec![vec![Some(found_rows.to_string())]],
+        });
+    }
+    match mysql_try_compat_query_outcome(state, sql, session.default_db.as_deref()).await {
+        Ok(Some(outcome)) => return Ok(outcome),
+        Ok(None) => {}
+        Err(err) => return Err(mysql_error_from_rpc(&err)),
+    }
+
+    let rewritten = mysql_rewrite_sql_calc_found_rows(sql);
+    let exec_sql = rewritten.clone().unwrap_or_else(|| sql.to_string());
+    let calc_found_rows = rewritten.is_some();
+
+    if !calc_found_rows {
+        if let Some(cols) = parse_select_literal_query(&exec_sql, session.default_db.as_deref()) {
+            let columns = cols
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            let rows = vec![cols
+                .iter()
+                .map(|(_, lit)| mysql_literal_text(lit))
+                .collect::<Vec<_>>()];
+            return Ok(MySqlQueryOutcome::ResultSet { columns, rows });
+        }
+    }
+
+    let params = SqlExecParams {
+        sql: exec_sql.clone(),
+        explain: false,
+        default_db: session.default_db.clone(),
+        result_format: Some(ResultFormat::RowsJson),
+    };
+    let result = sql_exec(state, params)
+        .await
+        .map_err(|err| mysql_error_from_rpc(&err))?;
+
+    if result.get("statement").and_then(|v| v.as_str()) == Some("use") {
+        session.default_db = result
+            .get("default_db")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+    }
+    if calc_found_rows {
+        match mysql_select_total_rows_without_limit(state, &exec_sql, session.default_db.as_deref())
+            .await
+        {
+            Ok(total) => session.last_found_rows = total,
+            Err(err) => return Err(mysql_error_from_rpc(&err)),
+        }
+    }
+
+    let statement = result
+        .get("statement")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let transactional_write = matches!(statement, "insert" | "update" | "delete")
+        && (!session.autocommit || session.tx_active);
+    if transactional_write {
+        session.tx_active = true;
+        if statement == "insert" {
+            if let Some(undo_sql) = mysql_build_insert_undo_sql(
+                state,
+                &exec_sql,
+                session.default_db.as_deref(),
+                &result,
+            )
+            .await
+            {
+                session.tx_undo_sql.push(undo_sql);
+            }
+        }
+    }
+
+    mysql_query_outcome_from_sql_exec(&result).map_err(|msg| (1105, "HY000", msg))
+}
+
 fn mysql_handshake_packet(connection_id: u32, seed: &[u8; 20]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(96);
     payload.push(MYSQL_PROTOCOL_VERSION);
@@ -2178,31 +3108,6 @@ async fn mysql_read_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8
     Ok((seq, payload))
 }
 
-async fn mysql_send_literal_result(
-    stream: &mut TcpStream,
-    start_seq: u8,
-    columns: &[(String, MySqlLiteral)],
-) -> anyhow::Result<()> {
-    let mut seq = start_seq;
-    let mut column_count = Vec::new();
-    mysql_push_lenenc_int(&mut column_count, columns.len());
-    mysql_write_packet(stream, seq, &column_count).await?;
-    seq = seq.wrapping_add(1);
-
-    for (name, lit) in columns {
-        let packet = mysql_column_definition_packet(name, lit);
-        mysql_write_packet(stream, seq, &packet).await?;
-        seq = seq.wrapping_add(1);
-    }
-
-    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
-    seq = seq.wrapping_add(1);
-    mysql_write_packet(stream, seq, &mysql_row_packet(columns)).await?;
-    seq = seq.wrapping_add(1);
-    mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
-    Ok(())
-}
-
 async fn mysql_send_text_result(
     stream: &mut TcpStream,
     start_seq: u8,
@@ -2229,6 +3134,165 @@ async fn mysql_send_text_result(
         seq = seq.wrapping_add(1);
     }
     mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    Ok(())
+}
+
+fn mysql_prepare_ok_packet(statement_id: u32, column_count: u16, param_count: u16) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(0x00);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.extend_from_slice(&column_count.to_le_bytes());
+    payload.extend_from_slice(&param_count.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload
+}
+
+async fn mysql_send_prepare_ok(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    statement_id: u32,
+    param_count: u16,
+    result_columns: &[MySqlStmtPrepareColumn],
+) -> anyhow::Result<()> {
+    let mut seq = start_seq;
+    let packet = mysql_prepare_ok_packet(statement_id, result_columns.len() as u16, param_count);
+    mysql_write_packet(stream, seq, &packet).await?;
+    seq = seq.wrapping_add(1);
+    if param_count > 0 {
+        for idx in 0..param_count {
+            let name = format!("param{}", idx + 1);
+            let packet = mysql_column_definition_packet_with_type(&name, 0xfd, 255);
+            mysql_write_packet(stream, seq, &packet).await?;
+            seq = seq.wrapping_add(1);
+        }
+        mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+        seq = seq.wrapping_add(1);
+    }
+    if !result_columns.is_empty() {
+        for column in result_columns {
+            let len = match column.column_type {
+                MySqlStmtColumnType::LongLong => 20,
+                MySqlStmtColumnType::Double => 24,
+                MySqlStmtColumnType::VarString => 255,
+            };
+            let packet = mysql_column_definition_packet_with_type(
+                &column.name,
+                mysql_stmt_column_type_code(column.column_type),
+                len,
+            );
+            mysql_write_packet(stream, seq, &packet).await?;
+            seq = seq.wrapping_add(1);
+        }
+        mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+    }
+    Ok(())
+}
+
+async fn mysql_send_binary_result(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+    prepared_columns: Option<&[MySqlStmtPrepareColumn]>,
+) -> anyhow::Result<()> {
+    let column_types = mysql_binary_result_column_types(columns, rows, prepared_columns);
+    let next_seq = mysql_send_binary_result_header(
+        stream,
+        start_seq,
+        columns,
+        rows,
+        &column_types,
+        MYSQL_STATUS_AUTOCOMMIT,
+    )
+    .await?;
+    mysql_send_binary_result_rows_only(
+        stream,
+        next_seq,
+        rows,
+        &column_types,
+        MYSQL_STATUS_AUTOCOMMIT,
+    )
+    .await?;
+    Ok(())
+}
+
+fn mysql_binary_result_column_types(
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+    prepared_columns: Option<&[MySqlStmtPrepareColumn]>,
+) -> Vec<MySqlStmtColumnType> {
+    let mut column_types = mysql_stmt_infer_column_types(rows, columns.len());
+    if rows.is_empty() {
+        if let Some(prepared_columns) = prepared_columns {
+            if prepared_columns.len() == columns.len()
+                && prepared_columns
+                    .iter()
+                    .zip(columns.iter())
+                    .all(|(prepared, actual)| prepared.name.eq_ignore_ascii_case(actual))
+            {
+                column_types = prepared_columns
+                    .iter()
+                    .map(|prepared| prepared.column_type)
+                    .collect();
+            }
+        }
+    }
+    column_types
+}
+
+async fn mysql_send_binary_result_header(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+    column_types: &[MySqlStmtColumnType],
+    eof_status: u16,
+) -> anyhow::Result<u8> {
+    let mut seq = start_seq;
+    let mut column_count = Vec::new();
+    mysql_push_lenenc_int(&mut column_count, columns.len());
+    mysql_write_packet(stream, seq, &column_count).await?;
+    seq = seq.wrapping_add(1);
+    for (idx, name) in columns.iter().enumerate() {
+        let len = match column_types[idx] {
+            MySqlStmtColumnType::LongLong => 20,
+            MySqlStmtColumnType::Double => 24,
+            MySqlStmtColumnType::VarString => rows
+                .iter()
+                .filter_map(|row| row.get(idx).and_then(|v| v.as_ref()))
+                .map(|value| value.len() as u32)
+                .max()
+                .unwrap_or(1),
+        };
+        let packet = mysql_column_definition_packet_with_type(
+            name,
+            mysql_stmt_column_type_code(column_types[idx]),
+            len,
+        );
+        mysql_write_packet(stream, seq, &packet).await?;
+        seq = seq.wrapping_add(1);
+    }
+
+    mysql_write_packet(stream, seq, &mysql_eof_packet_with_status(eof_status)).await?;
+    Ok(seq.wrapping_add(1))
+}
+
+async fn mysql_send_binary_result_rows_only(
+    stream: &mut TcpStream,
+    start_seq: u8,
+    rows: &[Vec<Option<String>>],
+    column_types: &[MySqlStmtColumnType],
+    eof_status: u16,
+) -> anyhow::Result<()> {
+    let mut seq = start_seq;
+    for row in rows {
+        let packet =
+            mysql_binary_row_packet(row, column_types).map_err(|msg| anyhow::anyhow!(msg))?;
+        mysql_write_packet(stream, seq, &packet).await?;
+        seq = seq.wrapping_add(1);
+    }
+    mysql_write_packet(stream, seq, &mysql_eof_packet_with_status(eof_status)).await?;
     Ok(())
 }
 
@@ -2274,11 +3338,9 @@ async fn handle_mysql_connection(
     }
 
     let username = response.username;
-    let mut default_db: Option<String> = None;
-    let mut last_found_rows: u64 = 0;
-    let mut autocommit = true;
-    let mut tx_active = false;
-    let mut tx_undo_sql = Vec::<String>::new();
+    let mut session = MySqlSessionState::new(response.database);
+    let mut prepared_statements = HashMap::<u32, MySqlPreparedStatement>::new();
+    let mut next_statement_id = 1u32;
     let ok = mysql_ok_packet();
     mysql_write_packet(&mut stream, seq.wrapping_add(1), &ok).await?;
 
@@ -2316,68 +3378,8 @@ async fn handle_mysql_connection(
             }
             0x03 => {
                 let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
-                if let Some(enabled) = mysql_parse_set_autocommit(&sql) {
-                    autocommit = enabled;
-                    if autocommit {
-                        tx_active = false;
-                        tx_undo_sql.clear();
-                    }
-                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
-                        .await?;
-                    continue;
-                }
-                if mysql_is_session_compat_set(&sql) {
-                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
-                        .await?;
-                    continue;
-                }
-                if mysql_is_begin(&sql) {
-                    tx_active = true;
-                    tx_undo_sql.clear();
-                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
-                        .await?;
-                    continue;
-                }
-                if mysql_is_commit(&sql) {
-                    tx_active = false;
-                    tx_undo_sql.clear();
-                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
-                        .await?;
-                    continue;
-                }
-                if mysql_is_rollback(&sql) {
-                    match mysql_rollback_transaction(&state, &tx_undo_sql).await {
-                        Ok(()) => {
-                            tx_active = false;
-                            tx_undo_sql.clear();
-                            mysql_write_packet(
-                                &mut stream,
-                                cmd_seq.wrapping_add(1),
-                                &mysql_ok_packet(),
-                            )
-                            .await?;
-                        }
-                        Err(err) => {
-                            let (code, state_code, message) = mysql_error_from_rpc(&err);
-                            let packet = mysql_err_packet(code, state_code, &message);
-                            mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
-                                .await?;
-                        }
-                    }
-                    continue;
-                }
-                if let Some(column_name) = mysql_parse_select_found_rows_query(&sql) {
-                    let found_rows = i64::try_from(last_found_rows).unwrap_or(i64::MAX);
-                    mysql_send_literal_result(
-                        &mut stream,
-                        cmd_seq.wrapping_add(1),
-                        &[(column_name, MySqlLiteral::Int(found_rows))],
-                    )
-                    .await?;
-                    continue;
-                }
-                match mysql_try_compat_query_outcome(&state, &sql, default_db.as_deref()).await {
-                    Ok(Some(MySqlQueryOutcome::ResultSet { columns, rows })) => {
+                match mysql_execute_sql(&state, &sql, &mut session).await {
+                    Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
                         mysql_send_text_result(
                             &mut stream,
                             cmd_seq.wrapping_add(1),
@@ -2385,127 +3387,265 @@ async fn handle_mysql_connection(
                             &rows,
                         )
                         .await?;
-                        continue;
                     }
-                    Ok(Some(MySqlQueryOutcome::Ok {
+                    Ok(MySqlQueryOutcome::Ok {
                         affected_rows,
                         last_insert_id,
-                    })) => {
+                    }) => {
                         let packet = mysql_ok_packet_with(affected_rows, last_insert_id);
                         mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
-                        continue;
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        let (code, state_code, message) = mysql_error_from_rpc(&err);
+                    Err((code, state_code, message)) => {
                         let packet = mysql_err_packet(code, state_code, &message);
                         mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
-                        continue;
                     }
                 }
-
-                let rewritten = mysql_rewrite_sql_calc_found_rows(&sql);
-                let exec_sql = rewritten.clone().unwrap_or_else(|| sql.clone());
-                let calc_found_rows = rewritten.is_some();
-
-                if !calc_found_rows {
-                    if let Some(cols) = parse_select_literal_query(&exec_sql, default_db.as_deref())
-                    {
-                        mysql_send_literal_result(&mut stream, cmd_seq.wrapping_add(1), &cols)
-                            .await?;
-                        continue;
-                    }
+            }
+            0x16 => {
+                let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
+                let statement_id = next_statement_id;
+                next_statement_id = next_statement_id.wrapping_add(1);
+                let param_count = mysql_count_placeholders(&sql);
+                let result_columns =
+                    mysql_stmt_prepare_columns(&state, &sql, session.default_db.as_deref()).await;
+                prepared_statements.insert(
+                    statement_id,
+                    MySqlPreparedStatement::new(sql, param_count, result_columns.clone()),
+                );
+                mysql_send_prepare_ok(
+                    &mut stream,
+                    cmd_seq.wrapping_add(1),
+                    statement_id,
+                    param_count,
+                    &result_columns,
+                )
+                .await?;
+            }
+            0x17 => {
+                if command_payload.len() < 5 {
+                    let packet = mysql_err_packet(1064, "42000", "malformed COM_STMT_EXECUTE");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
                 }
-
-                let params = SqlExecParams {
-                    sql: exec_sql.clone(),
-                    explain: false,
-                    default_db: default_db.clone(),
-                    result_format: Some(ResultFormat::RowsJson),
-                };
-                match sql_exec(&state, params).await {
-                    Ok(result) => {
-                        if result.get("statement").and_then(|v| v.as_str()) == Some("use") {
-                            default_db = result
-                                .get("default_db")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string());
-                        }
-                        if calc_found_rows {
-                            match mysql_select_total_rows_without_limit(
-                                &state,
-                                &exec_sql,
-                                default_db.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok(total) => last_found_rows = total,
-                                Err(err) => {
-                                    let (code, state_code, message) = mysql_error_from_rpc(&err);
-                                    let packet = mysql_err_packet(code, state_code, &message);
-                                    mysql_write_packet(
-                                        &mut stream,
-                                        cmd_seq.wrapping_add(1),
-                                        &packet,
-                                    )
-                                    .await?;
-                                    continue;
+                let statement_id = u32::from_le_bytes([
+                    command_payload[1],
+                    command_payload[2],
+                    command_payload[3],
+                    command_payload[4],
+                ]);
+                let (sql, prepared_columns, cursor_read_only) = match prepared_statements
+                    .get_mut(&statement_id)
+                {
+                    Some(statement) => {
+                        statement.cursor = None;
+                        match mysql_parse_stmt_execute_params(&command_payload, statement) {
+                            Ok((params, cursor_read_only)) => {
+                                match mysql_substitute_stmt_sql(&statement.sql, &params) {
+                                    Ok(sql) => {
+                                        (sql, statement.result_columns.clone(), cursor_read_only)
+                                    }
+                                    Err(message) => {
+                                        let packet = mysql_err_packet(1064, "42000", &message);
+                                        mysql_write_packet(
+                                            &mut stream,
+                                            cmd_seq.wrapping_add(1),
+                                            &packet,
+                                        )
+                                        .await?;
+                                        continue;
+                                    }
                                 }
-                            }
-                        }
-                        let statement = result
-                            .get("statement")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        let transactional_write =
-                            matches!(statement, "insert" | "update" | "delete")
-                                && (!autocommit || tx_active);
-                        if transactional_write {
-                            tx_active = true;
-                            if statement == "insert" {
-                                if let Some(undo_sql) = mysql_build_insert_undo_sql(
-                                    &state,
-                                    &exec_sql,
-                                    default_db.as_deref(),
-                                    &result,
-                                )
-                                .await
-                                {
-                                    tx_undo_sql.push(undo_sql);
-                                }
-                            }
-                        }
-                        match mysql_query_outcome_from_sql_exec(&result) {
-                            Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
-                                mysql_send_text_result(
-                                    &mut stream,
-                                    cmd_seq.wrapping_add(1),
-                                    &columns,
-                                    &rows,
-                                )
-                                .await?;
-                            }
-                            Ok(MySqlQueryOutcome::Ok {
-                                affected_rows,
-                                last_insert_id,
-                            }) => {
-                                let packet = mysql_ok_packet_with(affected_rows, last_insert_id);
-                                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
-                                    .await?;
                             }
                             Err(message) => {
-                                let packet = mysql_err_packet(1105, "HY000", &message);
+                                let code = if message.contains("unsupported") {
+                                    1235
+                                } else {
+                                    1064
+                                };
+                                let state_code = "42000";
+                                let packet = mysql_err_packet(code, state_code, &message);
                                 mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet)
                                     .await?;
+                                continue;
                             }
                         }
                     }
-                    Err(err) => {
-                        let (code, state_code, message) = mysql_error_from_rpc(&err);
+                    None => {
+                        let packet =
+                            mysql_err_packet(1243, "HY000", "unknown prepared statement handler");
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                        continue;
+                    }
+                };
+                match mysql_execute_sql(&state, &sql, &mut session).await {
+                    Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+                        if cursor_read_only {
+                            let column_types = mysql_binary_result_column_types(
+                                &columns,
+                                &rows,
+                                Some(&prepared_columns),
+                            );
+                            let cursor_status = if rows.is_empty() {
+                                MYSQL_STATUS_AUTOCOMMIT | MYSQL_STATUS_LAST_ROW_SENT
+                            } else {
+                                MYSQL_STATUS_AUTOCOMMIT | MYSQL_STATUS_CURSOR_EXISTS
+                            };
+                            mysql_send_binary_result_header(
+                                &mut stream,
+                                cmd_seq.wrapping_add(1),
+                                &columns,
+                                &rows,
+                                &column_types,
+                                cursor_status,
+                            )
+                            .await?;
+                            if let Some(statement) = prepared_statements.get_mut(&statement_id) {
+                                statement.cursor = Some(MySqlPreparedCursor {
+                                    column_types,
+                                    rows,
+                                    next_row: 0,
+                                });
+                            }
+                        } else {
+                            mysql_send_binary_result(
+                                &mut stream,
+                                cmd_seq.wrapping_add(1),
+                                &columns,
+                                &rows,
+                                Some(&prepared_columns),
+                            )
+                            .await?;
+                        }
+                    }
+                    Ok(MySqlQueryOutcome::Ok {
+                        affected_rows,
+                        last_insert_id,
+                    }) => {
+                        let packet = mysql_ok_packet_with(affected_rows, last_insert_id);
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    }
+                    Err((code, state_code, message)) => {
                         let packet = mysql_err_packet(code, state_code, &message);
                         mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
                     }
                 }
+            }
+            0x18 => {
+                if command_payload.len() < 7 {
+                    let packet =
+                        mysql_err_packet(1064, "42000", "malformed COM_STMT_SEND_LONG_DATA");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                }
+                let statement_id = u32::from_le_bytes([
+                    command_payload[1],
+                    command_payload[2],
+                    command_payload[3],
+                    command_payload[4],
+                ]);
+                let param_id = u16::from_le_bytes([command_payload[5], command_payload[6]]);
+                let Some(statement) = prepared_statements.get_mut(&statement_id) else {
+                    let packet =
+                        mysql_err_packet(1243, "HY000", "unknown prepared statement handler");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                };
+                statement
+                    .long_data
+                    .entry(param_id)
+                    .or_default()
+                    .extend_from_slice(&command_payload[7..]);
+                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                    .await?;
+            }
+            0x19 => {
+                if command_payload.len() >= 5 {
+                    let statement_id = u32::from_le_bytes([
+                        command_payload[1],
+                        command_payload[2],
+                        command_payload[3],
+                        command_payload[4],
+                    ]);
+                    prepared_statements.remove(&statement_id);
+                }
+                continue;
+            }
+            0x1a => {
+                if command_payload.len() < 5 {
+                    let packet = mysql_err_packet(1064, "42000", "malformed COM_STMT_RESET");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                }
+                let statement_id = u32::from_le_bytes([
+                    command_payload[1],
+                    command_payload[2],
+                    command_payload[3],
+                    command_payload[4],
+                ]);
+                let Some(statement) = prepared_statements.get_mut(&statement_id) else {
+                    let packet =
+                        mysql_err_packet(1243, "HY000", "unknown prepared statement handler");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                };
+                statement.long_data.clear();
+                statement.cursor = None;
+                mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
+                    .await?;
+            }
+            0x1c => {
+                if command_payload.len() < 9 {
+                    let packet = mysql_err_packet(1064, "42000", "malformed COM_STMT_FETCH");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                }
+                let statement_id = u32::from_le_bytes([
+                    command_payload[1],
+                    command_payload[2],
+                    command_payload[3],
+                    command_payload[4],
+                ]);
+                let fetch_rows = u32::from_le_bytes([
+                    command_payload[5],
+                    command_payload[6],
+                    command_payload[7],
+                    command_payload[8],
+                ]) as usize;
+                let Some(statement) = prepared_statements.get_mut(&statement_id) else {
+                    let packet =
+                        mysql_err_packet(1243, "HY000", "unknown prepared statement handler");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                };
+                let Some(cursor_state) = statement.cursor.as_mut() else {
+                    let packet =
+                        mysql_err_packet(1105, "HY000", "prepared statement has no open cursor");
+                    mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    continue;
+                };
+                let start = cursor_state.next_row.min(cursor_state.rows.len());
+                let end = if fetch_rows == 0 {
+                    start
+                } else {
+                    start
+                        .saturating_add(fetch_rows)
+                        .min(cursor_state.rows.len())
+                };
+                let rows = cursor_state.rows[start..end].to_vec();
+                cursor_state.next_row = end;
+                let eof_status = if cursor_state.next_row < cursor_state.rows.len() {
+                    MYSQL_STATUS_AUTOCOMMIT | MYSQL_STATUS_CURSOR_EXISTS
+                } else {
+                    MYSQL_STATUS_AUTOCOMMIT | MYSQL_STATUS_LAST_ROW_SENT
+                };
+                mysql_send_binary_result_rows_only(
+                    &mut stream,
+                    cmd_seq.wrapping_add(1),
+                    &rows,
+                    &cursor_state.column_types,
+                    eof_status,
+                )
+                .await?;
             }
             _ => {
                 let packet = mysql_err_packet(1047, "08S01", "unsupported command");
@@ -2675,7 +3815,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         tracing::info!("MySQL listener disabled (--mysql 0)");
     } else {
         tracing::info!(
-            "MySQL listener enabled (handshake/auth + COM_QUERY subset via sql.exec translator)"
+            "MySQL listener enabled (handshake/auth + COM_QUERY plus baseline COM_STMT_* compatibility via sql.exec translator)"
         );
     }
 
@@ -5512,7 +6652,10 @@ fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef,
 fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRef, RpcError> {
     let input = input.trim();
     for (token, join_type) in [
+        (" left outer join ", JoinType::Left),
+        (" right outer join ", JoinType::Right),
         (" left join ", JoinType::Left),
+        (" right join ", JoinType::Right),
         (" inner join ", JoinType::Inner),
         (" join ", JoinType::Inner),
     ] {
@@ -10466,6 +11609,63 @@ mod tests {
     }
 
     #[test]
+    fn mysql_stmt_prepare_columns_resolve_schema_and_projection_labels() {
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT u.id AS user_id, u.name FROM app.users AS u WHERE u.id = 7",
+            Some("app"),
+        )
+        .expect("parse select plan")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let desc = json!({
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}},
+                {"name": "name", "type": {"kind": "string"}}
+            ]
+        });
+        let explicit =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+        assert_eq!(
+            explicit,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "user_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan("SELECT * FROM app.users AS u", Some("app")).expect("parse wildcard")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let wildcard =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+        assert_eq!(
+            wildcard,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_parse_set_autocommit_roundtrip() {
         assert_eq!(mysql_parse_set_autocommit("SET autocommit=0"), Some(false));
         assert_eq!(
@@ -10493,17 +11693,37 @@ mod tests {
     }
 
     #[test]
-    fn mysql_parse_count_query_roundtrip() {
-        let parsed = mysql_parse_count_query(
+    fn mysql_parse_simple_aggregate_query_roundtrip() {
+        let parsed = mysql_parse_simple_aggregate_query(
             "SELECT COUNT(*) AS publish_count FROM wp_posts WHERE post_status = 'publish' ORDER BY id DESC LIMIT 10",
         )
-        .expect("parse count query");
+        .expect("parse aggregate query");
         assert_eq!(parsed.0, "publish_count");
         assert_eq!(
             parsed.1,
             "SELECT * FROM wp_posts WHERE post_status = 'publish'"
         );
-        assert!(mysql_parse_count_query("SELECT id FROM wp_posts").is_none());
+        assert_eq!(parsed.2, MySqlCompatAggregateOp::CountRows);
+
+        let parsed = mysql_parse_simple_aggregate_query(
+            "SELECT COUNT(meta_value) FROM wp_postmeta WHERE post_id = 7",
+        )
+        .expect("parse count(col) query");
+        assert_eq!(parsed.0, "COUNT(meta_value)");
+        assert_eq!(
+            parsed.1,
+            "SELECT meta_value FROM wp_postmeta WHERE post_id = 7"
+        );
+        assert_eq!(parsed.2, MySqlCompatAggregateOp::CountNonNull);
+
+        let parsed =
+            mysql_parse_simple_aggregate_query("SELECT SUM(score) AS total_score FROM wp_postmeta")
+                .expect("parse sum query");
+        assert_eq!(parsed.0, "total_score");
+        assert_eq!(parsed.1, "SELECT score FROM wp_postmeta");
+        assert_eq!(parsed.2, MySqlCompatAggregateOp::Sum);
+
+        assert!(mysql_parse_simple_aggregate_query("SELECT id FROM wp_posts").is_none());
     }
 
     #[test]
@@ -11662,6 +12882,42 @@ mod tests {
         assert_eq!(left_join_eq_rows.len(), 2);
         assert_eq!(left_join_eq_rows[0][0]["v"].as_i64(), Some(10));
         assert_eq!(left_join_eq_rows[1][0]["v"].as_i64(), Some(11));
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_users (id, status, name) VALUES (4, 'active', 'Margaret')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let right_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT u.id, p.id FROM wp_posts AS p RIGHT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id IS NULL ORDER BY u.id ASC",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(right_join.ok);
+        let right_join_rows = right_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(right_join_rows.len(), 2);
+        assert_eq!(right_join_rows[0][0]["v"].as_i64(), Some(2));
+        assert_eq!(right_join_rows[0][1]["t"].as_str(), Some("null"));
+        assert_eq!(right_join_rows[1][0]["v"].as_i64(), Some(4));
+        assert_eq!(right_join_rows[1][1]["t"].as_str(), Some("null"));
 
         let altered = call_rpc(
             &state,
