@@ -460,10 +460,17 @@ struct MySqlStmtParamType {
     unsigned: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MySqlStmtPrepareColumn {
+    name: String,
+    column_type: MySqlStmtColumnType,
+}
+
 #[derive(Debug, Clone)]
 struct MySqlPreparedStatement {
     sql: String,
     param_count: u16,
+    result_columns: Vec<MySqlStmtPrepareColumn>,
     param_types: Vec<MySqlStmtParamType>,
     long_data: HashMap<u16, Vec<u8>>,
 }
@@ -480,10 +487,11 @@ struct MySqlSessionState {
 type MySqlWireError = (u16, &'static str, String);
 
 impl MySqlPreparedStatement {
-    fn new(sql: String, param_count: u16) -> Self {
+    fn new(sql: String, param_count: u16, result_columns: Vec<MySqlStmtPrepareColumn>) -> Self {
         Self {
             sql,
             param_count,
+            result_columns,
             param_types: Vec::new(),
             long_data: HashMap::new(),
         }
@@ -2292,6 +2300,161 @@ fn mysql_stmt_column_type_code(kind: MySqlStmtColumnType) -> u8 {
     }
 }
 
+fn mysql_stmt_column_type_for_mysql_literal(lit: &MySqlLiteral) -> MySqlStmtColumnType {
+    match lit {
+        MySqlLiteral::Int(_) => MySqlStmtColumnType::LongLong,
+        MySqlLiteral::Str(_) | MySqlLiteral::Null => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_column_type_for_lit(lit: &Lit) -> MySqlStmtColumnType {
+    match lit {
+        Lit::Bool { .. } | Lit::I64 { .. } | Lit::U64 { .. } => MySqlStmtColumnType::LongLong,
+        Lit::F64 { .. } => MySqlStmtColumnType::Double,
+        Lit::Null
+        | Lit::Dec { .. }
+        | Lit::Str { .. }
+        | Lit::Date { .. }
+        | Lit::Time { .. }
+        | Lit::Datetime { .. }
+        | Lit::Uuid { .. }
+        | Lit::Bytes { .. }
+        | Lit::Json { .. }
+        | Lit::Embedding { .. } => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_column_type_from_desc_column(column: &Value) -> MySqlStmtColumnType {
+    match column
+        .get("type")
+        .and_then(|v| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("string")
+    {
+        "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
+        "f64" => MySqlStmtColumnType::Double,
+        _ => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
+    base.r#as.as_deref().unwrap_or(&base.table)
+}
+
+fn mysql_stmt_prepare_columns_from_select(
+    from: Option<&TableRef>,
+    projection: &[SelectItem],
+    base_desc: Option<&Value>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some(cols) = from
+        .and_then(|from| match from {
+            TableRef::Base(base) => Some(base),
+            _ => None,
+        })
+        .zip(base_desc)
+        .filter(|_| projection.is_empty())
+        .map(|(_, desc)| {
+            desc.get("columns")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+    {
+        return cols
+            .into_iter()
+            .filter_map(|column| {
+                let name = column.get("name").and_then(|v| v.as_str())?.to_string();
+                Some(MySqlStmtPrepareColumn {
+                    name,
+                    column_type: mysql_stmt_column_type_from_desc_column(&column),
+                })
+            })
+            .collect();
+    }
+
+    let base = from.and_then(|from| match from {
+        TableRef::Base(base) => Some(base),
+        _ => None,
+    });
+    projection
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let column_type = match &item.expr {
+                Expr::Lit { lit } => mysql_stmt_column_type_for_lit(lit),
+                Expr::Col { col, table } => {
+                    if let Some((base, desc)) = base.zip(base_desc) {
+                        let matches_base = table
+                            .as_deref()
+                            .map(|table_name| {
+                                table_name.eq_ignore_ascii_case(&base.table)
+                                    || table_name
+                                        .eq_ignore_ascii_case(mysql_stmt_base_table_alias(base))
+                            })
+                            .unwrap_or(true);
+                        if matches_base {
+                            desc.get("columns")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                                .find(|column| {
+                                    column
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|name| name.eq_ignore_ascii_case(col))
+                                        .unwrap_or(false)
+                                })
+                                .map(mysql_stmt_column_type_from_desc_column)
+                                .unwrap_or(MySqlStmtColumnType::VarString)
+                        } else {
+                            MySqlStmtColumnType::VarString
+                        }
+                    } else {
+                        MySqlStmtColumnType::VarString
+                    }
+                }
+                _ => MySqlStmtColumnType::VarString,
+            };
+            MySqlStmtPrepareColumn {
+                name: projection_label(item, idx),
+                column_type,
+            }
+        })
+        .collect()
+}
+
+async fn mysql_stmt_prepare_columns(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some(cols) = parse_select_literal_query(sql, default_db) {
+        return cols
+            .into_iter()
+            .map(|(name, lit)| MySqlStmtPrepareColumn {
+                name,
+                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
+            })
+            .collect();
+    }
+
+    let Ok(SqlPlan::Select {
+        from, projection, ..
+    }) = parse_sql_plan(sql, default_db)
+    else {
+        return Vec::new();
+    };
+
+    let base_desc = match from.as_ref() {
+        Some(TableRef::Base(base)) => {
+            let eng = state.engine.read().await;
+            eng.describe_table(&base.db, &base.table).ok()
+        }
+        _ => None,
+    };
+    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, base_desc.as_ref())
+}
+
 fn mysql_stmt_infer_column_types(
     rows: &[Vec<Option<String>>],
     column_count: usize,
@@ -2894,15 +3057,34 @@ async fn mysql_send_prepare_ok(
     start_seq: u8,
     statement_id: u32,
     param_count: u16,
+    result_columns: &[MySqlStmtPrepareColumn],
 ) -> anyhow::Result<()> {
     let mut seq = start_seq;
-    let packet = mysql_prepare_ok_packet(statement_id, 0, param_count);
+    let packet = mysql_prepare_ok_packet(statement_id, result_columns.len() as u16, param_count);
     mysql_write_packet(stream, seq, &packet).await?;
     seq = seq.wrapping_add(1);
     if param_count > 0 {
         for idx in 0..param_count {
             let name = format!("param{}", idx + 1);
             let packet = mysql_column_definition_packet_with_type(&name, 0xfd, 255);
+            mysql_write_packet(stream, seq, &packet).await?;
+            seq = seq.wrapping_add(1);
+        }
+        mysql_write_packet(stream, seq, &mysql_eof_packet()).await?;
+        seq = seq.wrapping_add(1);
+    }
+    if !result_columns.is_empty() {
+        for column in result_columns {
+            let len = match column.column_type {
+                MySqlStmtColumnType::LongLong => 20,
+                MySqlStmtColumnType::Double => 24,
+                MySqlStmtColumnType::VarString => 255,
+            };
+            let packet = mysql_column_definition_packet_with_type(
+                &column.name,
+                mysql_stmt_column_type_code(column.column_type),
+                len,
+            );
             mysql_write_packet(stream, seq, &packet).await?;
             seq = seq.wrapping_add(1);
         }
@@ -2916,6 +3098,7 @@ async fn mysql_send_binary_result(
     start_seq: u8,
     columns: &[String],
     rows: &[Vec<Option<String>>],
+    prepared_columns: Option<&[MySqlStmtPrepareColumn]>,
 ) -> anyhow::Result<()> {
     let mut seq = start_seq;
     let mut column_count = Vec::new();
@@ -2923,7 +3106,22 @@ async fn mysql_send_binary_result(
     mysql_write_packet(stream, seq, &column_count).await?;
     seq = seq.wrapping_add(1);
 
-    let column_types = mysql_stmt_infer_column_types(rows, columns.len());
+    let mut column_types = mysql_stmt_infer_column_types(rows, columns.len());
+    if rows.is_empty() {
+        if let Some(prepared_columns) = prepared_columns {
+            if prepared_columns.len() == columns.len()
+                && prepared_columns
+                    .iter()
+                    .zip(columns.iter())
+                    .all(|(prepared, actual)| prepared.name.eq_ignore_ascii_case(actual))
+            {
+                column_types = prepared_columns
+                    .iter()
+                    .map(|prepared| prepared.column_type)
+                    .collect();
+            }
+        }
+    }
     for (idx, name) in columns.iter().enumerate() {
         let len = match column_types[idx] {
             MySqlStmtColumnType::LongLong => 20,
@@ -3066,13 +3264,18 @@ async fn handle_mysql_connection(
                 let statement_id = next_statement_id;
                 next_statement_id = next_statement_id.wrapping_add(1);
                 let param_count = mysql_count_placeholders(&sql);
-                prepared_statements
-                    .insert(statement_id, MySqlPreparedStatement::new(sql, param_count));
+                let result_columns =
+                    mysql_stmt_prepare_columns(&state, &sql, session.default_db.as_deref()).await;
+                prepared_statements.insert(
+                    statement_id,
+                    MySqlPreparedStatement::new(sql, param_count, result_columns.clone()),
+                );
                 mysql_send_prepare_ok(
                     &mut stream,
                     cmd_seq.wrapping_add(1),
                     statement_id,
                     param_count,
+                    &result_columns,
                 )
                 .await?;
             }
@@ -3088,12 +3291,12 @@ async fn handle_mysql_connection(
                     command_payload[3],
                     command_payload[4],
                 ]);
-                let sql = match prepared_statements.get_mut(&statement_id) {
+                let (sql, prepared_columns) = match prepared_statements.get_mut(&statement_id) {
                     Some(statement) => {
                         match mysql_parse_stmt_execute_params(&command_payload, statement) {
                             Ok(params) => {
                                 match mysql_substitute_stmt_sql(&statement.sql, &params) {
-                                    Ok(sql) => sql,
+                                    Ok(sql) => (sql, statement.result_columns.clone()),
                                     Err(message) => {
                                         let packet = mysql_err_packet(1064, "42000", &message);
                                         mysql_write_packet(
@@ -3134,6 +3337,7 @@ async fn handle_mysql_connection(
                             cmd_seq.wrapping_add(1),
                             &columns,
                             &rows,
+                            Some(&prepared_columns),
                         )
                         .await?;
                     }
@@ -11171,6 +11375,63 @@ mod tests {
     #[test]
     fn parse_select_literal_query_rejects_from_clause() {
         assert!(parse_select_literal_query("SELECT 1 FROM app.users", None).is_none());
+    }
+
+    #[test]
+    fn mysql_stmt_prepare_columns_resolve_schema_and_projection_labels() {
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT u.id AS user_id, u.name FROM app.users AS u WHERE u.id = 7",
+            Some("app"),
+        )
+        .expect("parse select plan")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let desc = json!({
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}},
+                {"name": "name", "type": {"kind": "string"}}
+            ]
+        });
+        let explicit =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+        assert_eq!(
+            explicit,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "user_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan("SELECT * FROM app.users AS u", Some("app")).expect("parse wildcard")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let wildcard =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+        assert_eq!(
+            wildcard,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
     }
 
     #[test]

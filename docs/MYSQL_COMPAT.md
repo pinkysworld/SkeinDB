@@ -45,8 +45,9 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, and `COM_STMT_CLOSE`
   - `COM_STMT_SEND_LONG_DATA` and `COM_STMT_RESET` for common string/blob-style parameter flows
   - `?` placeholders are rebound into the same SQL-translation path as `COM_QUERY`
+  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including base-table `SELECT *` on a single table)
   - prepared `SELECT` responses are returned over the binary row protocol
-  - prepare-time result metadata is still intentionally minimal, so deeper driver parity remains follow-on work
+  - deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, cursors/fetch) remains follow-on work
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
   - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`

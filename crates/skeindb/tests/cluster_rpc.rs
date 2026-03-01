@@ -494,6 +494,14 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     let insert_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(insert_stmt.column_count, 0);
     assert_eq!(insert_stmt.param_count, 2);
+    assert_eq!(
+        insert_stmt
+            .param_defs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["param1", "param2"]
+    );
 
     send_com_stmt_long_data(&mut stream, insert_stmt.statement_id, 1, b"Nora").await?;
     match read_mysql_response(&mut stream).await? {
@@ -554,10 +562,14 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         other => return Err(anyhow!("expected OK for prepared insert, got {:?}", other)),
     }
 
-    send_com_stmt_prepare(&mut stream, "SELECT id, name FROM wp_users WHERE id = ?").await?;
+    send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users WHERE id = ?").await?;
     let select_stmt = read_mysql_prepare_ok(&mut stream).await?;
-    assert_eq!(select_stmt.column_count, 0);
+    assert_eq!(select_stmt.column_count, 2);
     assert_eq!(select_stmt.param_count, 1);
+    assert_eq!(
+        select_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
 
     send_com_stmt_execute(
         &mut stream,
@@ -1345,6 +1357,8 @@ struct MysqlStmtPrepareOk {
     statement_id: u32,
     column_count: u16,
     param_count: u16,
+    param_defs: Vec<(String, u8)>,
+    column_defs: Vec<(String, u8)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1362,13 +1376,19 @@ fn decode_mysql_stmt_prepare_ok(payload: &[u8]) -> anyhow::Result<MysqlStmtPrepa
         statement_id: u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]),
         column_count: u16::from_le_bytes([payload[5], payload[6]]),
         param_count: u16::from_le_bytes([payload[7], payload[8]]),
+        param_defs: Vec::new(),
+        column_defs: Vec::new(),
     })
 }
 
-fn decode_mysql_column_type(payload: &[u8]) -> anyhow::Result<u8> {
+fn decode_mysql_column_definition(payload: &[u8]) -> anyhow::Result<(String, u8)> {
     let mut cursor = 0usize;
-    for _ in 0..6 {
-        let _ = decode_mysql_lenenc_bytes(payload, &mut cursor)?;
+    let mut name = None::<String>;
+    for idx in 0..6 {
+        let field = decode_mysql_lenenc_bytes(payload, &mut cursor)?;
+        if idx == 4 {
+            name = Some(String::from_utf8_lossy(field).to_string());
+        }
     }
     if cursor >= payload.len() {
         return Err(anyhow!("truncated column definition"));
@@ -1379,10 +1399,11 @@ fn decode_mysql_column_type(payload: &[u8]) -> anyhow::Result<u8> {
         return Err(anyhow!("malformed column definition payload"));
     }
     cursor += 2 + 4;
-    payload
+    let type_code = payload
         .get(cursor)
         .copied()
-        .ok_or_else(|| anyhow!("missing column type"))
+        .ok_or_else(|| anyhow!("missing column type"))?;
+    Ok((name.unwrap_or_default(), type_code))
 }
 
 fn decode_mysql_lenenc_bytes<'a>(
@@ -1468,16 +1489,22 @@ async fn read_mysql_prepare_ok(stream: &mut TcpStream) -> anyhow::Result<MysqlSt
     if let Some(err) = decode_mysql_err_packet(&first_payload) {
         return Err(anyhow!("mysql error packet: {}", err));
     }
-    let prepare_ok = decode_mysql_stmt_prepare_ok(&first_payload)?;
+    let mut prepare_ok = decode_mysql_stmt_prepare_ok(&first_payload)?;
     for _ in 0..prepare_ok.param_count {
-        let _ = read_mysql_packet(stream).await?;
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        prepare_ok
+            .param_defs
+            .push(decode_mysql_column_definition(&payload)?);
     }
     if prepare_ok.param_count > 0 {
         let (_seq, eof) = read_mysql_packet(stream).await?;
         assert_eq!(eof.first().copied(), Some(0xfe));
     }
     for _ in 0..prepare_ok.column_count {
-        let _ = read_mysql_packet(stream).await?;
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        prepare_ok
+            .column_defs
+            .push(decode_mysql_column_definition(&payload)?);
     }
     if prepare_ok.column_count > 0 {
         let (_seq, eof) = read_mysql_packet(stream).await?;
@@ -1572,7 +1599,8 @@ async fn read_mysql_binary_result_rows(
     let mut column_types = Vec::with_capacity(column_count);
     for _ in 0..column_count {
         let (_seq, payload) = read_mysql_packet(stream).await?;
-        column_types.push(decode_mysql_column_type(&payload)?);
+        let (_name, column_type) = decode_mysql_column_definition(&payload)?;
+        column_types.push(column_type);
     }
     let (_seq, eof1) = read_mysql_packet(stream).await?;
     assert_eq!(eof1.first().copied(), Some(0xfe));
