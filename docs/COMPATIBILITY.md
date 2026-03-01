@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-02-28
+Last updated: 2026-03-01
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -41,9 +41,16 @@ SkeinDB adoption strategy:
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- INNER JOIN and LEFT JOIN (simple single-join shapes); RIGHT/FULL joins are not implemented yet
+- INNER JOIN, LEFT JOIN, and RIGHT JOIN (simple single-join shapes); FULL joins are not implemented yet
 - GROUP BY + aggregates remain mostly open beyond the current `COUNT(*)` compatibility shim
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
+
+### MySQL wire protocol
+- Handshake + `mysql_native_password`
+- COM_QUERY over the current SQL-translation subset
+- Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
+- `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` for common string/blob parameter flows
+- Prepared `SELECT` results are returned in the binary row protocol, but prepare-time result metadata is still minimal and cursor/fetch parity is still open
 
 ### SHOW / metadata
 - SHOW DATABASES / TABLES / FULL TABLES

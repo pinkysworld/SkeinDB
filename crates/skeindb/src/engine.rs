@@ -7837,8 +7837,34 @@ fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Ve
                 }
             }
         }
+        JoinType::Right => {
+            let left_nulls = null_row_ctx_for_ref(engine, &join.left)?;
+            for b in right.iter() {
+                let mut matched = false;
+                for a in left.iter() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                            matched = true;
+                        }
+                    } else {
+                        out.push(merged);
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    let mut merged = left_nulls.clone();
+                    merged.extend(b.clone());
+                    out.push(merged);
+                }
+            }
+        }
         _ => {
-            anyhow::bail!("only INNER, LEFT, and CROSS joins are implemented in this prototype")
+            anyhow::bail!(
+                "only INNER, LEFT, RIGHT, and CROSS joins are implemented in this prototype"
+            )
         }
     }
 
@@ -17304,6 +17330,174 @@ mod tests {
         );
         let (_cols, rows) = execute_select(&engine, &in_query, &[])?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_right_join_with_null_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("right_join_null_rows");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "author_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Ada".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Linus".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 10 }),
+                ("author_id", Lit::U64 { v: 1 }),
+            ])],
+            None,
+        )?;
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: Some("u".to_string()),
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: Some("p".to_string()),
+                            },
+                            r#as: None,
+                        },
+                    ],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Right,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "posts".to_string(),
+                                r#as: Some("p".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "users".to_string(),
+                                r#as: Some("u".to_string()),
+                            })),
+                            on: Some(eq_expr(
+                                Expr::Col {
+                                    col: "author_id".to_string(),
+                                    table: Some("p".to_string()),
+                                },
+                                Expr::Col {
+                                    col: "id".to_string(),
+                                    table: Some("u".to_string()),
+                                },
+                            )),
+                        },
+                    })]),
+                    r#where: Some(Expr::Op {
+                        op: "is_null".to_string(),
+                        a: Some(Box::new(Expr::Col {
+                            col: "id".to_string(),
+                            table: Some("p".to_string()),
+                        })),
+                        b: None,
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    }),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: vec![OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("u".to_string()),
+                },
+                dir: Some(OrderDir::Asc),
+            }],
+            limit: None,
+            lock: None,
+        };
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 4 }, Lit::Null]]);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
