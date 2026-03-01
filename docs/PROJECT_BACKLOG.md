@@ -45,8 +45,8 @@ Phase 0 verification checklist:
 - [x] T033: DDL/DML subset for corpus.sql
 - [x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
 - [ ] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics
-- [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (more joins, subqueries, aggregates, `ALTER TABLE` variants)
-- [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, broader parameter types, cursor/fetch support)
+- [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (more joins, subqueries, `GROUP BY`/richer aggregates, `ALTER TABLE` variants)
+- [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage)
 
 ## Phase 4 — Web console
 - [x] T040: HTTP API `/api/v1/sql/exec`

@@ -562,6 +562,56 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         other => return Err(anyhow!("expected OK for prepared insert, got {:?}", other)),
     }
 
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_metrics").await?;
+    let (_seq, ok_drop_metrics) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_metrics)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_metrics (id BIGINT UNSIGNED NOT NULL, score DOUBLE NULL, note VARCHAR(255) NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_metrics) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_metrics)?.0, 0);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "INSERT INTO wp_metrics (id, score, note) VALUES (?, ?, ?)",
+    )
+    .await?;
+    let metric_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(metric_stmt.param_count, 3);
+
+    send_com_stmt_execute(
+        &mut stream,
+        metric_stmt.statement_id,
+        &[
+            MysqlStmtParamValue::I64(1),
+            MysqlStmtParamValue::F64(1.5),
+            MysqlStmtParamValue::Null,
+        ],
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 1),
+        other => {
+            return Err(anyhow!(
+                "expected OK for prepared metric insert, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT score, note FROM wp_metrics WHERE id = 1",
+    )
+    .await?;
+    let metric_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(metric_rows, vec![vec![Some("1.5".to_string()), None]]);
+
+    send_com_stmt_close(&mut stream, metric_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users WHERE id = ?").await?;
     let select_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(select_stmt.column_count, 2);
@@ -595,6 +645,58 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
     );
 
+    send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
+    let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
+
+    send_com_stmt_execute_with_flags(&mut stream, cursor_stmt.statement_id, 0x01, &[]).await?;
+    let (column_types, execute_status) = read_mysql_binary_result_header(&mut stream).await?;
+    assert_eq!(column_types, vec![0x08, 0xfd]);
+    assert_eq!(execute_status & 0x0040, 0x0040);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (first_fetch_rows, first_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert_eq!(
+        first_fetch_rows,
+        vec![vec![Some("7".to_string()), Some("Nora".to_string())]]
+    );
+    assert_eq!(first_fetch_status & 0x0040, 0x0040);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 10).await?;
+    let (second_fetch_rows, second_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert_eq!(
+        second_fetch_rows,
+        vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
+    );
+    assert_eq!(second_fetch_status & 0x0080, 0x0080);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (empty_fetch_rows, empty_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert!(empty_fetch_rows.is_empty());
+    assert_eq!(empty_fetch_status & 0x0080, 0x0080);
+
+    send_com_stmt_reset(&mut stream, cursor_stmt.statement_id).await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 0),
+        other => {
+            return Err(anyhow!(
+                "expected OK for cursor COM_STMT_RESET, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (_seq, cursor_err) = read_mysql_packet(&mut stream).await?;
+    let cursor_err =
+        decode_mysql_err_packet(&cursor_err).ok_or_else(|| anyhow!("expected cursor error"))?;
+    assert!(cursor_err.contains("no open cursor"));
+
+    send_com_stmt_close(&mut stream, cursor_stmt.statement_id).await?;
+
     send_com_stmt_close(&mut stream, select_stmt.statement_id).await?;
 
     send_com_stmt_execute(
@@ -609,6 +711,70 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     assert!(closed_err.contains("unknown prepared statement handler"));
 
     send_com_stmt_close(&mut stream, insert_stmt.statement_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_simple_aggregate_compat_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_postmeta").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_postmeta (meta_id BIGINT UNSIGNED NOT NULL, sort_order BIGINT NULL, weight DOUBLE NULL, PRIMARY KEY (meta_id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    for sql in [
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (1, 2, 1.5)",
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (2, NULL, NULL)",
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (3, 5, 2.25)",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 1);
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT COUNT(sort_order) AS present_sorts FROM wp_postmeta",
+    )
+    .await?;
+    let count_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(count_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT SUM(sort_order) AS total_sort FROM wp_postmeta",
+    )
+    .await?;
+    let int_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(int_sum_rows, vec![vec![Some("7".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT SUM(weight) AS total_weight FROM wp_postmeta",
+    )
+    .await?;
+    let float_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(float_sum_rows, vec![vec![Some("3.75".to_string())]]);
+
     Ok(())
 }
 
@@ -1364,6 +1530,8 @@ struct MysqlStmtPrepareOk {
 #[derive(Debug, Clone)]
 enum MysqlStmtParamValue {
     I64(i64),
+    F64(f64),
+    Null,
     Str(String),
     LongData,
 }
@@ -1404,6 +1572,13 @@ fn decode_mysql_column_definition(payload: &[u8]) -> anyhow::Result<(String, u8)
         .copied()
         .ok_or_else(|| anyhow!("missing column type"))?;
     Ok((name.unwrap_or_default(), type_code))
+}
+
+fn decode_mysql_eof_status(payload: &[u8]) -> anyhow::Result<u16> {
+    if payload.len() < 5 || payload.first().copied() != Some(0xfe) {
+        return Err(anyhow!("not an EOF packet"));
+    }
+    Ok(u16::from_le_bytes([payload[3], payload[4]]))
 }
 
 fn decode_mysql_lenenc_bytes<'a>(
@@ -1525,19 +1700,41 @@ async fn send_com_stmt_execute(
     statement_id: u32,
     params: &[MysqlStmtParamValue],
 ) -> anyhow::Result<()> {
+    send_com_stmt_execute_with_flags(stream, statement_id, 0, params).await
+}
+
+async fn send_com_stmt_execute_with_flags(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    flags: u8,
+    params: &[MysqlStmtParamValue],
+) -> anyhow::Result<()> {
     let mut payload = Vec::new();
     payload.push(0x17);
     payload.extend_from_slice(&statement_id.to_le_bytes());
-    payload.push(0);
+    payload.push(flags);
     payload.extend_from_slice(&1u32.to_le_bytes());
     let null_bitmap_len = params.len().div_ceil(8);
-    let null_bitmap = vec![0u8; null_bitmap_len];
+    let mut null_bitmap = vec![0u8; null_bitmap_len];
+    for (idx, param) in params.iter().enumerate() {
+        if matches!(param, MysqlStmtParamValue::Null) {
+            null_bitmap[idx / 8] |= 1u8 << (idx % 8);
+        }
+    }
     payload.extend_from_slice(&null_bitmap);
     payload.push(1);
     for param in params {
         match param {
             MysqlStmtParamValue::I64(_) => {
                 payload.push(0x08);
+                payload.push(0);
+            }
+            MysqlStmtParamValue::F64(_) => {
+                payload.push(0x05);
+                payload.push(0);
+            }
+            MysqlStmtParamValue::Null => {
+                payload.push(0x06);
                 payload.push(0);
             }
             MysqlStmtParamValue::Str(_) | MysqlStmtParamValue::LongData => {
@@ -1548,14 +1745,27 @@ async fn send_com_stmt_execute(
     }
     for param in params {
         match param {
-            MysqlStmtParamValue::LongData => {}
+            MysqlStmtParamValue::Null | MysqlStmtParamValue::LongData => {}
             MysqlStmtParamValue::I64(v) => payload.extend_from_slice(&v.to_le_bytes()),
+            MysqlStmtParamValue::F64(v) => payload.extend_from_slice(&v.to_le_bytes()),
             MysqlStmtParamValue::Str(v) => {
                 encode_lenenc_int(&mut payload, v.len());
                 payload.extend_from_slice(v.as_bytes());
             }
         }
     }
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_fetch(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    rows: u32,
+) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(9);
+    payload.push(0x1c);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.extend_from_slice(&rows.to_le_bytes());
     write_mysql_packet(stream, 0, &payload).await
 }
 
@@ -1590,6 +1800,12 @@ async fn send_com_stmt_close(stream: &mut TcpStream, statement_id: u32) -> anyho
 async fn read_mysql_binary_result_rows(
     stream: &mut TcpStream,
 ) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let (column_types, _status) = read_mysql_binary_result_header(stream).await?;
+    let (rows, _status) = read_mysql_binary_result_rows_after_header(stream, &column_types).await?;
+    Ok(rows)
+}
+
+async fn read_mysql_binary_result_header(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, u16)> {
     let (_seq, first_payload) = read_mysql_packet(stream).await?;
     if let Some(err) = decode_mysql_err_packet(&first_payload) {
         return Err(anyhow!("mysql error packet: {}", err));
@@ -1603,17 +1819,28 @@ async fn read_mysql_binary_result_rows(
         column_types.push(column_type);
     }
     let (_seq, eof1) = read_mysql_packet(stream).await?;
-    assert_eq!(eof1.first().copied(), Some(0xfe));
+    Ok((column_types, decode_mysql_eof_status(&eof1)?))
+}
 
+async fn read_mysql_binary_result_rows_after_header(
+    stream: &mut TcpStream,
+    column_types: &[u8],
+) -> anyhow::Result<(Vec<Vec<Option<String>>>, u16)> {
     let mut rows = Vec::new();
     loop {
         let (_seq, payload) = read_mysql_packet(stream).await?;
         if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
-            break;
+            return Ok((rows, decode_mysql_eof_status(&payload)?));
         }
-        rows.push(decode_mysql_binary_row(&payload, &column_types)?);
+        rows.push(decode_mysql_binary_row(&payload, column_types)?);
     }
-    Ok(rows)
+}
+
+async fn read_mysql_stmt_fetch_rows(
+    stream: &mut TcpStream,
+    column_types: &[u8],
+) -> anyhow::Result<(Vec<Vec<Option<String>>>, u16)> {
+    read_mysql_binary_result_rows_after_header(stream, column_types).await
 }
 
 fn compat_corpus_statements() -> Vec<String> {

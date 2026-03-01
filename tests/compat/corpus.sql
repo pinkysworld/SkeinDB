@@ -168,6 +168,14 @@ SELECT COUNT(*) AS publish_count
   FROM wp_posts
  WHERE post_status = 'publish';
 
+SELECT COUNT(post_author) AS author_count
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT SUM(post_author) AS author_sum
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
 SELECT ID
   FROM wp_posts
  WHERE post_status LIKE 'pub%'

@@ -42,16 +42,16 @@ SkeinDB adoption strategy:
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (simple single-join shapes); FULL joins are not implemented yet
-- GROUP BY + aggregates remain mostly open beyond the current `COUNT(*)` compatibility shim
+- GROUP BY + full aggregate semantics remain mostly open, but simple single-result `COUNT(*)`, `COUNT(col)`, and `SUM(col)` compatibility shims now exist
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 
 ### MySQL wire protocol
 - Handshake + `mysql_native_password`
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
-- `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` for common string/blob parameter flows
+- `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
 - Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`), and prepared result rows are returned in the binary row protocol
-- Broader prepare metadata parity for more complex queries plus cursor/fetch support is still open
+- Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
 - SHOW DATABASES / TABLES / FULL TABLES
