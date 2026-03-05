@@ -7693,6 +7693,115 @@ fn parse_select_projection_item(raw: &str) -> Result<SelectItem, RpcError> {
     Ok(SelectItem { expr, r#as: alias })
 }
 
+fn sql_column_refs_match(
+    left_col: &str,
+    left_table: Option<&str>,
+    right_col: &str,
+    right_table: Option<&str>,
+) -> bool {
+    if !left_col.eq_ignore_ascii_case(right_col) {
+        return false;
+    }
+    match (left_table, right_table) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => true,
+    }
+}
+
+fn parse_group_by_projection_index(
+    group_expr: &str,
+    projection: &[SelectItem],
+) -> Result<usize, RpcError> {
+    let raw = group_expr.trim();
+    if raw.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "GROUP BY requires at least one expression",
+        ));
+    }
+
+    if let Ok(position) = raw.parse::<usize>() {
+        if position == 0 || position > projection.len() {
+            return Err(RpcError::new(
+                "invalid_request",
+                "GROUP BY ordinal is out of projection range",
+            ));
+        }
+        return Ok(position.saturating_sub(1));
+    }
+
+    let Some((group_col, group_table)) = parse_sql_column_ref(raw) else {
+        return Err(RpcError::new(
+            "not_supported",
+            "GROUP BY compatibility supports only column references or projection ordinals",
+        ));
+    };
+
+    for (idx, item) in projection.iter().enumerate() {
+        if let Some(alias) = item.r#as.as_ref() {
+            if group_table.is_none() && group_col.eq_ignore_ascii_case(alias) {
+                return Ok(idx);
+            }
+        }
+        let Expr::Col { col, table } = &item.expr else {
+            continue;
+        };
+        if sql_column_refs_match(&group_col, group_table.as_deref(), col, table.as_deref())
+            || (group_table.is_none() && group_col.eq_ignore_ascii_case(col))
+        {
+            return Ok(idx);
+        }
+    }
+
+    Err(RpcError::new(
+        "not_supported",
+        "GROUP BY compatibility requires grouped expressions to map to projected columns",
+    ))
+}
+
+fn ensure_group_by_projection_dedup_compatible(
+    group_sql: &str,
+    projection: &[SelectItem],
+) -> Result<(), RpcError> {
+    if projection.is_empty() {
+        return Err(RpcError::new(
+            "not_supported",
+            "GROUP BY with wildcard projection is not supported in compatibility mode",
+        ));
+    }
+    if projection
+        .iter()
+        .any(|item| !matches!(item.expr, Expr::Col { .. }))
+    {
+        return Err(RpcError::new(
+            "not_supported",
+            "GROUP BY compatibility currently supports only column projections",
+        ));
+    }
+
+    let mut grouped_projection_indexes = HashSet::new();
+    let mut saw_group_expr = false;
+    for part in split_csv_top_level(group_sql) {
+        saw_group_expr = true;
+        let idx = parse_group_by_projection_index(&part, projection)?;
+        grouped_projection_indexes.insert(idx);
+    }
+    if !saw_group_expr {
+        return Err(RpcError::new(
+            "invalid_request",
+            "GROUP BY requires at least one expression",
+        ));
+    }
+    if grouped_projection_indexes.len() != projection.len() {
+        return Err(RpcError::new(
+            "not_supported",
+            "GROUP BY compatibility requires grouping by all projected columns",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let mut rest = sql.trim();
     rest = rest
@@ -7736,6 +7845,7 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
     let from = parse_from_table_ref(table_sql, default_db)?;
 
     let mut where_sql = None::<String>;
+    let mut group_sql = None::<String>;
     let mut order_sql = None::<String>;
     let mut limit_sql = None::<String>;
     let mut offset_sql = None::<String>;
@@ -7743,7 +7853,7 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
     while !rem.is_empty() {
         if rem.to_ascii_lowercase().starts_with("where ") {
             let tail = rem[5..].trim_start();
-            let next = ["order by", "limit", "offset"]
+            let next = ["group by", "order by", "limit", "offset"]
                 .iter()
                 .filter_map(|k| find_keyword_top_level(tail, k))
                 .min()
@@ -7751,6 +7861,29 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
             where_sql = Some(tail[..next].trim().to_string());
             rem = tail[next..].trim();
             continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("group by ") {
+            if group_sql.is_some() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "duplicate GROUP BY clause",
+                ));
+            }
+            let tail = rem[8..].trim_start();
+            let next = ["having", "order by", "limit", "offset"]
+                .iter()
+                .filter_map(|k| find_keyword_top_level(tail, k))
+                .min()
+                .unwrap_or(tail.len());
+            group_sql = Some(tail[..next].trim().to_string());
+            rem = tail[next..].trim();
+            continue;
+        }
+        if rem.to_ascii_lowercase().starts_with("having ") {
+            return Err(RpcError::new(
+                "not_supported",
+                "HAVING is not supported in this compatibility layer yet",
+            ));
         }
         if rem.to_ascii_lowercase().starts_with("order by ") {
             let tail = rem[8..].trim_start();
@@ -7795,6 +7928,10 @@ fn parse_select_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         }
         out
     };
+    if let Some(group_sql) = group_sql.as_deref() {
+        ensure_group_by_projection_dedup_compatible(group_sql, &projection)?;
+        distinct = true;
+    }
 
     Ok(SqlPlan::Select {
         from: Some(from),
@@ -12533,6 +12670,35 @@ mod tests {
             panic!("expected inner right table");
         };
         assert_eq!(inner_right.table, "users");
+    }
+
+    #[test]
+    fn parse_select_plan_rewrites_projection_group_by_to_distinct() {
+        let plan = parse_sql_plan(
+            "SELECT p.id FROM app.posts AS p LEFT JOIN app.posts AS px ON px.post_author = p.post_author WHERE p.post_status = 'publish' GROUP BY p.id ORDER BY p.id ASC LIMIT 0, 2",
+            Some("app"),
+        )
+        .expect("parse select plan");
+        let SqlPlan::Select {
+            distinct, limit, ..
+        } = plan
+        else {
+            panic!("expected select plan");
+        };
+        assert!(distinct);
+        let limit = limit.expect("expected limit clause");
+        assert_eq!(limit.offset, Some(0));
+        assert_eq!(limit.limit, Some(2));
+    }
+
+    #[test]
+    fn parse_select_plan_rejects_partial_group_by_projection() {
+        let err = parse_sql_plan(
+            "SELECT p.id, p.post_author FROM app.posts AS p GROUP BY p.id",
+            Some("app"),
+        )
+        .expect_err("expected unsupported GROUP BY shape");
+        assert_eq!(err.code, "not_supported");
     }
 
     #[test]

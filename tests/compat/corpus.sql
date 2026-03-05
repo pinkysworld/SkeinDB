@@ -228,6 +228,17 @@ SELECT SQL_CALC_FOUND_ROWS ID
 
 SELECT FOUND_ROWS();
 
+SELECT SQL_CALC_FOUND_ROWS p.ID
+  FROM wp_posts AS p
+  LEFT JOIN wp_posts AS px
+    ON px.post_author = p.post_author
+ WHERE p.post_status='publish'
+ GROUP BY p.ID
+ ORDER BY p.ID ASC
+ LIMIT 0, 2;
+
+SELECT FOUND_ROWS();
+
 SET autocommit=0;
 
 BEGIN;

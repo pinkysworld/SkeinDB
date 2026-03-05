@@ -1244,6 +1244,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select sql_calc_found_rows p.id from wp_posts as p left join wp_posts as px on px.post_author = p.post_author where p.post_status='publish' group by p.id order by p.id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select found_rows()" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][0].as_deref(), Some("4"));
