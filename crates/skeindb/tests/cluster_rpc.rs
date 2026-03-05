@@ -982,10 +982,59 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show variables like 'sql_auto_is_null'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("sql_auto_is_null"));
+                    assert_eq!(rows[0][1].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'character_set_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("character_set_server")
+                            && row[1].as_deref() == Some("utf8mb4")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'collation_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("collation_database")
+                            && row[1].as_deref() == Some("utf8mb4_general_ci")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select @@transaction_isolation" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
                     assert_eq!(rows[0][0].as_deref(), Some("REPEATABLE-READ"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@sql_auto_is_null" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@character_set_server" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@collation_database" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4_general_ci"));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },

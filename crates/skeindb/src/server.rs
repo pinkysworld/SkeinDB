@@ -1148,7 +1148,9 @@ fn mysql_normalize_session_var_name(raw: &str) -> String {
 
 fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
     match mysql_normalize_session_var_name(raw).as_str() {
+        "version" => Some(MySqlLiteral::Str(MYSQL_SERVER_VERSION.to_string())),
         "sql_mode" => Some(MySqlLiteral::Str(String::new())),
+        "sql_auto_is_null" => Some(MySqlLiteral::Int(0)),
         "lower_case_table_names" => Some(MySqlLiteral::Int(0)),
         "version_comment" => Some(MySqlLiteral::Str("SkeinDB compatibility layer".to_string())),
         "wait_timeout" => Some(MySqlLiteral::Int(28_800)),
@@ -1164,10 +1166,42 @@ fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
         "character_set_client" | "character_set_connection" | "character_set_results" => {
             Some(MySqlLiteral::Str("utf8mb4".to_string()))
         }
-        "collation_connection" => Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string())),
+        "character_set_server" | "character_set_database" => {
+            Some(MySqlLiteral::Str("utf8mb4".to_string()))
+        }
+        "collation_connection" | "collation_server" | "collation_database" => {
+            Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string()))
+        }
         "autocommit" => Some(MySqlLiteral::Int(1)),
         _ => None,
     }
+}
+
+fn mysql_known_session_vars() -> &'static [&'static str] {
+    &[
+        "autocommit",
+        "character_set_client",
+        "character_set_connection",
+        "character_set_database",
+        "character_set_results",
+        "character_set_server",
+        "collation_connection",
+        "collation_database",
+        "collation_server",
+        "lower_case_table_names",
+        "sql_auto_is_null",
+        "sql_log_bin",
+        "sql_mode",
+        "sql_notes",
+        "time_zone",
+        "transaction_isolation",
+        "transaction_read_only",
+        "tx_isolation",
+        "tx_read_only",
+        "version",
+        "version_comment",
+        "wait_timeout",
+    ]
 }
 
 fn mysql_parse_set_assignment(sql: &str) -> Option<(String, String)> {
@@ -1304,6 +1338,7 @@ fn mysql_is_session_compat_set(sql: &str) -> bool {
         "foreign_key_checks",
         "unique_checks",
         "sql_log_bin",
+        "sql_auto_is_null",
     ]
     .iter()
     .any(|name| normalized.starts_with(name))
@@ -2437,11 +2472,28 @@ async fn mysql_try_compat_query_outcome(
     if lower.starts_with("show variables like ") {
         let name = parse_sql_string_literal(trimmed[20..].trim())
             .unwrap_or_else(|| clean_sql_ident(&trimmed[20..]));
-        let value = mysql_session_var_value(&name).and_then(|lit| mysql_literal_text(&lit));
-        let rows = value
-            .into_iter()
-            .map(|v| vec![Some(name.clone()), Some(v)])
-            .collect();
+        let rows = if name.contains('%') || name.contains('_') {
+            let mut names = mysql_known_session_vars()
+                .iter()
+                .copied()
+                .filter(|var| mysql_like_matches(var, &name))
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+                .into_iter()
+                .filter_map(|var| {
+                    mysql_session_var_value(var)
+                        .and_then(|lit| mysql_literal_text(&lit))
+                        .map(|value| vec![Some(var.to_string()), Some(value)])
+                })
+                .collect::<Vec<_>>()
+        } else {
+            mysql_session_var_value(&name)
+                .and_then(|lit| mysql_literal_text(&lit))
+                .into_iter()
+                .map(|v| vec![Some(name.clone()), Some(v)])
+                .collect::<Vec<_>>()
+        };
         return Ok(Some(MySqlQueryOutcome::ResultSet {
             columns: vec!["Variable_name".to_string(), "Value".to_string()],
             rows,
@@ -13009,6 +13061,7 @@ mod tests {
     fn mysql_is_session_compat_set_accepts_wordpress_bootstrap_sets() {
         assert!(mysql_is_session_compat_set("SET NAMES utf8mb4"));
         assert!(mysql_is_session_compat_set("SET SESSION sql_mode = ''"));
+        assert!(mysql_is_session_compat_set("SET SQL_AUTO_IS_NULL = 0"));
         assert!(mysql_is_session_compat_set(
             "SET @@session.character_set_results = 'utf8mb4'"
         ));
@@ -13017,6 +13070,26 @@ mod tests {
             "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
         ));
         assert!(!mysql_is_session_compat_set("SET max_connections = 200"));
+    }
+
+    #[test]
+    fn mysql_session_var_value_supports_wordpress_bootstrap_variables() {
+        assert_eq!(
+            mysql_session_var_value("@@sql_auto_is_null"),
+            Some(MySqlLiteral::Int(0))
+        );
+        assert_eq!(
+            mysql_session_var_value("@@character_set_server"),
+            Some(MySqlLiteral::Str("utf8mb4".to_string()))
+        );
+        assert_eq!(
+            mysql_session_var_value("@@collation_database"),
+            Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string()))
+        );
+        assert_eq!(
+            mysql_session_var_value("@@version"),
+            Some(MySqlLiteral::Str(MYSQL_SERVER_VERSION.to_string()))
+        );
     }
 
     #[test]

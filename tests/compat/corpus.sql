@@ -8,14 +8,21 @@ SELECT @@lower_case_table_names;
 
 SHOW VARIABLES LIKE 'sql_mode';
 SHOW VARIABLES LIKE 'lower_case_table_names';
+SHOW VARIABLES LIKE 'sql_auto_is_null';
 SHOW VARIABLES LIKE 'time_zone';
 SHOW VARIABLES LIKE 'transaction_isolation';
+SHOW VARIABLES LIKE 'character_set_%';
+SHOW VARIABLES LIKE 'collation_%';
 
 SELECT @@transaction_isolation;
+SELECT @@sql_auto_is_null;
+SELECT @@character_set_server;
+SELECT @@collation_database;
 
 SET NAMES utf8mb4;
 SET CHARACTER SET utf8mb4;
 SET SESSION sql_mode = '';
+SET SQL_AUTO_IS_NULL = 0;
 SET SESSION sql_notes = 0;
 SET time_zone = '+00:00';
 SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
