@@ -21,6 +21,8 @@ SHOW SESSION VARIABLES LIKE 'sql_mode';
 SHOW GLOBAL VARIABLES WHERE Variable_name = 'time_zone';
 SHOW STATUS;
 SHOW GLOBAL STATUS LIKE 'threads_%';
+SHOW CHARACTER SET LIKE 'utf8mb4';
+SHOW COLLATION WHERE Charset = 'utf8mb4';
 
 SELECT @@transaction_isolation;
 SELECT @@sql_auto_is_null;
@@ -309,6 +311,61 @@ COMMIT;
 SELECT option_value FROM wp_options WHERE option_name='txn_test';
 
 SET LOCAL autocommit=1;
+
+CREATE TABLE compat_alter_subq (
+  id BIGINT UNSIGNED NOT NULL,
+  ref_id BIGINT UNSIGNED NULL,
+  slug VARCHAR(20) NOT NULL DEFAULT '',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO compat_alter_subq (id, ref_id, slug)
+VALUES
+  (1, NULL, 'root'),
+  (2, 1, 'child'),
+  (3, 2, 'leaf');
+
+ALTER TABLE compat_alter_subq
+  MODIFY COLUMN slug VARCHAR(20) NOT NULL DEFAULT 'n-a';
+
+ALTER TABLE compat_alter_subq
+  CHANGE COLUMN ref_id parent_id BIGINT UNSIGNED NULL;
+
+INSERT INTO compat_alter_subq (id, parent_id)
+VALUES (4, 1);
+
+SELECT slug
+  FROM compat_alter_subq
+ WHERE id = 4;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE parent_id IN (
+   SELECT id
+     FROM compat_alter_subq
+    WHERE id < 3
+ )
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE EXISTS (
+   SELECT 1
+     FROM compat_alter_subq
+    WHERE slug = 'n-a'
+ )
+ ORDER BY id ASC
+ LIMIT 0, 2;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE NOT EXISTS (
+   SELECT 1
+     FROM compat_alter_subq
+    WHERE id = 999
+ )
+ ORDER BY id ASC
+ LIMIT 0, 2;
 
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;

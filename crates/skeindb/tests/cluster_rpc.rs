@@ -1050,6 +1050,25 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show character set like 'utf8mb4'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4"));
+                    assert_eq!(rows[0][2].as_deref(), Some("utf8mb4_general_ci"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show collation where charset = 'utf8mb4'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().all(|row| row[1].as_deref() == Some("utf8mb4")));
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("utf8mb4_general_ci")
+                            && row[3].as_deref() == Some("Yes")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show variables like 'character_set_%'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert!(!rows.is_empty());
@@ -1469,6 +1488,44 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select slug from compat_alter_subq where id = 4" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where slug = 'n-a' ) order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where not exists ( select 1 from compat_alter_subq where id = 999 ) order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "show status like 'threads_connected'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][1].as_deref(), Some("1"));

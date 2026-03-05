@@ -1271,6 +1271,122 @@ fn mysql_parse_show_named_value_query(sql: &str, kind: &str) -> Option<Option<St
     mysql_parse_show_named_value_filter(rest[kind.len()..].trim_start())
 }
 
+fn mysql_known_character_sets() -> &'static [(&'static str, &'static str, &'static str, u64)] {
+    &[
+        ("utf8mb4", "UTF-8 Unicode", "utf8mb4_general_ci", 4),
+        ("utf8", "UTF-8 Unicode", "utf8_general_ci", 3),
+        ("latin1", "cp1252 West European", "latin1_swedish_ci", 1),
+        ("binary", "Binary pseudo charset", "binary", 1),
+    ]
+}
+
+fn mysql_known_collations() -> &'static [(&'static str, &'static str, u64, bool, u64)] {
+    &[
+        ("utf8mb4_general_ci", "utf8mb4", 45, true, 1),
+        ("utf8mb4_unicode_ci", "utf8mb4", 224, false, 8),
+        ("utf8mb4_unicode_520_ci", "utf8mb4", 246, false, 8),
+        ("utf8_general_ci", "utf8", 33, true, 1),
+        ("latin1_swedish_ci", "latin1", 8, true, 1),
+        ("binary", "binary", 63, true, 1),
+    ]
+}
+
+fn mysql_parse_show_character_set_query(sql: &str) -> Option<Option<String>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("show character set") {
+        return None;
+    }
+    let tail = trimmed["show character set".len()..].trim();
+    if tail.is_empty() {
+        return Some(None);
+    }
+    let lower_tail = tail.to_ascii_lowercase();
+    if lower_tail.starts_with("like ") {
+        let raw = tail[4..].trim();
+        let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
+        return (!pattern.is_empty()).then_some(Some(pattern));
+    }
+    if lower_tail.starts_with("where ") {
+        let clause = tail[5..].trim();
+        let clause_lower = clause.to_ascii_lowercase();
+        if !clause_lower.starts_with("charset") {
+            return None;
+        }
+        let rest = clause["charset".len()..].trim_start();
+        let rest_lower = rest.to_ascii_lowercase();
+        let raw = if rest_lower.starts_with("like ") {
+            rest[4..].trim()
+        } else if let Some(stripped) = rest.strip_prefix('=') {
+            stripped.trim()
+        } else {
+            return None;
+        };
+        let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
+        return (!pattern.is_empty()).then_some(Some(pattern));
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MySqlShowCollationFilter {
+    All,
+    CollationLike(String),
+    CharsetLike(String),
+}
+
+fn mysql_parse_show_collation_query(sql: &str) -> Option<MySqlShowCollationFilter> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("show collation") {
+        return None;
+    }
+    let tail = trimmed["show collation".len()..].trim();
+    if tail.is_empty() {
+        return Some(MySqlShowCollationFilter::All);
+    }
+    let lower_tail = tail.to_ascii_lowercase();
+    if lower_tail.starts_with("like ") {
+        let raw = tail[4..].trim();
+        let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
+        return (!pattern.is_empty()).then_some(MySqlShowCollationFilter::CollationLike(pattern));
+    }
+    if lower_tail.starts_with("where ") {
+        let clause = tail[5..].trim();
+        let clause_lower = clause.to_ascii_lowercase();
+        let (field, rest) = if clause_lower.starts_with("charset") {
+            ("charset", clause["charset".len()..].trim_start())
+        } else if clause_lower.starts_with("collation") {
+            ("collation", clause["collation".len()..].trim_start())
+        } else {
+            return None;
+        };
+        let rest_lower = rest.to_ascii_lowercase();
+        let raw = if rest_lower.starts_with("like ") {
+            rest[4..].trim()
+        } else if let Some(stripped) = rest.strip_prefix('=') {
+            stripped.trim()
+        } else {
+            return None;
+        };
+        let pattern = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
+        if pattern.is_empty() {
+            return None;
+        }
+        if field == "charset" {
+            return Some(MySqlShowCollationFilter::CharsetLike(pattern));
+        }
+        return Some(MySqlShowCollationFilter::CollationLike(pattern));
+    }
+    None
+}
+
 fn mysql_parse_set_assignment(sql: &str) -> Option<(String, String)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
@@ -2549,6 +2665,242 @@ async fn mysql_rollback_transaction(state: &AppState, undo_sql: &[String]) -> Re
     Ok(())
 }
 
+fn mysql_parse_select_where_parts(sql: &str) -> Option<(String, String, String)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || !trimmed.to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+    let where_idx = find_keyword_top_level(trimmed, "where")?;
+    let prefix = trimmed[..where_idx].trim_end().to_string();
+    let tail = trimmed[where_idx + 5..].trim_start();
+    let next_idx = ["group by", "having", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|k| find_keyword_top_level(tail, k))
+        .min()
+        .unwrap_or(tail.len());
+    let where_clause = tail[..next_idx].trim().to_string();
+    if where_clause.is_empty() {
+        return None;
+    }
+    let suffix = tail[next_idx..].trim().to_string();
+    Some((prefix, where_clause, suffix))
+}
+
+fn mysql_parse_in_subquery_where_clause(where_clause: &str) -> Option<(String, bool, String)> {
+    if split_top_level_or(where_clause).len() != 1 || split_top_level_and(where_clause).len() != 1 {
+        return None;
+    }
+
+    let (idx, negated, token_len) =
+        if let Some(idx) = find_keyword_top_level(where_clause, "not in") {
+            (idx, true, "not in".len())
+        } else if let Some(idx) = find_keyword_top_level(where_clause, "in") {
+            (idx, false, "in".len())
+        } else {
+            return None;
+        };
+    let lhs = where_clause[..idx].trim();
+    if lhs.is_empty() {
+        return None;
+    }
+    let rhs = where_clause[idx + token_len..].trim_start();
+    if !rhs.starts_with('(') {
+        return None;
+    }
+    let close_idx = find_matching_parenthesis(rhs, 0)?;
+    if !rhs[close_idx + 1..].trim().is_empty() {
+        return None;
+    }
+    let subquery_sql = rhs[1..close_idx].trim();
+    if !subquery_sql.to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+    Some((lhs.to_string(), negated, subquery_sql.to_string()))
+}
+
+fn mysql_parse_exists_subquery_where_clause(where_clause: &str) -> Option<(bool, String)> {
+    if split_top_level_or(where_clause).len() != 1 || split_top_level_and(where_clause).len() != 1 {
+        return None;
+    }
+    let clause = where_clause.trim();
+    let lower = clause.to_ascii_lowercase();
+    let (negated, rest) = if lower.starts_with("exists") {
+        (false, clause[6..].trim_start())
+    } else if lower.starts_with("not exists") {
+        (true, clause[10..].trim_start())
+    } else {
+        return None;
+    };
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let close_idx = find_matching_parenthesis(rest, 0)?;
+    if !rest[close_idx + 1..].trim().is_empty() {
+        return None;
+    }
+    let subquery_sql = rest[1..close_idx].trim();
+    if !subquery_sql.to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+    Some((negated, subquery_sql.to_string()))
+}
+
+fn mysql_rebuild_select_with_where(
+    prefix: &str,
+    where_clause: Option<&str>,
+    suffix: &str,
+) -> String {
+    let mut sql = prefix.trim().to_string();
+    if let Some(where_clause) = where_clause {
+        sql.push_str(" WHERE ");
+        sql.push_str(where_clause.trim());
+    }
+    if !suffix.trim().is_empty() {
+        sql.push(' ');
+        sql.push_str(suffix.trim());
+    }
+    sql
+}
+
+fn mysql_extract_subquery_first_column_lits(result: &Value) -> Result<Vec<Lit>, RpcError> {
+    let data = result
+        .get("result")
+        .and_then(|v| v.get("data"))
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing data"))?;
+    let columns = data
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing columns"))?;
+    if columns.len() != 1 {
+        return Err(RpcError::new(
+            "not_supported",
+            "subquery compatibility currently requires a single projected column",
+        ));
+    }
+    let rows = data
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row_items = row
+            .as_array()
+            .ok_or_else(|| RpcError::new("internal", "subquery row must be an array"))?;
+        let Some(value) = row_items.first() else {
+            continue;
+        };
+        let lit = serde_json::from_value::<Lit>(value.clone())
+            .map_err(|_| RpcError::new("not_supported", "subquery value could not be decoded"))?;
+        values.push(lit);
+    }
+    Ok(values)
+}
+
+fn mysql_query_outcome_from_sql_exec_result(result: &Value) -> Result<MySqlQueryOutcome, RpcError> {
+    let statement = result
+        .get("statement")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if statement != "select" {
+        return Err(RpcError::new(
+            "not_supported",
+            "subquery compatibility currently supports only SELECT outer queries",
+        ));
+    }
+    let (columns, rows) =
+        mysql_extract_result_data(result).map_err(|err| RpcError::new("internal", err))?;
+    Ok(MySqlQueryOutcome::ResultSet { columns, rows })
+}
+
+async fn mysql_try_select_subquery_compat_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let Some((prefix, where_clause, suffix)) = mysql_parse_select_where_parts(sql) else {
+        return Ok(None);
+    };
+
+    if let Some((lhs, negated, subquery_sql)) = mysql_parse_in_subquery_where_clause(&where_clause)
+    {
+        let subquery_result = sql_exec(
+            state,
+            SqlExecParams {
+                sql: subquery_sql,
+                explain: false,
+                default_db: default_db.map(|db| db.to_string()),
+                result_format: Some(ResultFormat::RowsJson),
+            },
+        )
+        .await?;
+        let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
+        let rewritten_where = if lits.is_empty() {
+            if negated {
+                None
+            } else {
+                Some("1 = 0".to_string())
+            }
+        } else {
+            let values = lits
+                .iter()
+                .map(mysql_render_default_lit)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let op = if negated { "NOT IN" } else { "IN" };
+            Some(format!("{lhs} {op} ({values})"))
+        };
+        let rewritten_sql =
+            mysql_rebuild_select_with_where(&prefix, rewritten_where.as_deref(), &suffix);
+        let rewritten_result = sql_exec(
+            state,
+            SqlExecParams {
+                sql: rewritten_sql,
+                explain: false,
+                default_db: default_db.map(|db| db.to_string()),
+                result_format: Some(ResultFormat::RowsJson),
+            },
+        )
+        .await?;
+        return mysql_query_outcome_from_sql_exec_result(&rewritten_result).map(Some);
+    }
+
+    if let Some((negated, subquery_sql)) = mysql_parse_exists_subquery_where_clause(&where_clause) {
+        let subquery_result = sql_exec(
+            state,
+            SqlExecParams {
+                sql: subquery_sql,
+                explain: false,
+                default_db: default_db.map(|db| db.to_string()),
+                result_format: Some(ResultFormat::RowsJson),
+            },
+        )
+        .await?;
+        let rows = subquery_result
+            .get("result")
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+        let exists = !rows.is_empty();
+        let keep_rows = if negated { !exists } else { exists };
+        let rewritten_where = if keep_rows { None } else { Some("1 = 0") };
+        let rewritten_sql = mysql_rebuild_select_with_where(&prefix, rewritten_where, &suffix);
+        let rewritten_result = sql_exec(
+            state,
+            SqlExecParams {
+                sql: rewritten_sql,
+                explain: false,
+                default_db: default_db.map(|db| db.to_string()),
+                result_format: Some(ResultFormat::RowsJson),
+            },
+        )
+        .await?;
+        return mysql_query_outcome_from_sql_exec_result(&rewritten_result).map(Some);
+    }
+
+    Ok(None)
+}
+
 async fn mysql_try_compat_query_outcome(
     state: &AppState,
     sql: &str,
@@ -2570,6 +2922,81 @@ async fn mysql_try_compat_query_outcome(
         mysql_try_simple_aggregate_query_outcome(state, trimmed, default_db).await?
     {
         return Ok(Some(result));
+    }
+
+    if let Some(result) =
+        mysql_try_select_subquery_compat_outcome(state, trimmed, default_db).await?
+    {
+        return Ok(Some(result));
+    }
+
+    if let Some(filter) = mysql_parse_show_character_set_query(trimmed) {
+        let mut rows = mysql_known_character_sets()
+            .iter()
+            .copied()
+            .filter(|(charset, _, _, _)| {
+                filter
+                    .as_deref()
+                    .map(|pattern| mysql_like_matches(charset, pattern))
+                    .unwrap_or(true)
+            })
+            .map(|(charset, description, default_collation, maxlen)| {
+                vec![
+                    Some(charset.to_string()),
+                    Some(description.to_string()),
+                    Some(default_collation.to_string()),
+                    Some(maxlen.to_string()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec![
+                "Charset".to_string(),
+                "Description".to_string(),
+                "Default collation".to_string(),
+                "Maxlen".to_string(),
+            ],
+            rows,
+        }));
+    }
+
+    if let Some(filter) = mysql_parse_show_collation_query(trimmed) {
+        let mut rows = mysql_known_collations()
+            .iter()
+            .copied()
+            .filter(|(collation, charset, _, _, _)| match &filter {
+                MySqlShowCollationFilter::All => true,
+                MySqlShowCollationFilter::CollationLike(pattern) => {
+                    mysql_like_matches(collation, pattern)
+                }
+                MySqlShowCollationFilter::CharsetLike(pattern) => {
+                    mysql_like_matches(charset, pattern)
+                }
+            })
+            .map(|(collation, charset, id, is_default, sortlen)| {
+                vec![
+                    Some(collation.to_string()),
+                    Some(charset.to_string()),
+                    Some(id.to_string()),
+                    Some(if is_default { "Yes" } else { "" }.to_string()),
+                    Some("Yes".to_string()),
+                    Some(sortlen.to_string()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        return Ok(Some(MySqlQueryOutcome::ResultSet {
+            columns: vec![
+                "Collation".to_string(),
+                "Charset".to_string(),
+                "Id".to_string(),
+                "Default".to_string(),
+                "Compiled".to_string(),
+                "Sortlen".to_string(),
+            ],
+            rows,
+        }));
     }
 
     if let Some(filter) = mysql_parse_show_named_value_query(trimmed, "variables") {
@@ -7021,6 +7448,18 @@ enum SqlPlan {
         column: SchemaColumnInfo,
         default: Option<Lit>,
     },
+    AlterTableModifyColumn {
+        table: BaseTableRef,
+        column_name: String,
+        column: SchemaColumnInfo,
+        default: Option<Lit>,
+    },
+    AlterTableChangeColumn {
+        table: BaseTableRef,
+        old_name: String,
+        column: SchemaColumnInfo,
+        default: Option<Lit>,
+    },
     AlterTableAddIndex {
         table: BaseTableRef,
         index_name: String,
@@ -8734,21 +9173,64 @@ fn parse_alter_table_drop_index_clause(clause: &str) -> Result<Option<String>, R
     Ok(Some(index_name))
 }
 
+fn parse_alter_table_column_spec(
+    clause: &str,
+    name_idx: usize,
+    type_idx: usize,
+    action_name: &str,
+) -> Result<(SchemaColumnInfo, Option<Lit>), RpcError> {
+    let parts: Vec<&str> = clause.split_whitespace().collect();
+    if parts.len() <= type_idx {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("ALTER TABLE {action_name} requires a name and type"),
+        ));
+    }
+    let name = clean_sql_ident(parts[name_idx]);
+    if name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("ALTER TABLE {action_name} requires a valid column name"),
+        ));
+    }
+    let type_tok = parts[type_idx];
+    let clause_lower = clause.to_ascii_lowercase();
+    let unsigned = parts.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
+    let nullable = !clause_lower.contains("not null");
+    let auto_increment = clause_lower.contains("auto_increment");
+    let default = find_keyword_top_level(clause, "default")
+        .map(|idx| clause[idx + 7..].trim())
+        .filter(|raw| !raw.is_empty())
+        .map(parse_sql_leading_lit)
+        .transpose()?;
+    Ok((
+        SchemaColumnInfo {
+            name,
+            r#type: sql_type_to_desc(type_tok, unsigned),
+            nullable,
+            auto_increment,
+        },
+        default,
+    ))
+}
+
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
-    let add_idx = find_keyword_top_level(tail, "add");
-    let drop_idx = find_keyword_top_level(tail, "drop");
-    let (action_idx, action) =
-        match (add_idx, drop_idx) {
-            (Some(add), Some(drop)) if add < drop => (add, "add"),
-            (Some(_), Some(drop)) => (drop, "drop"),
-            (Some(add), None) => (add, "add"),
-            (None, Some(drop)) => (drop, "drop"),
-            (None, None) => return Err(RpcError::new(
-                "not_supported",
-                "ALTER TABLE currently supports ADD COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
-            )),
-        };
+    let mut action_match = None::<(usize, &'static str)>;
+    for action in ["add", "drop", "modify", "change"] {
+        if let Some(idx) = find_keyword_top_level(tail, action) {
+            match action_match {
+                Some((best_idx, _)) if best_idx <= idx => {}
+                _ => action_match = Some((idx, action)),
+            }
+        }
+    }
+    let Some((action_idx, action)) = action_match else {
+        return Err(RpcError::new(
+            "not_supported",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+        ));
+    };
 
     let table = parse_table_ref(tail[..action_idx].trim(), default_db)?;
     let mut clause = tail[action_idx + action.len()..].trim();
@@ -8766,6 +9248,47 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
         ));
     }
 
+    if action.eq_ignore_ascii_case("modify") {
+        if clause.len() >= 6 && clause[..6].eq_ignore_ascii_case("column") {
+            clause = clause[6..].trim_start();
+        }
+        let (column, default) = parse_alter_table_column_spec(clause, 0, 1, "MODIFY COLUMN")?;
+        let column_name = column.name.clone();
+        return Ok(SqlPlan::AlterTableModifyColumn {
+            table,
+            column_name,
+            column,
+            default,
+        });
+    }
+
+    if action.eq_ignore_ascii_case("change") {
+        if clause.len() >= 6 && clause[..6].eq_ignore_ascii_case("column") {
+            clause = clause[6..].trim_start();
+        }
+        let parts: Vec<&str> = clause.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(RpcError::new(
+                "invalid_request",
+                "ALTER TABLE CHANGE COLUMN requires old name, new name, and type",
+            ));
+        }
+        let old_name = clean_sql_ident(parts[0]);
+        if old_name.is_empty() {
+            return Err(RpcError::new(
+                "invalid_request",
+                "ALTER TABLE CHANGE COLUMN requires a valid old column name",
+            ));
+        }
+        let (column, default) = parse_alter_table_column_spec(clause, 1, 2, "CHANGE COLUMN")?;
+        return Ok(SqlPlan::AlterTableChangeColumn {
+            table,
+            old_name,
+            column,
+            default,
+        });
+    }
+
     if let Some((index_name, columns, unique)) = parse_alter_table_add_index_clause(clause)? {
         return Ok(SqlPlan::AlterTableAddIndex {
             table,
@@ -8777,32 +9300,10 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     if clause.len() >= 6 && clause[..6].eq_ignore_ascii_case("column") {
         clause = clause[6..].trim_start();
     }
-    let parts: Vec<&str> = clause.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(RpcError::new(
-            "invalid_request",
-            "ALTER TABLE ADD COLUMN requires a name and type",
-        ));
-    }
-    let name = clean_sql_ident(parts[0]);
-    let type_tok = parts[1];
-    let clause_lower = clause.to_ascii_lowercase();
-    let unsigned = parts.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
-    let nullable = !clause_lower.contains("not null");
-    let auto_increment = clause_lower.contains("auto_increment");
-    let default = find_keyword_top_level(clause, "default")
-        .map(|idx| clause[idx + 7..].trim())
-        .filter(|raw| !raw.is_empty())
-        .map(parse_sql_leading_lit)
-        .transpose()?;
+    let (column, default) = parse_alter_table_column_spec(clause, 0, 1, "ADD COLUMN")?;
     Ok(SqlPlan::AlterTableAddColumn {
         table,
-        column: SchemaColumnInfo {
-            name,
-            r#type: sql_type_to_desc(type_tok, unsigned),
-            nullable,
-            auto_increment,
-        },
+        column,
         default,
     })
 }
@@ -9140,7 +9641,10 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::CreateDatabase { .. } => "create_database",
         SqlPlan::CreateIndex { .. } => "create_index",
         SqlPlan::CreateTable { .. } => "create_table",
-        SqlPlan::AlterTableAddColumn { .. } | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
+        SqlPlan::AlterTableAddColumn { .. }
+        | SqlPlan::AlterTableModifyColumn { .. }
+        | SqlPlan::AlterTableChangeColumn { .. }
+        | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
         SqlPlan::DropTable { .. } => "drop_table",
         SqlPlan::Insert { mode, .. } => match mode {
@@ -9174,6 +9678,8 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         Ok(SqlPlan::CreateIndex { table, .. })
         | Ok(SqlPlan::CreateTable { table, .. })
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
+        | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
+        | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
@@ -9856,6 +10362,29 @@ async fn sql_exec_alter_table_add_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_modify_column(
+    state: &AppState,
+    table: BaseTableRef,
+    column_name: String,
+    column: SchemaColumnInfo,
+    default: Option<Lit>,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_modify_mysql_compat_column(
+        &table,
+        &column_name,
+        ColumnSchema {
+            name: column.name,
+            r#type: column.r#type,
+            nullable: column.nullable,
+            auto_increment: column.auto_increment,
+        },
+        default,
+    )
+    .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 async fn sql_exec_alter_table_add_index(
     state: &AppState,
     table: BaseTableRef,
@@ -10268,6 +10797,51 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "ok": true,
                 "table": table,
                 "operation": "add_column",
+                "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableModifyColumn {
+            table,
+            column_name,
+            column,
+            default,
+        } => {
+            sql_exec_alter_table_modify_column(
+                state,
+                table.clone(),
+                column_name.clone(),
+                column.clone(),
+                default,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "modify_column",
+                "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableChangeColumn {
+            table,
+            old_name,
+            column,
+            default,
+        } => {
+            sql_exec_alter_table_modify_column(
+                state,
+                table.clone(),
+                old_name.clone(),
+                column.clone(),
+                default,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "change_column",
+                "old_column": old_name,
                 "column": column.name
             }))
         }
@@ -13264,6 +13838,63 @@ mod tests {
     }
 
     #[test]
+    fn mysql_parse_show_character_set_and_collation_queries() {
+        assert_eq!(
+            mysql_parse_show_character_set_query("SHOW CHARACTER SET"),
+            Some(None)
+        );
+        assert_eq!(
+            mysql_parse_show_character_set_query("SHOW CHARACTER SET LIKE 'utf8mb4'"),
+            Some(Some("utf8mb4".to_string()))
+        );
+        assert_eq!(
+            mysql_parse_show_character_set_query("SHOW CHARACTER SET WHERE Charset = 'utf8mb4'"),
+            Some(Some("utf8mb4".to_string()))
+        );
+
+        assert_eq!(
+            mysql_parse_show_collation_query("SHOW COLLATION"),
+            Some(MySqlShowCollationFilter::All)
+        );
+        assert_eq!(
+            mysql_parse_show_collation_query("SHOW COLLATION LIKE 'utf8mb4_%'"),
+            Some(MySqlShowCollationFilter::CollationLike(
+                "utf8mb4_%".to_string()
+            ))
+        );
+        assert_eq!(
+            mysql_parse_show_collation_query("SHOW COLLATION WHERE Charset = 'utf8mb4'"),
+            Some(MySqlShowCollationFilter::CharsetLike("utf8mb4".to_string()))
+        );
+    }
+
+    #[test]
+    fn mysql_parse_subquery_compat_where_clauses_roundtrip() {
+        let in_parsed = mysql_parse_in_subquery_where_clause(
+            "parent_id IN (SELECT id FROM compat_alter_subq WHERE id < 3)",
+        )
+        .expect("parse IN subquery");
+        assert_eq!(in_parsed.0, "parent_id");
+        assert!(!in_parsed.1);
+        assert_eq!(in_parsed.2, "SELECT id FROM compat_alter_subq WHERE id < 3");
+
+        let exists_parsed = mysql_parse_exists_subquery_where_clause(
+            "NOT EXISTS (SELECT 1 FROM compat_alter_subq WHERE id = 999)",
+        )
+        .expect("parse EXISTS subquery");
+        assert!(exists_parsed.0);
+        assert_eq!(
+            exists_parsed.1,
+            "SELECT 1 FROM compat_alter_subq WHERE id = 999"
+        );
+
+        assert!(mysql_parse_in_subquery_where_clause(
+            "parent_id IN (SELECT id FROM compat_alter_subq) AND id > 1",
+        )
+        .is_none());
+    }
+
+    #[test]
     fn mysql_lock_tables_compat_roundtrip() {
         assert!(mysql_is_lock_tables("LOCK TABLES wp_options WRITE"));
         assert!(mysql_is_unlock_tables("UNLOCK TABLES"));
@@ -13458,6 +14089,61 @@ mod tests {
         assert_eq!(column.name, "post_name");
         assert!(!column.nullable);
         assert_eq!(default, Some(Lit::Str { v: String::new() }));
+    }
+
+    #[test]
+    fn parse_alter_table_modify_and_change_column_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts MODIFY COLUMN post_name VARCHAR(200) NOT NULL DEFAULT 'slug'",
+            Some("app"),
+        )
+        .expect("parse alter table modify column");
+        let SqlPlan::AlterTableModifyColumn {
+            table,
+            column_name,
+            column,
+            default,
+        } = plan
+        else {
+            panic!("expected alter table modify column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(column_name, "post_name");
+        assert_eq!(column.name, "post_name");
+        assert!(!column.nullable);
+        assert_eq!(
+            default,
+            Some(Lit::Str {
+                v: "slug".to_string()
+            })
+        );
+
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts CHANGE COLUMN post_name post_slug VARCHAR(200) NOT NULL DEFAULT 'slug'",
+            Some("app"),
+        )
+        .expect("parse alter table change column");
+        let SqlPlan::AlterTableChangeColumn {
+            table,
+            old_name,
+            column,
+            default,
+        } = plan
+        else {
+            panic!("expected alter table change column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(old_name, "post_name");
+        assert_eq!(column.name, "post_slug");
+        assert!(!column.nullable);
+        assert_eq!(
+            default,
+            Some(Lit::Str {
+                v: "slug".to_string()
+            })
+        );
     }
 
     #[test]

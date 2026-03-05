@@ -37,7 +37,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`, `DROP TABLE`
-  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses), `ALTER TABLE ... ADD [UNIQUE] KEY`, and `ALTER TABLE ... DROP [KEY|INDEX]`
+  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses), `ALTER TABLE ... MODIFY [COLUMN]`, `ALTER TABLE ... CHANGE [COLUMN]`, `ALTER TABLE ... ADD [UNIQUE] KEY`, and `ALTER TABLE ... DROP [KEY|INDEX]`
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
@@ -61,7 +61,8 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL` / `IS NOT NULL`, and parenthesized `AND` / `OR` predicate trees for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
   - index-backed in-memory `UNIQUE KEY` probe enforcement for inserts/updates, plus declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
-  - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `sql_auto_is_null`, charset/collation variables, `time_zone`, and `transaction_isolation`; unfiltered and scoped forms like `SHOW [SESSION|GLOBAL] VARIABLES`; simple `WHERE Variable_name ...` filters; plus wildcard patterns like `SHOW VARIABLES LIKE 'character_set_%'`)
+  - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CHARACTER SET`, `SHOW COLLATION`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `sql_auto_is_null`, charset/collation variables, `time_zone`, and `transaction_isolation`; unfiltered and scoped forms like `SHOW [SESSION|GLOBAL] VARIABLES`; simple `WHERE Variable_name ...` / `WHERE Charset ...` filters; plus wildcard patterns like `SHOW VARIABLES LIKE 'character_set_%'`)
+  - limited single-predicate subquery compatibility rewrites for common adoption paths: `... WHERE <col> [NOT] IN (SELECT ...)` and `... WHERE [NOT] EXISTS (SELECT ...)`
   - `SET autocommit` (including qualified/session forms), `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
   - compatibility no-op handling for `LOCK TABLES` / `UNLOCK TABLES`
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.

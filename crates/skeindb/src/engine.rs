@@ -1565,6 +1565,145 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_modify_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        column: ColumnSchema,
+        default: Option<Lit>,
+    ) -> anyhow::Result<()> {
+        let old_name = old_name.trim();
+        if old_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+        let target_name = column.name.trim().to_string();
+        if target_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+            let Some(col_idx) = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(old_name))
+            else {
+                anyhow::bail!("not_found: column not found: {old_name}");
+            };
+            let existing_name = schema.columns[col_idx].name.clone();
+            let rename = existing_name != target_name;
+
+            if rename
+                && schema
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, c)| idx != col_idx && c.name.eq_ignore_ascii_case(&target_name))
+            {
+                anyhow::bail!("conflict: column already exists: {target_name}");
+            }
+
+            if rename {
+                for entry in tdata.rows.iter_mut() {
+                    let value = entry.row.remove(&existing_name);
+                    if let Some(value) = value {
+                        entry.row.insert(target_name.clone(), value);
+                    } else if let Some(default) = default.as_ref() {
+                        entry.row.insert(target_name.clone(), default.clone());
+                    } else if column.nullable {
+                        entry.row.insert(target_name.clone(), Lit::Null);
+                    }
+                }
+                for pk in schema.primary_key.iter_mut() {
+                    if pk.eq_ignore_ascii_case(&existing_name) {
+                        *pk = target_name.clone();
+                    }
+                }
+                if let Some(next) = schema.auto_inc_next.remove(&existing_name) {
+                    schema.auto_inc_next.insert(target_name.clone(), next);
+                }
+                rename_mysql_compat_column_default(schema, &existing_name, &target_name);
+                rename_mysql_compat_index_columns(schema, &existing_name, &target_name);
+            }
+
+            for entry in tdata.rows.iter_mut() {
+                if !entry.row.contains_key(&target_name) {
+                    entry
+                        .row
+                        .insert(target_name.clone(), default.clone().unwrap_or(Lit::Null));
+                }
+                if !column.nullable
+                    && entry
+                        .row
+                        .get(&target_name)
+                        .is_some_and(|value| matches!(value, Lit::Null))
+                {
+                    if let Some(default) = default.as_ref() {
+                        entry.row.insert(target_name.clone(), default.clone());
+                    } else {
+                        anyhow::bail!(
+                            "invalid_request: non-null column requires default for existing rows"
+                        );
+                    }
+                }
+            }
+
+            schema.columns[col_idx] = ColumnSchema {
+                name: target_name.clone(),
+                r#type: column.r#type.clone(),
+                nullable: column.nullable,
+                auto_increment: column.auto_increment,
+            };
+
+            if column.auto_increment {
+                if !schema.auto_inc_next.contains_key(&target_name) {
+                    let mut next_id = 1u64;
+                    for entry in tdata.rows.iter() {
+                        if entry.deleted {
+                            continue;
+                        }
+                        if let Some(Lit::U64 { v }) = entry.row.get(&target_name) {
+                            next_id = next_id.max(v.saturating_add(1));
+                        }
+                    }
+                    schema.auto_inc_next.insert(target_name.clone(), next_id);
+                }
+            } else {
+                schema.auto_inc_next.remove(&target_name);
+            }
+
+            match default.as_ref() {
+                Some(default) => set_mysql_compat_column_default(schema, &target_name, default),
+                None => remove_mysql_compat_column_default(schema, &target_name),
+            }
+
+            tdata.pk_index.clear();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let pk = extract_pk(schema, &entry.row)?;
+                let key = pk_key(&pk);
+                if tdata.pk_index.insert(key, idx).is_some() {
+                    anyhow::bail!("conflict: duplicate primary key after ALTER TABLE");
+                }
+            }
+
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn schema_drop_mysql_compat_index(
         &mut self,
         table: &BaseTableRef,
@@ -10326,6 +10465,111 @@ fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, defau
         serde_json::Value::Object(defaults),
     );
     schema.compat_mysql = Some(serde_json::Value::Object(root));
+}
+
+fn remove_mysql_compat_column_default(schema: &mut TableSchema, column: &str) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    defaults.retain(|name, _| !name.eq_ignore_ascii_case(column));
+    if defaults.is_empty() {
+        root.remove("column_defaults");
+    } else {
+        root.insert(
+            "column_defaults".to_string(),
+            serde_json::Value::Object(defaults),
+        );
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn rename_mysql_compat_column_default(schema: &mut TableSchema, old_name: &str, new_name: &str) {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut moved_value = None;
+    defaults.retain(|name, value| {
+        if name.eq_ignore_ascii_case(old_name) {
+            moved_value = Some(value.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if let Some(value) = moved_value {
+        defaults.insert(new_name.to_string(), value);
+    }
+    if defaults.is_empty() {
+        root.remove("column_defaults");
+    } else {
+        root.insert(
+            "column_defaults".to_string(),
+            serde_json::Value::Object(defaults),
+        );
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn rename_mysql_compat_index_columns(schema: &mut TableSchema, old_name: &str, new_name: &str) {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    for entry in indexes.iter_mut() {
+        let Some(columns) = entry.get_mut("columns").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for column in columns.iter_mut() {
+            if column
+                .as_str()
+                .map(|name| name.eq_ignore_ascii_case(old_name))
+                .unwrap_or(false)
+            {
+                *column = serde_json::Value::String(new_name.to_string());
+            }
+        }
+    }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
 }
 
 fn set_mysql_compat_index(schema: &mut TableSchema, name: &str, columns: &[String], unique: bool) {
@@ -19560,6 +19804,139 @@ mod tests {
                 None,
             )
             .expect_err("expected duplicate insert conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_modify_and_change_column_updates_schema_rows_and_indexes() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("mysql_modify_change_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": ""}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "world".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.schema_modify_mysql_compat_column(
+            &table,
+            "slug",
+            ColumnSchema {
+                name: "slug".to_string(),
+                r#type: type_desc("str"),
+                nullable: false,
+                auto_increment: false,
+            },
+            Some(Lit::Str {
+                v: "n-a".to_string(),
+            }),
+        )?;
+
+        engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 3 })])], None)?;
+        let row_three = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            row_three.row.get("slug"),
+            Some(&Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+
+        engine.schema_modify_mysql_compat_column(
+            &table,
+            "slug",
+            ColumnSchema {
+                name: "post_slug".to_string(),
+                r#type: type_desc("str"),
+                nullable: false,
+                auto_increment: false,
+            },
+            Some(Lit::Str {
+                v: "n-a".to_string(),
+            }),
+        )?;
+
+        let renamed = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            renamed.row.get("post_slug"),
+            Some(&Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert!(!renamed.row.contains_key("slug"));
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "post_slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
         assert!(err.to_string().contains("conflict"));
 
         fs::remove_dir_all(&dir).ok();
