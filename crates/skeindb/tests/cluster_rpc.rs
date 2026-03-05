@@ -1003,6 +1003,53 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show variables" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("sql_mode") && row[1].as_deref() == Some("")
+                    }));
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("time_zone")
+                            && row[1].as_deref() == Some("SYSTEM")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show session variables like 'sql_mode'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("sql_mode"));
+                    assert_eq!(rows[0][1].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show global variables where variable_name = 'time_zone'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("time_zone"));
+                    assert_eq!(rows[0][1].as_deref(), Some("SYSTEM"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show status" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("Threads_connected")
+                            && row[1].as_deref() == Some("1")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show global status like 'threads_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("Threads_connected"));
+                    assert_eq!(rows[0][1].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show variables like 'character_set_%'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert!(!rows.is_empty());

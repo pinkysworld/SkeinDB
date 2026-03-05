@@ -16,6 +16,11 @@ SHOW VARIABLES LIKE 'time_zone';
 SHOW VARIABLES LIKE 'transaction_isolation';
 SHOW VARIABLES LIKE 'character_set_%';
 SHOW VARIABLES LIKE 'collation_%';
+SHOW VARIABLES;
+SHOW SESSION VARIABLES LIKE 'sql_mode';
+SHOW GLOBAL VARIABLES WHERE Variable_name = 'time_zone';
+SHOW STATUS;
+SHOW GLOBAL STATUS LIKE 'threads_%';
 
 SELECT @@transaction_isolation;
 SELECT @@sql_auto_is_null;

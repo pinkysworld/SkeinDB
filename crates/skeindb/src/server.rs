@@ -1204,6 +1204,73 @@ fn mysql_known_session_vars() -> &'static [&'static str] {
     ]
 }
 
+fn mysql_known_status_vars() -> &'static [(&'static str, &'static str)] {
+    &[("Threads_connected", "1")]
+}
+
+fn mysql_parse_show_named_value_filter(tail: &str) -> Option<Option<String>> {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return Some(None);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let raw = if lower.starts_with("like ") {
+        trimmed[4..].trim()
+    } else if lower.starts_with("where ") {
+        let clause = trimmed[5..].trim();
+        let clause_lower = clause.to_ascii_lowercase();
+        if !clause_lower.starts_with("variable_name") {
+            return None;
+        }
+        let rest = clause["variable_name".len()..].trim_start();
+        let rest_lower = rest.to_ascii_lowercase();
+        if rest_lower.starts_with("like ") {
+            rest[4..].trim()
+        } else if let Some(stripped) = rest.strip_prefix('=') {
+            stripped.trim()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    let parsed = parse_sql_string_literal(raw).unwrap_or_else(|| clean_sql_ident(raw));
+    if parsed.is_empty() {
+        return None;
+    }
+    Some(Some(parsed))
+}
+
+fn mysql_parse_show_named_value_query(sql: &str, kind: &str) -> Option<Option<String>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("show ") {
+        return None;
+    }
+
+    let mut rest = trimmed[5..].trim_start();
+    let mut rest_lower = rest.to_ascii_lowercase();
+    for scope_prefix in ["session ", "global ", "local "] {
+        if rest_lower.starts_with(scope_prefix) {
+            rest = rest[scope_prefix.len()..].trim_start();
+            rest_lower = rest.to_ascii_lowercase();
+            break;
+        }
+    }
+
+    if !rest_lower.starts_with(kind) {
+        return None;
+    }
+    if rest_lower.len() > kind.len() && !rest_lower.as_bytes()[kind.len()].is_ascii_whitespace() {
+        return None;
+    }
+
+    mysql_parse_show_named_value_filter(rest[kind.len()..].trim_start())
+}
+
 fn mysql_parse_set_assignment(sql: &str) -> Option<(String, String)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
@@ -2505,48 +2572,48 @@ async fn mysql_try_compat_query_outcome(
         return Ok(Some(result));
     }
 
-    if lower.starts_with("show variables like ") {
-        let name = parse_sql_string_literal(trimmed[20..].trim())
-            .unwrap_or_else(|| clean_sql_ident(&trimmed[20..]));
-        let rows = if name.contains('%') || name.contains('_') {
-            let mut names = mysql_known_session_vars()
-                .iter()
-                .copied()
-                .filter(|var| mysql_like_matches(var, &name))
-                .collect::<Vec<_>>();
-            names.sort_unstable();
-            names
-                .into_iter()
-                .filter_map(|var| {
-                    mysql_session_var_value(var)
-                        .and_then(|lit| mysql_literal_text(&lit))
-                        .map(|value| vec![Some(var.to_string()), Some(value)])
-                })
-                .collect::<Vec<_>>()
-        } else {
-            mysql_session_var_value(&name)
-                .and_then(|lit| mysql_literal_text(&lit))
-                .into_iter()
-                .map(|v| vec![Some(name.clone()), Some(v)])
-                .collect::<Vec<_>>()
-        };
+    if let Some(filter) = mysql_parse_show_named_value_query(trimmed, "variables") {
+        let mut names = mysql_known_session_vars()
+            .iter()
+            .copied()
+            .filter(|name| {
+                filter
+                    .as_deref()
+                    .map(|pattern| mysql_like_matches(name, pattern))
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        let rows = names
+            .into_iter()
+            .filter_map(|name| {
+                mysql_session_var_value(name)
+                    .and_then(|lit| mysql_literal_text(&lit))
+                    .map(|value| vec![Some(name.to_string()), Some(value)])
+            })
+            .collect::<Vec<_>>();
         return Ok(Some(MySqlQueryOutcome::ResultSet {
             columns: vec!["Variable_name".to_string(), "Value".to_string()],
             rows,
         }));
     }
 
-    if lower.starts_with("show status like ") {
-        let name = parse_sql_string_literal(trimmed[17..].trim())
-            .unwrap_or_else(|| clean_sql_ident(&trimmed[17..]));
-        let value = match name.to_ascii_lowercase().as_str() {
-            "threads_connected" => Some("1".to_string()),
-            _ => None,
-        };
-        let rows = value
+    if let Some(filter) = mysql_parse_show_named_value_query(trimmed, "status") {
+        let mut entries = mysql_known_status_vars()
+            .iter()
+            .copied()
+            .filter(|(name, _)| {
+                filter
+                    .as_deref()
+                    .map(|pattern| mysql_like_matches(name, pattern))
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        let rows = entries
             .into_iter()
-            .map(|v| vec![Some(name.clone()), Some(v)])
-            .collect();
+            .map(|(name, value)| vec![Some(name.to_string()), Some(value.to_string())])
+            .collect::<Vec<_>>();
         return Ok(Some(MySqlQueryOutcome::ResultSet {
             columns: vec!["Variable_name".to_string(), "Value".to_string()],
             rows,
@@ -13160,6 +13227,40 @@ mod tests {
         assert!(mysql_like_matches("wp_posts", "wp_%"));
         assert!(mysql_like_matches("wp_posts", "wp_post_"));
         assert!(!mysql_like_matches("wp_posts", "wp_option_"));
+    }
+
+    #[test]
+    fn mysql_parse_show_named_value_query_supports_scope_and_where_forms() {
+        assert_eq!(
+            mysql_parse_show_named_value_query("SHOW VARIABLES", "variables"),
+            Some(None)
+        );
+        assert_eq!(
+            mysql_parse_show_named_value_query(
+                "SHOW SESSION VARIABLES LIKE 'sql_mode'",
+                "variables"
+            ),
+            Some(Some("sql_mode".to_string()))
+        );
+        assert_eq!(
+            mysql_parse_show_named_value_query(
+                "SHOW GLOBAL VARIABLES WHERE Variable_name = 'time_zone'",
+                "variables"
+            ),
+            Some(Some("time_zone".to_string()))
+        );
+        assert_eq!(
+            mysql_parse_show_named_value_query("SHOW STATUS", "status"),
+            Some(None)
+        );
+        assert_eq!(
+            mysql_parse_show_named_value_query("SHOW GLOBAL STATUS LIKE 'Threads_%'", "status"),
+            Some(Some("Threads_%".to_string()))
+        );
+        assert_eq!(
+            mysql_parse_show_named_value_query("SHOW STATUS WHERE Value = '1'", "status"),
+            None
+        );
     }
 
     #[test]
