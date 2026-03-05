@@ -189,6 +189,17 @@ SELECT post_author, SUM(post_author) AS author_sum_by_author
 
 SELECT ID
   FROM wp_posts
+ WHERE post_status = 'publish' OR post_status = 'draft'
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE (post_status = 'publish' OR post_status = 'draft')
+   AND post_author = 1
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
  WHERE post_status LIKE 'pub%'
  ORDER BY ID DESC
  LIMIT 0, 2;

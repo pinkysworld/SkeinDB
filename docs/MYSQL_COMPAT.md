@@ -57,7 +57,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL, surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
-  - `DISTINCT`, `IN (...)`, `LIKE`, and `IS NULL` / `IS NOT NULL` for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
+  - `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL` / `IS NOT NULL`, and parenthesized `AND` / `OR` predicate trees for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
   - scan-based `UNIQUE KEY` enforcement for inserts/updates, plus declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
   - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow

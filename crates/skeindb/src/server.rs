@@ -7050,20 +7050,74 @@ fn split_csv_top_level(input: &str) -> Vec<String> {
     out
 }
 
-fn split_top_level_and(input: &str) -> Vec<String> {
+fn split_top_level_keyword(input: &str, keyword: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut rest = input.trim();
-    while let Some(idx) = find_keyword_top_level(rest, "and") {
+    while let Some(idx) = find_keyword_top_level(rest, keyword) {
         let left = rest[..idx].trim();
         if !left.is_empty() {
             parts.push(left.to_string());
         }
-        rest = rest[idx + 3..].trim();
+        rest = rest[idx + keyword.len()..].trim();
     }
     if !rest.is_empty() {
         parts.push(rest.to_string());
     }
     parts
+}
+
+fn split_top_level_and(input: &str) -> Vec<String> {
+    split_top_level_keyword(input, "and")
+}
+
+fn split_top_level_or(input: &str) -> Vec<String> {
+    split_top_level_keyword(input, "or")
+}
+
+fn trim_wrapping_parentheses(input: &str) -> &str {
+    let mut out = input.trim();
+    loop {
+        if !out.starts_with('(') || !out.ends_with(')') {
+            break;
+        }
+        let bytes = out.as_bytes();
+        let mut depth = 0u32;
+        let mut quote = 0u8;
+        let mut wraps = true;
+        for (idx, b) in bytes.iter().enumerate() {
+            let b = *b;
+            if quote != 0 {
+                if b == quote {
+                    if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                        continue;
+                    }
+                    quote = 0;
+                }
+                continue;
+            }
+            match b {
+                b'\'' | b'"' | b'`' => quote = b,
+                b'(' => depth = depth.saturating_add(1),
+                b')' => {
+                    if depth == 0 {
+                        wraps = false;
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && idx + 1 < bytes.len() {
+                        wraps = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !wraps || depth != 0 {
+            break;
+        }
+        out = out[1..out.len() - 1].trim();
+    }
+    out
 }
 
 fn parse_base_table_ref_with_alias(
@@ -7428,29 +7482,51 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
     ))
 }
 
+fn parse_where_expr_recursive(where_sql: &str) -> Result<Expr, RpcError> {
+    let where_sql = trim_wrapping_parentheses(where_sql);
+    let or_parts = split_top_level_or(where_sql);
+    if or_parts.len() > 1 {
+        let mut expr = parse_where_expr_recursive(&or_parts[0])?;
+        for part in or_parts.iter().skip(1) {
+            let rhs = parse_where_expr_recursive(part)?;
+            expr = Expr::Op {
+                op: "or".to_string(),
+                a: Some(Box::new(expr)),
+                b: Some(Box::new(rhs)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+        }
+        return Ok(expr);
+    }
+    let and_parts = split_top_level_and(where_sql);
+    if and_parts.len() > 1 {
+        let mut expr = parse_where_expr_recursive(&and_parts[0])?;
+        for part in and_parts.iter().skip(1) {
+            let rhs = parse_where_expr_recursive(part)?;
+            expr = Expr::Op {
+                op: "and".to_string(),
+                a: Some(Box::new(expr)),
+                b: Some(Box::new(rhs)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+        }
+        return Ok(expr);
+    }
+    parse_condition_expr(where_sql)
+}
+
 fn parse_where_expr(where_sql: &str) -> Result<Option<Expr>, RpcError> {
     let where_sql = where_sql.trim();
     if where_sql.is_empty() {
         return Ok(None);
     }
-    let parts = split_top_level_and(where_sql);
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    let mut expr = parse_condition_expr(&parts[0])?;
-    for part in parts.iter().skip(1) {
-        let rhs = parse_condition_expr(part)?;
-        expr = Expr::Op {
-            op: "and".to_string(),
-            a: Some(Box::new(expr)),
-            b: Some(Box::new(rhs)),
-            args: None,
-            list: None,
-            lo: None,
-            hi: None,
-        };
-    }
-    Ok(Some(expr))
+    Ok(Some(parse_where_expr_recursive(where_sql)?))
 }
 
 fn parse_order_by(order_sql: &str) -> Result<Vec<OrderBy>, RpcError> {
@@ -12370,6 +12446,55 @@ mod tests {
         let limit = limit.expect("expected limit clause");
         assert_eq!(limit.offset, Some(0));
         assert_eq!(limit.limit, Some(2));
+    }
+
+    #[test]
+    fn parse_where_expr_supports_or_and_parentheses_precedence() {
+        let expr = parse_where_expr(
+            "post_status = 'publish' OR post_status = 'draft' AND post_author = 1",
+        )
+        .expect("parse where expr")
+        .expect("where expression");
+        let Expr::Op {
+            op,
+            a: _,
+            b: Some(right),
+            ..
+        } = expr
+        else {
+            panic!("expected OR expression");
+        };
+        assert_eq!(op, "or");
+        let Expr::Op {
+            op: right_op,
+            a: _,
+            b: _,
+            ..
+        } = *right
+        else {
+            panic!("expected right side to be AND expression");
+        };
+        assert_eq!(right_op, "and");
+
+        let expr = parse_where_expr(
+            "(post_status = 'publish' OR post_status = 'draft') AND post_author = 1",
+        )
+        .expect("parse parenthesized where expr")
+        .expect("where expression");
+        let Expr::Op {
+            op,
+            a: Some(left),
+            b: _,
+            ..
+        } = expr
+        else {
+            panic!("expected AND expression");
+        };
+        assert_eq!(op, "and");
+        let Expr::Op { op: left_op, .. } = *left else {
+            panic!("expected left side to be OR expression");
+        };
+        assert_eq!(left_op, "or");
     }
 
     #[tokio::test]

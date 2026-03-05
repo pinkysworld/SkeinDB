@@ -39,7 +39,7 @@ SkeinDB adoption strategy:
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata; the implementation remains scan-based rather than backed by a true secondary index structure
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
-- SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
+- SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (simple single-join shapes); FULL joins are not implemented yet
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
@@ -77,7 +77,7 @@ Add queries there first, then implement.
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
-pagination/count, and grouped aggregate compatibility queries.
+pagination/count, grouped aggregate compatibility, and parenthesized `AND` / `OR` filter queries.
 
 ---
 

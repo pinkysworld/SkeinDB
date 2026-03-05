@@ -1193,6 +1193,29 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select id from wp_posts where post_status = 'publish' or post_status = 'draft' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 5);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[3][0].as_deref(), Some("4"));
+                        assert_eq!(rows[4][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where (post_status = 'publish' or post_status = 'draft') and post_author = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from wp_posts where post_status like 'pub%' order by id desc limit 0, 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
