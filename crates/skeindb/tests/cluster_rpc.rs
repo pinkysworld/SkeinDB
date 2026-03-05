@@ -1112,6 +1112,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select p.id, u.user_login, ux.user_login from wp_posts as p left join wp_users as u on p.post_author = u.id left join wp_users as ux on ux.id = u.id where p.id = 1 order by p.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                        assert_eq!(rows[0][2].as_deref(), Some("ada"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from wp_posts where post_title = null order by id asc" => match response {
                 MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
                 other => panic!("expected result set, got {:?}", other),
@@ -1299,10 +1310,12 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "USE wp",
         "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
         "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
         "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
         "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
         "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+        "INSERT INTO wp_profiles (user_id, display_name) VALUES (1, 'Ada Lovelace'), (3, 'Linus Torvalds')",
         "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
     ] {
         send_com_query(&mut stream, stmt).await?;
@@ -1333,6 +1346,21 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
             assert_eq!(rows[0][1].as_deref(), Some("Ada"));
             assert_eq!(rows[1][0].as_deref(), Some("3"));
             assert_eq!(rows[1][1].as_deref(), Some("Linus"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id, u.name, pr.display_name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id LEFT JOIN wp_profiles AS pr ON pr.user_id = u.id WHERE p.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+            assert_eq!(rows[0][2].as_deref(), Some("Ada Lovelace"));
         }
         other => panic!("expected result set, got {:?}", other),
     }

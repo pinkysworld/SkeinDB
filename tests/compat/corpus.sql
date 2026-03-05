@@ -159,6 +159,15 @@ SELECT u.id, p.ID
  WHERE p.ID IS NULL
  ORDER BY u.id ASC;
 
+SELECT p.ID, u.user_login, ux.user_login
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+  LEFT JOIN wp_users AS ux
+    ON ux.id = u.id
+ WHERE p.ID = 1
+ ORDER BY p.ID ASC;
+
 SELECT ID
   FROM wp_posts
  WHERE post_title = NULL

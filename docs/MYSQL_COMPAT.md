@@ -33,7 +33,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 - The CLI `--mysql` listener now supports a **minimal MySQL wire handshake** with `mysql_native_password` auth exchange.
 - The listener supports a `COM_QUERY` translation subset through `sql.exec` for:
-  - `SELECT` (literal-only, single-table, and simple `INNER JOIN` / `LEFT JOIN` / `RIGHT JOIN` queries)
+  - `SELECT` (literal-only, single-table, and simple `INNER JOIN` / `LEFT JOIN` / `RIGHT JOIN` queries, including basic left-associative multi-join chains)
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`

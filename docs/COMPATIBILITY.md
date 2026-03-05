@@ -41,7 +41,7 @@ SkeinDB adoption strategy:
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- INNER JOIN, LEFT JOIN, and RIGHT JOIN (simple single-join shapes); FULL joins are not implemented yet
+- INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 

@@ -7173,42 +7173,102 @@ fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef,
     Ok(table)
 }
 
-fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRef, RpcError> {
-    let input = input.trim();
-    for (token, join_type) in [
-        (" left outer join ", JoinType::Left),
-        (" right outer join ", JoinType::Right),
-        (" left join ", JoinType::Left),
-        (" right join ", JoinType::Right),
-        (" inner join ", JoinType::Inner),
-        (" join ", JoinType::Inner),
+fn parse_join_prefix(input: &str) -> Option<(JoinType, usize)> {
+    for (keyword, join_type) in [
+        ("left outer join", JoinType::Left),
+        ("right outer join", JoinType::Right),
+        ("left join", JoinType::Left),
+        ("right join", JoinType::Right),
+        ("inner join", JoinType::Inner),
+        ("join", JoinType::Inner),
     ] {
-        if let Some(idx) = find_ascii_ci_outside_quotes(input.as_bytes(), token.as_bytes()) {
-            let left_sql = input[..idx].trim();
-            let right_tail = input[idx + token.len()..].trim();
-            let on_idx = find_keyword_top_level(right_tail, "on").ok_or_else(|| {
-                RpcError::new("not_supported", "JOIN currently requires an ON predicate")
-            })?;
-            let right_sql = right_tail[..on_idx].trim();
-            let on_sql = right_tail[on_idx + 2..].trim();
-            let on = parse_where_expr(on_sql)?;
-            return Ok(TableRef::Join(JoinTableRef {
-                join: JoinRef {
-                    join_type,
-                    left: Box::new(TableRef::Base(parse_base_table_ref_with_alias(
-                        left_sql, default_db, true,
-                    )?)),
-                    right: Box::new(TableRef::Base(parse_base_table_ref_with_alias(
-                        right_sql, default_db, true,
-                    )?)),
-                    on,
-                },
-            }));
+        if input.len() <= keyword.len() || !input[..keyword.len()].eq_ignore_ascii_case(keyword) {
+            continue;
+        }
+        if input.as_bytes()[keyword.len()].is_ascii_whitespace() {
+            return Some((join_type, keyword.len()));
         }
     }
-    Ok(TableRef::Base(parse_base_table_ref_with_alias(
-        input, default_db, true,
-    )?))
+    None
+}
+
+fn find_next_join_clause(input: &str) -> Option<(usize, JoinType, usize)> {
+    let mut out = None::<(usize, JoinType, usize)>;
+    for (keyword, join_type) in [
+        ("left outer join", JoinType::Left),
+        ("right outer join", JoinType::Right),
+        ("left join", JoinType::Left),
+        ("right join", JoinType::Right),
+        ("inner join", JoinType::Inner),
+        ("join", JoinType::Inner),
+    ] {
+        if let Some(idx) = find_keyword_top_level(input, keyword) {
+            let candidate = (idx, join_type, keyword.len());
+            if out
+                .as_ref()
+                .map(|(best_idx, _, _)| idx < *best_idx)
+                .unwrap_or(true)
+            {
+                out = Some(candidate);
+            }
+        }
+    }
+    out
+}
+
+fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRef, RpcError> {
+    let input = input.trim();
+    let Some((first_join_idx, _, _)) = find_next_join_clause(input) else {
+        return Ok(TableRef::Base(parse_base_table_ref_with_alias(
+            input, default_db, true,
+        )?));
+    };
+
+    let left_sql = input[..first_join_idx].trim();
+    let mut table_ref =
+        TableRef::Base(parse_base_table_ref_with_alias(left_sql, default_db, true)?);
+    let mut rest = input[first_join_idx..].trim_start();
+    while !rest.is_empty() {
+        let Some((join_type, prefix_len)) = parse_join_prefix(rest) else {
+            return Err(RpcError::new(
+                "not_supported",
+                format!("unsupported JOIN clause '{}'", rest),
+            ));
+        };
+        rest = rest[prefix_len..].trim_start();
+        let on_idx = find_keyword_top_level(rest, "on").ok_or_else(|| {
+            RpcError::new("not_supported", "JOIN currently requires an ON predicate")
+        })?;
+        let right_sql = rest[..on_idx].trim();
+        if right_sql.is_empty() {
+            return Err(RpcError::new("invalid_request", "JOIN missing right table"));
+        }
+        rest = rest[on_idx + 2..].trim_start();
+        let (on_sql, tail_after_on) = if let Some((idx, _, _)) = find_next_join_clause(rest) {
+            (rest[..idx].trim(), rest[idx..].trim_start())
+        } else {
+            (rest.trim(), "")
+        };
+        if on_sql.is_empty() {
+            return Err(RpcError::new(
+                "invalid_request",
+                "JOIN missing ON predicate",
+            ));
+        }
+        let on = parse_where_expr(on_sql)?;
+        table_ref = TableRef::Join(JoinTableRef {
+            join: JoinRef {
+                join_type,
+                left: Box::new(table_ref),
+                right: Box::new(TableRef::Base(parse_base_table_ref_with_alias(
+                    right_sql, default_db, true,
+                )?)),
+                on,
+            },
+        });
+        rest = tail_after_on;
+    }
+    Ok(table_ref)
 }
 
 fn parse_sql_column_ref(raw: &str) -> Option<(String, Option<String>)> {
@@ -12446,6 +12506,39 @@ mod tests {
         let limit = limit.expect("expected limit clause");
         assert_eq!(limit.offset, Some(0));
         assert_eq!(limit.limit, Some(2));
+    }
+
+    #[test]
+    fn parse_select_plan_supports_multi_join_chain() {
+        let plan = parse_sql_plan(
+            "SELECT p.id FROM app.posts AS p LEFT JOIN app.users AS u ON p.post_author = u.id LEFT JOIN app.profiles AS pr ON pr.user_id = u.id WHERE p.id = 10",
+            Some("app"),
+        )
+        .expect("parse select plan");
+        let SqlPlan::Select { from, .. } = plan else {
+            panic!("expected select plan");
+        };
+        let Some(TableRef::Join(outer)) = from else {
+            panic!("expected outer JOIN");
+        };
+        assert_eq!(outer.join.join_type, JoinType::Left);
+        let TableRef::Base(outer_right) = outer.join.right.as_ref() else {
+            panic!("expected outer right table");
+        };
+        assert_eq!(outer_right.table, "profiles");
+
+        let TableRef::Join(inner) = outer.join.left.as_ref() else {
+            panic!("expected inner JOIN");
+        };
+        assert_eq!(inner.join.join_type, JoinType::Left);
+        let TableRef::Base(inner_left) = inner.join.left.as_ref() else {
+            panic!("expected inner left table");
+        };
+        assert_eq!(inner_left.table, "posts");
+        let TableRef::Base(inner_right) = inner.join.right.as_ref() else {
+            panic!("expected inner right table");
+        };
+        assert_eq!(inner_right.table, "users");
     }
 
     #[test]
