@@ -50,7 +50,7 @@ SkeinDB adoption strategy:
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
-- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`), and prepared result rows are returned in the binary row protocol
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *` and simple join projections), and prepared result rows are returned in the binary row protocol
 - Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata

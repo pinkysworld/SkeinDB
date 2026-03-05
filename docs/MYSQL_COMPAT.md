@@ -45,7 +45,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, and `COM_STMT_CLOSE`
   - `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, and baseline `COM_STMT_FETCH`
   - `?` placeholders are rebound into the same SQL-translation path as `COM_QUERY`
-  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including base-table `SELECT *` on a single table)
+  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including single-table `SELECT *` and simple join projections)
   - prepared `SELECT` responses are returned over the binary row protocol
   - read-only server-side cursor execution now works for prepared result sets
   - deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, stricter cursor/driver semantics) remains follow-on work

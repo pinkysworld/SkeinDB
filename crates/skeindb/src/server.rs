@@ -469,6 +469,12 @@ struct MySqlStmtPrepareColumn {
 }
 
 #[derive(Debug, Clone)]
+struct MySqlStmtPrepareTableDesc {
+    base: BaseTableRef,
+    desc: Value,
+}
+
+#[derive(Debug, Clone)]
 struct MySqlPreparedCursor {
     column_types: Vec<MySqlStmtColumnType>,
     rows: Vec<Vec<Option<String>>>,
@@ -2435,41 +2441,85 @@ fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
     base.r#as.as_deref().unwrap_or(&base.table)
 }
 
+fn mysql_stmt_table_matches_name(base: &BaseTableRef, table_name: &str) -> bool {
+    table_name.eq_ignore_ascii_case(&base.table)
+        || table_name.eq_ignore_ascii_case(mysql_stmt_base_table_alias(base))
+}
+
+fn mysql_stmt_collect_base_tables(table_ref: &TableRef, out: &mut Vec<BaseTableRef>) {
+    match table_ref {
+        TableRef::Base(base) => out.push(base.clone()),
+        TableRef::Join(join) => {
+            mysql_stmt_collect_base_tables(join.join.left.as_ref(), out);
+            mysql_stmt_collect_base_tables(join.join.right.as_ref(), out);
+        }
+        TableRef::Subquery(_) => {}
+    }
+}
+
+fn mysql_stmt_desc_column_type(desc: &Value, col: &str) -> Option<MySqlStmtColumnType> {
+    desc.get("columns")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .find(|column| {
+            column
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| name.eq_ignore_ascii_case(col))
+                .unwrap_or(false)
+        })
+        .map(mysql_stmt_column_type_from_desc_column)
+}
+
+fn mysql_stmt_resolve_column_type(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+    col: &str,
+    table: Option<&str>,
+) -> MySqlStmtColumnType {
+    let mut matches = Vec::new();
+    for table_desc in table_descs {
+        if let Some(table_name) = table {
+            if !mysql_stmt_table_matches_name(&table_desc.base, table_name) {
+                continue;
+            }
+        }
+        if let Some(found) = mysql_stmt_desc_column_type(&table_desc.desc, col) {
+            matches.push(found);
+        }
+    }
+    if matches.len() == 1 {
+        matches[0]
+    } else {
+        MySqlStmtColumnType::VarString
+    }
+}
+
 fn mysql_stmt_prepare_columns_from_select(
     from: Option<&TableRef>,
     projection: &[SelectItem],
-    base_desc: Option<&Value>,
+    table_descs: &[MySqlStmtPrepareTableDesc],
 ) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some(cols) = from
-        .and_then(|from| match from {
-            TableRef::Base(base) => Some(base),
-            _ => None,
-        })
-        .zip(base_desc)
-        .filter(|_| projection.is_empty())
-        .map(|(_, desc)| {
-            desc.get("columns")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-        })
-    {
-        return cols
-            .into_iter()
-            .filter_map(|column| {
-                let name = column.get("name").and_then(|v| v.as_str())?.to_string();
-                Some(MySqlStmtPrepareColumn {
-                    name,
-                    column_type: mysql_stmt_column_type_from_desc_column(&column),
-                })
-            })
-            .collect();
+    if from.is_some() && projection.is_empty() {
+        let mut wildcard = Vec::new();
+        for table_desc in table_descs {
+            if let Some(cols) = table_desc.desc.get("columns").and_then(|v| v.as_array()) {
+                for column in cols {
+                    let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    wildcard.push(MySqlStmtPrepareColumn {
+                        name: name.to_string(),
+                        column_type: mysql_stmt_column_type_from_desc_column(column),
+                    });
+                }
+            }
+        }
+        if !wildcard.is_empty() {
+            return wildcard;
+        }
     }
 
-    let base = from.and_then(|from| match from {
-        TableRef::Base(base) => Some(base),
-        _ => None,
-    });
     projection
         .iter()
         .enumerate()
@@ -2477,35 +2527,7 @@ fn mysql_stmt_prepare_columns_from_select(
             let column_type = match &item.expr {
                 Expr::Lit { lit } => mysql_stmt_column_type_for_lit(lit),
                 Expr::Col { col, table } => {
-                    if let Some((base, desc)) = base.zip(base_desc) {
-                        let matches_base = table
-                            .as_deref()
-                            .map(|table_name| {
-                                table_name.eq_ignore_ascii_case(&base.table)
-                                    || table_name
-                                        .eq_ignore_ascii_case(mysql_stmt_base_table_alias(base))
-                            })
-                            .unwrap_or(true);
-                        if matches_base {
-                            desc.get("columns")
-                                .and_then(|v| v.as_array())
-                                .into_iter()
-                                .flatten()
-                                .find(|column| {
-                                    column
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .map(|name| name.eq_ignore_ascii_case(col))
-                                        .unwrap_or(false)
-                                })
-                                .map(mysql_stmt_column_type_from_desc_column)
-                                .unwrap_or(MySqlStmtColumnType::VarString)
-                        } else {
-                            MySqlStmtColumnType::VarString
-                        }
-                    } else {
-                        MySqlStmtColumnType::VarString
-                    }
+                    mysql_stmt_resolve_column_type(table_descs, col, table.as_deref())
                 }
                 _ => MySqlStmtColumnType::VarString,
             };
@@ -2539,14 +2561,23 @@ async fn mysql_stmt_prepare_columns(
         return Vec::new();
     };
 
-    let base_desc = match from.as_ref() {
-        Some(TableRef::Base(base)) => {
+    let table_descs = match from.as_ref() {
+        Some(from_ref) => {
+            let mut base_tables = Vec::new();
+            mysql_stmt_collect_base_tables(from_ref, &mut base_tables);
             let eng = state.engine.read().await;
-            eng.describe_table(&base.db, &base.table).ok()
+            base_tables
+                .into_iter()
+                .filter_map(|base| {
+                    eng.describe_table(&base.db, &base.table)
+                        .ok()
+                        .map(|desc| MySqlStmtPrepareTableDesc { base, desc })
+                })
+                .collect()
         }
-        _ => None,
+        None => Vec::new(),
     };
-    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, base_desc.as_ref())
+    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs)
 }
 
 fn mysql_stmt_infer_column_types(
@@ -11626,8 +11657,15 @@ mod tests {
                 {"name": "name", "type": {"kind": "string"}}
             ]
         });
+        let table_descs = match from.as_ref() {
+            Some(TableRef::Base(base)) => vec![MySqlStmtPrepareTableDesc {
+                base: base.clone(),
+                desc: desc.clone(),
+            }],
+            _ => Vec::new(),
+        };
         let explicit =
-            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
         assert_eq!(
             explicit,
             vec![
@@ -11648,11 +11686,108 @@ mod tests {
         else {
             panic!("expected SELECT plan");
         };
+        let table_descs = match from.as_ref() {
+            Some(TableRef::Base(base)) => vec![MySqlStmtPrepareTableDesc {
+                base: base.clone(),
+                desc: desc.clone(),
+            }],
+            _ => Vec::new(),
+        };
         let wildcard =
-            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, Some(&desc));
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
         assert_eq!(
             wildcard,
             vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT p.id AS post_id, u.name FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse join projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let posts_desc = json!({
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}},
+                {"name": "user_id", "type": {"kind": "u64"}}
+            ]
+        });
+        let users_desc = json!({
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}},
+                {"name": "name", "type": {"kind": "string"}}
+            ]
+        });
+        let table_descs = vec![
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "posts".to_string(),
+                    r#as: Some("p".to_string()),
+                },
+                desc: posts_desc,
+            },
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: Some("u".to_string()),
+                },
+                desc: users_desc,
+            },
+        ];
+        let join_projection =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
+        assert_eq!(
+            join_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "post_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT * FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse join wildcard")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let join_wildcard =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
+        assert_eq!(
+            join_wildcard,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "user_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,

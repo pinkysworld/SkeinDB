@@ -645,6 +645,52 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
     );
 
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_posts").await?;
+    let (_seq, ok_drop_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_posts)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_posts (id BIGINT UNSIGNED NOT NULL, author_id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_posts)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_posts (id, author_id) VALUES (11, 7), (12, 42)",
+    )
+    .await?;
+    let (_seq, ok_insert_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_posts)?.0, 2);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.id AS post_id, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.author_id = u.id WHERE p.id = ?",
+    )
+    .await?;
+    let join_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(join_stmt.param_count, 1);
+    assert_eq!(
+        join_stmt.column_defs,
+        vec![("post_id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        join_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let join_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        join_rows,
+        vec![vec![Some("11".to_string()), Some("Nora".to_string())]]
+    );
+
+    send_com_stmt_close(&mut stream, join_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
