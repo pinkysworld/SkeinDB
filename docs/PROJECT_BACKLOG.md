@@ -44,7 +44,7 @@ Phase 0 verification checklist:
 - [x] T032: SQL translator (subset)
 - [x] T033: DDL/DML subset for corpus.sql
 - [x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
-- [ ] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics
+- [ ] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics (runtime write-path now uses in-memory unique probe indexes; durable/reusable secondary-index lifecycle and full parity hardening remain)
 - [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (single-column grouped `COUNT`/`SUM` shims, projection-grouped `GROUP BY` de-dup compatibility for `SQL_CALC_FOUND_ROWS` flows, parenthesized `AND`/`OR` filters plus `NOT IN` / `NOT LIKE`, basic left-associative multi-join chains, `CREATE [UNIQUE] INDEX` / `DROP INDEX`, `ALTER TABLE ... ADD COLUMN` position-clause / `ADD [UNIQUE] KEY` / `DROP [KEY|INDEX]`, bootstrap/session compatibility `SET` forms including `SQL_AUTO_IS_NULL`, compatibility `SHOW VARIABLES` values/wildcard patterns (`character_set_%`, `collation_%`), and `LOCK TABLES` / `UNLOCK TABLES` no-op handling are now covered; subqueries, richer aggregates, and broader `ALTER TABLE` variants remain)
 - [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage)
 

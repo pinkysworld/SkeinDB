@@ -1642,6 +1642,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
 
             for mut row in rows {
                 // Fill missing cols and apply auto-increment.
@@ -1649,7 +1650,7 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(schema, tdata, &row, None).is_some() {
+                if mysql_compat_unique_conflict(&unique_indexes, tdata, &row, None).is_some() {
                     anyhow::bail!("conflict");
                 }
 
@@ -1674,6 +1675,7 @@ impl Engine {
                     deleted: false,
                 });
                 tdata.pk_index.insert(pk_key_s, idx);
+                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &row);
 
                 change_pks.push(pk);
                 collect_value_store_items(&row, &mut intern_items);
@@ -1739,6 +1741,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
 
             for idx in 0..tdata.rows.len() {
                 if tdata.rows[idx].deleted {
@@ -1756,17 +1759,21 @@ impl Engine {
                     }
                 }
 
-                let mut new_row = current_row;
+                let mut new_row = current_row.clone();
                 for (k, v) in set.iter() {
                     new_row.insert(k.clone(), v.clone());
                 }
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx)).is_some() {
+                if mysql_compat_unique_conflict(&unique_indexes, tdata, &new_row, Some(idx))
+                    .is_some()
+                {
                     anyhow::bail!("conflict");
                 }
+                mysql_compat_unique_index_remove_row(&mut unique_indexes, idx, &current_row);
                 tdata.rows[idx].row = new_row;
+                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &tdata.rows[idx].row);
                 tdata.rows[idx].version = next_row_version(schema);
                 affected += 1;
 
@@ -10187,22 +10194,113 @@ fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[Strin
     compared
 }
 
-fn mysql_compat_unique_conflict(
+#[derive(Debug, Clone)]
+struct MySqlCompatUniqueRuntimeIndex {
+    name: String,
+    columns: Vec<String>,
+    keys: HashMap<String, Vec<usize>>,
+}
+
+fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String> {
+    let mut values = Vec::with_capacity(columns.len());
+    for column in columns {
+        let value = row.get(column)?.clone();
+        if matches!(value, Lit::Null) {
+            return None;
+        }
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    Some(secondary_index_value_key(&values))
+}
+
+fn mysql_compat_unique_runtime_indexes(
     schema: &TableSchema,
+    tdata: &TableData,
+) -> Vec<MySqlCompatUniqueRuntimeIndex> {
+    mysql_compat_index_defs(schema)
+        .into_iter()
+        .filter(|index| index.unique)
+        .map(|index| {
+            let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let Some(key) = mysql_compat_unique_key(&index.columns, &entry.row) else {
+                    continue;
+                };
+                keys.entry(key).or_default().push(idx);
+            }
+            MySqlCompatUniqueRuntimeIndex {
+                name: index.name,
+                columns: index.columns,
+                keys,
+            }
+        })
+        .collect()
+}
+
+fn mysql_compat_unique_index_add_row(
+    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
+    idx: usize,
+    row: &RowObject,
+) {
+    for index in indexes.iter_mut() {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        index.keys.entry(key).or_default().push(idx);
+    }
+}
+
+fn mysql_compat_unique_index_remove_row(
+    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
+    idx: usize,
+    row: &RowObject,
+) {
+    for index in indexes.iter_mut() {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        let mut remove_bucket = false;
+        if let Some(values) = index.keys.get_mut(&key) {
+            values.retain(|candidate| *candidate != idx);
+            remove_bucket = values.is_empty();
+        }
+        if remove_bucket {
+            index.keys.remove(&key);
+        }
+    }
+}
+
+fn mysql_compat_unique_conflict(
+    indexes: &[MySqlCompatUniqueRuntimeIndex],
     tdata: &TableData,
     row: &RowObject,
     skip_idx: Option<usize>,
 ) -> Option<String> {
-    for index in mysql_compat_index_defs(schema)
-        .into_iter()
-        .filter(|index| index.unique)
-    {
-        for (idx, entry) in tdata.rows.iter().enumerate() {
-            if entry.deleted || skip_idx == Some(idx) {
+    for index in indexes {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        let Some(candidates) = index.keys.get(&key) else {
+            continue;
+        };
+        for idx in candidates {
+            if skip_idx == Some(*idx) {
+                continue;
+            }
+            let Some(entry) = tdata.rows.get(*idx) else {
+                continue;
+            };
+            if entry.deleted {
                 continue;
             }
             if row_matches_compat_index(row, &entry.row, &index.columns) {
-                return Some(index.name);
+                return Some(index.name.clone());
             }
         }
     }
@@ -19331,6 +19429,138 @@ mod tests {
             }),
             Some(5)
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_unique_index_enforcement_tracks_updates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_unique_runtime_index");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "email_unique",
+                    "columns": ["email"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "a@example.com".to_string(),
+            },
+        );
+        let mut predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        let err = engine
+            .data_update(&table, &predicate, &set, None, None, &[])
+            .expect_err("expected unique conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "c@example.com".to_string(),
+            },
+        );
+        let moved = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(moved.affected, 1);
+
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "b@example.com".to_string(),
+            },
+        );
+        predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        let reused = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(reused.affected, 1);
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected duplicate insert conflict");
+        assert!(err.to_string().contains("conflict"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
