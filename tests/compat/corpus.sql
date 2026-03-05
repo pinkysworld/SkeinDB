@@ -38,6 +38,9 @@ CREATE TABLE wp_posts (
   KEY post_status (post_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
 
+ALTER TABLE wp_posts
+  ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title;
+
 CREATE TABLE wp_users (
   id BIGINT UNSIGNED NOT NULL,
   user_login VARCHAR(60) NOT NULL,
@@ -137,6 +140,10 @@ VALUES
   (2, '2020-01-03 00:00:00', 'publish', 'World'),
   (2, '2020-01-04 00:00:00', 'publish', 'More'),
   (3, '2020-01-05 00:00:00', 'publish', 'Even More');
+
+SELECT post_name
+  FROM wp_posts
+ WHERE ID = 1;
 
 SELECT p.post_author, u.user_login
   FROM wp_posts AS p

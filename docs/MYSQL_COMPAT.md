@@ -37,7 +37,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
-  - `ALTER TABLE ... ADD COLUMN`
+  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses)
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`

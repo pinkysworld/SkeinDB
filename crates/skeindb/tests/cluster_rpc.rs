@@ -1038,7 +1038,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             },
             "describe wp_posts" => match response {
                 MysqlResponse::Rows(rows) => {
-                    assert_eq!(rows.len(), 5);
+                    assert_eq!(rows.len(), 6);
                     assert_eq!(rows[0][0].as_deref(), Some("ID"));
                 }
                 other => panic!("expected result set, got {:?}", other),
@@ -1092,6 +1092,13 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select post_name from wp_posts where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select p.id from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login = 'ada' order by p.id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1312,6 +1319,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
         "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
+        "ALTER TABLE wp_posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
         "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
         "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
         "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
@@ -1330,6 +1338,15 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         MysqlResponse::Rows(rows) => {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0][0].as_deref(), Some("untitled"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(&mut stream, "SELECT post_name FROM wp_posts WHERE id = 10").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some(""));
         }
         other => panic!("expected result set, got {:?}", other),
     }

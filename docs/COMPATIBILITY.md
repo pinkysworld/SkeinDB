@@ -30,7 +30,7 @@ SkeinDB adoption strategy:
 - CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
-- ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT`)
+- ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
 - DROP TABLE
 
 ### DML

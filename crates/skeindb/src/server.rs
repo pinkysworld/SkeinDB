@@ -8133,19 +8133,13 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let name = clean_sql_ident(parts[0]);
     let type_tok = parts[1];
     let clause_lower = clause.to_ascii_lowercase();
-    if clause_lower.contains(" after ") || clause_lower.ends_with(" first") {
-        return Err(RpcError::new(
-            "not_supported",
-            "ALTER TABLE ADD COLUMN position clauses are not supported yet",
-        ));
-    }
     let unsigned = parts.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
     let nullable = !clause_lower.contains("not null");
     let auto_increment = clause_lower.contains("auto_increment");
     let default = find_keyword_top_level(clause, "default")
         .map(|idx| clause[idx + 7..].trim())
         .filter(|raw| !raw.is_empty())
-        .map(parse_sql_lit)
+        .map(parse_sql_leading_lit)
         .transpose()?;
     Ok(SqlPlan::AlterTableAddColumn {
         table,
@@ -12539,6 +12533,28 @@ mod tests {
             panic!("expected inner right table");
         };
         assert_eq!(inner_right.table, "users");
+    }
+
+    #[test]
+    fn parse_alter_table_add_column_supports_after_clause() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
+            Some("app"),
+        )
+        .expect("parse alter table");
+        let SqlPlan::AlterTableAddColumn {
+            table,
+            column,
+            default,
+        } = plan
+        else {
+            panic!("expected alter table add column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(column.name, "post_name");
+        assert!(!column.nullable);
+        assert_eq!(default, Some(Lit::Str { v: String::new() }));
     }
 
     #[test]
