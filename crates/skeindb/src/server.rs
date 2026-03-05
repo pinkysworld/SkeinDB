@@ -1128,18 +1128,22 @@ fn parse_sql_string_literal(input: &str) -> Option<String> {
 }
 
 fn mysql_normalize_session_var_name(raw: &str) -> String {
-    raw.trim()
+    let lowered = raw
+        .trim()
         .trim_start_matches('@')
         .trim_start_matches('@')
         .trim()
-        .trim_start_matches("global.")
-        .trim_start_matches("GLOBAL.")
-        .trim_start_matches("session.")
-        .trim_start_matches("SESSION.")
-        .trim_start_matches("local.")
-        .trim_start_matches("LOCAL.")
+        .to_ascii_lowercase();
+    lowered
+        .strip_prefix("global.")
+        .or_else(|| lowered.strip_prefix("global "))
+        .or_else(|| lowered.strip_prefix("session."))
+        .or_else(|| lowered.strip_prefix("session "))
+        .or_else(|| lowered.strip_prefix("local."))
+        .or_else(|| lowered.strip_prefix("local "))
+        .unwrap_or(lowered.as_str())
         .trim()
-        .to_ascii_lowercase()
+        .to_string()
 }
 
 fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
@@ -1147,9 +1151,16 @@ fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
         "sql_mode" => Some(MySqlLiteral::Str(String::new())),
         "lower_case_table_names" => Some(MySqlLiteral::Int(0)),
         "version_comment" => Some(MySqlLiteral::Str("SkeinDB compatibility layer".to_string())),
+        "wait_timeout" => Some(MySqlLiteral::Int(28_800)),
+        "time_zone" => Some(MySqlLiteral::Str("SYSTEM".to_string())),
+        "sql_notes" => Some(MySqlLiteral::Int(1)),
+        "foreign_key_checks" => Some(MySqlLiteral::Int(1)),
+        "unique_checks" => Some(MySqlLiteral::Int(1)),
+        "sql_log_bin" => Some(MySqlLiteral::Int(1)),
         "tx_isolation" | "transaction_isolation" => {
             Some(MySqlLiteral::Str("REPEATABLE-READ".to_string()))
         }
+        "tx_read_only" | "transaction_read_only" => Some(MySqlLiteral::Int(0)),
         "character_set_client" | "character_set_connection" | "character_set_results" => {
             Some(MySqlLiteral::Str("utf8mb4".to_string()))
         }
@@ -1157,6 +1168,27 @@ fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
         "autocommit" => Some(MySqlLiteral::Int(1)),
         _ => None,
     }
+}
+
+fn mysql_parse_set_assignment(sql: &str) -> Option<(String, String)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("set ") {
+        return None;
+    }
+    let rest = trimmed[4..].trim();
+    if rest.contains(',') {
+        return None;
+    }
+    let (lhs, rhs) = rest.split_once('=')?;
+    let normalized = mysql_normalize_session_var_name(lhs.trim_end_matches(':').trim());
+    if normalized.is_empty() {
+        return None;
+    }
+    Some((normalized, rhs.trim().to_string()))
 }
 
 fn parse_select_literal_query(
@@ -1219,25 +1251,13 @@ fn parse_select_literal_query(
 }
 
 fn mysql_parse_set_autocommit(sql: &str) -> Option<bool> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    if !trimmed.is_ascii() {
+    let (name, value) = mysql_parse_set_assignment(sql)?;
+    if name != "autocommit" {
         return None;
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("set ") {
-        return None;
-    }
-    let rest = trimmed[4..].trim();
-    let rest_lower = rest.to_ascii_lowercase();
-    let key = "autocommit";
-    if !rest_lower.starts_with(key) {
-        return None;
-    }
-    let tail = rest[key.len()..].trim_start();
-    let tail = tail.strip_prefix('=').unwrap_or(tail).trim();
-    match tail {
-        "0" => Some(false),
-        "1" => Some(true),
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "off" | "false" => Some(false),
+        "1" | "on" | "true" => Some(true),
         _ => None,
     }
 }
@@ -1253,7 +1273,7 @@ fn mysql_is_session_compat_set(sql: &str) -> bool {
     }
     let rest = trimmed[4..].trim();
     let rest_lower = rest.to_ascii_lowercase();
-    if rest_lower.starts_with("names ") {
+    if rest_lower.starts_with("names ") || rest_lower.starts_with("character set ") {
         return true;
     }
 
@@ -1273,9 +1293,33 @@ fn mysql_is_session_compat_set(sql: &str) -> bool {
         "character_set_results",
         "collation_connection",
         "wait_timeout",
+        "time_zone",
+        "sql_notes",
+        "tx_isolation",
+        "transaction_isolation",
+        "transaction_read_only",
+        "transaction isolation level",
+        "transaction read only",
+        "transaction read write",
+        "foreign_key_checks",
+        "unique_checks",
+        "sql_log_bin",
     ]
     .iter()
     .any(|name| normalized.starts_with(name))
+}
+
+fn mysql_is_lock_tables(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() {
+        return false;
+    }
+    trimmed.to_ascii_lowercase().starts_with("lock tables ")
+}
+
+fn mysql_is_unlock_tables(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    trimmed.eq_ignore_ascii_case("unlock tables")
 }
 
 fn mysql_is_begin(sql: &str) -> bool {
@@ -2393,11 +2437,7 @@ async fn mysql_try_compat_query_outcome(
     if lower.starts_with("show variables like ") {
         let name = parse_sql_string_literal(trimmed[20..].trim())
             .unwrap_or_else(|| clean_sql_ident(&trimmed[20..]));
-        let value = match name.to_ascii_lowercase().as_str() {
-            "sql_mode" => Some(String::new()),
-            "lower_case_table_names" => Some("0".to_string()),
-            _ => None,
-        };
+        let value = mysql_session_var_value(&name).and_then(|lit| mysql_literal_text(&lit));
         let rows = value
             .into_iter()
             .map(|v| vec![Some(name.clone()), Some(v)])
@@ -3384,6 +3424,12 @@ async fn mysql_execute_sql(
         });
     }
     if mysql_is_session_compat_set(sql) {
+        return Ok(MySqlQueryOutcome::Ok {
+            affected_rows: 0,
+            last_insert_id: 0,
+        });
+    }
+    if mysql_is_lock_tables(sql) || mysql_is_unlock_tables(sql) {
         return Ok(MySqlQueryOutcome::Ok {
             affected_rows: 0,
             last_insert_id: 0,
@@ -8503,16 +8549,62 @@ fn parse_alter_table_add_index_clause(
     Ok(Some((index_name, columns, unique)))
 }
 
+fn parse_alter_table_drop_index_clause(clause: &str) -> Result<Option<String>, RpcError> {
+    let tokens: Vec<&str> = clause.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE DROP clause must not be empty",
+        ));
+    }
+    if !(tokens[0].eq_ignore_ascii_case("key") || tokens[0].eq_ignore_ascii_case("index")) {
+        return Ok(None);
+    }
+    let index_name = tokens
+        .get(1)
+        .map(|v| clean_sql_ident(v))
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            RpcError::new(
+                "invalid_request",
+                "ALTER TABLE DROP INDEX/KEY requires an index name",
+            )
+        })?;
+    Ok(Some(index_name))
+}
+
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
-    let add_idx = find_keyword_top_level(tail, "add").ok_or_else(|| {
-        RpcError::new(
+    let add_idx = find_keyword_top_level(tail, "add");
+    let drop_idx = find_keyword_top_level(tail, "drop");
+    let (action_idx, action) =
+        match (add_idx, drop_idx) {
+            (Some(add), Some(drop)) if add < drop => (add, "add"),
+            (Some(_), Some(drop)) => (drop, "drop"),
+            (Some(add), None) => (add, "add"),
+            (None, Some(drop)) => (drop, "drop"),
+            (None, None) => return Err(RpcError::new(
+                "not_supported",
+                "ALTER TABLE currently supports ADD COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+            )),
+        };
+
+    let table = parse_table_ref(tail[..action_idx].trim(), default_db)?;
+    let mut clause = tail[action_idx + action.len()..].trim();
+    if action.eq_ignore_ascii_case("drop") {
+        if let Some(index_name) = parse_alter_table_drop_index_clause(clause)? {
+            return Ok(SqlPlan::DropIndex {
+                table,
+                index_name,
+                if_exists: false,
+            });
+        }
+        return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports only ADD COLUMN / ADD [UNIQUE] KEY",
-        )
-    })?;
-    let table = parse_table_ref(tail[..add_idx].trim(), default_db)?;
-    let mut clause = tail[add_idx + 3..].trim();
+            "ALTER TABLE DROP currently supports only DROP [KEY|INDEX]",
+        ));
+    }
+
     if let Some((index_name, columns, unique)) = parse_alter_table_add_index_clause(clause)? {
         return Ok(SqlPlan::AlterTableAddIndex {
             table,
@@ -12894,6 +12986,22 @@ mod tests {
             mysql_parse_set_autocommit("SET autocommit = 1;"),
             Some(true)
         );
+        assert_eq!(
+            mysql_parse_set_autocommit("SET @@session.autocommit = 0"),
+            Some(false)
+        );
+        assert_eq!(
+            mysql_parse_set_autocommit("SET SESSION autocommit = ON"),
+            Some(true)
+        );
+        assert_eq!(
+            mysql_parse_set_autocommit("SET LOCAL autocommit := FALSE"),
+            Some(false)
+        );
+        assert_eq!(
+            mysql_parse_set_autocommit("SET autocommit = 1, sql_mode = ''"),
+            None
+        );
         assert_eq!(mysql_parse_set_autocommit("SET sql_mode=''"), None);
     }
 
@@ -12904,7 +13012,11 @@ mod tests {
         assert!(mysql_is_session_compat_set(
             "SET @@session.character_set_results = 'utf8mb4'"
         ));
-        assert!(!mysql_is_session_compat_set("SET time_zone = '+00:00'"));
+        assert!(mysql_is_session_compat_set("SET time_zone = '+00:00'"));
+        assert!(mysql_is_session_compat_set(
+            "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        ));
+        assert!(!mysql_is_session_compat_set("SET max_connections = 200"));
     }
 
     #[test]
@@ -12912,6 +13024,13 @@ mod tests {
         assert!(mysql_like_matches("wp_posts", "wp_%"));
         assert!(mysql_like_matches("wp_posts", "wp_post_"));
         assert!(!mysql_like_matches("wp_posts", "wp_option_"));
+    }
+
+    #[test]
+    fn mysql_lock_tables_compat_roundtrip() {
+        assert!(mysql_is_lock_tables("LOCK TABLES wp_options WRITE"));
+        assert!(mysql_is_unlock_tables("UNLOCK TABLES"));
+        assert!(!mysql_is_lock_tables("LOCK TABLE wp_options WRITE"));
     }
 
     #[test]
@@ -13166,6 +13285,34 @@ mod tests {
         assert_eq!(table.table, "users");
         assert_eq!(index_name, "user_login_uq");
         assert!(!if_exists);
+    }
+
+    #[test]
+    fn parse_alter_table_drop_index_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.users DROP INDEX user_login_uq",
+            Some("app"),
+        )
+        .expect("parse alter table drop index");
+        let SqlPlan::DropIndex {
+            table,
+            index_name,
+            if_exists,
+        } = plan
+        else {
+            panic!("expected drop index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(index_name, "user_login_uq");
+        assert!(!if_exists);
+
+        let plan = parse_sql_plan("ALTER TABLE app.users DROP KEY user_login_uq", Some("app"))
+            .expect("parse alter table drop key");
+        let SqlPlan::DropIndex { index_name, .. } = plan else {
+            panic!("expected drop index plan");
+        };
+        assert_eq!(index_name, "user_login_uq");
     }
 
     #[test]

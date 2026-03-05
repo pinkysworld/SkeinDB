@@ -8,9 +8,18 @@ SELECT @@lower_case_table_names;
 
 SHOW VARIABLES LIKE 'sql_mode';
 SHOW VARIABLES LIKE 'lower_case_table_names';
+SHOW VARIABLES LIKE 'time_zone';
+SHOW VARIABLES LIKE 'transaction_isolation';
+
+SELECT @@transaction_isolation;
 
 SET NAMES utf8mb4;
+SET CHARACTER SET utf8mb4;
 SET SESSION sql_mode = '';
+SET SESSION sql_notes = 0;
+SET time_zone = '+00:00';
+SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET SESSION transaction_read_only = OFF;
 
 CREATE DATABASE IF NOT EXISTS skein_test;
 USE skein_test;
@@ -49,6 +58,9 @@ CREATE TABLE wp_users (
   user_login VARCHAR(60) NOT NULL,
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+LOCK TABLES wp_options WRITE;
+UNLOCK TABLES;
 
 SHOW DATABASES;
 SHOW TABLES FROM skein_test;
@@ -146,7 +158,7 @@ VALUES (5, 'ada');
 SELECT COUNT(*) AS user_count
   FROM wp_users;
 
-DROP INDEX user_login_unique ON wp_users;
+ALTER TABLE wp_users DROP INDEX user_login_unique;
 
 SHOW INDEX FROM wp_users;
 
@@ -266,7 +278,7 @@ SELECT SQL_CALC_FOUND_ROWS p.ID
 
 SELECT FOUND_ROWS();
 
-SET autocommit=0;
+SET @@SESSION.autocommit=0;
 
 BEGIN;
 INSERT INTO wp_options (option_name, option_value, autoload)
@@ -281,7 +293,7 @@ VALUES ('txn_test', '2', 'no');
 COMMIT;
 SELECT option_value FROM wp_options WHERE option_name='txn_test';
 
-SET autocommit=1;
+SET LOCAL autocommit=1;
 
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;

@@ -37,7 +37,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`, `DROP TABLE`
-  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses) and `ALTER TABLE ... ADD [UNIQUE] KEY`
+  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses), `ALTER TABLE ... ADD [UNIQUE] KEY`, and `ALTER TABLE ... DROP [KEY|INDEX]`
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
@@ -51,7 +51,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, stricter cursor/driver semantics) remains follow-on work
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
-  - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`
+  - WordPress-style/bootstrap session queries such as `SET NAMES`, `SET CHARACTER SET`, `SET SESSION sql_mode`, `SET SESSION sql_notes`, `SET time_zone`, transaction-isolation/read-only `SET` forms, and `SELECT @@sql_mode` / `@@transaction_isolation`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
   - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
@@ -60,8 +60,9 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL` / `IS NOT NULL`, and parenthesized `AND` / `OR` predicate trees for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
   - scan-based `UNIQUE KEY` enforcement for inserts/updates, plus declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
-  - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS`
-  - `SET autocommit`, `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
+  - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `time_zone` and `transaction_isolation`)
+  - `SET autocommit` (including qualified/session forms), `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
+  - compatibility no-op handling for `LOCK TABLES` / `UNLOCK TABLES`
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
@@ -70,7 +71,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) replace the current scan-based duplicate compatibility logic with true secondary-index-backed unique-key enforcement
-2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (subqueries, richer aggregates, broader `ALTER TABLE` variants beyond `ADD COLUMN` / `ADD [UNIQUE] KEY`)
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (subqueries, richer aggregates, and broader `ALTER TABLE` variants beyond `ADD COLUMN` / `ADD|DROP [KEY|INDEX]`)
 3) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers
 
 ---

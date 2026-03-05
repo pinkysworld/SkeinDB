@@ -966,6 +966,29 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show variables like 'time_zone'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("time_zone"));
+                    assert_eq!(rows[0][1].as_deref(), Some("SYSTEM"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'transaction_isolation'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("transaction_isolation"));
+                    assert_eq!(rows[0][1].as_deref(), Some("REPEATABLE-READ"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@transaction_isolation" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("REPEATABLE-READ"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show tables from skein_test like 'wp_%'" => match response {
                 MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 3),
                 other => panic!("expected result set, got {:?}", other),
