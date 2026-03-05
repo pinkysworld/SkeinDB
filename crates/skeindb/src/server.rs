@@ -7432,6 +7432,35 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
             }
         }
     }
+    if let Some(idx) = find_keyword_top_level(clause, "not in") {
+        let left = clause[..idx].trim();
+        let right = clause[idx + "not in".len()..].trim();
+        let left_expr = parse_sql_scalar_expr(left)?;
+        if matches!(left_expr, Expr::Col { .. }) && right.starts_with('(') && right.ends_with(')') {
+            let values = split_csv_top_level(&right[1..right.len() - 1])
+                .into_iter()
+                .map(|part| parse_sql_scalar_expr(&part))
+                .collect::<Result<Vec<_>, _>>()?;
+            let in_expr = Expr::Op {
+                op: "in".to_string(),
+                a: Some(Box::new(left_expr)),
+                b: None,
+                args: None,
+                list: Some(values),
+                lo: None,
+                hi: None,
+            };
+            return Ok(Expr::Op {
+                op: "not".to_string(),
+                a: Some(Box::new(in_expr)),
+                b: None,
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
+    }
     if let Some(idx) = find_keyword_top_level(clause, "in") {
         let left = clause[..idx].trim();
         let right = clause[idx + 2..].trim();
@@ -7447,6 +7476,35 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
                 b: None,
                 args: None,
                 list: Some(values),
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+    if let Some((idx, op, token_len)) = [("not like", "like"), ("not ilike", "ilike")]
+        .into_iter()
+        .find_map(|(token, op)| {
+            find_keyword_top_level(clause, token).map(|idx| (idx, op, token.len()))
+        })
+    {
+        let left = clause[..idx].trim();
+        let right = clause[idx + token_len..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            let like_expr = Expr::Op {
+                op: op.to_string(),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+            return Ok(Expr::Op {
+                op: "not".to_string(),
+                a: Some(Box::new(like_expr)),
+                b: None,
+                args: None,
+                list: None,
                 lo: None,
                 hi: None,
             });
@@ -12966,6 +13024,39 @@ mod tests {
             panic!("expected left side to be OR expression");
         };
         assert_eq!(left_op, "or");
+    }
+
+    #[test]
+    fn parse_where_expr_supports_not_in_and_not_like() {
+        let expr = parse_where_expr("post_status NOT IN ('draft')")
+            .expect("parse where expression")
+            .expect("where expression");
+        let Expr::Op {
+            op, a: Some(inner), ..
+        } = expr
+        else {
+            panic!("expected NOT expression");
+        };
+        assert_eq!(op, "not");
+        let Expr::Op { op: inner_op, .. } = *inner else {
+            panic!("expected inner IN expression");
+        };
+        assert_eq!(inner_op, "in");
+
+        let expr = parse_where_expr("post_title NOT LIKE 'Dr%'")
+            .expect("parse where expression")
+            .expect("where expression");
+        let Expr::Op {
+            op, a: Some(inner), ..
+        } = expr
+        else {
+            panic!("expected NOT expression");
+        };
+        assert_eq!(op, "not");
+        let Expr::Op { op: inner_op, .. } = *inner else {
+            panic!("expected inner LIKE expression");
+        };
+        assert_eq!(inner_op, "like");
     }
 
     #[tokio::test]

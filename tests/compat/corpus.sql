@@ -219,6 +219,16 @@ SELECT ID
 
 SELECT ID
   FROM wp_posts
+ WHERE post_status NOT IN ('draft')
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE post_title NOT LIKE 'Dr%'
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
  WHERE post_status LIKE 'pub%'
  ORDER BY ID DESC
  LIMIT 0, 2;
