@@ -6806,6 +6806,12 @@ enum SqlPlan {
         column: SchemaColumnInfo,
         default: Option<Lit>,
     },
+    AlterTableAddIndex {
+        table: BaseTableRef,
+        index_name: String,
+        columns: Vec<String>,
+        unique: bool,
+    },
     DropTable {
         table: BaseTableRef,
         if_exists: bool,
@@ -8247,16 +8253,145 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
     })
 }
 
+fn find_matching_parenthesis(input: &str, open_idx: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
+        return None;
+    }
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    for (idx, b) in bytes.iter().enumerate().skip(open_idx) {
+        let b = *b;
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
+                    continue;
+                }
+                quote = 0;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_alter_table_add_index_clause(
+    clause: &str,
+) -> Result<Option<(String, Vec<String>, bool)>, RpcError> {
+    let open_idx = clause.find('(');
+    let prefix = open_idx
+        .map(|idx| clause[..idx].trim())
+        .unwrap_or_else(|| clause.trim());
+    let tokens: Vec<&str> = prefix.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD clause must not be empty",
+        ));
+    }
+
+    let mut tok_idx = 0usize;
+    let mut unique = false;
+    if tokens[tok_idx].eq_ignore_ascii_case("unique") {
+        unique = true;
+        tok_idx = tok_idx.saturating_add(1);
+    }
+    if tok_idx >= tokens.len()
+        || !(tokens[tok_idx].eq_ignore_ascii_case("key")
+            || tokens[tok_idx].eq_ignore_ascii_case("index"))
+    {
+        return Ok(None);
+    }
+    tok_idx = tok_idx.saturating_add(1);
+
+    let index_name = tokens
+        .get(tok_idx)
+        .copied()
+        .filter(|tok| !tok.eq_ignore_ascii_case("using"))
+        .map(clean_sql_ident)
+        .filter(|name| !name.is_empty());
+
+    let open_idx = open_idx.ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD KEY requires a parenthesized column list",
+        )
+    })?;
+    let close_idx = find_matching_parenthesis(clause, open_idx).ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD KEY has an unterminated column list",
+        )
+    })?;
+    let cols_sql = clause[open_idx + 1..close_idx].trim();
+    if cols_sql.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD KEY requires at least one column",
+        ));
+    }
+
+    let mut columns = Vec::new();
+    for raw in split_csv_top_level(cols_sql) {
+        let token = raw
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .split('(')
+            .next()
+            .unwrap_or_default();
+        let col = clean_sql_ident(token);
+        if col.is_empty() {
+            return Err(RpcError::new(
+                "invalid_request",
+                format!("invalid ALTER TABLE ADD KEY column '{}'", raw.trim()),
+            ));
+        }
+        columns.push(col);
+    }
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE ADD KEY requires at least one column",
+        ));
+    }
+
+    let index_name = index_name.unwrap_or_else(|| columns[0].clone());
+    Ok(Some((index_name, columns, unique)))
+}
+
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
     let add_idx = find_keyword_top_level(tail, "add").ok_or_else(|| {
         RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports only ADD COLUMN",
+            "ALTER TABLE currently supports only ADD COLUMN / ADD [UNIQUE] KEY",
         )
     })?;
     let table = parse_table_ref(tail[..add_idx].trim(), default_db)?;
     let mut clause = tail[add_idx + 3..].trim();
+    if let Some((index_name, columns, unique)) = parse_alter_table_add_index_clause(clause)? {
+        return Ok(SqlPlan::AlterTableAddIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+        });
+    }
     if clause.len() >= 6 && clause[..6].eq_ignore_ascii_case("column") {
         clause = clause[6..].trim_start();
     }
@@ -8596,7 +8731,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::UseDb { .. } => "use",
         SqlPlan::CreateDatabase { .. } => "create_database",
         SqlPlan::CreateTable { .. } => "create_table",
-        SqlPlan::AlterTableAddColumn { .. } => "alter_table",
+        SqlPlan::AlterTableAddColumn { .. } | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropTable { .. } => "drop_table",
         SqlPlan::Insert { mode, .. } => match mode {
             InsertMode::Replace => "replace",
@@ -8628,6 +8763,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
         Ok(SqlPlan::CreateTable { table, .. })
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
+        | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
         | Ok(SqlPlan::Insert { table, .. })
         | Ok(SqlPlan::Update { table, .. })
@@ -9308,6 +9444,19 @@ async fn sql_exec_alter_table_add_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_add_index(
+    state: &AppState,
+    table: BaseTableRef,
+    index_name: String,
+    columns: Vec<String>,
+    unique: bool,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_add_mysql_compat_index(&table, index_name, columns, unique)
+        .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 fn rows_json_result_len(result: &Value) -> Result<u64, RpcError> {
     let rows = result
         .get("rows")
@@ -9673,6 +9822,30 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "table": table,
                 "operation": "add_column",
                 "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableAddIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+        } => {
+            sql_exec_alter_table_add_index(
+                state,
+                table.clone(),
+                index_name.clone(),
+                columns.clone(),
+                unique,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "add_index",
+                "index": index_name,
+                "columns": columns,
+                "unique": unique
             }))
         }
         SqlPlan::DropTable { table, if_exists } => {
@@ -12724,6 +12897,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_alter_table_add_unique_key_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts ADD UNIQUE KEY post_name (post_name)",
+            Some("app"),
+        )
+        .expect("parse alter table add key");
+        let SqlPlan::AlterTableAddIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+        } = plan
+        else {
+            panic!("expected alter table add index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(index_name, "post_name");
+        assert_eq!(columns, vec!["post_name".to_string()]);
+        assert!(unique);
+    }
+
+    #[test]
     fn parse_where_expr_supports_or_and_parentheses_precedence() {
         let expr = parse_where_expr(
             "post_status = 'publish' OR post_status = 'draft' AND post_author = 1",
@@ -13777,6 +13973,41 @@ mod tests {
         )
         .await
         .ok);
+
+        assert!(
+            call_rpc(
+                &state,
+                "sql.exec",
+                json!({
+                    "sql": "ALTER TABLE wp_posts ADD KEY post_author (post_author)",
+                    "default_db": "wp"
+                }),
+            )
+            .await
+            .ok
+        );
+
+        let posts_desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "wp",
+                "table": "wp_posts"
+            }),
+        )
+        .await;
+        assert!(posts_desc.ok);
+        let post_indexes = posts_desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(post_indexes.iter().any(|idx| {
+            idx.get("name").and_then(|v| v.as_str()) == Some("post_author")
+                && idx.get("unique").and_then(|v| v.as_bool()) == Some(false)
+        }));
 
         assert!(call_rpc(
             &state,

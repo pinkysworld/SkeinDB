@@ -41,6 +41,9 @@ CREATE TABLE wp_posts (
 ALTER TABLE wp_posts
   ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title;
 
+ALTER TABLE wp_posts
+  ADD KEY post_author (post_author);
+
 CREATE TABLE wp_users (
   id BIGINT UNSIGNED NOT NULL,
   user_login VARCHAR(60) NOT NULL,

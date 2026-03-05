@@ -1006,6 +1006,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     assert!(!rows.is_empty());
                     assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
                     assert!(rows.iter().any(|row| row[2].as_deref() == Some("post_status")));
+                    assert!(rows.iter().any(|row| row[2].as_deref() == Some("post_author")));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -1032,6 +1033,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     assert!(ddl.contains("CREATE TABLE"));
                     assert!(ddl.contains("PRIMARY KEY"));
                     assert!(ddl.contains("KEY `post_status` (`post_status`)"));
+                    assert!(ddl.contains("KEY `post_author` (`post_author`)"));
                     assert!(ddl.contains("DEFAULT 'publish'"));
                 }
                 other => panic!("expected result set, got {:?}", other),
@@ -1330,6 +1332,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
         "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
         "ALTER TABLE wp_posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
+        "ALTER TABLE wp_posts ADD KEY post_author (post_author)",
         "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
         "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
         "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",

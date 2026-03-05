@@ -1501,6 +1501,70 @@ impl Engine {
         })
     }
 
+    pub fn schema_add_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        index_name: String,
+        columns: Vec<String>,
+        unique: bool,
+    ) -> anyhow::Result<()> {
+        let index_name = index_name.trim().to_string();
+        if index_name.is_empty() {
+            anyhow::bail!("invalid_request: index name must not be empty");
+        }
+        if columns.is_empty() {
+            anyhow::bail!("invalid_request: index requires at least one column");
+        }
+
+        {
+            let (schema, _) = self.get_table_mut(table)?;
+            let mut normalized_columns = Vec::new();
+            let mut seen = HashSet::new();
+            for column in columns.iter() {
+                let Some(schema_column) = schema
+                    .columns
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(column))
+                    .map(|c| c.name.clone())
+                else {
+                    anyhow::bail!("invalid_request: unknown column {column}");
+                };
+                let seen_key = schema_column.to_ascii_lowercase();
+                if seen.insert(seen_key) {
+                    normalized_columns.push(schema_column);
+                }
+            }
+            if normalized_columns.is_empty() {
+                anyhow::bail!("invalid_request: index requires at least one column");
+            }
+
+            let mut unchanged = false;
+            for def in mysql_compat_index_defs(schema) {
+                if def.name.eq_ignore_ascii_case(&index_name) {
+                    unchanged = def.unique == unique && def.columns == normalized_columns;
+                    break;
+                }
+            }
+            if unchanged {
+                return Ok(());
+            }
+
+            set_mysql_compat_index(schema, &index_name, &normalized_columns, unique);
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
         let (_schema, tdata) = self.get_table(table)?;
 
@@ -10129,6 +10193,45 @@ fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, defau
         "column_defaults".to_string(),
         serde_json::Value::Object(defaults),
     );
+    schema.compat_mysql = Some(serde_json::Value::Object(root));
+}
+
+fn set_mysql_compat_index(schema: &mut TableSchema, name: &str, columns: &[String], unique: bool) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut replaced = false;
+    for entry in indexes.iter_mut() {
+        let same_name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(name))
+            .unwrap_or(false);
+        if !same_name {
+            continue;
+        }
+        *entry = serde_json::json!({
+            "name": name,
+            "columns": columns,
+            "unique": unique,
+        });
+        replaced = true;
+        break;
+    }
+    if !replaced {
+        indexes.push(serde_json::json!({
+            "name": name,
+            "columns": columns,
+            "unique": unique,
+        }));
+    }
+    root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
     schema.compat_mysql = Some(serde_json::Value::Object(root));
 }
 
