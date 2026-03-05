@@ -146,6 +146,10 @@ VALUES (5, 'ada');
 SELECT COUNT(*) AS user_count
   FROM wp_users;
 
+DROP INDEX user_login_unique ON wp_users;
+
+SHOW INDEX FROM wp_users;
+
 INSERT INTO wp_posts (post_author, post_date, post_status, post_title)
 VALUES
   (1, '2020-01-01 00:00:00', 'publish', 'Hello'),

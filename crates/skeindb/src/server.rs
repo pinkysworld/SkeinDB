@@ -6743,6 +6743,7 @@ enum SqlVerb {
     CreateTable,
     CreateIndex,
     AlterTable,
+    DropIndex,
     DropTable,
     Insert,
     InsertIgnore,
@@ -6818,6 +6819,11 @@ enum SqlPlan {
         index_name: String,
         columns: Vec<String>,
         unique: bool,
+    },
+    DropIndex {
+        table: BaseTableRef,
+        index_name: String,
+        if_exists: bool,
     },
     DropTable {
         table: BaseTableRef,
@@ -6939,6 +6945,8 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::CreateTable
     } else if lower.starts_with("alter table ") {
         SqlVerb::AlterTable
+    } else if lower.starts_with("drop index ") {
+        SqlVerb::DropIndex
     } else if lower.starts_with("drop table ") {
         SqlVerb::DropTable
     } else if lower.starts_with("insert ignore into ") {
@@ -8546,6 +8554,30 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     })
 }
 
+fn parse_drop_index_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[10..].trim();
+    let mut if_exists = false;
+    if tail.to_ascii_lowercase().starts_with("if exists ") {
+        if_exists = true;
+        tail = tail[10..].trim_start();
+    }
+    let on_idx = find_keyword_top_level(tail, "on")
+        .ok_or_else(|| RpcError::new("invalid_request", "DROP INDEX requires ON <table> clause"))?;
+    let index_name = clean_sql_ident(tail[..on_idx].trim());
+    if index_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "DROP INDEX requires an index name",
+        ));
+    }
+    let table = parse_table_ref(tail[on_idx + 2..].trim(), default_db)?;
+    Ok(SqlPlan::DropIndex {
+        table,
+        index_name,
+        if_exists,
+    })
+}
+
 fn parse_drop_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let mut tail = sql[10..].trim();
     let mut if_exists = false;
@@ -8831,6 +8863,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::CreateIndex => parse_create_index_plan(normalized, default_db),
         SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
         SqlVerb::AlterTable => parse_alter_table_plan(normalized, default_db),
+        SqlVerb::DropIndex => parse_drop_index_plan(normalized, default_db),
         SqlVerb::DropTable => parse_drop_table_plan(normalized, default_db),
         SqlVerb::Insert => parse_insert_plan(normalized, default_db, InsertMode::Insert),
         SqlVerb::InsertIgnore => parse_insert_plan(normalized, default_db, InsertMode::Ignore),
@@ -8839,7 +8872,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
         SqlVerb::Unsupported => Err(RpcError::new(
             "not_supported",
-            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/CREATE INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
+            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/CREATE INDEX/ALTER TABLE/DROP INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
         )),
     }
 }
@@ -8855,6 +8888,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::CreateIndex { .. } => "create_index",
         SqlPlan::CreateTable { .. } => "create_table",
         SqlPlan::AlterTableAddColumn { .. } | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
+        SqlPlan::DropIndex { .. } => "drop_index",
         SqlPlan::DropTable { .. } => "drop_table",
         SqlPlan::Insert { mode, .. } => match mode {
             InsertMode::Replace => "replace",
@@ -8888,6 +8922,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::CreateTable { table, .. })
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
+        | Ok(SqlPlan::DropIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
         | Ok(SqlPlan::Insert { table, .. })
         | Ok(SqlPlan::Update { table, .. })
@@ -9581,6 +9616,18 @@ async fn sql_exec_alter_table_add_index(
     Ok(())
 }
 
+async fn sql_exec_drop_index(
+    state: &AppState,
+    table: BaseTableRef,
+    index_name: String,
+    if_exists: bool,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_drop_mysql_compat_index(&table, &index_name, if_exists)
+        .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 fn rows_json_result_len(result: &Value) -> Result<u64, RpcError> {
     let rows = result
         .get("rows")
@@ -9993,6 +10040,20 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "index": index_name,
                 "columns": columns,
                 "unique": unique
+            }))
+        }
+        SqlPlan::DropIndex {
+            table,
+            index_name,
+            if_exists,
+        } => {
+            sql_exec_drop_index(state, table.clone(), index_name.clone(), if_exists).await?;
+            Ok(serde_json::json!({
+                "statement": "drop_index",
+                "ok": true,
+                "table": table,
+                "index": index_name,
+                "if_exists": if_exists
             }))
         }
         SqlPlan::DropTable { table, if_exists } => {
@@ -13090,6 +13151,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_drop_index_roundtrip() {
+        let plan = parse_sql_plan("DROP INDEX user_login_uq ON app.users", Some("app"))
+            .expect("parse drop index");
+        let SqlPlan::DropIndex {
+            table,
+            index_name,
+            if_exists,
+        } = plan
+        else {
+            panic!("expected drop index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(index_name, "user_login_uq");
+        assert!(!if_exists);
+    }
+
+    #[test]
     fn parse_where_expr_supports_or_and_parentheses_precedence() {
         let expr = parse_where_expr(
             "post_status = 'publish' OR post_status = 'draft' AND post_author = 1",
@@ -14193,6 +14272,49 @@ mod tests {
             duplicate_user_name.error.as_ref().map(|e| e.code.as_str()),
             Some("conflict")
         );
+
+        let drop_user_name_index = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "DROP INDEX user_name_unique ON wp_users",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(drop_user_name_index.ok);
+
+        let users_desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "wp",
+                "table": "wp_users"
+            }),
+        )
+        .await;
+        assert!(users_desc.ok);
+        let user_indexes = users_desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!user_indexes
+            .iter()
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("user_name_unique")));
+
+        let duplicate_after_drop = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "UPDATE wp_users SET name = 'Ada' WHERE id = 2",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(duplicate_after_drop.ok);
 
         assert!(call_rpc(
             &state,

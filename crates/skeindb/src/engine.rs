@@ -1565,6 +1565,40 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_drop_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        index_name: &str,
+        if_exists: bool,
+    ) -> anyhow::Result<()> {
+        let removed = {
+            let (schema, _) = self.get_table_mut(table)?;
+            let removed = remove_mysql_compat_index(schema, index_name);
+            if removed {
+                bump_table_version(schema);
+            }
+            removed
+        };
+
+        if !removed {
+            if if_exists {
+                return Ok(());
+            }
+            anyhow::bail!("not_found: index not found: {}", index_name);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
         let (_schema, tdata) = self.get_table(table)?;
 
@@ -10233,6 +10267,38 @@ fn set_mysql_compat_index(schema: &mut TableSchema, name: &str, columns: &[Strin
     }
     root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
     schema.compat_mysql = Some(serde_json::Value::Object(root));
+}
+
+fn remove_mysql_compat_index(schema: &mut TableSchema, name: &str) -> bool {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let original_len = indexes.len();
+    indexes.retain(|entry| {
+        !entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(name))
+            .unwrap_or(false)
+    });
+    let removed = indexes.len() != original_len;
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+    removed
 }
 
 #[derive(Debug, Clone)]

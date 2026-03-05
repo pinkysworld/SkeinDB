@@ -916,6 +916,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     let mut timezone_value_index = 0usize;
     let mut timezone_autoload_index = 0usize;
     let mut siteurl_pair_index = 0usize;
+    let mut wp_users_show_index_count = 0usize;
 
     for statement in compat_corpus_statements() {
         send_com_query(&mut stream, &statement).await?;
@@ -1012,15 +1013,27 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             },
             "show index from wp_users" => match response {
                 MysqlResponse::Rows(rows) => {
+                    wp_users_show_index_count += 1;
                     assert!(!rows.is_empty());
                     assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
-                    assert!(rows
-                        .iter()
-                        .any(|row| row[2].as_deref() == Some("user_login_unique")));
-                    assert!(rows.iter().any(|row| {
-                        row[2].as_deref() == Some("user_login_unique")
-                            && row[1].as_deref() == Some("0")
-                    }));
+                    match wp_users_show_index_count {
+                        1 => {
+                            assert!(
+                                rows.iter()
+                                    .any(|row| row[2].as_deref() == Some("user_login_unique"))
+                            );
+                            assert!(rows.iter().any(|row| {
+                                row[2].as_deref() == Some("user_login_unique")
+                                    && row[1].as_deref() == Some("0")
+                            }));
+                        }
+                        2 => {
+                            assert!(!rows
+                                .iter()
+                                .any(|row| row[2].as_deref() == Some("user_login_unique")));
+                        }
+                        _ => panic!("unexpected wp_users show index count"),
+                    }
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -1358,6 +1371,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     assert_eq!(timezone_value_index, 2);
     assert_eq!(timezone_autoload_index, 2);
     assert_eq!(siteurl_pair_index, 2);
+    assert_eq!(wp_users_show_index_count, 2);
 
     Ok(())
 }
