@@ -36,7 +36,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SELECT` (literal-only, single-table, and simple `INNER JOIN` / `LEFT JOIN` / `RIGHT JOIN` queries, including basic left-associative multi-join chains)
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
-  - `CREATE DATABASE`, `CREATE TABLE`, `DROP TABLE`
+  - `CREATE DATABASE`, `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, `DROP TABLE`
   - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses) and `ALTER TABLE ... ADD [UNIQUE] KEY`
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)

@@ -6741,6 +6741,7 @@ enum SqlVerb {
     Use,
     CreateDatabase,
     CreateTable,
+    CreateIndex,
     AlterTable,
     DropTable,
     Insert,
@@ -6800,6 +6801,12 @@ enum SqlPlan {
         primary_key: Vec<String>,
         if_not_exists: bool,
         compat_mysql: Option<Value>,
+    },
+    CreateIndex {
+        table: BaseTableRef,
+        index_name: String,
+        columns: Vec<String>,
+        unique: bool,
     },
     AlterTableAddColumn {
         table: BaseTableRef,
@@ -6926,6 +6933,8 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::Use
     } else if lower.starts_with("create database ") {
         SqlVerb::CreateDatabase
+    } else if lower.starts_with("create unique index ") || lower.starts_with("create index ") {
+        SqlVerb::CreateIndex
     } else if lower.starts_with("create table ") {
         SqlVerb::CreateTable
     } else if lower.starts_with("alter table ") {
@@ -8311,6 +8320,91 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
     })
 }
 
+fn parse_index_column_list(raw: &str) -> Result<Vec<String>, RpcError> {
+    let mut columns = Vec::new();
+    for part in split_csv_top_level(raw) {
+        let token = part
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .split('(')
+            .next()
+            .unwrap_or_default();
+        let column = clean_sql_ident(token);
+        if column.is_empty() {
+            return Err(RpcError::new(
+                "invalid_request",
+                format!("invalid index column '{}'", part.trim()),
+            ));
+        }
+        columns.push(column);
+    }
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "index requires at least one column",
+        ));
+    }
+    Ok(columns)
+}
+
+fn parse_create_index_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[6..].trim();
+    let mut unique = false;
+    if tail.to_ascii_lowercase().starts_with("unique ") {
+        unique = true;
+        tail = tail[7..].trim_start();
+    }
+    if !tail
+        .get(..6)
+        .map(|prefix| prefix.eq_ignore_ascii_case("index "))
+        .unwrap_or(false)
+    {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CREATE INDEX requires INDEX keyword",
+        ));
+    }
+    tail = tail[6..].trim_start();
+
+    let on_idx = find_keyword_top_level(tail, "on").ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "CREATE INDEX requires ON <table>(...) clause",
+        )
+    })?;
+    let index_name = clean_sql_ident(tail[..on_idx].trim());
+    if index_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CREATE INDEX requires an index name",
+        ));
+    }
+
+    let on_tail = tail[on_idx + 2..].trim_start();
+    let open_idx = on_tail.find('(').ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "CREATE INDEX requires a parenthesized column list",
+        )
+    })?;
+    let close_idx = find_matching_parenthesis(on_tail, open_idx).ok_or_else(|| {
+        RpcError::new(
+            "invalid_request",
+            "CREATE INDEX has an unterminated column list",
+        )
+    })?;
+    let table = parse_table_ref(on_tail[..open_idx].trim(), default_db)?;
+    let columns = parse_index_column_list(on_tail[open_idx + 1..close_idx].trim())?;
+
+    Ok(SqlPlan::CreateIndex {
+        table,
+        index_name,
+        columns,
+        unique,
+    })
+}
+
 fn find_matching_parenthesis(input: &str, open_idx: usize) -> Option<usize> {
     let bytes = input.as_bytes();
     if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
@@ -8395,38 +8489,7 @@ fn parse_alter_table_add_index_clause(
             "ALTER TABLE ADD KEY has an unterminated column list",
         )
     })?;
-    let cols_sql = clause[open_idx + 1..close_idx].trim();
-    if cols_sql.is_empty() {
-        return Err(RpcError::new(
-            "invalid_request",
-            "ALTER TABLE ADD KEY requires at least one column",
-        ));
-    }
-
-    let mut columns = Vec::new();
-    for raw in split_csv_top_level(cols_sql) {
-        let token = raw
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .split('(')
-            .next()
-            .unwrap_or_default();
-        let col = clean_sql_ident(token);
-        if col.is_empty() {
-            return Err(RpcError::new(
-                "invalid_request",
-                format!("invalid ALTER TABLE ADD KEY column '{}'", raw.trim()),
-            ));
-        }
-        columns.push(col);
-    }
-    if columns.is_empty() {
-        return Err(RpcError::new(
-            "invalid_request",
-            "ALTER TABLE ADD KEY requires at least one column",
-        ));
-    }
+    let columns = parse_index_column_list(clause[open_idx + 1..close_idx].trim())?;
 
     let index_name = index_name.unwrap_or_else(|| columns[0].clone());
     Ok(Some((index_name, columns, unique)))
@@ -8765,6 +8828,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         }
         SqlVerb::Use => parse_use_plan(normalized),
         SqlVerb::CreateDatabase => parse_create_database_plan(normalized),
+        SqlVerb::CreateIndex => parse_create_index_plan(normalized, default_db),
         SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
         SqlVerb::AlterTable => parse_alter_table_plan(normalized, default_db),
         SqlVerb::DropTable => parse_drop_table_plan(normalized, default_db),
@@ -8775,7 +8839,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
         SqlVerb::Unsupported => Err(RpcError::new(
             "not_supported",
-            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE",
+            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/CREATE INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
         )),
     }
 }
@@ -8788,6 +8852,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::ShowColumns { .. } => "show_columns",
         SqlPlan::UseDb { .. } => "use",
         SqlPlan::CreateDatabase { .. } => "create_database",
+        SqlPlan::CreateIndex { .. } => "create_index",
         SqlPlan::CreateTable { .. } => "create_table",
         SqlPlan::AlterTableAddColumn { .. } | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropTable { .. } => "drop_table",
@@ -8819,7 +8884,8 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
     let default_db = obj.get("default_db").and_then(|v| v.as_str());
     match parse_sql_plan(sql, default_db) {
         Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
-        Ok(SqlPlan::CreateTable { table, .. })
+        Ok(SqlPlan::CreateIndex { table, .. })
+        | Ok(SqlPlan::CreateTable { table, .. })
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
@@ -9866,6 +9932,29 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "ok": true,
                 "table": table,
                 "if_not_exists": if_not_exists
+            }))
+        }
+        SqlPlan::CreateIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+        } => {
+            sql_exec_alter_table_add_index(
+                state,
+                table.clone(),
+                index_name.clone(),
+                columns.clone(),
+                unique,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "create_index",
+                "ok": true,
+                "table": table,
+                "index": index_name,
+                "columns": columns,
+                "unique": unique
             }))
         }
         SqlPlan::AlterTableAddColumn {
@@ -12978,6 +13067,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_create_unique_index_roundtrip() {
+        let plan = parse_sql_plan(
+            "CREATE UNIQUE INDEX user_login_uq ON app.users (user_login)",
+            Some("app"),
+        )
+        .expect("parse create unique index");
+        let SqlPlan::CreateIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+        } = plan
+        else {
+            panic!("expected create index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(index_name, "user_login_uq");
+        assert_eq!(columns, vec!["user_login".to_string()]);
+        assert!(unique);
+    }
+
+    #[test]
     fn parse_where_expr_supports_or_and_parentheses_precedence() {
         let expr = parse_where_expr(
             "post_status = 'publish' OR post_status = 'draft' AND post_author = 1",
@@ -13820,6 +13932,19 @@ mod tests {
         .await
         .ok);
 
+        assert!(
+            call_rpc(
+                &state,
+                "sql.exec",
+                json!({
+                    "sql": "CREATE UNIQUE INDEX user_name_unique ON wp_users (name)",
+                    "default_db": "wp"
+                }),
+            )
+            .await
+            .ok
+        );
+
         assert!(call_rpc(
             &state,
             "sql.exec",
@@ -14052,6 +14177,21 @@ mod tests {
                 .and_then(|v| v.get("affected"))
                 .and_then(|v| v.as_u64()),
             Some(2)
+        );
+
+        let duplicate_user_name = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_users (id, status, name) VALUES (4, 'active', 'Ada')",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(!duplicate_user_name.ok);
+        assert_eq!(
+            duplicate_user_name.error.as_ref().map(|e| e.code.as_str()),
+            Some("conflict")
         );
 
         assert!(call_rpc(

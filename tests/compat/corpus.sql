@@ -136,6 +136,16 @@ VALUES
   (2, 'grace'),
   (4, 'margaret');
 
+CREATE UNIQUE INDEX user_login_unique ON wp_users (user_login);
+
+SHOW INDEX FROM wp_users;
+
+INSERT IGNORE INTO wp_users (id, user_login)
+VALUES (5, 'ada');
+
+SELECT COUNT(*) AS user_count
+  FROM wp_users;
+
 INSERT INTO wp_posts (post_author, post_date, post_status, post_title)
 VALUES
   (1, '2020-01-01 00:00:00', 'publish', 'Hello'),

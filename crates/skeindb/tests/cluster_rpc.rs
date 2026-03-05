@@ -1010,6 +1010,20 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show index from wp_users" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert!(rows
+                        .iter()
+                        .any(|row| row[2].as_deref() == Some("user_login_unique")));
+                    assert!(rows.iter().any(|row| {
+                        row[2].as_deref() == Some("user_login_unique")
+                            && row[1].as_deref() == Some("0")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show keys from wp_posts" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert!(!rows.is_empty());
@@ -1187,6 +1201,13 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select count(*) as user_count from wp_users" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("3"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select post_status, count(*) as status_count from wp_posts group by post_status order by post_status asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
