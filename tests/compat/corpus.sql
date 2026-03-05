@@ -5,6 +5,9 @@ SELECT VERSION();
 SELECT DATABASE();
 SELECT @@sql_mode;
 SELECT @@lower_case_table_names;
+SELECT @@version_comment LIMIT 1;
+SELECT @@version_comment LIMIT 0,1;
+SELECT @@version_comment LIMIT 1 OFFSET 1;
 
 SHOW VARIABLES LIKE 'sql_mode';
 SHOW VARIABLES LIKE 'lower_case_table_names';

@@ -52,6 +52,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 - The MySQL wire layer also ships **compatibility shims** for the checked-in corpus in `tests/compat/corpus.sql`, including:
   - `SELECT VERSION()` and `SELECT DATABASE()`
   - WordPress-style/bootstrap session queries such as `SET NAMES`, `SET CHARACTER SET`, `SET SESSION sql_mode`, `SET SQL_AUTO_IS_NULL`, `SET SESSION sql_notes`, `SET time_zone`, transaction-isolation/read-only `SET` forms, and `SELECT @@sql_mode` / `@@transaction_isolation` / `@@sql_auto_is_null`
+  - literal session-variable selects with MySQL-style `LIMIT` forms (`LIMIT n`, `LIMIT offset,n`, `LIMIT n OFFSET offset`) for bootstrap probes such as `SELECT @@version_comment`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
   - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)

@@ -966,6 +966,19 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select @@version_comment limit 1" | "select @@version_comment limit 0,1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("SkeinDB compatibility layer"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select @@version_comment limit 1 offset 1" => match response {
+                MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show variables like 'time_zone'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);

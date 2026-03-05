@@ -1225,10 +1225,51 @@ fn mysql_parse_set_assignment(sql: &str) -> Option<(String, String)> {
     Some((normalized, rhs.trim().to_string()))
 }
 
+fn mysql_parse_literal_select_projection_and_limit(rest: &str) -> Option<(String, bool)> {
+    let mut projection = rest.trim();
+    if projection.is_empty() {
+        return None;
+    }
+    if find_keyword_top_level(projection, "from").is_some() {
+        return None;
+    }
+
+    let mut emit_row = true;
+    if let Some(limit_idx) = find_keyword_top_level(projection, "limit") {
+        let expr_part = projection[..limit_idx].trim();
+        let limit_tail = projection[limit_idx + 5..].trim();
+        if expr_part.is_empty() || limit_tail.is_empty() {
+            return None;
+        }
+
+        let mut offset = 0u64;
+        let count = if let Some((off_raw, count_raw)) = limit_tail.split_once(',') {
+            offset = off_raw.trim().parse::<u64>().ok()?;
+            count_raw.trim().parse::<u64>().ok()?
+        } else if let Some(offset_idx) = find_keyword_top_level(limit_tail, "offset") {
+            let count_raw = limit_tail[..offset_idx].trim();
+            let off_raw = limit_tail[offset_idx + 6..].trim();
+            if count_raw.is_empty() || off_raw.is_empty() {
+                return None;
+            }
+            offset = off_raw.parse::<u64>().ok()?;
+            count_raw.parse::<u64>().ok()?
+        } else {
+            limit_tail.parse::<u64>().ok()?
+        };
+        emit_row = count > 0 && offset == 0;
+        projection = expr_part;
+    } else if find_keyword_top_level(projection, "offset").is_some() {
+        return None;
+    }
+
+    Some((projection.to_string(), emit_row))
+}
+
 fn parse_select_literal_query(
     sql: &str,
     default_db: Option<&str>,
-) -> Option<Vec<(String, MySqlLiteral)>> {
+) -> Option<(Vec<(String, MySqlLiteral)>, bool)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
         return None;
@@ -1237,14 +1278,9 @@ fn parse_select_literal_query(
         return None;
     }
     let rest = trimmed[6..].trim();
-    if rest.is_empty() {
-        return None;
-    }
-    if find_ascii_ci_outside_quotes(rest.as_bytes(), b" from ").is_some() {
-        return None;
-    }
+    let (projection_sql, emit_row) = mysql_parse_literal_select_projection_and_limit(rest)?;
 
-    let exprs = split_select_expressions(rest)?;
+    let exprs = split_select_expressions(&projection_sql)?;
     let mut cols = Vec::with_capacity(exprs.len());
     for (idx, expr) in exprs.iter().enumerate() {
         let bytes = expr.as_bytes();
@@ -1281,7 +1317,7 @@ fn parse_select_literal_query(
         };
         cols.push((alias, lit));
     }
-    Some(cols)
+    Some((cols, emit_row))
 }
 
 fn mysql_parse_set_autocommit(sql: &str) -> Option<bool> {
@@ -3075,7 +3111,7 @@ async fn mysql_stmt_prepare_columns(
     sql: &str,
     default_db: Option<&str>,
 ) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some(cols) = parse_select_literal_query(sql, default_db) {
+    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
         return cols
             .into_iter()
             .map(|(name, lit)| MySqlStmtPrepareColumn {
@@ -3534,15 +3570,21 @@ async fn mysql_execute_sql(
     let calc_found_rows = rewritten.is_some();
 
     if !calc_found_rows {
-        if let Some(cols) = parse_select_literal_query(&exec_sql, session.default_db.as_deref()) {
+        if let Some((cols, emit_row)) =
+            parse_select_literal_query(&exec_sql, session.default_db.as_deref())
+        {
             let columns = cols
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
-            let rows = vec![cols
-                .iter()
-                .map(|(_, lit)| mysql_literal_text(lit))
-                .collect::<Vec<_>>()];
+            let rows = if emit_row {
+                vec![cols
+                    .iter()
+                    .map(|(_, lit)| mysql_literal_text(lit))
+                    .collect::<Vec<_>>()]
+            } else {
+                Vec::new()
+            };
             return Ok(MySqlQueryOutcome::ResultSet { columns, rows });
         }
     }
@@ -12842,11 +12884,12 @@ mod tests {
 
     #[test]
     fn parse_select_literal_query_roundtrip() {
-        let parsed = parse_select_literal_query(
+        let (parsed, emit_row) = parse_select_literal_query(
             "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db, @@sql_mode AS mode",
             Some("app"),
         )
         .expect("parse select literal");
+        assert!(emit_row);
         assert_eq!(parsed.len(), 6);
         assert_eq!(parsed[0].0, "one");
         assert_eq!(parsed[0].1, MySqlLiteral::Int(1));
@@ -12863,6 +12906,26 @@ mod tests {
         assert_eq!(parsed[4].1, MySqlLiteral::Str("app".to_string()));
         assert_eq!(parsed[5].0, "mode");
         assert_eq!(parsed[5].1, MySqlLiteral::Str(String::new()));
+    }
+
+    #[test]
+    fn parse_select_literal_query_limit_controls_row_visibility() {
+        let (_, emit_row) =
+            parse_select_literal_query("SELECT @@version_comment LIMIT 1", None).expect("limit 1");
+        assert!(emit_row);
+
+        let (_, emit_row) = parse_select_literal_query("SELECT @@version_comment LIMIT 0,1", None)
+            .expect("limit offset,count");
+        assert!(emit_row);
+
+        let (_, emit_row) =
+            parse_select_literal_query("SELECT @@version_comment LIMIT 0", None).expect("limit 0");
+        assert!(!emit_row);
+
+        let (_, emit_row) =
+            parse_select_literal_query("SELECT @@version_comment LIMIT 1 OFFSET 1", None)
+                .expect("limit with offset");
+        assert!(!emit_row);
     }
 
     #[test]
