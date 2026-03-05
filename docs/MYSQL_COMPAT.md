@@ -54,7 +54,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - WordPress-style bootstrap/session queries such as `SET NAMES`, `SET SESSION sql_mode`, and `SELECT @@sql_mode`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
-  - simple aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on single-result aggregate queries
+  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL, surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)`, `LIKE`, and `IS NULL` / `IS NOT NULL` for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates

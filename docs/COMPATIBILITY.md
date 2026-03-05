@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-03-01
+Last updated: 2026-03-05
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -42,7 +42,7 @@ SkeinDB adoption strategy:
 - SELECT supports `DISTINCT`, `IN (...)`, `LIKE`, `IS NULL`, `IS NOT NULL`
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (simple single-join shapes); FULL joins are not implemented yet
-- GROUP BY + full aggregate semantics remain mostly open, but simple single-result `COUNT(*)`, `COUNT(col)`, and `SUM(col)` compatibility shims now exist
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 
 ### MySQL wire protocol
@@ -77,7 +77,7 @@ Add queries there first, then implement.
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
-and pagination/count queries.
+pagination/count, and grouped aggregate compatibility queries.
 
 ---
 

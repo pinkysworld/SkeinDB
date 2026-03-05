@@ -1664,6 +1664,340 @@ enum MySqlCompatAggregateOp {
     Sum,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCompatGroupedAggregateOrderTarget {
+    Group,
+    Aggregate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlCompatGroupedAggregateOrder {
+    target: MySqlCompatGroupedAggregateOrderTarget,
+    desc: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MySqlCompatGroupedAggregateQuery {
+    group_alias: String,
+    aggregate_alias: String,
+    aggregate_op: MySqlCompatAggregateOp,
+    source_sql: String,
+    order_by: Vec<MySqlCompatGroupedAggregateOrder>,
+    limit: Option<LimitClause>,
+}
+
+#[derive(Debug, Clone)]
+struct MySqlCompatGroupedAggregateState {
+    row_count: u64,
+    non_null_count: u64,
+    sum_total: f64,
+    sum_all_i64: bool,
+    sum_saw_value: bool,
+}
+
+impl MySqlCompatGroupedAggregateState {
+    fn new() -> Self {
+        Self {
+            row_count: 0,
+            non_null_count: 0,
+            sum_total: 0.0,
+            sum_all_i64: true,
+            sum_saw_value: false,
+        }
+    }
+}
+
+fn mysql_parse_aggregate_projection_expr(
+    aggregate_expr: &str,
+) -> Option<(Option<String>, String, MySqlCompatAggregateOp)> {
+    let aggregate_lower = aggregate_expr
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if matches!(aggregate_lower.as_str(), "count(*)" | "count(1)") {
+        let alias = if aggregate_lower == "count(1)" {
+            "COUNT(1)".to_string()
+        } else {
+            "COUNT(*)".to_string()
+        };
+        return Some((None, alias, MySqlCompatAggregateOp::CountRows));
+    }
+    if aggregate_lower.starts_with("count(") && aggregate_lower.ends_with(')') {
+        let arg = aggregate_expr[6..aggregate_expr.len() - 1].trim();
+        let (col, table) = parse_sql_column_ref(arg)?;
+        let select_expr = table
+            .map(|table| format!("{table}.{col}"))
+            .unwrap_or(col.clone());
+        return Some((
+            Some(select_expr.clone()),
+            format!("COUNT({select_expr})"),
+            MySqlCompatAggregateOp::CountNonNull,
+        ));
+    }
+    if aggregate_lower.starts_with("sum(") && aggregate_lower.ends_with(')') {
+        let arg = aggregate_expr[4..aggregate_expr.len() - 1].trim();
+        let (col, table) = parse_sql_column_ref(arg)?;
+        let select_expr = table
+            .map(|table| format!("{table}.{col}"))
+            .unwrap_or(col.clone());
+        return Some((
+            Some(select_expr.clone()),
+            format!("SUM({select_expr})"),
+            MySqlCompatAggregateOp::Sum,
+        ));
+    }
+    None
+}
+
+fn mysql_parse_projection_expr_alias(item: &str) -> (String, Option<String>) {
+    let projection = item.trim();
+    if let Some(idx) = find_keyword_top_level(projection, "as") {
+        let expr = projection[..idx].trim();
+        let alias = clean_sql_ident(projection[idx + 2..].trim());
+        if !expr.is_empty() && !alias.is_empty() {
+            return (expr.to_string(), Some(alias));
+        }
+    }
+    (projection.to_string(), None)
+}
+
+fn mysql_grouped_order_matches_group_column(
+    order_col: &str,
+    order_table: Option<&str>,
+    group_col: &str,
+    group_table: Option<&str>,
+    group_alias: &str,
+) -> bool {
+    if order_table.is_none() && order_col.eq_ignore_ascii_case(group_alias) {
+        return true;
+    }
+    if !order_col.eq_ignore_ascii_case(group_col) {
+        return false;
+    }
+    match (order_table, group_table) {
+        (Some(order_table), Some(group_table)) => order_table.eq_ignore_ascii_case(group_table),
+        (Some(_), None) => false,
+        _ => true,
+    }
+}
+
+fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAggregateQuery> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    let from_idx = find_keyword_top_level(rest, "from")?;
+    let projection = rest[..from_idx].trim();
+    let from_tail = rest[from_idx..].trim();
+    let group_idx = find_keyword_top_level(from_tail, "group by")?;
+    let source_from_tail = from_tail[..group_idx].trim().to_string();
+    if source_from_tail.is_empty() {
+        return None;
+    }
+
+    let mut group_tail = from_tail[group_idx + "group by".len()..].trim();
+    let group_key_end = ["having", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(group_tail, keyword))
+        .min()
+        .unwrap_or(group_tail.len());
+    let group_by_expr = group_tail[..group_key_end].trim().to_string();
+    if group_by_expr.is_empty() {
+        return None;
+    }
+    group_tail = group_tail[group_key_end..].trim();
+    if group_tail
+        .get(..7)
+        .map(|chunk| chunk.eq_ignore_ascii_case("having "))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut order_sql = None::<String>;
+    let mut limit_sql = None::<String>;
+    let mut offset_sql = None::<String>;
+    while !group_tail.is_empty() {
+        if group_tail.to_ascii_lowercase().starts_with("order by ") {
+            let tail = group_tail[8..].trim_start();
+            let next = ["limit", "offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            order_sql = Some(tail[..next].trim().to_string());
+            group_tail = tail[next..].trim();
+            continue;
+        }
+        if group_tail.to_ascii_lowercase().starts_with("limit ") {
+            let tail = group_tail[5..].trim_start();
+            let next = ["offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            limit_sql = Some(tail[..next].trim().to_string());
+            group_tail = tail[next..].trim();
+            continue;
+        }
+        if group_tail.to_ascii_lowercase().starts_with("offset ") {
+            let tail = group_tail[6..].trim_start();
+            offset_sql = Some(tail.trim().to_string());
+            group_tail = "";
+            continue;
+        }
+        return None;
+    }
+
+    let projection_items = split_csv_top_level(projection);
+    if projection_items.len() != 2 {
+        return None;
+    }
+    let projection_items = projection_items
+        .iter()
+        .map(|item| mysql_parse_projection_expr_alias(item))
+        .collect::<Vec<_>>();
+
+    let mut aggregate_idx = None::<usize>;
+    let mut aggregate = None::<(Option<String>, String, MySqlCompatAggregateOp)>;
+    for (idx, (expr, _)) in projection_items.iter().enumerate() {
+        if let Some(parsed) = mysql_parse_aggregate_projection_expr(expr) {
+            if aggregate_idx.is_some() {
+                return None;
+            }
+            aggregate_idx = Some(idx);
+            aggregate = Some(parsed);
+        }
+    }
+    let aggregate_idx = aggregate_idx?;
+    let (aggregate_select_expr, aggregate_default_alias, aggregate_op) = aggregate?;
+    let group_idx = if aggregate_idx == 0 { 1 } else { 0 };
+    let (group_expr_raw, group_alias_raw) = &projection_items[group_idx];
+    let (group_col, group_table) = parse_sql_column_ref(group_expr_raw)?;
+    let group_select_expr = group_table
+        .as_ref()
+        .map(|table| format!("{table}.{group_col}"))
+        .unwrap_or_else(|| group_col.clone());
+    let group_alias = group_alias_raw
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| group_col.clone());
+    if group_alias.is_empty() {
+        return None;
+    }
+    let aggregate_alias = projection_items[aggregate_idx]
+        .1
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(aggregate_default_alias);
+    if aggregate_alias.is_empty() {
+        return None;
+    }
+
+    if let Ok(position) = group_by_expr.parse::<usize>() {
+        if position == 0 || position > projection_items.len() || position - 1 != group_idx {
+            return None;
+        }
+    } else {
+        let (group_by_col, group_by_table) = parse_sql_column_ref(&group_by_expr)?;
+        let matches_alias =
+            group_by_table.is_none() && group_by_col.eq_ignore_ascii_case(&group_alias);
+        let matches_column = group_by_col.eq_ignore_ascii_case(&group_col)
+            && match (&group_by_table, &group_table) {
+                (Some(lhs), Some(rhs)) => lhs.eq_ignore_ascii_case(rhs),
+                (Some(_), None) => false,
+                _ => true,
+            };
+        if !matches_alias && !matches_column {
+            return None;
+        }
+    }
+
+    let mut order_by = Vec::new();
+    if let Some(order_sql) = order_sql {
+        let parsed = parse_order_by(&order_sql).ok()?;
+        for item in parsed {
+            let Expr::Col { col, table } = item.expr else {
+                return None;
+            };
+            let target = if table.is_none() && col == "1" {
+                Some(MySqlCompatGroupedAggregateOrderTarget::Group)
+            } else if table.is_none() && col == "2" {
+                Some(MySqlCompatGroupedAggregateOrderTarget::Aggregate)
+            } else if mysql_grouped_order_matches_group_column(
+                &col,
+                table.as_deref(),
+                &group_col,
+                group_table.as_deref(),
+                &group_alias,
+            ) {
+                Some(MySqlCompatGroupedAggregateOrderTarget::Group)
+            } else if table.is_none() && col.eq_ignore_ascii_case(&aggregate_alias) {
+                Some(MySqlCompatGroupedAggregateOrderTarget::Aggregate)
+            } else {
+                None
+            };
+            let Some(target) = target else {
+                return None;
+            };
+            order_by.push(MySqlCompatGroupedAggregateOrder {
+                target,
+                desc: matches!(item.dir, Some(OrderDir::Desc)),
+            });
+        }
+    }
+
+    let mut source_projection = vec![group_select_expr];
+    if let Some(aggregate_select_expr) = aggregate_select_expr.as_ref() {
+        source_projection.push(aggregate_select_expr.clone());
+    }
+    let source_sql = format!(
+        "SELECT {} {}",
+        source_projection.join(", "),
+        source_from_tail
+    );
+
+    Some(MySqlCompatGroupedAggregateQuery {
+        group_alias,
+        aggregate_alias,
+        aggregate_op,
+        source_sql,
+        order_by,
+        limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref()).ok()?,
+    })
+}
+
+fn mysql_text_ordering(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    match (left, right) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(lhs), Some(rhs)) => lhs.cmp(rhs),
+    }
+}
+
+fn mysql_numeric_text_ordering(
+    left: Option<&str>,
+    right: Option<&str>,
+) -> Option<std::cmp::Ordering> {
+    let parse = |raw: &str| -> Option<f64> {
+        if let Ok(value) = raw.parse::<i64>() {
+            return Some(value as f64);
+        }
+        raw.parse::<f64>().ok()
+    };
+    match (left, right) {
+        (None, None) => Some(std::cmp::Ordering::Equal),
+        (None, Some(_)) => Some(std::cmp::Ordering::Less),
+        (Some(_), None) => Some(std::cmp::Ordering::Greater),
+        (Some(lhs), Some(rhs)) => {
+            parse(lhs).and_then(|lhs| parse(rhs).and_then(|rhs| lhs.partial_cmp(&rhs)))
+        }
+    }
+}
+
 fn mysql_parse_simple_aggregate_query(
     sql: &str,
 ) -> Option<(String, String, MySqlCompatAggregateOp)> {
@@ -1679,53 +2013,20 @@ fn mysql_parse_simple_aggregate_query(
     } else {
         (projection, None)
     };
-    let aggregate_lower = aggregate_expr
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let (select_expr, default_alias, op) =
-        if matches!(aggregate_lower.as_str(), "count(*)" | "count(1)") {
-            let default_alias = if aggregate_lower == "count(1)" {
-                "COUNT(1)".to_string()
-            } else {
-                "COUNT(*)".to_string()
-            };
-            (
-                "*".to_string(),
-                default_alias,
-                MySqlCompatAggregateOp::CountRows,
-            )
-        } else if aggregate_lower.starts_with("count(") && aggregate_lower.ends_with(')') {
-            let arg = aggregate_expr[6..aggregate_expr.len() - 1].trim();
-            let (col, table) = parse_sql_column_ref(arg)?;
-            let select_expr = table
-                .map(|table| format!("{table}.{col}"))
-                .unwrap_or(col.clone());
-            (
-                select_expr.clone(),
-                format!("COUNT({select_expr})"),
-                MySqlCompatAggregateOp::CountNonNull,
-            )
-        } else if aggregate_lower.starts_with("sum(") && aggregate_lower.ends_with(')') {
-            let arg = aggregate_expr[4..aggregate_expr.len() - 1].trim();
-            let (col, table) = parse_sql_column_ref(arg)?;
-            let select_expr = table
-                .map(|table| format!("{table}.{col}"))
-                .unwrap_or(col.clone());
-            (
-                select_expr.clone(),
-                format!("SUM({select_expr})"),
-                MySqlCompatAggregateOp::Sum,
-            )
-        } else {
-            return None;
-        };
+    let (aggregate_select_expr, default_alias, op) =
+        mysql_parse_aggregate_projection_expr(aggregate_expr)?;
+    let select_expr = aggregate_select_expr.unwrap_or_else(|| "*".to_string());
     let alias = alias_raw
         .map(clean_sql_ident)
         .filter(|name| !name.is_empty())
         .unwrap_or(default_alias);
-    let mut from_tail = rest[from_idx..].trim().to_string();
+    let from_tail = rest[from_idx..].trim().to_string();
+    if find_keyword_top_level(&from_tail, "group by").is_some()
+        || find_keyword_top_level(&from_tail, "having").is_some()
+    {
+        return None;
+    }
+    let mut from_tail = from_tail;
     let truncate_at = ["order by", "limit", "offset"]
         .iter()
         .filter_map(|keyword| find_keyword_top_level(&from_tail, keyword))
@@ -1797,6 +2098,138 @@ async fn mysql_try_simple_aggregate_query_outcome(
     Ok(Some(MySqlQueryOutcome::ResultSet {
         columns: vec![alias],
         rows: vec![vec![value]],
+    }))
+}
+
+async fn mysql_try_grouped_aggregate_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let Some(query) = mysql_parse_grouped_aggregate_query(sql) else {
+        return Ok(None);
+    };
+    let params = SqlExecParams {
+        sql: query.source_sql,
+        explain: false,
+        default_db: default_db.map(|db| db.to_string()),
+        result_format: Some(ResultFormat::RowsJson),
+    };
+    let result = sql_exec(state, params).await?;
+    let (_, rows) =
+        mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
+
+    let mut grouped_rows = Vec::<(Option<String>, MySqlCompatGroupedAggregateState)>::new();
+    let mut grouped_lookup = HashMap::<Option<String>, usize>::new();
+    for row in rows {
+        let group_key = row.first().cloned().unwrap_or(None);
+        let entry_idx = if let Some(idx) = grouped_lookup.get(&group_key).copied() {
+            idx
+        } else {
+            grouped_rows.push((group_key.clone(), MySqlCompatGroupedAggregateState::new()));
+            let idx = grouped_rows.len().saturating_sub(1);
+            grouped_lookup.insert(group_key, idx);
+            idx
+        };
+        let state = &mut grouped_rows[entry_idx].1;
+        state.row_count = state.row_count.saturating_add(1);
+        let aggregate_value = row
+            .get(1)
+            .and_then(|value| value.as_ref())
+            .map(|s| s.as_str());
+        match query.aggregate_op {
+            MySqlCompatAggregateOp::CountRows => {}
+            MySqlCompatAggregateOp::CountNonNull => {
+                if aggregate_value.is_some() {
+                    state.non_null_count = state.non_null_count.saturating_add(1);
+                }
+            }
+            MySqlCompatAggregateOp::Sum => {
+                let Some(raw) = aggregate_value else {
+                    continue;
+                };
+                state.sum_saw_value = true;
+                if let Ok(value) = raw.parse::<i64>() {
+                    state.sum_total += value as f64;
+                } else if let Ok(value) = raw.parse::<f64>() {
+                    state.sum_all_i64 = false;
+                    state.sum_total += value;
+                } else {
+                    return Err(RpcError::new(
+                        "not_supported",
+                        "SUM compatibility currently supports only numeric result values",
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut out_rows = grouped_rows
+        .into_iter()
+        .map(|(group_key, state)| {
+            let aggregate_value = match query.aggregate_op {
+                MySqlCompatAggregateOp::CountRows => Some(state.row_count.to_string()),
+                MySqlCompatAggregateOp::CountNonNull => Some(state.non_null_count.to_string()),
+                MySqlCompatAggregateOp::Sum => {
+                    if !state.sum_saw_value {
+                        None
+                    } else if state.sum_all_i64 {
+                        Some((state.sum_total as i64).to_string())
+                    } else {
+                        Some(state.sum_total.to_string())
+                    }
+                }
+            };
+            vec![group_key, aggregate_value]
+        })
+        .collect::<Vec<_>>();
+
+    if !query.order_by.is_empty() {
+        out_rows.sort_by(|left, right| {
+            for order in &query.order_by {
+                let (left_value, right_value) = match order.target {
+                    MySqlCompatGroupedAggregateOrderTarget::Group => (
+                        left.first().and_then(|value| value.as_deref()),
+                        right.first().and_then(|value| value.as_deref()),
+                    ),
+                    MySqlCompatGroupedAggregateOrderTarget::Aggregate => (
+                        left.get(1).and_then(|value| value.as_deref()),
+                        right.get(1).and_then(|value| value.as_deref()),
+                    ),
+                };
+                let mut cmp = if matches!(
+                    order.target,
+                    MySqlCompatGroupedAggregateOrderTarget::Aggregate
+                ) {
+                    mysql_numeric_text_ordering(left_value, right_value)
+                        .unwrap_or_else(|| mysql_text_ordering(left_value, right_value))
+                } else {
+                    mysql_text_ordering(left_value, right_value)
+                };
+                if order.desc {
+                    cmp = cmp.reverse();
+                }
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    if let Some(limit) = query.limit {
+        let offset = limit.offset.unwrap_or(0) as usize;
+        if offset > 0 {
+            out_rows = out_rows.into_iter().skip(offset).collect();
+        }
+        if let Some(limit) = limit.limit {
+            out_rows = out_rows.into_iter().take(limit as usize).collect();
+        }
+    }
+
+    Ok(Some(MySqlQueryOutcome::ResultSet {
+        columns: vec![query.group_alias, query.aggregate_alias],
+        rows: out_rows,
     }))
 }
 
@@ -1944,6 +2377,12 @@ async fn mysql_try_compat_query_outcome(
         return Ok(None);
     }
     let lower = trimmed.to_ascii_lowercase();
+
+    if let Some(result) =
+        mysql_try_grouped_aggregate_query_outcome(state, trimmed, default_db).await?
+    {
+        return Ok(Some(result));
+    }
 
     if let Some(result) =
         mysql_try_simple_aggregate_query_outcome(state, trimmed, default_db).await?
@@ -11859,6 +12298,41 @@ mod tests {
         assert_eq!(parsed.2, MySqlCompatAggregateOp::Sum);
 
         assert!(mysql_parse_simple_aggregate_query("SELECT id FROM wp_posts").is_none());
+        assert!(mysql_parse_simple_aggregate_query(
+            "SELECT post_status, COUNT(*) FROM wp_posts GROUP BY post_status"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mysql_parse_grouped_aggregate_query_roundtrip() {
+        let parsed = mysql_parse_grouped_aggregate_query(
+            "SELECT post_status, COUNT(*) AS status_count FROM wp_posts WHERE post_author > 0 GROUP BY post_status ORDER BY status_count DESC, post_status ASC LIMIT 0, 2",
+        )
+        .expect("parse grouped aggregate query");
+        assert_eq!(parsed.group_alias, "post_status");
+        assert_eq!(parsed.aggregate_alias, "status_count");
+        assert_eq!(
+            parsed.source_sql,
+            "SELECT post_status FROM wp_posts WHERE post_author > 0"
+        );
+        assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::CountRows);
+        assert_eq!(parsed.order_by.len(), 2);
+        assert_eq!(
+            parsed.order_by[0].target,
+            MySqlCompatGroupedAggregateOrderTarget::Aggregate
+        );
+        assert!(parsed.order_by[0].desc);
+        assert_eq!(
+            parsed.order_by[1].target,
+            MySqlCompatGroupedAggregateOrderTarget::Group
+        );
+        assert!(!parsed.order_by[1].desc);
+        assert_eq!(
+            parsed.limit.as_ref().and_then(|limit| limit.offset),
+            Some(0)
+        );
+        assert_eq!(parsed.limit.as_ref().and_then(|limit| limit.limit), Some(2));
     }
 
     #[test]

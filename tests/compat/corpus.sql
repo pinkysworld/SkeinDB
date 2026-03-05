@@ -176,6 +176,17 @@ SELECT SUM(post_author) AS author_sum
   FROM wp_posts
  WHERE post_status = 'publish';
 
+SELECT post_status, COUNT(*) AS status_count
+  FROM wp_posts
+ GROUP BY post_status
+ ORDER BY post_status ASC;
+
+SELECT post_author, SUM(post_author) AS author_sum_by_author
+  FROM wp_posts
+ WHERE post_status = 'publish'
+ GROUP BY post_author
+ ORDER BY post_author ASC;
+
 SELECT ID
   FROM wp_posts
  WHERE post_status LIKE 'pub%'

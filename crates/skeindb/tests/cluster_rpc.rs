@@ -821,6 +821,35 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
     let float_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
     assert_eq!(float_sum_rows, vec![vec![Some("3.75".to_string())]]);
 
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, COUNT(*) AS group_rows FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC",
+    )
+    .await?;
+    let grouped_count_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_count_rows,
+        vec![
+            vec![None, Some("1".to_string())],
+            vec![Some("2".to_string()), Some("1".to_string())],
+            vec![Some("5".to_string()), Some("1".to_string())],
+        ]
+    );
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, SUM(weight) AS grouped_weight FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC LIMIT 0, 2",
+    )
+    .await?;
+    let grouped_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_sum_rows,
+        vec![
+            vec![None, None],
+            vec![Some("2".to_string()), Some("1.5".to_string())],
+        ]
+    );
+
     Ok(())
 }
 
@@ -1134,6 +1163,32 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 1);
                         assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, count(*) as status_count from wp_posts group by post_status order by post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("draft"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[1][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_author, sum(post_author) as author_sum_by_author from wp_posts where post_status = 'publish' group by post_author order by post_author asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][1].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][1].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
