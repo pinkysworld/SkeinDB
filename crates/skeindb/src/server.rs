@@ -3004,10 +3004,32 @@ fn mysql_parse_correlated_subquery_equality_clause(
     None
 }
 
-fn mysql_try_rewrite_correlated_exists_subquery(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MySqlCorrelatedSubqueryRewrite {
+    outer_exprs: Vec<String>,
+    rewritten_subquery_sql: String,
+}
+
+fn mysql_parse_simple_select_projection_sql(sql: &str) -> Option<Vec<String>> {
+    let trimmed = sql.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let rest = trimmed[6..].trim_start();
+    let from_idx = find_keyword_top_level(rest, "from")?;
+    let projection = rest[..from_idx].trim();
+    if projection.is_empty() {
+        return None;
+    }
+    Some(split_csv_top_level(projection))
+}
+
+fn mysql_try_rewrite_correlated_subquery(
     subquery_sql: &str,
     default_db: Option<&str>,
-) -> Option<(String, String)> {
+    outer_value_expr_sql: Option<&str>,
+) -> Option<MySqlCorrelatedSubqueryRewrite> {
     let SqlPlan::Select {
         from: Some(TableRef::Base(inner_base)),
         ..
@@ -3017,22 +3039,46 @@ fn mysql_try_rewrite_correlated_exists_subquery(
     };
     let (_, subquery_where, subquery_suffix) = mysql_parse_select_where_parts(subquery_sql)?;
     let mut remaining_parts = Vec::new();
-    let mut correlation = None::<(String, String)>;
+    let mut correlations = Vec::<(String, String)>::new();
     for part in split_top_level_and(trim_wrapping_parentheses(&subquery_where)) {
-        if correlation.is_none() {
-            if let Some(parsed) =
-                mysql_parse_correlated_subquery_equality_clause(&part, &inner_base)
-            {
-                correlation = Some(parsed);
-                continue;
-            }
+        if let Some(parsed) = mysql_parse_correlated_subquery_equality_clause(&part, &inner_base) {
+            correlations.push(parsed);
+        } else {
+            remaining_parts.push(part);
         }
-        remaining_parts.push(part);
     }
-    let (inner_col_sql, outer_expr_sql) = correlation?;
-    remaining_parts.push(format!("{inner_col_sql} IS NOT NULL"));
+    if correlations.is_empty() {
+        return None;
+    }
+
+    let mut inner_select_exprs = correlations
+        .iter()
+        .map(|(inner_expr_sql, _)| inner_expr_sql.clone())
+        .collect::<Vec<_>>();
+    let mut outer_exprs = correlations
+        .iter()
+        .map(|(_, outer_expr_sql)| outer_expr_sql.clone())
+        .collect::<Vec<_>>();
+    if let Some(outer_value_expr_sql) = outer_value_expr_sql {
+        let projection_sqls = mysql_parse_simple_select_projection_sql(subquery_sql)?;
+        if projection_sqls.len() != 1 {
+            return None;
+        }
+        inner_select_exprs.push(projection_sqls[0].clone());
+        outer_exprs.push(outer_value_expr_sql.trim().to_string());
+    }
+
+    let mut non_null_exprs = HashSet::new();
+    for inner_expr_sql in &inner_select_exprs {
+        let normalized = inner_expr_sql.trim().to_ascii_lowercase();
+        if non_null_exprs.insert(normalized) {
+            remaining_parts.push(format!("{inner_expr_sql} IS NOT NULL"));
+        }
+    }
+
     let mut rewritten = format!(
-        "SELECT {inner_col_sql} FROM {}",
+        "SELECT {} FROM {}",
+        inner_select_exprs.join(", "),
         mysql_render_base_table_ref(&inner_base)
     );
     if !remaining_parts.is_empty() {
@@ -3043,7 +3089,10 @@ fn mysql_try_rewrite_correlated_exists_subquery(
         rewritten.push(' ');
         rewritten.push_str(subquery_suffix.trim());
     }
-    Some((outer_expr_sql, rewritten))
+    Some(MySqlCorrelatedSubqueryRewrite {
+        outer_exprs,
+        rewritten_subquery_sql: rewritten,
+    })
 }
 
 fn mysql_rebuild_select_with_where(
@@ -3097,6 +3146,93 @@ fn mysql_extract_subquery_first_column_lits(result: &Value) -> Result<Vec<Lit>, 
     Ok(values)
 }
 
+fn mysql_extract_subquery_row_lits(result: &Value) -> Result<Vec<Vec<Lit>>, RpcError> {
+    let data = result
+        .get("result")
+        .and_then(|v| v.get("data"))
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing data"))?;
+    let columns = data
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing columns"))?;
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "not_supported",
+            "subquery compatibility currently requires at least one projected column",
+        ));
+    }
+    let rows = data
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+    let mut decoded_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row_items = row
+            .as_array()
+            .ok_or_else(|| RpcError::new("internal", "subquery row must be an array"))?;
+        if row_items.len() != columns.len() {
+            return Err(RpcError::new(
+                "internal",
+                "subquery row does not match projected column count",
+            ));
+        }
+        let mut decoded = Vec::with_capacity(row_items.len());
+        for value in row_items {
+            let lit = serde_json::from_value::<Lit>(value.clone()).map_err(|_| {
+                RpcError::new("not_supported", "subquery value could not be decoded")
+            })?;
+            decoded.push(lit);
+        }
+        decoded_rows.push(decoded);
+    }
+    Ok(decoded_rows)
+}
+
+fn mysql_render_correlated_subquery_match_clause(
+    outer_exprs: &[String],
+    rows: &[Vec<Lit>],
+    negated: bool,
+) -> Option<String> {
+    if outer_exprs.is_empty() {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut clauses = Vec::new();
+    for row in rows {
+        if row.len() != outer_exprs.len() || row.iter().any(|lit| matches!(lit, Lit::Null)) {
+            continue;
+        }
+        let parts = outer_exprs
+            .iter()
+            .zip(row.iter())
+            .map(|(outer_expr_sql, lit)| {
+                format!("{outer_expr_sql} = {}", mysql_render_default_lit(lit))
+            })
+            .collect::<Vec<_>>();
+        let clause = if parts.len() == 1 {
+            parts[0].clone()
+        } else {
+            format!("({})", parts.join(" AND "))
+        };
+        if seen.insert(clause.clone()) {
+            clauses.push(clause);
+        }
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+    let joined = if clauses.len() == 1 {
+        clauses[0].clone()
+    } else {
+        format!("({})", clauses.join(" OR "))
+    };
+    if negated {
+        Some(format!("NOT {joined}"))
+    } else {
+        Some(joined)
+    }
+}
+
 fn mysql_query_outcome_from_sql_exec_result(result: &Value) -> Result<MySqlQueryOutcome, RpcError> {
     let statement = result
         .get("statement")
@@ -3140,6 +3276,31 @@ async fn mysql_try_select_subquery_compat_outcome(
                 negated,
                 subquery_sql,
             } => {
+                if let Some(rewrite) =
+                    mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, Some(&lhs))
+                {
+                    let subquery_result = sql_exec(
+                        state,
+                        SqlExecParams {
+                            sql: rewrite.rewritten_subquery_sql,
+                            explain: false,
+                            default_db: default_db.map(|db| db.to_string()),
+                            result_format: Some(ResultFormat::RowsJson),
+                        },
+                    )
+                    .await?;
+                    let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
+                    if let Some(clause) = mysql_render_correlated_subquery_match_clause(
+                        &rewrite.outer_exprs,
+                        &rows,
+                        negated,
+                    ) {
+                        rewritten_parts.push(clause);
+                    } else if !negated {
+                        rewritten_parts.push("1 = 0".to_string());
+                    }
+                    continue;
+                }
                 let subquery_result = sql_exec(
                     state,
                     SqlExecParams {
@@ -3169,35 +3330,28 @@ async fn mysql_try_select_subquery_compat_outcome(
                 negated,
                 subquery_sql,
             } => {
-                if let Some((outer_expr_sql, rewritten_subquery_sql)) =
-                    mysql_try_rewrite_correlated_exists_subquery(&subquery_sql, default_db)
+                if let Some(rewrite) =
+                    mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, None)
                 {
                     let subquery_result = sql_exec(
                         state,
                         SqlExecParams {
-                            sql: rewritten_subquery_sql,
+                            sql: rewrite.rewritten_subquery_sql,
                             explain: false,
                             default_db: default_db.map(|db| db.to_string()),
                             result_format: Some(ResultFormat::RowsJson),
                         },
                     )
                     .await?;
-                    let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?
-                        .into_iter()
-                        .filter(|lit| !matches!(lit, Lit::Null))
-                        .collect::<Vec<_>>();
-                    if lits.is_empty() {
-                        if !negated {
-                            rewritten_parts.push("1 = 0".to_string());
-                        }
-                    } else {
-                        let values = lits
-                            .iter()
-                            .map(mysql_render_default_lit)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let op = if negated { "NOT IN" } else { "IN" };
-                        rewritten_parts.push(format!("{outer_expr_sql} {op} ({values})"));
+                    let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
+                    if let Some(clause) = mysql_render_correlated_subquery_match_clause(
+                        &rewrite.outer_exprs,
+                        &rows,
+                        negated,
+                    ) {
+                        rewritten_parts.push(clause);
+                    } else if !negated {
+                        rewritten_parts.push("1 = 0".to_string());
                     }
                     continue;
                 }
@@ -3905,6 +4059,97 @@ fn mysql_stmt_resolve_column_type(
     }
 }
 
+fn mysql_stmt_merge_column_types(
+    left: MySqlStmtColumnType,
+    right: MySqlStmtColumnType,
+) -> MySqlStmtColumnType {
+    if left == right {
+        return left;
+    }
+    if matches!(left, MySqlStmtColumnType::VarString)
+        || matches!(right, MySqlStmtColumnType::VarString)
+    {
+        return MySqlStmtColumnType::VarString;
+    }
+    if matches!(left, MySqlStmtColumnType::Double) || matches!(right, MySqlStmtColumnType::Double) {
+        return MySqlStmtColumnType::Double;
+    }
+    MySqlStmtColumnType::LongLong
+}
+
+fn mysql_stmt_aggregate_result_type(
+    op: MySqlCompatAggregateOp,
+    source_type: MySqlStmtColumnType,
+) -> MySqlStmtColumnType {
+    match op {
+        MySqlCompatAggregateOp::CountRows | MySqlCompatAggregateOp::CountNonNull => {
+            MySqlStmtColumnType::LongLong
+        }
+        MySqlCompatAggregateOp::Avg => MySqlStmtColumnType::Double,
+        MySqlCompatAggregateOp::Sum => {
+            if matches!(source_type, MySqlStmtColumnType::Double) {
+                MySqlStmtColumnType::Double
+            } else {
+                MySqlStmtColumnType::LongLong
+            }
+        }
+        MySqlCompatAggregateOp::Min | MySqlCompatAggregateOp::Max => source_type,
+    }
+}
+
+fn mysql_stmt_expr_type(
+    expr: &Expr,
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> MySqlStmtColumnType {
+    match expr {
+        Expr::Lit { lit } => mysql_stmt_column_type_for_lit(lit),
+        Expr::Col { col, table } => {
+            mysql_stmt_resolve_column_type(table_descs, col, table.as_deref())
+        }
+        Expr::Param { .. } => MySqlStmtColumnType::VarString,
+        Expr::Op { op, a, b, .. } => match op.as_str() {
+            "and" | "or" | "not" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "in" | "between"
+            | "like" | "ilike" | "is_null" => MySqlStmtColumnType::LongLong,
+            "add" | "sub" | "mul" | "div" | "mod" => {
+                let left = a
+                    .as_ref()
+                    .map(|expr| mysql_stmt_expr_type(expr, table_descs))
+                    .unwrap_or(MySqlStmtColumnType::VarString);
+                let right = b
+                    .as_ref()
+                    .map(|expr| mysql_stmt_expr_type(expr, table_descs))
+                    .unwrap_or(MySqlStmtColumnType::VarString);
+                mysql_stmt_merge_column_types(left, right)
+            }
+            _ => MySqlStmtColumnType::VarString,
+        },
+        Expr::Func { name, args, .. } => match name.as_str() {
+            "count" | "length" | "char_length" | "character_length" | "locate" | "instr" => {
+                MySqlStmtColumnType::LongLong
+            }
+            "avg" | "round" => MySqlStmtColumnType::Double,
+            "sum" | "abs" | "floor" | "ceil" | "ceiling" | "mod" => args
+                .iter()
+                .map(|expr| mysql_stmt_expr_type(expr, table_descs))
+                .reduce(mysql_stmt_merge_column_types)
+                .unwrap_or(MySqlStmtColumnType::VarString),
+            "min" | "max" | "if" | "coalesce" | "ifnull" | "nullif" | "least" | "greatest" => args
+                .iter()
+                .map(|expr| mysql_stmt_expr_type(expr, table_descs))
+                .reduce(mysql_stmt_merge_column_types)
+                .unwrap_or(MySqlStmtColumnType::VarString),
+            "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
+            | "right" | "substring" | "substr" | "replace" | "concat" => {
+                MySqlStmtColumnType::VarString
+            }
+            _ => MySqlStmtColumnType::VarString,
+        },
+        Expr::Cast { .. } | Expr::Case { .. } | Expr::Subquery { .. } | Expr::Exists { .. } => {
+            MySqlStmtColumnType::VarString
+        }
+    }
+}
+
 fn mysql_stmt_prepare_columns_from_select(
     from: Option<&TableRef>,
     projection: &[SelectItem],
@@ -3934,13 +4179,7 @@ fn mysql_stmt_prepare_columns_from_select(
         .iter()
         .enumerate()
         .map(|(idx, item)| {
-            let column_type = match &item.expr {
-                Expr::Lit { lit } => mysql_stmt_column_type_for_lit(lit),
-                Expr::Col { col, table } => {
-                    mysql_stmt_resolve_column_type(table_descs, col, table.as_deref())
-                }
-                _ => MySqlStmtColumnType::VarString,
-            };
+            let column_type = mysql_stmt_expr_type(&item.expr, table_descs);
             MySqlStmtPrepareColumn {
                 name: projection_label(item, idx),
                 column_type,
@@ -3949,26 +4188,16 @@ fn mysql_stmt_prepare_columns_from_select(
         .collect()
 }
 
-async fn mysql_stmt_prepare_columns(
+async fn mysql_stmt_prepare_columns_for_translated_select(
     state: &AppState,
     sql: &str,
     default_db: Option<&str>,
-) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
-        return cols
-            .into_iter()
-            .map(|(name, lit)| MySqlStmtPrepareColumn {
-                name,
-                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
-            })
-            .collect();
-    }
-
+) -> Option<Vec<MySqlStmtPrepareColumn>> {
     let Ok(SqlPlan::Select {
         from, projection, ..
     }) = parse_sql_plan(sql, default_db)
     else {
-        return Vec::new();
+        return None;
     };
 
     let table_descs = match from.as_ref() {
@@ -3987,7 +4216,74 @@ async fn mysql_stmt_prepare_columns(
         }
         None => Vec::new(),
     };
-    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs)
+    Some(mysql_stmt_prepare_columns_from_select(
+        from.as_ref(),
+        &projection,
+        &table_descs,
+    ))
+}
+
+async fn mysql_stmt_prepare_columns(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
+        return cols
+            .into_iter()
+            .map(|(name, lit)| MySqlStmtPrepareColumn {
+                name,
+                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
+            })
+            .collect();
+    }
+
+    if let Some((alias, source_sql, op)) = mysql_parse_simple_aggregate_query(sql) {
+        let source_columns =
+            mysql_stmt_prepare_columns_for_translated_select(state, &source_sql, default_db)
+                .await
+                .unwrap_or_default();
+        let source_type = source_columns
+            .first()
+            .map(|column| column.column_type)
+            .unwrap_or(MySqlStmtColumnType::VarString);
+        return vec![MySqlStmtPrepareColumn {
+            name: alias,
+            column_type: mysql_stmt_aggregate_result_type(op, source_type),
+        }];
+    }
+
+    if let Some(query) = mysql_parse_grouped_aggregate_query(sql) {
+        let source_columns =
+            mysql_stmt_prepare_columns_for_translated_select(state, &query.source_sql, default_db)
+                .await
+                .unwrap_or_default();
+        let group_type = source_columns
+            .first()
+            .map(|column| column.column_type)
+            .unwrap_or(MySqlStmtColumnType::VarString);
+        let aggregate_source_type = source_columns
+            .get(1)
+            .map(|column| column.column_type)
+            .unwrap_or(MySqlStmtColumnType::VarString);
+        return vec![
+            MySqlStmtPrepareColumn {
+                name: query.group_alias,
+                column_type: group_type,
+            },
+            MySqlStmtPrepareColumn {
+                name: query.aggregate_alias,
+                column_type: mysql_stmt_aggregate_result_type(
+                    query.aggregate_op,
+                    aggregate_source_type,
+                ),
+            },
+        ];
+    }
+
+    mysql_stmt_prepare_columns_for_translated_select(state, sql, default_db)
+        .await
+        .unwrap_or_default()
 }
 
 fn mysql_stmt_infer_column_types(
@@ -14252,6 +14548,101 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT LENGTH(u.name) AS name_len, IF(p.id = 7, u.name, 'other') AS chosen_name, LOCATE('ra', u.name) AS hit_pos FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse function projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let function_projection =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
+        assert_eq!(
+            function_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "name_len".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "chosen_name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "hit_pos".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_stmt_prepare_columns_support_aggregate_compat_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_stmt_prepare_aggregate_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let simple = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT COUNT(*) AS total_users FROM app.users",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            simple,
+            vec![MySqlStmtPrepareColumn {
+                name: "total_users".to_string(),
+                column_type: MySqlStmtColumnType::LongLong,
+            }]
+        );
+
+        let grouped = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT id, AVG(score) AS avg_score FROM app.users GROUP BY id ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            grouped,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "avg_score".to_string(),
+                    column_type: MySqlStmtColumnType::Double,
+                },
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]
@@ -14416,15 +14807,45 @@ mod tests {
         ));
         assert!(mysql_parse_subquery_compat_predicate(&and_parts[1]).is_none());
 
-        let correlated_rewrite = mysql_try_rewrite_correlated_exists_subquery(
+        let correlated_rewrite = mysql_try_rewrite_correlated_subquery(
             "SELECT 1 FROM compat_alter_subq AS inner_q WHERE inner_q.parent_id = outer_q.id",
             Some("app"),
+            None,
         )
         .expect("rewrite correlated EXISTS");
-        assert_eq!(correlated_rewrite.0, "outer_q.id");
         assert_eq!(
-            correlated_rewrite.1,
+            correlated_rewrite.outer_exprs,
+            vec!["outer_q.id".to_string()]
+        );
+        assert_eq!(
+            correlated_rewrite.rewritten_subquery_sql,
             "SELECT inner_q.parent_id FROM `app`.`compat_alter_subq` AS `inner_q` WHERE inner_q.parent_id IS NOT NULL"
+        );
+
+        let correlated_in = mysql_try_rewrite_correlated_subquery(
+            "SELECT inner_q.id FROM compat_alter_subq AS inner_q WHERE inner_q.parent_id = outer_q.parent_id",
+            Some("app"),
+            Some("outer_q.id"),
+        )
+        .expect("rewrite correlated IN");
+        assert_eq!(
+            correlated_in.outer_exprs,
+            vec!["outer_q.parent_id".to_string(), "outer_q.id".to_string()]
+        );
+        assert_eq!(
+            correlated_in.rewritten_subquery_sql,
+            "SELECT inner_q.parent_id, inner_q.id FROM `app`.`compat_alter_subq` AS `inner_q` WHERE inner_q.parent_id IS NOT NULL AND inner_q.id IS NOT NULL"
+        );
+
+        let correlated_exists_pairs = mysql_try_rewrite_correlated_subquery(
+            "SELECT 1 FROM compat_alter_subq AS inner_q WHERE inner_q.parent_id = outer_q.id AND inner_q.slug = outer_q.slug",
+            Some("app"),
+            None,
+        )
+        .expect("rewrite multi-correlation EXISTS");
+        assert_eq!(
+            correlated_exists_pairs.outer_exprs,
+            vec!["outer_q.id".to_string(), "outer_q.slug".to_string()]
         );
     }
 

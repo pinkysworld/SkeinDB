@@ -449,6 +449,42 @@ SELECT TRIM('  n-a  '),
   FROM compat_alter_subq
  WHERE id = 4;
 
+SELECT IF(1, post_slug, 'miss'),
+       LOCATE('a', post_slug),
+       INSTR(post_slug, 'a'),
+       ABS(-7),
+       ROUND(1.75, 1),
+       FLOOR(1.75),
+       CEIL(1.2),
+       MOD(7, 4),
+       LEAST('z', 'a'),
+       GREATEST(1, 5, 2)
+  FROM compat_alter_subq
+ WHERE id = 4;
+
+INSERT INTO compat_alter_subq (id, parent_id)
+VALUES (5, 1);
+
+SELECT outer_q.id
+  FROM compat_alter_subq AS outer_q
+ WHERE EXISTS (
+   SELECT 1
+     FROM compat_alter_subq AS inner_q
+    WHERE inner_q.parent_id = outer_q.parent_id
+      AND inner_q.post_slug = outer_q.post_slug
+      AND inner_q.id > 4
+ )
+ ORDER BY outer_q.id ASC;
+
+SELECT outer_q.id
+  FROM compat_alter_subq AS outer_q
+ WHERE outer_q.id IN (
+   SELECT inner_q.id
+     FROM compat_alter_subq AS inner_q
+    WHERE inner_q.parent_id = outer_q.parent_id
+ )
+ ORDER BY outer_q.id ASC;
+
 CREATE TABLE compat_dropcol (
   id BIGINT UNSIGNED NOT NULL,
   keep_col VARCHAR(20) NOT NULL DEFAULT '',

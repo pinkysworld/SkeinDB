@@ -691,6 +691,51 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_close(&mut stream, join_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(&mut stream, "SELECT AVG(id) AS avg_user_id FROM wp_users").await?;
+    let aggregate_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(
+        aggregate_stmt.column_defs,
+        vec![("avg_user_id".to_string(), 0x05),]
+    );
+
+    send_com_stmt_execute(&mut stream, aggregate_stmt.statement_id, &[]).await?;
+    let aggregate_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(aggregate_rows, vec![vec![Some("7.5".to_string())]]);
+    send_com_stmt_close(&mut stream, aggregate_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT LENGTH(name) AS name_len, IF(1, name, 'missing') AS chosen_name, LOCATE('ra', name) AS hit_pos FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let function_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(function_stmt.param_count, 1);
+    assert_eq!(
+        function_stmt.column_defs,
+        vec![
+            ("name_len".to_string(), 0x08),
+            ("chosen_name".to_string(), 0xfd),
+            ("hit_pos".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        function_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let function_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        function_rows,
+        vec![vec![
+            Some("5".to_string()),
+            Some("Grace".to_string()),
+            Some("2".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, function_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -1728,6 +1773,46 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][5].as_deref(), Some("-a"));
                         assert_eq!(rows[0][6].as_deref(), Some("n_a"));
                         assert_eq!(rows[0][7], None);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select if(1, post_slug, 'miss'), locate('a', post_slug), instr(post_slug, 'a'), abs(-7), round(1.75, 1), floor(1.75), ceil(1.2), mod(7, 4), least('z', 'a'), greatest(1, 5, 2) from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("3"));
+                        assert_eq!(rows[0][2].as_deref(), Some("3"));
+                        assert_eq!(rows[0][3].as_deref(), Some("7"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1.8"));
+                        assert_eq!(rows[0][5].as_deref(), Some("1"));
+                        assert_eq!(rows[0][6].as_deref(), Some("2"));
+                        assert_eq!(rows[0][7].as_deref(), Some("3"));
+                        assert_eq!(rows[0][8].as_deref(), Some("a"));
+                        assert_eq!(rows[0][9].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.parent_id and inner_q.post_slug = outer_q.post_slug and inner_q.id > 4 ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                        assert_eq!(rows[1][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where outer_q.id in ( select inner_q.id from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.parent_id ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                        assert_eq!(rows[3][0].as_deref(), Some("5"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

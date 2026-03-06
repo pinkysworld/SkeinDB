@@ -8019,6 +8019,17 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "substr"
                     | "replace"
                     | "nullif"
+                    | "if"
+                    | "locate"
+                    | "instr"
+                    | "abs"
+                    | "round"
+                    | "floor"
+                    | "ceil"
+                    | "ceiling"
+                    | "mod"
+                    | "least"
+                    | "greatest"
                     | "coalesce"
                     | "ifnull"
                     | "concat"
@@ -8647,6 +8658,174 @@ fn eval_expr(
                         Ok(left)
                     }
                 }
+                "if" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("if requires 3 args");
+                    }
+                    let condition = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(mysql_if_condition_truth(&condition), Some(true)) {
+                        eval_expr(&fargs[1], row, ctx, args)
+                    } else {
+                        eval_expr(&fargs[2], row, ctx, args)
+                    }
+                }
+                "locate" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("locate requires 2 or 3 args");
+                    }
+                    let needle = eval_expr(&fargs[0], row, ctx, args)?;
+                    let haystack = eval_expr(&fargs[1], row, ctx, args)?;
+                    let start = if let Some(start_expr) = fargs.get(2) {
+                        let value = eval_expr(start_expr, row, ctx, args)?;
+                        let Some(start) = lit_to_i64(&value) else {
+                            return Ok(Lit::Null);
+                        };
+                        Some(start)
+                    } else {
+                        None
+                    };
+                    let (Some(needle), Some(haystack)) = (
+                        lit_to_string_for_like(&needle),
+                        lit_to_string_for_like(&haystack),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: mysql_locate_chars(&needle, &haystack, start),
+                    })
+                }
+                "instr" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("instr requires 2 args");
+                    }
+                    let haystack = eval_expr(&fargs[0], row, ctx, args)?;
+                    let needle = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (Some(haystack), Some(needle)) = (
+                        lit_to_string_for_like(&haystack),
+                        lit_to_string_for_like(&needle),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: mysql_locate_chars(&needle, &haystack, None),
+                    })
+                }
+                "abs" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("abs requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    match value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::I64 {
+                            v: v.saturating_abs(),
+                        }),
+                        Lit::U64 { v } => Ok(Lit::U64 { v }),
+                        Lit::F64 { v } => Ok(Lit::F64 { v: v.abs() }),
+                        Lit::Str { .. } | Lit::Dec { .. } => {
+                            let Some(v) = lit_to_f64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::F64 { v: v.abs() })
+                        }
+                        _ => Ok(Lit::Null),
+                    }
+                }
+                "round" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("round requires 1 or 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let decimals = if let Some(decimals_expr) = fargs.get(1) {
+                        let decimals = eval_expr(decimals_expr, row, ctx, args)?;
+                        let Some(decimals) = lit_to_i64(&decimals) else {
+                            return Ok(Lit::Null);
+                        };
+                        decimals
+                    } else {
+                        0
+                    };
+                    Ok(Lit::F64 {
+                        v: mysql_round_number(value, decimals),
+                    })
+                }
+                "floor" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("floor requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: value.floor() as i64,
+                    })
+                }
+                "ceil" | "ceiling" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("ceil requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: value.ceil() as i64,
+                    })
+                }
+                "mod" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("mod requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    if let (Some(left), Some(right)) = (lit_to_i64(&left), lit_to_i64(&right)) {
+                        if right == 0 {
+                            return Ok(Lit::Null);
+                        }
+                        return Ok(Lit::I64 { v: left % right });
+                    }
+                    let (Some(left), Some(right)) = (lit_to_f64(&left), lit_to_f64(&right)) else {
+                        return Ok(Lit::Null);
+                    };
+                    if right == 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: left % right })
+                }
+                "least" | "greatest" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("{name} requires at least one arg");
+                    }
+                    let mut best = None::<Lit>;
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if matches!(value, Lit::Null) {
+                            return Ok(Lit::Null);
+                        }
+                        match &best {
+                            Some(current) => {
+                                let ord = cmp_lit(&value, current)?;
+                                let replace = if name == "least" {
+                                    ord == std::cmp::Ordering::Less
+                                } else {
+                                    ord == std::cmp::Ordering::Greater
+                                };
+                                if replace {
+                                    best = Some(value);
+                                }
+                            }
+                            None => best = Some(value),
+                        }
+                    }
+                    Ok(best.unwrap_or(Lit::Null))
+                }
                 "coalesce" => {
                     if fargs.is_empty() {
                         anyhow::bail!("coalesce requires at least one arg");
@@ -8794,7 +8973,20 @@ fn lit_to_i64(lit: &Lit) -> Option<i64> {
         Lit::I64 { v } => Some(*v),
         Lit::U64 { v } => i64::try_from(*v).ok(),
         Lit::F64 { v } => Some(*v as i64),
+        Lit::Dec { v } => v.parse::<f64>().ok().map(|v| v as i64),
         Lit::Str { v } => v.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn mysql_if_condition_truth(lit: &Lit) -> Option<bool> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(*v),
+        Lit::I64 { v } => Some(*v != 0),
+        Lit::U64 { v } => Some(*v != 0),
+        Lit::F64 { v } => Some(*v != 0.0),
+        Lit::Dec { v } | Lit::Str { v } => v.parse::<f64>().ok().map(|v| v != 0.0),
         _ => None,
     }
 }
@@ -8834,6 +9026,39 @@ fn mysql_substring_chars(value: &str, position: i64, length: Option<i64>) -> Str
         None => chars.len(),
     };
     chars[start..end].iter().collect()
+}
+
+fn mysql_locate_chars(needle: &str, haystack: &str, start: Option<i64>) -> u64 {
+    let haystack_chars = haystack.chars().collect::<Vec<_>>();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    let start = start.unwrap_or(1);
+    if start <= 0 {
+        return 0;
+    }
+    let start_idx = start.saturating_sub(1) as usize;
+    if needle_chars.is_empty() {
+        return start as u64;
+    }
+    if start_idx >= haystack_chars.len() || needle_chars.len() > haystack_chars.len() {
+        return 0;
+    }
+    for idx in start_idx..=haystack_chars.len() - needle_chars.len() {
+        if haystack_chars[idx..idx + needle_chars.len()] == needle_chars[..] {
+            return (idx + 1) as u64;
+        }
+    }
+    0
+}
+
+fn mysql_round_number(value: f64, decimals: i64) -> f64 {
+    let clamped = decimals.clamp(-18, 18) as i32;
+    if clamped >= 0 {
+        let factor = 10_f64.powi(clamped);
+        (value * factor).round() / factor
+    } else {
+        let factor = 10_f64.powi(-clamped);
+        (value / factor).round() * factor
+    }
 }
 
 fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
@@ -9074,6 +9299,7 @@ fn secondary_index_candidates(
     tdata: &TableData,
     filters: &HashMap<String, Lit>,
 ) -> Option<Vec<usize>> {
+    ensure_mysql_compat_secondary_indexes(schema, tdata);
     let mut guard = tdata.secondary_indexes.lock().ok()?;
     if guard.is_empty() {
         return None;
@@ -10631,6 +10857,12 @@ fn mysql_compat_index_defs(schema: &TableSchema) -> Vec<CompatIndexDef> {
         .flatten()
         .filter_map(mysql_compat_index_from_value)
         .collect()
+}
+
+fn ensure_mysql_compat_secondary_indexes(schema: &TableSchema, tdata: &TableData) {
+    for index in mysql_compat_index_defs(schema) {
+        let _ = register_secondary_index(schema, tdata, &index.columns, &[]);
+    }
 }
 
 fn mysql_compat_indexes_json(schema: &TableSchema) -> Vec<serde_json::Value> {
@@ -12888,6 +13120,8 @@ fn lit_to_f64(lit: &Lit) -> Option<f64> {
         Lit::I64 { v } => Some(*v as f64),
         Lit::U64 { v } => Some(*v as f64),
         Lit::F64 { v } => Some(*v),
+        Lit::Dec { v } => v.parse::<f64>().ok(),
+        Lit::Str { v } => v.parse::<f64>().ok(),
         _ => None,
     }
 }
@@ -17012,6 +17246,85 @@ mod tests {
     }
 
     #[test]
+    fn mysql_compat_indexes_seed_secondary_index_candidates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_secondary_index_seed");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_idx".to_string(),
+            vec!["city".to_string()],
+            false,
+        )?;
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let (schema, tdata) = reopened.get_table(&table)?;
+        let mut filters = HashMap::new();
+        filters.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
+        assert_eq!(candidates.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn migration_intent_report_detects_pagination() -> anyhow::Result<()> {
         let dir = temp_dir("intent_pagination");
         let engine = Engine::open(&dir)?;
@@ -18483,6 +18796,136 @@ mod tests {
                     ],
                     distinct: None,
                 },
+                Expr::Func {
+                    name: "if".to_string(),
+                    args: vec![
+                        Expr::Op {
+                            op: "eq".to_string(),
+                            a: Some(Box::new(Expr::Lit {
+                                lit: Lit::I64 { v: 1 },
+                            })),
+                            b: Some(Box::new(Expr::Lit {
+                                lit: Lit::I64 { v: 1 },
+                            })),
+                            args: None,
+                            list: None,
+                            lo: None,
+                            hi: None,
+                        },
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "miss".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "locate".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "instr".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "abs".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::I64 { v: -7 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "round".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::F64 { v: 1.75 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "floor".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::F64 { v: 1.75 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "ceil".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::F64 { v: 1.2 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "mod".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 7 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 4 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "least".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str { v: "z".to_string() },
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "a".to_string() },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "greatest".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 5 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                    ],
+                    distinct: None,
+                },
             ],
             Some(eq_expr(
                 lower_expr,
@@ -18531,6 +18974,18 @@ mod tests {
                     v: "he".to_string()
                 },
                 Lit::Null,
+                Lit::Str {
+                    v: "hé".to_string()
+                },
+                Lit::U64 { v: 2 },
+                Lit::U64 { v: 2 },
+                Lit::I64 { v: 7 },
+                Lit::F64 { v: 1.8 },
+                Lit::I64 { v: 1 },
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 3 },
+                Lit::Str { v: "a".to_string() },
+                Lit::I64 { v: 5 },
             ]]
         );
 
