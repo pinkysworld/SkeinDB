@@ -462,6 +462,24 @@ SELECT IF(1, post_slug, 'miss'),
   FROM compat_alter_subq
  WHERE id = 4;
 
+SELECT CAST(id AS CHAR),
+       CAST('7' AS UNSIGNED),
+       CASE WHEN parent_id IS NULL THEN 'root' ELSE 'child' END,
+       CASE post_slug WHEN 'n-a' THEN 'match' ELSE 'miss' END
+  FROM compat_alter_subq
+ WHERE id = 4;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE CAST(parent_id AS UNSIGNED) = 1
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE parent_id IS NOT NULL
+ ORDER BY CAST(parent_id AS UNSIGNED) DESC, id ASC
+ LIMIT 0, 2;
+
 INSERT INTO compat_alter_subq (id, parent_id)
 VALUES (5, 1);
 

@@ -736,6 +736,39 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
     send_com_stmt_close(&mut stream, function_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT CAST(name AS CHAR) AS name_text, CASE WHEN id = 8 THEN name ELSE 'missing' END AS chosen_name, CAST(id AS UNSIGNED) AS id_unsigned FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let cast_case_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(cast_case_stmt.param_count, 1);
+    assert_eq!(
+        cast_case_stmt.column_defs,
+        vec![
+            ("name_text".to_string(), 0xfd),
+            ("chosen_name".to_string(), 0xfd),
+            ("id_unsigned".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        cast_case_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let cast_case_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        cast_case_rows,
+        vec![vec![
+            Some("Grace".to_string()),
+            Some("Grace".to_string()),
+            Some("8".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, cast_case_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -1791,6 +1824,38 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][7].as_deref(), Some("3"));
                         assert_eq!(rows[0][8].as_deref(), Some("a"));
                         assert_eq!(rows[0][9].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select cast(id as char), cast('7' as unsigned), case when parent_id is null then 'root' else 'child' end, case post_slug when 'n-a' then 'match' else 'miss' end from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                        assert_eq!(rows[0][1].as_deref(), Some("7"));
+                        assert_eq!(rows[0][2].as_deref(), Some("child"));
+                        assert_eq!(rows[0][3].as_deref(), Some("match"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where cast(parent_id as unsigned) = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id is not null order by cast(parent_id as unsigned) desc, id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

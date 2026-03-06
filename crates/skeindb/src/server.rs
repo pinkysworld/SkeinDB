@@ -44,9 +44,9 @@ use skeindb_skeinql::{
         WasmPlanRunParams,
     },
     types::{
-        BaseTableRef, Expr, JoinRef, JoinTableRef, JoinType, LimitClause, Lit, OrderBy, OrderDir,
-        Query, QueryBody, QueryCache, ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc,
-        WireHints,
+        BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
+        LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache, ResultFormat,
+        SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
     },
     RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
@@ -3989,12 +3989,25 @@ fn mysql_stmt_column_type_for_lit(lit: &Lit) -> MySqlStmtColumnType {
 }
 
 fn mysql_stmt_column_type_from_desc_column(column: &Value) -> MySqlStmtColumnType {
-    match column
-        .get("type")
-        .and_then(|v| v.get("kind"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("string")
-    {
+    mysql_stmt_column_type_from_desc_kind(
+        column
+            .get("type")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("string"),
+    )
+}
+
+fn mysql_stmt_column_type_from_desc_kind(kind: &str) -> MySqlStmtColumnType {
+    match kind {
+        "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
+        "f64" => MySqlStmtColumnType::Double,
+        _ => MySqlStmtColumnType::VarString,
+    }
+}
+
+fn mysql_stmt_column_type_for_type_desc(desc: &TypeDesc) -> MySqlStmtColumnType {
+    match desc.kind.as_str() {
         "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
         "f64" => MySqlStmtColumnType::Double,
         _ => MySqlStmtColumnType::VarString,
@@ -4144,9 +4157,20 @@ fn mysql_stmt_expr_type(
             }
             _ => MySqlStmtColumnType::VarString,
         },
-        Expr::Cast { .. } | Expr::Case { .. } | Expr::Subquery { .. } | Expr::Exists { .. } => {
-            MySqlStmtColumnType::VarString
+        Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
+        Expr::Case { case_ } => {
+            let mut out = case_
+                .when
+                .iter()
+                .map(|branch| mysql_stmt_expr_type(&branch.then, table_descs))
+                .reduce(mysql_stmt_merge_column_types)
+                .unwrap_or(MySqlStmtColumnType::VarString);
+            if let Some(other) = case_.r#else.as_ref() {
+                out = mysql_stmt_merge_column_types(out, mysql_stmt_expr_type(other, table_descs));
+            }
+            out
         }
+        Expr::Subquery { .. } | Expr::Exists { .. } => MySqlStmtColumnType::VarString,
     }
 }
 
@@ -8630,8 +8654,347 @@ fn parse_sql_function_call(raw: &str) -> Option<(String, Vec<String>)> {
     Some((name.to_ascii_lowercase(), args))
 }
 
+fn mysql_parse_cast_type_desc(raw: &str) -> Result<TypeDesc, RpcError> {
+    let token = raw
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if token.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CAST requires a target type",
+        ));
+    }
+    let lower = token.to_ascii_lowercase();
+    let desc = match lower.as_str() {
+        "signed" => TypeDesc {
+            kind: "i64".to_string(),
+            max: None,
+            precision: None,
+            scale: None,
+            charset: None,
+            collation: None,
+            unsigned: None,
+        },
+        "unsigned" => TypeDesc {
+            kind: "u64".to_string(),
+            max: None,
+            precision: None,
+            scale: None,
+            charset: None,
+            collation: None,
+            unsigned: Some(true),
+        },
+        _ => sql_type_to_desc(token, lower.contains("unsigned")),
+    };
+    Ok(desc)
+}
+
+fn parse_sql_cast_expr(raw: &str) -> Result<Option<Expr>, RpcError> {
+    let expr = raw.trim();
+    if !expr
+        .get(..4)
+        .map(|prefix| prefix.eq_ignore_ascii_case("cast"))
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let Some(open_idx) = expr.find('(') else {
+        return Ok(None);
+    };
+    if !expr[..open_idx].trim().eq_ignore_ascii_case("cast") {
+        return Ok(None);
+    }
+    let close_idx = find_matching_parenthesis(expr, open_idx)
+        .ok_or_else(|| RpcError::new("invalid_request", "CAST requires a closing parenthesis"))?;
+    if close_idx + 1 != expr.len() {
+        return Ok(None);
+    }
+    let inner = expr[open_idx + 1..close_idx].trim();
+    let Some(as_idx) = find_keyword_top_level(inner, "as") else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CAST requires an AS target type",
+        ));
+    };
+    let value_sql = inner[..as_idx].trim();
+    let type_sql = inner[as_idx + 2..].trim();
+    if value_sql.is_empty() || type_sql.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CAST requires both a value expression and target type",
+        ));
+    }
+    Ok(Some(Expr::Cast {
+        cast: CastExpr {
+            expr: Box::new(parse_sql_scalar_expr(value_sql)?),
+            to: mysql_parse_cast_type_desc(type_sql)?,
+        },
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCaseKeyword {
+    When,
+    Then,
+    Else,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlCaseKeywordMarker {
+    keyword: MySqlCaseKeyword,
+    start: usize,
+    end: usize,
+}
+
+fn mysql_parse_case_keyword_markers(raw: &str) -> Option<(usize, Vec<MySqlCaseKeywordMarker>)> {
+    let bytes = raw.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut nested_case_depth = 0u32;
+    let mut saw_outer_case = false;
+    let mut case_body_start = 0usize;
+    let mut markers = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == quote {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && (b.is_ascii_alphabetic() || b == b'_') {
+            let start = i;
+            let mut end = i + 1;
+            while end < bytes.len() && is_sql_ident_char(bytes[end]) {
+                end += 1;
+            }
+            let token = raw[start..end].to_ascii_lowercase();
+            if !saw_outer_case {
+                if token == "case" && raw[..start].trim().is_empty() {
+                    saw_outer_case = true;
+                    case_body_start = end;
+                }
+                i = end;
+                continue;
+            }
+            match token.as_str() {
+                "case" => nested_case_depth = nested_case_depth.saturating_add(1),
+                "end" => {
+                    if nested_case_depth == 0 {
+                        markers.push(MySqlCaseKeywordMarker {
+                            keyword: MySqlCaseKeyword::End,
+                            start,
+                            end,
+                        });
+                        if raw[end..].trim().is_empty() {
+                            return Some((case_body_start, markers));
+                        }
+                        return None;
+                    }
+                    nested_case_depth = nested_case_depth.saturating_sub(1);
+                }
+                "when" if nested_case_depth == 0 => markers.push(MySqlCaseKeywordMarker {
+                    keyword: MySqlCaseKeyword::When,
+                    start,
+                    end,
+                }),
+                "then" if nested_case_depth == 0 => markers.push(MySqlCaseKeywordMarker {
+                    keyword: MySqlCaseKeyword::Then,
+                    start,
+                    end,
+                }),
+                "else" if nested_case_depth == 0 => markers.push(MySqlCaseKeywordMarker {
+                    keyword: MySqlCaseKeyword::Else,
+                    start,
+                    end,
+                }),
+                _ => {}
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_sql_case_condition_expr(raw: &str) -> Result<Expr, RpcError> {
+    parse_where_expr_recursive(raw).or_else(|_| parse_sql_scalar_expr(raw))
+}
+
+fn parse_sql_case_expr(raw: &str) -> Result<Option<Expr>, RpcError> {
+    let expr = raw.trim();
+    if !expr
+        .get(..4)
+        .map(|prefix| prefix.eq_ignore_ascii_case("case"))
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let (case_body_start, markers) = mysql_parse_case_keyword_markers(expr)
+        .ok_or_else(|| RpcError::new("invalid_request", "invalid CASE expression"))?;
+    let Some(first_marker) = markers.first() else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CASE requires at least one WHEN branch",
+        ));
+    };
+    if first_marker.keyword != MySqlCaseKeyword::When {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CASE expression must start with WHEN",
+        ));
+    }
+    let simple_case_base_sql = expr[case_body_start..first_marker.start].trim();
+    let simple_case_base = if simple_case_base_sql.is_empty() {
+        None
+    } else {
+        Some(parse_sql_scalar_expr(simple_case_base_sql)?)
+    };
+
+    let mut when = Vec::new();
+    let mut else_expr = None;
+    let mut idx = 0usize;
+    while idx < markers.len() {
+        match markers[idx].keyword {
+            MySqlCaseKeyword::When => {
+                let Some(then_marker) = markers.get(idx + 1) else {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE WHEN requires a THEN branch",
+                    ));
+                };
+                if then_marker.keyword != MySqlCaseKeyword::Then {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE WHEN requires THEN before the next branch",
+                    ));
+                }
+                let Some(next_marker) = markers.get(idx + 2) else {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE THEN requires a following branch or END",
+                    ));
+                };
+                let condition_sql = expr[markers[idx].end..then_marker.start].trim();
+                let then_sql = expr[then_marker.end..next_marker.start].trim();
+                if condition_sql.is_empty() || then_sql.is_empty() {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE WHEN and THEN expressions must not be empty",
+                    ));
+                }
+                let condition_expr = if let Some(base_expr) = simple_case_base.as_ref() {
+                    Expr::Op {
+                        op: "eq".to_string(),
+                        a: Some(Box::new(base_expr.clone())),
+                        b: Some(Box::new(parse_sql_scalar_expr(condition_sql)?)),
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    }
+                } else {
+                    parse_sql_case_condition_expr(condition_sql)?
+                };
+                when.push(CaseWhen {
+                    r#if: condition_expr,
+                    then: parse_sql_scalar_expr(then_sql)?,
+                });
+                idx += 2;
+            }
+            MySqlCaseKeyword::Else => {
+                let Some(next_marker) = markers.get(idx + 1) else {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE ELSE requires a trailing END",
+                    ));
+                };
+                if next_marker.keyword != MySqlCaseKeyword::End {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE ELSE must be the final branch before END",
+                    ));
+                }
+                let else_sql = expr[markers[idx].end..next_marker.start].trim();
+                if else_sql.is_empty() {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        "CASE ELSE expression must not be empty",
+                    ));
+                }
+                else_expr = Some(Box::new(parse_sql_scalar_expr(else_sql)?));
+                idx += 1;
+            }
+            MySqlCaseKeyword::Then => {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "CASE THEN must follow a WHEN branch",
+                ));
+            }
+            MySqlCaseKeyword::End => break,
+        }
+    }
+    if when.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "CASE requires at least one WHEN branch",
+        ));
+    }
+    Ok(Some(Expr::Case {
+        case_: CaseExpr {
+            when,
+            r#else: else_expr,
+        },
+    }))
+}
+
 fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
     let s = raw.trim();
+    if s.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "SQL expression must not be empty",
+        ));
+    }
+    let unwrapped = trim_wrapping_parentheses(s);
+    if unwrapped != s {
+        return parse_sql_scalar_expr(unwrapped);
+    }
+    if let Some(expr) = parse_sql_case_expr(s)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_sql_cast_expr(s)? {
+        return Ok(expr);
+    }
     let is_lit = s.starts_with('\'')
         || s.starts_with('"')
         || s.eq_ignore_ascii_case("null")
@@ -9001,30 +9364,58 @@ fn parse_where_expr(where_sql: &str) -> Result<Option<Expr>, RpcError> {
     Ok(Some(parse_where_expr_recursive(where_sql)?))
 }
 
+fn mysql_split_order_by_expr_and_dir(part: &str) -> (&str, Option<OrderDir>) {
+    let trimmed = part.trim();
+    if trimmed.is_empty() {
+        return ("", None);
+    }
+    let bytes = trimmed.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut last_top_level_ws = None::<usize>;
+    for (idx, b) in bytes.iter().enumerate() {
+        let b = *b;
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
+                    continue;
+                }
+                quote = 0;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && b.is_ascii_whitespace() => last_top_level_ws = Some(idx),
+            _ => {}
+        }
+    }
+    let Some(idx) = last_top_level_ws else {
+        return (trimmed, None);
+    };
+    let expr_sql = trimmed[..idx].trim_end();
+    let dir_sql = trimmed[idx..].trim();
+    if dir_sql.eq_ignore_ascii_case("desc") {
+        (expr_sql, Some(OrderDir::Desc))
+    } else if dir_sql.eq_ignore_ascii_case("asc") {
+        (expr_sql, Some(OrderDir::Asc))
+    } else {
+        (trimmed, None)
+    }
+}
+
 fn parse_order_by(order_sql: &str) -> Result<Vec<OrderBy>, RpcError> {
     let mut out = Vec::new();
     for part in split_csv_top_level(order_sql) {
-        let mut toks = part.split_whitespace();
-        let Some(col_tok) = toks.next() else {
+        let (expr_sql, dir) = mysql_split_order_by_expr_and_dir(&part);
+        if expr_sql.is_empty() {
             continue;
-        };
-        let Some((col, table)) = parse_sql_column_ref(col_tok) else {
-            continue;
-        };
-        let dir = match toks.next().map(|t| t.to_ascii_lowercase()) {
-            Some(d) if d == "desc" => Some(OrderDir::Desc),
-            Some(d) if d == "asc" => Some(OrderDir::Asc),
-            Some(other) => {
-                return Err(RpcError::new(
-                    "not_supported",
-                    format!("unsupported ORDER BY direction '{}'", other),
-                ))
-            }
-            None => Some(OrderDir::Asc),
-        };
+        }
         out.push(OrderBy {
-            expr: Expr::Col { col, table },
-            dir,
+            expr: parse_sql_scalar_expr(expr_sql)?,
+            dir: Some(dir.unwrap_or(OrderDir::Asc)),
         });
     }
     Ok(out)
@@ -14578,6 +14969,32 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT CAST(u.id AS CHAR) AS user_id_text, CASE WHEN p.id = 7 THEN u.name ELSE 'other' END AS chosen_name FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse cast/case projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let cast_case_projection =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
+        assert_eq!(
+            cast_case_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "user_id_text".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "chosen_name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -15155,6 +15572,53 @@ mod tests {
         assert!(distinct.is_none());
         assert!(matches!(args[0], Expr::Func { .. }));
         assert!(matches!(args[2], Expr::Func { .. }));
+    }
+
+    #[test]
+    fn parse_sql_scalar_expr_supports_mysql_cast_and_case() {
+        let cast_expr =
+            parse_sql_scalar_expr("CAST(parent_id AS UNSIGNED)").expect("parse cast expr");
+        let Expr::Cast { cast } = cast_expr else {
+            panic!("expected cast expr");
+        };
+        assert_eq!(cast.to.kind, "u64");
+        assert!(cast.to.unsigned.unwrap_or(false));
+        assert!(matches!(*cast.expr, Expr::Col { .. }));
+
+        let case_expr = parse_sql_scalar_expr(
+            "CASE post_status WHEN 'draft' THEN post_title ELSE post_slug END",
+        )
+        .expect("parse simple case expr");
+        let Expr::Case { case_ } = case_expr else {
+            panic!("expected case expr");
+        };
+        assert_eq!(case_.when.len(), 1);
+        assert!(matches!(case_.when[0].r#if, Expr::Op { .. }));
+        assert!(case_.r#else.is_some());
+
+        let searched_case = parse_sql_scalar_expr(
+            "CASE WHEN parent_id = 7 THEN 'child' WHEN parent_id IS NULL THEN 'root' ELSE 'other' END",
+        )
+        .expect("parse searched case expr");
+        let Expr::Case { case_: searched } = searched_case else {
+            panic!("expected searched case expr");
+        };
+        assert_eq!(searched.when.len(), 2);
+        assert!(matches!(searched.when[0].r#if, Expr::Op { .. }));
+        assert!(searched.r#else.is_some());
+    }
+
+    #[test]
+    fn parse_order_by_supports_scalar_expressions() {
+        let order = parse_order_by(
+            "CAST(parent_id AS UNSIGNED) DESC, CASE WHEN post_status = 'draft' THEN post_title ELSE post_slug END ASC",
+        )
+        .expect("parse order by");
+        assert_eq!(order.len(), 2);
+        assert!(matches!(order[0].expr, Expr::Cast { .. }));
+        assert_eq!(order[0].dir, Some(OrderDir::Desc));
+        assert!(matches!(order[1].expr, Expr::Case { .. }));
+        assert_eq!(order[1].dir, Some(OrderDir::Asc));
     }
 
     #[test]

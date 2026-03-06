@@ -8045,8 +8045,17 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Expr::Cast { .. } => anyhow::bail!("invalid_request: wasm plans do not support cast"),
-        Expr::Case { .. } => anyhow::bail!("invalid_request: wasm plans do not support case"),
+        Expr::Cast { cast } => validate_wasm_expr(&cast.expr),
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                validate_wasm_expr(&when.r#if)?;
+                validate_wasm_expr(&when.then)?;
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                validate_wasm_expr(other)?;
+            }
+            Ok(())
+        }
         Expr::Subquery { .. } | Expr::Exists { .. } => {
             anyhow::bail!("invalid_request: wasm plans do not support subqueries")
         }
@@ -8476,6 +8485,23 @@ fn eval_expr(
                     })
                 }
                 _ => anyhow::bail!("unsupported op: {op}"),
+            }
+        }
+        Expr::Cast { cast } => {
+            let value = eval_expr(&cast.expr, row, ctx, args)?;
+            mysql_cast_lit(value, &cast.to)
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                let condition = eval_expr(&when.r#if, row, ctx, args)?;
+                if matches!(mysql_if_condition_truth(&condition), Some(true)) {
+                    return eval_expr(&when.then, row, ctx, args);
+                }
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                eval_expr(other, row, ctx, args)
+            } else {
+                Ok(Lit::Null)
             }
         }
         Expr::Func {
@@ -9059,6 +9085,84 @@ fn mysql_round_number(value: f64, decimals: i64) -> f64 {
         let factor = 10_f64.powi(-clamped);
         (value / factor).round() * factor
     }
+}
+
+fn mysql_cast_to_u64(lit: &Lit) -> Option<u64> {
+    match lit {
+        Lit::U64 { v } => Some(*v),
+        Lit::I64 { v } => Some(*v as u64),
+        Lit::F64 { v } => Some(*v as u64),
+        Lit::Dec { v } => v
+            .parse::<f64>()
+            .ok()
+            .map(|value| value as i64 as u64)
+            .or_else(|| v.parse::<u64>().ok()),
+        Lit::Str { v } => v
+            .parse::<i64>()
+            .ok()
+            .map(|value| value as u64)
+            .or_else(|| v.parse::<u64>().ok()),
+        _ => None,
+    }
+}
+
+fn mysql_cast_iso_lit(kind: &str, text: String) -> Lit {
+    match kind {
+        "date" => Lit::Date { iso: text },
+        "time" => Lit::Time { iso: text },
+        _ => Lit::Datetime { iso: text },
+    }
+}
+
+fn mysql_cast_lit(value: Lit, target: &TypeDesc) -> anyhow::Result<Lit> {
+    if matches!(value, Lit::Null) {
+        return Ok(Lit::Null);
+    }
+    Ok(match target.kind.as_str() {
+        "bool" => match mysql_if_condition_truth(&value) {
+            Some(v) => Lit::Bool { v },
+            None => Lit::Null,
+        },
+        "i64" => lit_to_i64(&value)
+            .map(|v| Lit::I64 { v })
+            .unwrap_or(Lit::Null),
+        "u64" => mysql_cast_to_u64(&value)
+            .map(|v| Lit::U64 { v })
+            .unwrap_or(Lit::Null),
+        "f64" => lit_to_f64(&value)
+            .map(|v| Lit::F64 { v })
+            .unwrap_or(Lit::Null),
+        "bytes" => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            Lit::Bytes {
+                b64: BASE64_STANDARD.encode(text.as_bytes()),
+            }
+        }
+        "json" => match value {
+            Lit::Json { .. } => value,
+            Lit::Str { ref v } => match serde_json::from_str::<serde_json::Value>(v) {
+                Ok(json) => Lit::Json { v: json },
+                Err(_) => Lit::Null,
+            },
+            other => Lit::Json {
+                v: lit_to_json_value(other)?,
+            },
+        },
+        "date" | "time" | "datetime" => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            mysql_cast_iso_lit(&target.kind, text)
+        }
+        _ => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            Lit::Str { v: text }
+        }
+    })
 }
 
 fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
@@ -18926,6 +19030,91 @@ mod tests {
                     ],
                     distinct: None,
                 },
+                Expr::Cast {
+                    cast: skeindb_skeinql::types::CastExpr {
+                        expr: Box::new(Expr::Col {
+                            col: "id".to_string(),
+                            table: None,
+                        }),
+                        to: type_desc("string"),
+                    },
+                },
+                Expr::Cast {
+                    cast: skeindb_skeinql::types::CastExpr {
+                        expr: Box::new(Expr::Lit {
+                            lit: Lit::Str { v: "7".to_string() },
+                        }),
+                        to: TypeDesc {
+                            kind: "u64".to_string(),
+                            max: None,
+                            precision: None,
+                            scale: None,
+                            charset: None,
+                            collation: None,
+                            unsigned: Some(true),
+                        },
+                    },
+                },
+                Expr::Case {
+                    case_: skeindb_skeinql::types::CaseExpr {
+                        when: vec![skeindb_skeinql::types::CaseWhen {
+                            r#if: Expr::Op {
+                                op: "is_null".to_string(),
+                                a: Some(Box::new(Expr::Col {
+                                    col: "parent_id".to_string(),
+                                    table: None,
+                                })),
+                                b: None,
+                                args: None,
+                                list: None,
+                                lo: None,
+                                hi: None,
+                            },
+                            then: Expr::Lit {
+                                lit: Lit::Str {
+                                    v: "root".to_string(),
+                                },
+                            },
+                        }],
+                        r#else: Some(Box::new(Expr::Lit {
+                            lit: Lit::Str {
+                                v: "child".to_string(),
+                            },
+                        })),
+                    },
+                },
+                Expr::Case {
+                    case_: skeindb_skeinql::types::CaseExpr {
+                        when: vec![skeindb_skeinql::types::CaseWhen {
+                            r#if: Expr::Op {
+                                op: "eq".to_string(),
+                                a: Some(Box::new(Expr::Col {
+                                    col: "slug".to_string(),
+                                    table: None,
+                                })),
+                                b: Some(Box::new(Expr::Lit {
+                                    lit: Lit::Str {
+                                        v: "hé".to_string(),
+                                    },
+                                })),
+                                args: None,
+                                list: None,
+                                lo: None,
+                                hi: None,
+                            },
+                            then: Expr::Lit {
+                                lit: Lit::Str {
+                                    v: "match".to_string(),
+                                },
+                            },
+                        }],
+                        r#else: Some(Box::new(Expr::Lit {
+                            lit: Lit::Str {
+                                v: "miss".to_string(),
+                            },
+                        })),
+                    },
+                },
             ],
             Some(eq_expr(
                 lower_expr,
@@ -18986,6 +19175,14 @@ mod tests {
                 Lit::I64 { v: 3 },
                 Lit::Str { v: "a".to_string() },
                 Lit::I64 { v: 5 },
+                Lit::Str { v: "1".to_string() },
+                Lit::U64 { v: 7 },
+                Lit::Str {
+                    v: "root".to_string()
+                },
+                Lit::Str {
+                    v: "match".to_string()
+                },
             ]]
         );
 

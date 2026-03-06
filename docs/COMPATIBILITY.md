@@ -41,10 +41,11 @@ SkeinDB adoption strategy:
 - INSERT ... ON DUPLICATE KEY UPDATE
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata backed by in-memory compatibility key indexes; durable reusable secondary-index parity is still open
 - UPDATE/DELETE with simple WHERE
-- SELECT with WHERE / ORDER BY / LIMIT / OFFSET
+- SELECT with WHERE / ORDER BY / LIMIT / OFFSET (including scalar-expression `ORDER BY` for the translated compatibility subset)
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
+- Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
@@ -56,7 +57,7 @@ SkeinDB adoption strategy:
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
-- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
 - Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
@@ -84,8 +85,10 @@ The MySQL integration suite now executes that corpus end-to-end over the wire li
 so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
 pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
-parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverage, `ALTER TABLE ... RENAME COLUMN`,
-top-level `AND`-chained subquery rewrite coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage for creating MySQL compatibility unique indexes.
+parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverage, baseline `CASE` / `CAST`
+expression coverage including scalar-expression `ORDER BY`, `ALTER TABLE ... RENAME COLUMN`, top-level
+`AND`-chained subquery rewrite coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage
+for creating MySQL compatibility unique indexes.
 
 ---
 
