@@ -8048,6 +8048,23 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "coalesce"
                     | "ifnull"
                     | "concat"
+                    | "date"
+                    | "year"
+                    | "month"
+                    | "day"
+                    | "dayofmonth"
+                    | "hour"
+                    | "minute"
+                    | "second"
+                    | "unix_timestamp"
+                    | "now"
+                    | "current_timestamp"
+                    | "localtimestamp"
+                    | "curdate"
+                    | "current_date"
+                    | "curtime"
+                    | "current_time"
+                    | "localtime"
                     | "vector.cosine"
                     | "vector.dot"
                     | "vector.l2"
@@ -8915,6 +8932,88 @@ fn eval_expr(
                     }
                     Ok(Lit::Str { v: out })
                 }
+                "date" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("date requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Date {
+                        iso: mysql_format_date_parts(date),
+                    })
+                }
+                "year" | "month" | "day" | "dayofmonth" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let out = match name {
+                        "year" => i64::from(date.year),
+                        "month" => i64::from(date.month),
+                        _ => i64::from(date.day),
+                    };
+                    Ok(Lit::I64 { v: out })
+                }
+                "hour" | "minute" | "second" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((date, time)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let time = time.unwrap_or(MySqlTimeParts {
+                        hour: 0,
+                        minute: 0,
+                        second: 0,
+                    });
+                    if time.hour == 0 && time.minute == 0 && time.second == 0 && date.is_none() {
+                        return Ok(Lit::Null);
+                    }
+                    let out = match name {
+                        "hour" => i64::from(time.hour),
+                        "minute" => i64::from(time.minute),
+                        _ => i64::from(time.second),
+                    };
+                    Ok(Lit::I64 { v: out })
+                }
+                "unix_timestamp" => {
+                    if fargs.len() > 1 {
+                        anyhow::bail!("unix_timestamp requires 0 or 1 args");
+                    }
+                    if fargs.is_empty() {
+                        return Ok(Lit::I64 {
+                            v: mysql_current_unix_seconds(),
+                        });
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_unix_timestamp_from_lit(&value)
+                        .map(|v| Lit::I64 { v })
+                        .unwrap_or(Lit::Null))
+                }
+                "now" | "current_timestamp" | "localtimestamp" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "curdate" | "current_date" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_date_lit())
+                }
+                "curtime" | "current_time" | "localtime" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_time_lit())
+                }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
                         anyhow::bail!("{name} requires 2 args");
@@ -9003,7 +9102,10 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
             .zip(lit_to_f64(b))
             .and_then(|(x, y)| x.partial_cmp(&y))
             .unwrap_or(Ordering::Equal)),
-        _ => Ok(Ordering::Equal),
+        _ => match (lit_to_string_for_like(a), lit_to_string_for_like(b)) {
+            (Some(x), Some(y)) => Ok(x.cmp(&y)),
+            _ => Ok(Ordering::Equal),
+        },
     }
 }
 
@@ -9285,6 +9387,206 @@ fn mysql_cast_lit(value: Lit, target: &TypeDesc) -> anyhow::Result<Lit> {
             Lit::Str { v: text }
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlDateParts {
+    year: i32,
+    month: u8,
+    day: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlTimeParts {
+    hour: u8,
+    minute: u8,
+    second: u8,
+}
+
+fn mysql_is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn mysql_days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if mysql_is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn mysql_parse_date_parts(text: &str) -> Option<MySqlDateParts> {
+    let trimmed = text.trim();
+    let parts = trimmed.split('-').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year = parts[0].parse::<i32>().ok()?;
+    let month = parts[1].parse::<u8>().ok()?;
+    let day = parts[2].parse::<u8>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if day == 0 || day > mysql_days_in_month(year, month) {
+        return None;
+    }
+    Some(MySqlDateParts { year, month, day })
+}
+
+fn mysql_parse_time_parts(text: &str) -> Option<MySqlTimeParts> {
+    let trimmed = text.trim();
+    let trimmed = trimmed.strip_suffix('Z').unwrap_or(trimmed);
+    let trimmed = trimmed.split('.').next().unwrap_or(trimmed);
+    let trimmed = if trimmed.len() > 8 {
+        let bytes = trimmed.as_bytes();
+        if matches!(bytes.get(8), Some(b'+') | Some(b'-')) {
+            &trimmed[..8]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let parts = trimmed.split(':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    let hour = parts[0].parse::<u8>().ok()?;
+    let minute = parts[1].parse::<u8>().ok()?;
+    let second = parts[2].parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(MySqlTimeParts {
+        hour,
+        minute,
+        second,
+    })
+}
+
+fn mysql_parse_date_time_lit_parts(
+    lit: &Lit,
+) -> Option<(Option<MySqlDateParts>, Option<MySqlTimeParts>)> {
+    let text = lit_to_string_for_like(lit)?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((date_text, time_text)) =
+        trimmed.split_once('T').or_else(|| trimmed.split_once(' '))
+    {
+        let date = mysql_parse_date_parts(date_text.trim())?;
+        let time = mysql_parse_time_parts(time_text.trim())?;
+        return Some((Some(date), Some(time)));
+    }
+    if trimmed.contains('-') {
+        return Some((Some(mysql_parse_date_parts(trimmed)?), None));
+    }
+    if trimmed.contains(':') {
+        return Some((None, Some(mysql_parse_time_parts(trimmed)?)));
+    }
+    None
+}
+
+fn mysql_days_from_civil(date: MySqlDateParts) -> i64 {
+    let year = date.year - i32::from(date.month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i32::from(date.month);
+    let day = i32::from(date.day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468
+}
+
+fn mysql_civil_from_days(days: i64) -> MySqlDateParts {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era as i32 + era as i32 * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u8;
+    let month = (month_prime + if month_prime < 10 { 3 } else { -9 }) as u8;
+    year += i32::from(month <= 2);
+    MySqlDateParts { year, month, day }
+}
+
+fn mysql_format_date_parts(date: MySqlDateParts) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+fn mysql_format_time_parts(time: MySqlTimeParts) -> String {
+    format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second)
+}
+
+fn mysql_format_datetime_parts(date: MySqlDateParts, time: MySqlTimeParts) -> String {
+    format!(
+        "{} {}",
+        mysql_format_date_parts(date),
+        mysql_format_time_parts(time)
+    )
+}
+
+fn mysql_current_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn mysql_current_date_time_parts() -> (MySqlDateParts, MySqlTimeParts) {
+    let seconds = mysql_current_unix_seconds();
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let date = mysql_civil_from_days(days);
+    let time = MySqlTimeParts {
+        hour: (seconds_of_day / 3_600) as u8,
+        minute: ((seconds_of_day % 3_600) / 60) as u8,
+        second: (seconds_of_day % 60) as u8,
+    };
+    (date, time)
+}
+
+fn mysql_current_datetime_lit() -> Lit {
+    let (date, time) = mysql_current_date_time_parts();
+    Lit::Datetime {
+        iso: mysql_format_datetime_parts(date, time),
+    }
+}
+
+fn mysql_current_date_lit() -> Lit {
+    let (date, _) = mysql_current_date_time_parts();
+    Lit::Date {
+        iso: mysql_format_date_parts(date),
+    }
+}
+
+fn mysql_current_time_lit() -> Lit {
+    let (_, time) = mysql_current_date_time_parts();
+    Lit::Time {
+        iso: mysql_format_time_parts(time),
+    }
+}
+
+fn mysql_unix_timestamp_from_lit(lit: &Lit) -> Option<i64> {
+    let (date, time) = mysql_parse_date_time_lit_parts(lit)?;
+    let date = date?;
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    Some(
+        mysql_days_from_civil(date) * 86_400
+            + i64::from(time.hour) * 3_600
+            + i64::from(time.minute) * 60
+            + i64::from(time.second),
+    )
 }
 
 fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
@@ -19510,6 +19812,327 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_mysql_datetime_functions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_datetime_functions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "published_at".to_string(),
+                    r#type: type_desc("datetime"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-01 00:00:00".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-02 03:04:05".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-03 06:07:08".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let projection_query = base_query(
+            "app",
+            "posts",
+            vec![
+                Expr::Func {
+                    name: "date".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "year".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "month".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "day".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "hour".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "minute".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "second".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "unix_timestamp".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::Date {
+                    iso: "2020-01-02".to_string(),
+                },
+                Lit::I64 { v: 2020 },
+                Lit::I64 { v: 1 },
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 3 },
+                Lit::I64 { v: 4 },
+                Lit::I64 { v: 5 },
+                Lit::I64 { v: 1_577_934_245 },
+            ]]
+        );
+
+        let date_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "date".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2020-01-03".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, filtered_rows) = execute_select(&engine, &date_filtered_query, &[])?;
+        assert_eq!(filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let mut ordered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "year".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 2020 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        ordered_query.order_by = vec![
+            OrderBy {
+                expr: Expr::Func {
+                    name: "unix_timestamp".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                dir: Some(OrderDir::Desc),
+            },
+            OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                dir: Some(OrderDir::Asc),
+            },
+        ];
+        ordered_query.limit = Some(LimitClause {
+            limit: Some(2),
+            offset: Some(0),
+        });
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        assert_eq!(
+            ordered_rows,
+            vec![vec![Lit::U64 { v: 3 }], vec![Lit::U64 { v: 2 }]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_current_datetime_functions_return_date_like_literals() -> anyhow::Result<()> {
+        let row = row(&[]);
+
+        let now = eval_expr(
+            &Expr::Func {
+                name: "now".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Datetime { iso: now_iso } = now else {
+            panic!("expected datetime literal");
+        };
+        assert!(mysql_parse_date_time_lit_parts(&Lit::Datetime { iso: now_iso }).is_some());
+
+        let curdate = eval_expr(
+            &Expr::Func {
+                name: "curdate".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Date { iso: curdate_iso } = curdate else {
+            panic!("expected date literal");
+        };
+        let (date, time) =
+            mysql_parse_date_time_lit_parts(&Lit::Date { iso: curdate_iso }).unwrap();
+        assert!(date.is_some());
+        assert!(time.is_none());
+
+        let curtime = eval_expr(
+            &Expr::Func {
+                name: "curtime".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Time { iso: curtime_iso } = curtime else {
+            panic!("expected time literal");
+        };
+        let (date, time) =
+            mysql_parse_date_time_lit_parts(&Lit::Time { iso: curtime_iso }).unwrap();
+        assert!(date.is_none());
+        assert!(time.is_some());
+
+        let unix_now = eval_expr(
+            &Expr::Func {
+                name: "unix_timestamp".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        assert!(matches!(unix_now, Lit::I64 { v } if v > 1_500_000_000));
+
         Ok(())
     }
 

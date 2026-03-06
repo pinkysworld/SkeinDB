@@ -191,6 +191,21 @@ SELECT post_name
   FROM wp_posts
  WHERE ID = 1;
 
+SELECT DATE(post_date), YEAR(post_date), MONTH(post_date), DAY(post_date), HOUR(post_date), MINUTE(post_date), SECOND(post_date)
+  FROM wp_posts
+ WHERE ID = 1;
+
+SELECT ID
+  FROM wp_posts
+ WHERE DATE(post_date) = '2020-01-03'
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE YEAR(post_date) = 2020
+ ORDER BY UNIX_TIMESTAMP(post_date) DESC
+ LIMIT 0, 2;
+
 SELECT p.post_author, u.user_login
   FROM wp_posts AS p
   LEFT JOIN wp_users AS u

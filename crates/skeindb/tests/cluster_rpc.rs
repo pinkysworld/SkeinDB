@@ -802,6 +802,59 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
     send_com_stmt_close(&mut stream, arithmetic_stmt.statement_id).await?;
 
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_events").await?;
+    let (_seq, ok_drop_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_events)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_events (id BIGINT UNSIGNED NOT NULL, occurred_at DATETIME NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_events)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_events (id, occurred_at) VALUES (1, '2020-01-02 03:04:05')",
+    )
+    .await?;
+    let (_seq, ok_insert_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_events)?.0, 1);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATE(occurred_at) AS occurred_day, YEAR(occurred_at) AS occurred_year, UNIX_TIMESTAMP(occurred_at) AS occurred_ts FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(datetime_stmt.param_count, 1);
+    assert_eq!(
+        datetime_stmt.column_defs,
+        vec![
+            ("occurred_day".to_string(), 0xfd),
+            ("occurred_year".to_string(), 0x08),
+            ("occurred_ts".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        datetime_rows,
+        vec![vec![
+            Some("2020-01-02".to_string()),
+            Some("2020".to_string()),
+            Some("1577934245".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, datetime_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -1470,6 +1523,45 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select date(post_date), year(post_date), month(post_date), day(post_date), hour(post_date), minute(post_date), second(post_date) from wp_posts where id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-01".to_string()),
+                                Some("2020".to_string()),
+                                Some("1".to_string()),
+                                Some("1".to_string()),
+                                Some("0".to_string()),
+                                Some("0".to_string()),
+                                Some("0".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date(post_date) = '2020-01-03' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where year(post_date) = 2020 order by unix_timestamp(post_date) desc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("5"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select p.id from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login = 'ada' order by p.id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {

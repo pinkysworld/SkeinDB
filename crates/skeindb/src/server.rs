@@ -4141,6 +4141,8 @@ fn mysql_stmt_expr_type(
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr" => {
                 MySqlStmtColumnType::LongLong
             }
+            "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
+            | "unix_timestamp" => MySqlStmtColumnType::LongLong,
             "avg" | "round" => MySqlStmtColumnType::Double,
             "sum" | "abs" | "floor" | "ceil" | "ceiling" | "mod" => args
                 .iter()
@@ -4153,9 +4155,9 @@ fn mysql_stmt_expr_type(
                 .reduce(mysql_stmt_merge_column_types)
                 .unwrap_or(MySqlStmtColumnType::VarString),
             "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
-            | "right" | "substring" | "substr" | "replace" | "concat" => {
-                MySqlStmtColumnType::VarString
-            }
+            | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "now"
+            | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
+            | "current_time" | "localtime" => MySqlStmtColumnType::VarString,
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -8655,6 +8657,19 @@ fn parse_sql_function_call(raw: &str) -> Option<(String, Vec<String>)> {
     Some((name.to_ascii_lowercase(), args))
 }
 
+fn mysql_parse_no_paren_scalar_function(raw: &str) -> Option<String> {
+    let token = clean_sql_ident(raw);
+    if token.is_empty() || token.contains('.') {
+        return None;
+    }
+    let lower = token.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "current_timestamp" | "localtimestamp" | "current_date" | "current_time" | "localtime"
+    )
+    .then_some(lower)
+}
+
 fn mysql_is_unary_plus_minus(expr: &str, idx: usize) -> bool {
     let bytes = expr.as_bytes();
     if idx >= bytes.len() || !matches!(bytes[idx], b'+' | b'-') {
@@ -9142,6 +9157,13 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
         return Ok(Expr::Func {
             name,
             args,
+            distinct: None,
+        });
+    }
+    if let Some(name) = mysql_parse_no_paren_scalar_function(s) {
+        return Ok(Expr::Func {
+            name,
+            args: Vec::new(),
             distinct: None,
         });
     }
@@ -15152,6 +15174,56 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT DATE(p.created_at) AS created_day, YEAR(p.created_at) AS created_year, UNIX_TIMESTAMP(p.created_at) AS created_ts, CURRENT_TIMESTAMP AS now_value FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse datetime projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let datetime_table_descs = vec![MySqlStmtPrepareTableDesc {
+            base: BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: Some("p".to_string()),
+            },
+            desc: json!({
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}},
+                    {"name": "created_at", "type": {"kind": "datetime"}}
+                ]
+            }),
+        }];
+        let datetime_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            datetime_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_day".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_year".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_ts".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "now_value".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -15785,18 +15857,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_scalar_expr_supports_mysql_datetime_functions() {
+        let expr =
+            parse_sql_scalar_expr("UNIX_TIMESTAMP(post_date)").expect("parse unix_timestamp expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = expr
+        else {
+            panic!("expected function expr");
+        };
+        assert_eq!(name, "unix_timestamp");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
+        assert!(matches!(args[0], Expr::Col { .. }));
+
+        let no_paren =
+            parse_sql_scalar_expr("CURRENT_TIMESTAMP").expect("parse current_timestamp expr");
+        let Expr::Func { name, args, .. } = no_paren else {
+            panic!("expected no-paren current_timestamp function expr");
+        };
+        assert_eq!(name, "current_timestamp");
+        assert!(args.is_empty());
+    }
+
+    #[test]
     fn parse_order_by_supports_scalar_expressions() {
         let order = parse_order_by(
-            "CAST(parent_id AS UNSIGNED) DESC, CASE WHEN post_status = 'draft' THEN post_title ELSE post_slug END ASC, parent_id + 0 DESC",
+            "CAST(parent_id AS UNSIGNED) DESC, CASE WHEN post_status = 'draft' THEN post_title ELSE post_slug END ASC, parent_id + 0 DESC, UNIX_TIMESTAMP(post_date) ASC",
         )
         .expect("parse order by");
-        assert_eq!(order.len(), 3);
+        assert_eq!(order.len(), 4);
         assert!(matches!(order[0].expr, Expr::Cast { .. }));
         assert_eq!(order[0].dir, Some(OrderDir::Desc));
         assert!(matches!(order[1].expr, Expr::Case { .. }));
         assert_eq!(order[1].dir, Some(OrderDir::Asc));
         assert!(matches!(order[2].expr, Expr::Op { .. }));
         assert_eq!(order[2].dir, Some(OrderDir::Desc));
+        assert!(matches!(order[3].expr, Expr::Func { .. }));
+        assert_eq!(order[3].dir, Some(OrderDir::Asc));
     }
 
     #[test]
