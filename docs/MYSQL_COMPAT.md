@@ -60,10 +60,10 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL` / `IS NOT NULL`, and parenthesized `AND` / `OR` predicate trees for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
-  - baseline MySQL scalar-function coverage for `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
-  - index-backed in-memory `UNIQUE KEY` probe enforcement for inserts/updates, plus declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE` (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
+  - baseline MySQL scalar-function coverage for `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
+  - index-backed in-memory `UNIQUE KEY` probe enforcement for inserts/updates, declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE`, and duplicate-row rejection when creating a MySQL compatibility `UNIQUE INDEX` over existing data (useful for tables like `wp_options`, even when the unique column is not the first inserted column)
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CHARACTER SET`, `SHOW COLLATION`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `sql_auto_is_null`, charset/collation variables, `time_zone`, and `transaction_isolation`; unfiltered and scoped forms like `SHOW [SESSION|GLOBAL] VARIABLES`; simple `WHERE Variable_name ...` / `WHERE Charset ...` filters; plus wildcard patterns like `SHOW VARIABLES LIKE 'character_set_%'`)
-  - limited subquery compatibility rewrites for common adoption paths: `... WHERE <col> [NOT] IN (SELECT ...)` and `... WHERE [NOT] EXISTS (SELECT ...)`, including top-level `AND` chains that mix one or more of those predicates with translated non-subquery filters
+  - limited subquery compatibility rewrites for common adoption paths: `... WHERE <col> [NOT] IN (SELECT ...)` and `... WHERE [NOT] EXISTS (SELECT ...)`, including top-level `AND` chains that mix one or more of those predicates with translated non-subquery filters plus simple correlated `EXISTS` membership rewrites (`inner.col = outer_alias.col`)
   - `SET autocommit` (including qualified/session forms), `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
   - compatibility no-op handling for `LOCK TABLES` / `UNLOCK TABLES`
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
@@ -74,7 +74,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) complete duplicate-key enforcement hardening from the current in-memory probe indexes to full durable/reusable secondary-index-backed unique-key semantics
-2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (deeper correlated/nested subqueries, broader function coverage beyond the current scalar baseline, and broader `ALTER TABLE` variants beyond the current `ADD/MODIFY/CHANGE/RENAME/DROP COLUMN` plus index metadata surface)
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (deeper correlated/nested subqueries beyond the current simple `EXISTS` rewrite, broader function coverage beyond the current scalar baseline, and broader `ALTER TABLE` variants beyond the current `ADD/MODIFY/CHANGE/RENAME/DROP COLUMN` plus index metadata surface)
 3) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers
 
 ---

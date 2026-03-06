@@ -383,6 +383,15 @@ SELECT id
  ORDER BY id ASC
  LIMIT 0, 2;
 
+SELECT outer_q.id
+  FROM compat_alter_subq AS outer_q
+ WHERE EXISTS (
+   SELECT 1
+     FROM compat_alter_subq AS inner_q
+    WHERE inner_q.parent_id = outer_q.id
+ )
+ ORDER BY outer_q.id ASC;
+
 SELECT id
   FROM compat_alter_subq
  WHERE NOT EXISTS (
@@ -426,6 +435,17 @@ SELECT LOWER(post_slug),
        COALESCE(parent_id, 0),
        IFNULL(parent_id, 0),
        CONCAT(post_slug, '-', IFNULL(parent_id, 0))
+  FROM compat_alter_subq
+ WHERE id = 4;
+
+SELECT TRIM('  n-a  '),
+       LTRIM('  n-a'),
+       RTRIM('n-a  '),
+       LEFT(post_slug, 1),
+       RIGHT(post_slug, 1),
+       SUBSTRING(post_slug, 2, 2),
+       REPLACE(post_slug, '-', '_'),
+       NULLIF(post_slug, 'n-a')
   FROM compat_alter_subq
  WHERE id = 4;
 

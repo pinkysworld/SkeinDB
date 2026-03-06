@@ -1517,7 +1517,7 @@ impl Engine {
         }
 
         {
-            let (schema, _) = self.get_table_mut(table)?;
+            let (schema, tdata) = self.get_table_mut(table)?;
             let mut normalized_columns = Vec::new();
             let mut seen = HashSet::new();
             for column in columns.iter() {
@@ -1547,6 +1547,10 @@ impl Engine {
             }
             if unchanged {
                 return Ok(());
+            }
+
+            if unique {
+                mysql_compat_validate_unique_columns(tdata, &normalized_columns, &index_name)?;
             }
 
             set_mysql_compat_index(schema, &index_name, &normalized_columns, unique);
@@ -8006,6 +8010,15 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "length"
                     | "char_length"
                     | "character_length"
+                    | "trim"
+                    | "ltrim"
+                    | "rtrim"
+                    | "left"
+                    | "right"
+                    | "substring"
+                    | "substr"
+                    | "replace"
+                    | "nullif"
                     | "coalesce"
                     | "ifnull"
                     | "concat"
@@ -8505,6 +8518,135 @@ fn eval_expr(
                         v: v.chars().count() as u64,
                     })
                 }
+                "trim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("trim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim().to_string(),
+                    })
+                }
+                "ltrim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("ltrim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim_start().to_string(),
+                    })
+                }
+                "rtrim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("rtrim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim_end().to_string(),
+                    })
+                }
+                "left" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("left requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: mysql_left_chars(&value, count),
+                    })
+                }
+                "right" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("right requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: mysql_right_chars(&value, count),
+                    })
+                }
+                "substring" | "substr" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("substring requires 2 or 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let position = eval_expr(&fargs[1], row, ctx, args)?;
+                    let length = if let Some(length_expr) = fargs.get(2) {
+                        Some(eval_expr(length_expr, row, ctx, args)?)
+                    } else {
+                        None
+                    };
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(position) = lit_to_i64(&position) else {
+                        return Ok(Lit::Null);
+                    };
+                    let length = length.as_ref().and_then(lit_to_i64);
+                    if fargs.len() == 3 && length.is_none() {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Str {
+                        v: mysql_substring_chars(&value, position, length),
+                    })
+                }
+                "replace" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("replace requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(from), Some(to)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_string_for_like(&from),
+                        lit_to_string_for_like(&to),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: value.replace(&from, &to),
+                    })
+                }
+                "nullif" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("nullif requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(left, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    if matches!(right, Lit::Null) {
+                        return Ok(left);
+                    }
+                    if cmp_lit(&left, &right)? == std::cmp::Ordering::Equal {
+                        Ok(Lit::Null)
+                    } else {
+                        Ok(left)
+                    }
+                }
                 "coalesce" => {
                     if fargs.is_empty() {
                         anyhow::bail!("coalesce requires at least one arg");
@@ -8645,6 +8787,53 @@ fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
         Lit::Uuid { v } => Some(v.clone()),
         Lit::Embedding { .. } => None,
     }
+}
+
+fn lit_to_i64(lit: &Lit) -> Option<i64> {
+    match lit {
+        Lit::I64 { v } => Some(*v),
+        Lit::U64 { v } => i64::try_from(*v).ok(),
+        Lit::F64 { v } => Some(*v as i64),
+        Lit::Str { v } => v.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn mysql_left_chars(value: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    value.chars().take(count as usize).collect()
+}
+
+fn mysql_right_chars(value: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(count as usize);
+    chars[start..].iter().collect()
+}
+
+fn mysql_substring_chars(value: &str, position: i64, length: Option<i64>) -> String {
+    if matches!(length, Some(len) if len <= 0) || position == 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    let len = chars.len() as i64;
+    let start = if position > 0 {
+        position.saturating_sub(1)
+    } else {
+        len.saturating_add(position).max(0)
+    } as usize;
+    if start >= chars.len() {
+        return String::new();
+    }
+    let end = match length {
+        Some(len) => start.saturating_add(len as usize).min(chars.len()),
+        None => chars.len(),
+    };
+    chars[start..end].iter().collect()
 }
 
 fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
@@ -10607,6 +10796,26 @@ fn mysql_compat_unique_conflict(
         }
     }
     None
+}
+
+fn mysql_compat_validate_unique_columns(
+    tdata: &TableData,
+    columns: &[String],
+    index_name: &str,
+) -> anyhow::Result<()> {
+    let mut seen = HashMap::<String, usize>::new();
+    for (idx, entry) in tdata.rows.iter().enumerate() {
+        if entry.deleted {
+            continue;
+        }
+        let Some(key) = mysql_compat_unique_key(columns, &entry.row) else {
+            continue;
+        };
+        if seen.insert(key, idx).is_some() {
+            anyhow::bail!("conflict: duplicate key for unique index {index_name}");
+        }
+    }
+    Ok(())
 }
 
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
@@ -18172,6 +18381,108 @@ mod tests {
                     ],
                     distinct: None,
                 },
+                Expr::Func {
+                    name: "trim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "  hi  ".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "ltrim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "  hi".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "rtrim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "hi  ".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "left".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "right".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "substring".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "replace".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "e".to_string() },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "nullif".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hé".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
             ],
             Some(eq_expr(
                 lower_expr,
@@ -18200,6 +18511,26 @@ mod tests {
                 Lit::Str {
                     v: "hé-0".to_string()
                 },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str { v: "h".to_string() },
+                Lit::Str {
+                    v: "é".to_string()
+                },
+                Lit::Str {
+                    v: "é".to_string()
+                },
+                Lit::Str {
+                    v: "he".to_string()
+                },
+                Lit::Null,
             ]]
         );
 
@@ -20166,6 +20497,76 @@ mod tests {
             )
             .expect_err("expected duplicate insert conflict");
         assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_add_unique_index_rejects_existing_duplicates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_unique_index_existing_duplicates");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "dup@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "dup@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let err = engine
+            .schema_add_mysql_compat_index(
+                &table,
+                "email_unique".to_string(),
+                vec!["email".to_string()],
+                true,
+            )
+            .expect_err("expected duplicate-key conflict when creating unique index");
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

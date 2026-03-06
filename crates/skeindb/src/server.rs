@@ -2899,6 +2899,153 @@ fn mysql_parse_subquery_compat_predicate(
     None
 }
 
+fn mysql_render_base_table_ref(base: &BaseTableRef) -> String {
+    let mut rendered = format!(
+        "{}.{}",
+        mysql_quote_ident(&base.db),
+        mysql_quote_ident(&base.table)
+    );
+    if let Some(alias) = base.r#as.as_deref() {
+        rendered.push_str(" AS ");
+        rendered.push_str(&mysql_quote_ident(alias));
+    }
+    rendered
+}
+
+fn mysql_expr_is_inner_subquery_col(expr: &Expr, inner_base: &BaseTableRef) -> bool {
+    match expr {
+        Expr::Col {
+            table: Some(table), ..
+        } => mysql_stmt_table_matches_name(inner_base, table),
+        Expr::Col { table: None, .. } => true,
+        _ => false,
+    }
+}
+
+fn mysql_expr_is_outer_correlated_col(expr: &Expr, inner_base: &BaseTableRef) -> bool {
+    match expr {
+        Expr::Col {
+            table: Some(table), ..
+        } => !mysql_stmt_table_matches_name(inner_base, table),
+        _ => false,
+    }
+}
+
+fn mysql_parse_correlated_subquery_equality_clause(
+    clause: &str,
+    inner_base: &BaseTableRef,
+) -> Option<(String, String)> {
+    let clause = trim_wrapping_parentheses(clause.trim());
+    let bytes = clause.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && b == b'=' {
+            if matches!(
+                i.checked_sub(1).and_then(|idx| bytes.get(idx)),
+                Some(b'!') | Some(b'<') | Some(b'>')
+            ) || bytes.get(i + 1) == Some(&b'=')
+            {
+                i += 1;
+                continue;
+            }
+            let left_raw = clause[..i].trim();
+            let right_raw = clause[i + 1..].trim();
+            if left_raw.is_empty() || right_raw.is_empty() {
+                return None;
+            }
+            let left_expr = parse_sql_scalar_expr(left_raw).ok()?;
+            let right_expr = parse_sql_scalar_expr(right_raw).ok()?;
+            let left_inner = mysql_expr_is_inner_subquery_col(&left_expr, inner_base);
+            let right_inner = mysql_expr_is_inner_subquery_col(&right_expr, inner_base);
+            let left_outer = mysql_expr_is_outer_correlated_col(&left_expr, inner_base);
+            let right_outer = mysql_expr_is_outer_correlated_col(&right_expr, inner_base);
+            if left_inner && right_outer {
+                return Some((left_raw.to_string(), right_raw.to_string()));
+            }
+            if right_inner && left_outer {
+                return Some((right_raw.to_string(), left_raw.to_string()));
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn mysql_try_rewrite_correlated_exists_subquery(
+    subquery_sql: &str,
+    default_db: Option<&str>,
+) -> Option<(String, String)> {
+    let SqlPlan::Select {
+        from: Some(TableRef::Base(inner_base)),
+        ..
+    } = parse_sql_plan(subquery_sql, default_db).ok()?
+    else {
+        return None;
+    };
+    let (_, subquery_where, subquery_suffix) = mysql_parse_select_where_parts(subquery_sql)?;
+    let mut remaining_parts = Vec::new();
+    let mut correlation = None::<(String, String)>;
+    for part in split_top_level_and(trim_wrapping_parentheses(&subquery_where)) {
+        if correlation.is_none() {
+            if let Some(parsed) =
+                mysql_parse_correlated_subquery_equality_clause(&part, &inner_base)
+            {
+                correlation = Some(parsed);
+                continue;
+            }
+        }
+        remaining_parts.push(part);
+    }
+    let (inner_col_sql, outer_expr_sql) = correlation?;
+    remaining_parts.push(format!("{inner_col_sql} IS NOT NULL"));
+    let mut rewritten = format!(
+        "SELECT {inner_col_sql} FROM {}",
+        mysql_render_base_table_ref(&inner_base)
+    );
+    if !remaining_parts.is_empty() {
+        rewritten.push_str(" WHERE ");
+        rewritten.push_str(&remaining_parts.join(" AND "));
+    }
+    if !subquery_suffix.trim().is_empty() {
+        rewritten.push(' ');
+        rewritten.push_str(subquery_suffix.trim());
+    }
+    Some((outer_expr_sql, rewritten))
+}
+
 fn mysql_rebuild_select_with_where(
     prefix: &str,
     where_clause: Option<&str>,
@@ -3022,6 +3169,38 @@ async fn mysql_try_select_subquery_compat_outcome(
                 negated,
                 subquery_sql,
             } => {
+                if let Some((outer_expr_sql, rewritten_subquery_sql)) =
+                    mysql_try_rewrite_correlated_exists_subquery(&subquery_sql, default_db)
+                {
+                    let subquery_result = sql_exec(
+                        state,
+                        SqlExecParams {
+                            sql: rewritten_subquery_sql,
+                            explain: false,
+                            default_db: default_db.map(|db| db.to_string()),
+                            result_format: Some(ResultFormat::RowsJson),
+                        },
+                    )
+                    .await?;
+                    let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?
+                        .into_iter()
+                        .filter(|lit| !matches!(lit, Lit::Null))
+                        .collect::<Vec<_>>();
+                    if lits.is_empty() {
+                        if !negated {
+                            rewritten_parts.push("1 = 0".to_string());
+                        }
+                    } else {
+                        let values = lits
+                            .iter()
+                            .map(mysql_render_default_lit)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let op = if negated { "NOT IN" } else { "IN" };
+                        rewritten_parts.push(format!("{outer_expr_sql} {op} ({values})"));
+                    }
+                    continue;
+                }
                 let subquery_result = sql_exec(
                     state,
                     SqlExecParams {
@@ -14236,6 +14415,17 @@ mod tests {
             Some(MySqlSubqueryCompatPredicate::In { .. })
         ));
         assert!(mysql_parse_subquery_compat_predicate(&and_parts[1]).is_none());
+
+        let correlated_rewrite = mysql_try_rewrite_correlated_exists_subquery(
+            "SELECT 1 FROM compat_alter_subq AS inner_q WHERE inner_q.parent_id = outer_q.id",
+            Some("app"),
+        )
+        .expect("rewrite correlated EXISTS");
+        assert_eq!(correlated_rewrite.0, "outer_q.id");
+        assert_eq!(
+            correlated_rewrite.1,
+            "SELECT inner_q.parent_id FROM `app`.`compat_alter_subq` AS `inner_q` WHERE inner_q.parent_id IS NOT NULL"
+        );
     }
 
     #[test]

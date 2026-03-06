@@ -901,6 +901,39 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn mysql_create_unique_index_rejects_existing_duplicates() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_create_unique_index_rejects_duplicates")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE IF NOT EXISTS skein_test",
+        "USE skein_test",
+        "DROP TABLE IF EXISTS dup_users",
+        "CREATE TABLE dup_users (id BIGINT UNSIGNED NOT NULL, email VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO dup_users (id, email) VALUES (1, 'dup@example.com')",
+        "INSERT INTO dup_users (id, email) VALUES (2, 'dup@example.com')",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(decode_mysql_ok_packet(&ok)?.0, if sql.starts_with("INSERT") { 1 } else { 0 });
+    }
+
+    send_com_query(
+        &mut stream,
+        "CREATE UNIQUE INDEX email_unique ON dup_users (email)",
+    )
+    .await?;
+    let err = read_mysql_response(&mut stream)
+        .await
+        .expect_err("expected duplicate-key error");
+    assert!(err.to_string().contains("duplicate key"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mysql_sql_calc_found_rows_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_mysql("mysql_sql_calc_found_rows_roundtrip")?;
@@ -1618,6 +1651,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select outer_q.id from compat_alter_subq as outer_q where exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from compat_alter_subq where not exists ( select 1 from compat_alter_subq where id = 999 ) order by id asc limit 0, 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1669,6 +1712,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][4].as_deref(), Some("1"));
                         assert_eq!(rows[0][5].as_deref(), Some("1"));
                         assert_eq!(rows[0][6].as_deref(), Some("n-a-1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select trim('  n-a  '), ltrim('  n-a'), rtrim('n-a  '), left(post_slug, 1), right(post_slug, 1), substring(post_slug, 2, 2), replace(post_slug, '-', '_'), nullif(post_slug, 'n-a') from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][2].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][3].as_deref(), Some("n"));
+                        assert_eq!(rows[0][4].as_deref(), Some("a"));
+                        assert_eq!(rows[0][5].as_deref(), Some("-a"));
+                        assert_eq!(rows[0][6].as_deref(), Some("n_a"));
+                        assert_eq!(rows[0][7], None);
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
