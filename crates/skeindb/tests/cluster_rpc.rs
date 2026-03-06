@@ -769,6 +769,39 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
     send_com_stmt_close(&mut stream, cast_case_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT id + 1 AS next_id, id / 2 AS half_id, id % 3 AS mod_id FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let arithmetic_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(arithmetic_stmt.param_count, 1);
+    assert_eq!(
+        arithmetic_stmt.column_defs,
+        vec![
+            ("next_id".to_string(), 0x08),
+            ("half_id".to_string(), 0x05),
+            ("mod_id".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        arithmetic_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let arithmetic_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        arithmetic_rows,
+        vec![vec![
+            Some("8".to_string()),
+            Some("3.5".to_string()),
+            Some("1".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, arithmetic_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -1840,6 +1873,19 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select parent_id + 1, parent_id - 1, parent_id * 2, parent_id / 2, parent_id % 2 from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[0][1].as_deref(), Some("0"));
+                        assert_eq!(rows[0][2].as_deref(), Some("2"));
+                        assert_eq!(rows[0][3].as_deref(), Some("0.5"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from compat_alter_subq where cast(parent_id as unsigned) = 1 order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1850,7 +1896,27 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select id from compat_alter_subq where parent_id + 0 = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from compat_alter_subq where parent_id is not null order by cast(parent_id as unsigned) desc, id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id is not null order by parent_id + 0 desc, id asc limit 0, 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 2);

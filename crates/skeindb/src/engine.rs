@@ -7964,7 +7964,22 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             let op_name = op.as_str();
             let allowed = matches!(
                 op_name,
-                "and" | "or" | "not" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "in" | "between"
+                "and"
+                    | "or"
+                    | "not"
+                    | "eq"
+                    | "ne"
+                    | "lt"
+                    | "le"
+                    | "gt"
+                    | "ge"
+                    | "in"
+                    | "between"
+                    | "add"
+                    | "sub"
+                    | "mul"
+                    | "div"
+                    | "mod"
             );
             if !allowed {
                 anyhow::bail!("invalid_request: unsupported op in wasm plan");
@@ -8407,6 +8422,17 @@ fn eval_expr(
                         _ => false,
                     };
                     Ok(Lit::Bool { v: out })
+                }
+                "add" | "sub" | "mul" | "div" | "mod" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    Ok(mysql_eval_numeric_binary_op(op, &va, &vb))
                 }
                 "in" => {
                     let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("in requires a"))?;
@@ -8973,6 +8999,10 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
         // Cross numeric compare (very small helper)
         (Lit::I64 { v: x }, Lit::U64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
         (Lit::U64 { v: x }, Lit::I64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
+        _ if lit_to_f64(a).is_some() && lit_to_f64(b).is_some() => Ok(lit_to_f64(a)
+            .zip(lit_to_f64(b))
+            .and_then(|(x, y)| x.partial_cmp(&y))
+            .unwrap_or(Ordering::Equal)),
         _ => Ok(Ordering::Equal),
     }
 }
@@ -8996,6 +9026,7 @@ fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
 
 fn lit_to_i64(lit: &Lit) -> Option<i64> {
     match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
         Lit::I64 { v } => Some(*v),
         Lit::U64 { v } => i64::try_from(*v).ok(),
         Lit::F64 { v } => Some(*v as i64),
@@ -9003,6 +9034,97 @@ fn lit_to_i64(lit: &Lit) -> Option<i64> {
         Lit::Str { v } => v.parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn mysql_lit_is_integral_like(lit: &Lit) -> bool {
+    match lit {
+        Lit::Bool { .. } | Lit::I64 { .. } | Lit::U64 { .. } => true,
+        Lit::F64 { v } => v.fract() == 0.0,
+        Lit::Dec { v } | Lit::Str { v } => {
+            let trimmed = v.trim();
+            !trimmed.is_empty()
+                && !trimmed.contains(['.', 'e', 'E'])
+                && trimmed.parse::<i128>().is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn mysql_integral_numeric_value(lit: &Lit) -> Option<i128> {
+    match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
+        Lit::I64 { v } => Some(*v as i128),
+        Lit::U64 { v } => Some(*v as i128),
+        Lit::F64 { v } if v.fract() == 0.0 => Some(*v as i128),
+        Lit::Dec { v } | Lit::Str { v } => v.trim().parse::<i128>().ok(),
+        _ => None,
+    }
+}
+
+fn mysql_numeric_binary_integral_result(value: i128) -> Lit {
+    if let Ok(v) = i64::try_from(value) {
+        Lit::I64 { v }
+    } else {
+        Lit::F64 { v: value as f64 }
+    }
+}
+
+fn mysql_eval_numeric_binary_op(op: &str, left: &Lit, right: &Lit) -> Lit {
+    if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+        return Lit::Null;
+    }
+    if op == "div" {
+        let (Some(left), Some(right)) = (lit_to_f64(left), lit_to_f64(right)) else {
+            return Lit::Null;
+        };
+        if right == 0.0 {
+            return Lit::Null;
+        }
+        return Lit::F64 { v: left / right };
+    }
+    if op == "mod" && mysql_lit_is_integral_like(left) && mysql_lit_is_integral_like(right) {
+        let (Some(left), Some(right)) = (
+            mysql_integral_numeric_value(left),
+            mysql_integral_numeric_value(right),
+        ) else {
+            return Lit::Null;
+        };
+        if right == 0 {
+            return Lit::Null;
+        }
+        return mysql_numeric_binary_integral_result(left % right);
+    }
+    if mysql_lit_is_integral_like(left) && mysql_lit_is_integral_like(right) {
+        let (Some(left), Some(right)) = (
+            mysql_integral_numeric_value(left),
+            mysql_integral_numeric_value(right),
+        ) else {
+            return Lit::Null;
+        };
+        let value = match op {
+            "add" => left.saturating_add(right),
+            "sub" => left.saturating_sub(right),
+            "mul" => left.saturating_mul(right),
+            _ => return Lit::Null,
+        };
+        return mysql_numeric_binary_integral_result(value);
+    }
+    let (Some(left), Some(right)) = (lit_to_f64(left), lit_to_f64(right)) else {
+        return Lit::Null;
+    };
+    if op == "mod" {
+        if right == 0.0 {
+            return Lit::Null;
+        }
+        return Lit::F64 { v: left % right };
+    }
+    let value = match op {
+        "add" => left + right,
+        "sub" => left - right,
+        "mul" => left * right,
+        _ => return Lit::Null,
+    };
+    Lit::F64 { v: value }
 }
 
 fn mysql_if_condition_truth(lit: &Lit) -> Option<bool> {
@@ -13221,6 +13343,7 @@ fn merge_numeric_f64(a: &Lit, b: &Lit, op: fn(f64, f64) -> f64) -> Option<Lit> {
 
 fn lit_to_f64(lit: &Lit) -> Option<f64> {
     match lit {
+        Lit::Bool { v } => Some(if *v { 1.0 } else { 0.0 }),
         Lit::I64 { v } => Some(*v as f64),
         Lit::U64 { v } => Some(*v as f64),
         Lit::F64 { v } => Some(*v),
@@ -19184,6 +19307,206 @@ mod tests {
                     v: "match".to_string()
                 },
             ]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_mysql_arithmetic_expressions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_arithmetic_expressions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[("id", Lit::U64 { v: 2 }), ("parent_id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 3 }), ("parent_id", Lit::U64 { v: 2 })]),
+                row(&[("id", Lit::U64 { v: 4 }), ("parent_id", Lit::U64 { v: 1 })]),
+            ],
+            None,
+        )?;
+
+        let projection_query = base_query(
+            "app",
+            "posts",
+            vec![
+                Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 1 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "sub".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 1 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "mul".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "div".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "mod".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 4 },
+                },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 0 },
+                Lit::I64 { v: 2 },
+                Lit::F64 { v: 0.5 },
+                Lit::I64 { v: 1 },
+            ]]
+        );
+
+        let mut ordered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 0 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: 1 },
+                },
+            )),
+        );
+        ordered_query.order_by = vec![
+            OrderBy {
+                expr: Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 0 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                dir: Some(OrderDir::Desc),
+            },
+            OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                dir: Some(OrderDir::Asc),
+            },
+        ];
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        assert_eq!(
+            ordered_rows,
+            vec![vec![Lit::U64 { v: 2 }], vec![Lit::U64 { v: 4 }]]
         );
 
         fs::remove_dir_all(&dir).ok();

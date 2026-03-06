@@ -469,6 +469,14 @@ SELECT CAST(id AS CHAR),
   FROM compat_alter_subq
  WHERE id = 4;
 
+SELECT parent_id + 1,
+       parent_id - 1,
+       parent_id * 2,
+       parent_id / 2,
+       parent_id % 2
+  FROM compat_alter_subq
+ WHERE id = 4;
+
 SELECT id
   FROM compat_alter_subq
  WHERE CAST(parent_id AS UNSIGNED) = 1
@@ -476,8 +484,19 @@ SELECT id
 
 SELECT id
   FROM compat_alter_subq
+ WHERE parent_id + 0 = 1
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
  WHERE parent_id IS NOT NULL
  ORDER BY CAST(parent_id AS UNSIGNED) DESC, id ASC
+ LIMIT 0, 2;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE parent_id IS NOT NULL
+ ORDER BY parent_id + 0 DESC, id ASC
  LIMIT 0, 2;
 
 INSERT INTO compat_alter_subq (id, parent_id)

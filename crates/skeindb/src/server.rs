@@ -4123,7 +4123,7 @@ fn mysql_stmt_expr_type(
         Expr::Op { op, a, b, .. } => match op.as_str() {
             "and" | "or" | "not" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "in" | "between"
             | "like" | "ilike" | "is_null" => MySqlStmtColumnType::LongLong,
-            "add" | "sub" | "mul" | "div" | "mod" => {
+            "add" | "sub" | "mul" | "mod" => {
                 let left = a
                     .as_ref()
                     .map(|expr| mysql_stmt_expr_type(expr, table_descs))
@@ -4134,6 +4134,7 @@ fn mysql_stmt_expr_type(
                     .unwrap_or(MySqlStmtColumnType::VarString);
                 mysql_stmt_merge_column_types(left, right)
             }
+            "div" => MySqlStmtColumnType::Double,
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Func { name, args, .. } => match name.as_str() {
@@ -8654,13 +8655,111 @@ fn parse_sql_function_call(raw: &str) -> Option<(String, Vec<String>)> {
     Some((name.to_ascii_lowercase(), args))
 }
 
+fn mysql_is_unary_plus_minus(expr: &str, idx: usize) -> bool {
+    let bytes = expr.as_bytes();
+    if idx >= bytes.len() || !matches!(bytes[idx], b'+' | b'-') {
+        return false;
+    }
+    let mut probe = idx;
+    while probe > 0 {
+        probe -= 1;
+        let prev = bytes[probe];
+        if prev.is_ascii_whitespace() {
+            continue;
+        }
+        return matches!(prev, b'(' | b',' | b'+' | b'-' | b'*' | b'/' | b'%');
+    }
+    true
+}
+
+fn mysql_find_top_level_arithmetic_operator(expr: &str, operators: &[u8]) -> Option<(usize, u8)> {
+    let bytes = expr.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut candidate = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == quote {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && operators.contains(&b) {
+            if matches!(b, b'+' | b'-') && mysql_is_unary_plus_minus(expr, i) {
+                i += 1;
+                continue;
+            }
+            candidate = Some((i, b));
+        }
+        i += 1;
+    }
+    candidate
+}
+
+fn mysql_arithmetic_op_name(op: u8) -> &'static str {
+    match op {
+        b'+' => "add",
+        b'-' => "sub",
+        b'*' => "mul",
+        b'/' => "div",
+        b'%' => "mod",
+        _ => "add",
+    }
+}
+
+fn mysql_parse_binary_arithmetic_expr(
+    expr: &str,
+    operators: &[u8],
+) -> Result<Option<Expr>, RpcError> {
+    let Some((idx, op)) = mysql_find_top_level_arithmetic_operator(expr, operators) else {
+        return Ok(None);
+    };
+    let left = expr[..idx].trim();
+    let right = expr[idx + 1..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            format!("invalid arithmetic expression '{}'", expr),
+        ));
+    }
+    Ok(Some(Expr::Op {
+        op: mysql_arithmetic_op_name(op).to_string(),
+        a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+        b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }))
+}
+
 fn mysql_parse_cast_type_desc(raw: &str) -> Result<TypeDesc, RpcError> {
-    let token = raw
-        .trim()
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim();
+    let token = raw.split_whitespace().next().unwrap_or_default().trim();
     if token.is_empty() {
         return Err(RpcError::new(
             "invalid_request",
@@ -9006,6 +9105,34 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
         return Ok(Expr::Lit {
             lit: parse_sql_lit(s)?,
         });
+    }
+    if let Some(expr) = mysql_parse_binary_arithmetic_expr(s, b"+-")? {
+        return Ok(expr);
+    }
+    if let Some(expr) = mysql_parse_binary_arithmetic_expr(s, b"*/%")? {
+        return Ok(expr);
+    }
+    if let Some(rest) = s.strip_prefix('+') {
+        let rest = rest.trim_start();
+        if !rest.is_empty() {
+            return parse_sql_scalar_expr(rest);
+        }
+    }
+    if let Some(rest) = s.strip_prefix('-') {
+        let rest = rest.trim_start();
+        if !rest.is_empty() {
+            return Ok(Expr::Op {
+                op: "sub".to_string(),
+                a: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 0 },
+                })),
+                b: Some(Box::new(parse_sql_scalar_expr(rest)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
     }
     if let Some((name, args_raw)) = parse_sql_function_call(s) {
         let args = args_raw
@@ -14995,6 +15122,36 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT u.id + 1 AS next_user_id, p.id / 2 AS half_post_id, p.id % 2 AS post_mod FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse arithmetic projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let arithmetic_projection =
+            mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs);
+        assert_eq!(
+            arithmetic_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "next_user_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "half_post_id".to_string(),
+                    column_type: MySqlStmtColumnType::Double,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "post_mod".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -15609,16 +15766,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_sql_scalar_expr_supports_mysql_arithmetic_ops() {
+        let expr = parse_sql_scalar_expr("parent_id + 1 * 2").expect("parse arithmetic expr");
+        let Expr::Op { op, a, b, .. } = expr else {
+            panic!("expected arithmetic op expr");
+        };
+        assert_eq!(op, "add");
+        assert!(matches!(a.as_deref(), Some(Expr::Col { .. })));
+        assert!(matches!(b.as_deref(), Some(Expr::Op { op, .. }) if op == "mul"));
+
+        let unary = parse_sql_scalar_expr("-parent_id").expect("parse unary minus");
+        let Expr::Op { op, a, b, .. } = unary else {
+            panic!("expected unary op");
+        };
+        assert_eq!(op, "sub");
+        assert!(matches!(a.as_deref(), Some(Expr::Lit { .. })));
+        assert!(matches!(b.as_deref(), Some(Expr::Col { .. })));
+    }
+
+    #[test]
     fn parse_order_by_supports_scalar_expressions() {
         let order = parse_order_by(
-            "CAST(parent_id AS UNSIGNED) DESC, CASE WHEN post_status = 'draft' THEN post_title ELSE post_slug END ASC",
+            "CAST(parent_id AS UNSIGNED) DESC, CASE WHEN post_status = 'draft' THEN post_title ELSE post_slug END ASC, parent_id + 0 DESC",
         )
         .expect("parse order by");
-        assert_eq!(order.len(), 2);
+        assert_eq!(order.len(), 3);
         assert!(matches!(order[0].expr, Expr::Cast { .. }));
         assert_eq!(order[0].dir, Some(OrderDir::Desc));
         assert!(matches!(order[1].expr, Expr::Case { .. }));
         assert_eq!(order[1].dir, Some(OrderDir::Asc));
+        assert!(matches!(order[2].expr, Expr::Op { .. }));
+        assert_eq!(order[2].dir, Some(OrderDir::Desc));
     }
 
     #[test]
