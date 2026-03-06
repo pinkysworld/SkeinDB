@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-01-17
+Last updated: 2026-03-05
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -23,22 +23,39 @@ SkeinDB adoption strategy:
 
 ---
 
-## 2) v0.1 SQL surface (target)
+## 2) v0.1 SQL surface (current baseline)
 
 ### DDL
 - CREATE DATABASE / DROP DATABASE / USE
-- CREATE TABLE (PK, UNIQUE, KEY)
-- ALTER TABLE (add/drop column, add/drop index)
+- CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
+- CREATE INDEX / CREATE UNIQUE INDEX
+- DROP INDEX
+- `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
+- `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
+- ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
+- ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
 - DROP TABLE
 
 ### DML
-- INSERT / INSERT IGNORE
+- INSERT / INSERT IGNORE / REPLACE
 - INSERT ... ON DUPLICATE KEY UPDATE
-- UPDATE/DELETE with WHERE (optional LIMIT)
-- SELECT with WHERE / ORDER BY / LIMIT
-- INNER JOIN + LEFT JOIN
-- GROUP BY + aggregates
+- `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata; the implementation remains scan-based rather than backed by a true secondary index structure
+- UPDATE/DELETE with simple WHERE
+- SELECT with WHERE / ORDER BY / LIMIT / OFFSET
+- SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
+- Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
+- INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
+
+### MySQL wire protocol
+- Handshake + `mysql_native_password`
+- COM_QUERY over the current SQL-translation subset
+- Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
+- `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *` and simple join projections), and prepared result rows are returned in the binary row protocol
+- Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
 - SHOW DATABASES / TABLES / FULL TABLES
@@ -51,7 +68,8 @@ SkeinDB adoption strategy:
 - SHOW GRANTS
 
 ### INFORMATION_SCHEMA
-- tables, columns, statistics, engines, user_privileges
+- `tables`, `columns`
+- richer compatibility views such as `statistics`, `engines`, and `user_privileges` remain backlog work
 
 ---
 
@@ -59,6 +77,12 @@ SkeinDB adoption strategy:
 
 The file `tests/compat/corpus.sql` is the primary compatibility driver.
 Add queries there first, then implement.
+
+The MySQL integration suite now executes that corpus end-to-end over the wire listener,
+so the checked-in corpus is the enforced baseline for compatibility work.
+That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
+pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
+and parenthesized `AND` / `OR` filter queries.
 
 ---
 

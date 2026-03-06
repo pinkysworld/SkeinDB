@@ -316,6 +316,73 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
 
+    send_com_query(&mut stream, "SHOW INDEX FROM wp_options").await?;
+    let index_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(index_rows.len(), 2);
+    assert_eq!(index_rows[0][2].as_deref(), Some("PRIMARY"));
+    assert_eq!(index_rows[1][1].as_deref(), Some("0"));
+    assert_eq!(index_rows[1][2].as_deref(), Some("option_name"));
+    assert_eq!(index_rows[1][4].as_deref(), Some("option_name"));
+
+    send_com_query(&mut stream, "SHOW FULL COLUMNS FROM wp_options").await?;
+    let column_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(column_rows.len(), 4);
+    assert_eq!(column_rows[1][0].as_deref(), Some("option_name"));
+    assert_eq!(column_rows[1][4].as_deref(), Some("UNI"));
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_name, option_value) VALUES ('home', 'https://example.com')",
+    )
+    .await?;
+    let (_seq, ok_insert_default) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_default)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT autoload FROM wp_options WHERE option_name = 'home'",
+    )
+    .await?;
+    let default_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(default_rows.len(), 1);
+    assert_eq!(default_rows[0][0].as_deref(), Some("yes"));
+
+    send_com_query(
+        &mut stream,
+        "INSERT IGNORE INTO wp_options (option_name, option_value) VALUES ('home', 'https://ignored.example')",
+    )
+    .await?;
+    let (_seq, ok_ignore_home) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_ignore_home)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "REPLACE INTO wp_options (option_name, option_value, autoload) VALUES ('home', 'https://example.net', 'no')",
+    )
+    .await?;
+    let (_seq, ok_replace_home) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_replace_home)?.0, 2);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value, autoload FROM wp_options WHERE option_name = 'home'",
+    )
+    .await?;
+    let home_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(home_rows.len(), 1);
+    assert_eq!(home_rows[0][0].as_deref(), Some("https://example.net"));
+    assert_eq!(home_rows[0][1].as_deref(), Some("no"));
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('home', 'https://duplicate.example', 'yes')",
+    )
+    .await?;
+    let (_seq, duplicate_err) = read_mysql_packet(&mut stream).await?;
+    let duplicate_err = decode_mysql_err_packet(&duplicate_err)
+        .ok_or_else(|| anyhow!("expected error packet for duplicate insert"))?;
+    assert!(duplicate_err.contains("conflict"));
+
     send_com_query(
         &mut stream,
         "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('siteurl', 'https://example.com', 'yes')",
@@ -340,6 +407,448 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let rows = read_mysql_text_result_rows(&mut stream).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0].as_deref(), Some("https://example.net"));
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_id FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let original_id_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(original_id_rows.len(), 1);
+    let original_id = original_id_rows[0][0].clone();
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.shuffle', 'siteurl', 'no') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = VALUES(autoload)",
+    )
+    .await?;
+    let (_seq, ok_shuffled_upsert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_shuffled_upsert)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let shuffled_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(shuffled_rows.len(), 1);
+    assert_eq!(
+        shuffled_rows[0][0].as_deref(),
+        Some("https://example.shuffle")
+    );
+    assert_eq!(shuffled_rows[0][1].as_deref(), Some("no"));
+
+    send_com_query(
+        &mut stream,
+        "REPLACE INTO wp_options (option_value, option_name, autoload) VALUES ('https://example.replace', 'siteurl', 'yes')",
+    )
+    .await?;
+    let (_seq, ok_shuffled_replace) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_shuffled_replace)?.0, 2);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_id, option_value, autoload FROM wp_options WHERE option_name = 'siteurl'",
+    )
+    .await?;
+    let replaced_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(replaced_rows.len(), 1);
+    assert_ne!(replaced_rows[0][0], original_id);
+    assert_eq!(
+        replaced_rows[0][1].as_deref(),
+        Some("https://example.replace")
+    );
+    assert_eq!(replaced_rows[0][2].as_deref(), Some("yes"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_com_stmt_prepare_execute_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_users").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    send_com_stmt_prepare(&mut stream, "INSERT INTO wp_users (id, name) VALUES (?, ?)").await?;
+    let insert_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(insert_stmt.column_count, 0);
+    assert_eq!(insert_stmt.param_count, 2);
+    assert_eq!(
+        insert_stmt
+            .param_defs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["param1", "param2"]
+    );
+
+    send_com_stmt_long_data(&mut stream, insert_stmt.statement_id, 1, b"Nora").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 0),
+        other => {
+            return Err(anyhow!(
+                "expected OK for COM_STMT_SEND_LONG_DATA, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_stmt_execute(
+        &mut stream,
+        insert_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7), MysqlStmtParamValue::LongData],
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 1),
+        other => return Err(anyhow!("expected OK for prepared insert, got {:?}", other)),
+    }
+
+    send_com_stmt_long_data(
+        &mut stream,
+        insert_stmt.statement_id,
+        1,
+        b"SHOULD_NOT_BE_USED",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 0),
+        other => {
+            return Err(anyhow!(
+                "expected OK for COM_STMT_SEND_LONG_DATA, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_stmt_reset(&mut stream, insert_stmt.statement_id).await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 0),
+        other => return Err(anyhow!("expected OK for COM_STMT_RESET, got {:?}", other)),
+    }
+
+    send_com_stmt_execute(
+        &mut stream,
+        insert_stmt.statement_id,
+        &[
+            MysqlStmtParamValue::I64(8),
+            MysqlStmtParamValue::Str("Grace".to_string()),
+        ],
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 1),
+        other => return Err(anyhow!("expected OK for prepared insert, got {:?}", other)),
+    }
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_metrics").await?;
+    let (_seq, ok_drop_metrics) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_metrics)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_metrics (id BIGINT UNSIGNED NOT NULL, score DOUBLE NULL, note VARCHAR(255) NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_metrics) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_metrics)?.0, 0);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "INSERT INTO wp_metrics (id, score, note) VALUES (?, ?, ?)",
+    )
+    .await?;
+    let metric_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(metric_stmt.param_count, 3);
+
+    send_com_stmt_execute(
+        &mut stream,
+        metric_stmt.statement_id,
+        &[
+            MysqlStmtParamValue::I64(1),
+            MysqlStmtParamValue::F64(1.5),
+            MysqlStmtParamValue::Null,
+        ],
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 1),
+        other => {
+            return Err(anyhow!(
+                "expected OK for prepared metric insert, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT score, note FROM wp_metrics WHERE id = 1",
+    )
+    .await?;
+    let metric_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(metric_rows, vec![vec![Some("1.5".to_string()), None]]);
+
+    send_com_stmt_close(&mut stream, metric_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users WHERE id = ?").await?;
+    let select_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(select_stmt.column_count, 2);
+    assert_eq!(select_stmt.param_count, 1);
+    assert_eq!(
+        select_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        select_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let nora_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        nora_rows,
+        vec![vec![Some("7".to_string()), Some("Nora".to_string())]]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        select_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let grace_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        grace_rows,
+        vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
+    );
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_posts").await?;
+    let (_seq, ok_drop_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_posts)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_posts (id BIGINT UNSIGNED NOT NULL, author_id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_posts)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_posts (id, author_id) VALUES (11, 7), (12, 42)",
+    )
+    .await?;
+    let (_seq, ok_insert_posts) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_posts)?.0, 2);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.id AS post_id, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.author_id = u.id WHERE p.id = ?",
+    )
+    .await?;
+    let join_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(join_stmt.param_count, 1);
+    assert_eq!(
+        join_stmt.column_defs,
+        vec![("post_id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        join_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let join_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        join_rows,
+        vec![vec![Some("11".to_string()), Some("Nora".to_string())]]
+    );
+
+    send_com_stmt_close(&mut stream, join_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
+    let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
+
+    send_com_stmt_execute_with_flags(&mut stream, cursor_stmt.statement_id, 0x01, &[]).await?;
+    let (column_types, execute_status) = read_mysql_binary_result_header(&mut stream).await?;
+    assert_eq!(column_types, vec![0x08, 0xfd]);
+    assert_eq!(execute_status & 0x0040, 0x0040);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (first_fetch_rows, first_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert_eq!(
+        first_fetch_rows,
+        vec![vec![Some("7".to_string()), Some("Nora".to_string())]]
+    );
+    assert_eq!(first_fetch_status & 0x0040, 0x0040);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 10).await?;
+    let (second_fetch_rows, second_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert_eq!(
+        second_fetch_rows,
+        vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
+    );
+    assert_eq!(second_fetch_status & 0x0080, 0x0080);
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (empty_fetch_rows, empty_fetch_status) =
+        read_mysql_stmt_fetch_rows(&mut stream, &column_types).await?;
+    assert!(empty_fetch_rows.is_empty());
+    assert_eq!(empty_fetch_status & 0x0080, 0x0080);
+
+    send_com_stmt_reset(&mut stream, cursor_stmt.statement_id).await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { affected_rows, .. } => assert_eq!(affected_rows, 0),
+        other => {
+            return Err(anyhow!(
+                "expected OK for cursor COM_STMT_RESET, got {:?}",
+                other
+            ))
+        }
+    }
+
+    send_com_stmt_fetch(&mut stream, cursor_stmt.statement_id, 1).await?;
+    let (_seq, cursor_err) = read_mysql_packet(&mut stream).await?;
+    let cursor_err =
+        decode_mysql_err_packet(&cursor_err).ok_or_else(|| anyhow!("expected cursor error"))?;
+    assert!(cursor_err.contains("no open cursor"));
+
+    send_com_stmt_close(&mut stream, cursor_stmt.statement_id).await?;
+
+    send_com_stmt_close(&mut stream, select_stmt.statement_id).await?;
+
+    send_com_stmt_execute(
+        &mut stream,
+        select_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let (_seq, closed_err) = read_mysql_packet(&mut stream).await?;
+    let closed_err = decode_mysql_err_packet(&closed_err)
+        .ok_or_else(|| anyhow!("expected error after COM_STMT_CLOSE"))?;
+    assert!(closed_err.contains("unknown prepared statement handler"));
+
+    send_com_stmt_close(&mut stream, insert_stmt.statement_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_simple_aggregate_compat_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_postmeta").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_postmeta (meta_id BIGINT UNSIGNED NOT NULL, sort_order BIGINT NULL, weight DOUBLE NULL, PRIMARY KEY (meta_id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    for sql in [
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (1, 2, 1.5)",
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (2, NULL, NULL)",
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (3, 5, 2.25)",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 1);
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT COUNT(sort_order) AS present_sorts FROM wp_postmeta",
+    )
+    .await?;
+    let count_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(count_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT SUM(sort_order) AS total_sort FROM wp_postmeta",
+    )
+    .await?;
+    let int_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(int_sum_rows, vec![vec![Some("7".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT SUM(weight) AS total_weight FROM wp_postmeta",
+    )
+    .await?;
+    let float_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(float_sum_rows, vec![vec![Some("3.75".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, COUNT(*) AS group_rows FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC",
+    )
+    .await?;
+    let grouped_count_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_count_rows,
+        vec![
+            vec![None, Some("1".to_string())],
+            vec![Some("2".to_string()), Some("1".to_string())],
+            vec![Some("5".to_string()), Some("1".to_string())],
+        ]
+    );
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, SUM(weight) AS grouped_weight FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC LIMIT 0, 2",
+    )
+    .await?;
+    let grouped_sum_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_sum_rows,
+        vec![
+            vec![None, None],
+            vec![Some("2".to_string()), Some("1.5".to_string())],
+        ]
+    );
 
     Ok(())
 }
@@ -393,6 +902,810 @@ async fn mysql_sql_calc_found_rows_roundtrip() -> anyhow::Result<()> {
     let found_rows = read_mysql_text_result_rows(&mut stream).await?;
     assert_eq!(found_rows.len(), 1);
     assert_eq!(found_rows[0][0].as_deref(), Some("3"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_compat_corpus_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+    let mut txn_select_index = 0usize;
+    let mut timezone_value_index = 0usize;
+    let mut timezone_autoload_index = 0usize;
+    let mut siteurl_pair_index = 0usize;
+    let mut wp_users_show_index_count = 0usize;
+
+    for statement in compat_corpus_statements() {
+        send_com_query(&mut stream, &statement).await?;
+        let response = read_mysql_response(&mut stream)
+            .await
+            .with_context(|| format!("execute statement: {}", statement))?;
+        let normalized = statement
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+
+        match normalized.as_str() {
+            "select 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select version()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][0].as_deref(), Some("8.0.0-skeindb"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select database()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0], None);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@sql_mode" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@lower_case_table_names" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@version_comment limit 1" | "select @@version_comment limit 0,1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("SkeinDB compatibility layer"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select @@version_comment limit 1 offset 1" => match response {
+                MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'time_zone'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("time_zone"));
+                    assert_eq!(rows[0][1].as_deref(), Some("SYSTEM"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'transaction_isolation'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("transaction_isolation"));
+                    assert_eq!(rows[0][1].as_deref(), Some("REPEATABLE-READ"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'sql_auto_is_null'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("sql_auto_is_null"));
+                    assert_eq!(rows[0][1].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("sql_mode") && row[1].as_deref() == Some("")
+                    }));
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("time_zone")
+                            && row[1].as_deref() == Some("SYSTEM")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show session variables like 'sql_mode'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("sql_mode"));
+                    assert_eq!(rows[0][1].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show global variables where variable_name = 'time_zone'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("time_zone"));
+                    assert_eq!(rows[0][1].as_deref(), Some("SYSTEM"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show status" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("Threads_connected")
+                            && row[1].as_deref() == Some("1")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show global status like 'threads_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("Threads_connected"));
+                    assert_eq!(rows[0][1].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show character set like 'utf8mb4'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4"));
+                    assert_eq!(rows[0][2].as_deref(), Some("utf8mb4_general_ci"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show collation where charset = 'utf8mb4'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().all(|row| row[1].as_deref() == Some("utf8mb4")));
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("utf8mb4_general_ci")
+                            && row[3].as_deref() == Some("Yes")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'character_set_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("character_set_server")
+                            && row[1].as_deref() == Some("utf8mb4")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show variables like 'collation_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert!(rows.iter().any(|row| {
+                        row[0].as_deref() == Some("collation_database")
+                            && row[1].as_deref() == Some("utf8mb4_general_ci")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@transaction_isolation" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("REPEATABLE-READ"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@sql_auto_is_null" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("0"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@character_set_server" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select @@collation_database" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("utf8mb4_general_ci"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show tables from skein_test like 'wp_%'" => match response {
+                MysqlResponse::Rows(rows) => assert_eq!(rows.len(), 3),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show full tables from skein_test where table_type = 'base table'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 3);
+                    assert_eq!(rows[0][1].as_deref(), Some("BASE TABLE"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show table status from skein_test like 'wp_posts'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("wp_posts"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show full columns from wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 4);
+                    assert_eq!(rows[0].len(), 9);
+                    assert_eq!(rows[1][4].as_deref(), Some("UNI"));
+                    assert_eq!(rows[3][5].as_deref(), Some("yes"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert_eq!(rows[1][1].as_deref(), Some("0"));
+                    assert_eq!(rows[1][2].as_deref(), Some("option_name"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert!(rows.iter().any(|row| row[2].as_deref() == Some("post_status")));
+                    assert!(rows.iter().any(|row| row[2].as_deref() == Some("post_author")));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from wp_users" => match response {
+                MysqlResponse::Rows(rows) => {
+                    wp_users_show_index_count += 1;
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    match wp_users_show_index_count {
+                        1 => {
+                            assert!(
+                                rows.iter()
+                                    .any(|row| row[2].as_deref() == Some("user_login_unique"))
+                            );
+                            assert!(rows.iter().any(|row| {
+                                row[2].as_deref() == Some("user_login_unique")
+                                    && row[1].as_deref() == Some("0")
+                            }));
+                        }
+                        2 => {
+                            assert!(!rows
+                                .iter()
+                                .any(|row| row[2].as_deref() == Some("user_login_unique")));
+                        }
+                        _ => panic!("unexpected wp_users show index count"),
+                    }
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show keys from wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert!(!rows.is_empty());
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show create table wp_options" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("UNIQUE KEY `option_name` (`option_name`)"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show create table wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("PRIMARY KEY"));
+                    assert!(ddl.contains("KEY `post_status` (`post_status`)"));
+                    assert!(ddl.contains("KEY `post_author` (`post_author`)"));
+                    assert!(ddl.contains("DEFAULT 'publish'"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "describe wp_posts" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 6);
+                    assert_eq!(rows[0][0].as_deref(), Some("ID"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_name from wp_options where option_name in ('siteurl', 'home') order by option_name" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("home"));
+                        assert_eq!(rows[1][0].as_deref(), Some("siteurl"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select option_value from wp_options where option_name = 'siteurl'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    assert!(matches!(
+                        value,
+                        Some("https://example.com")
+                            | Some("https://example.org")
+                            | Some("https://example.net")
+                            | Some("https://example.replace")
+                    ));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='siteurl'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    assert!(matches!(
+                        value,
+                        Some("https://example.net") | Some("https://example.replace")
+                    ));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select p.post_author, u.user_login from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login is null order by p.post_author asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[0][1], None);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_name from wp_posts where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some(""));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select p.id from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login = 'ada' order by p.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select u.id, p.id from wp_posts as p right join wp_users as u on p.post_author = u.id where p.id is null order by u.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                        assert_eq!(rows[0][1], None);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select p.id, u.user_login, ux.user_login from wp_posts as p left join wp_users as u on p.post_author = u.id left join wp_users as ux on ux.id = u.id where p.id = 1 order by p.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                        assert_eq!(rows[0][2].as_deref(), Some("ada"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_title = null order by id asc" => match response {
+                MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value, autoload from wp_options where option_name='siteurl'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        siteurl_pair_index += 1;
+                        let expected = match siteurl_pair_index {
+                            1 => (Some("https://example.shuffle"), Some("no")),
+                            2 => (Some("https://example.replace-shuffled"), Some("yes")),
+                            _ => panic!("unexpected siteurl pair select count"),
+                        };
+                        assert_eq!(rows[0][0].as_deref(), expected.0);
+                        assert_eq!(rows[0][1].as_deref(), expected.1);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select autoload from wp_options where option_name='timezone_string'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    timezone_autoload_index += 1;
+                    let expected = match timezone_autoload_index {
+                        1 => Some("yes"),
+                        2 => Some("no"),
+                        _ => panic!("unexpected timezone autoload select count"),
+                    };
+                    assert_eq!(rows[0][0].as_deref(), expected);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='timezone_string'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    timezone_value_index += 1;
+                    let expected = match timezone_value_index {
+                        1 => Some("UTC"),
+                        2 => Some("Europe/Berlin"),
+                        _ => panic!("unexpected timezone value select count"),
+                    };
+                    assert_eq!(rows[0][0].as_deref(), expected);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select count(*) as publish_count from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select count(*) as user_count from wp_users" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("3"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select post_status, count(*) as status_count from wp_posts group by post_status order by post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("draft"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[1][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_author, sum(post_author) as author_sum_by_author from wp_posts where post_status = 'publish' group by post_author order by post_author asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][1].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][1].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_status = 'publish' or post_status = 'draft' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 5);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[3][0].as_deref(), Some("4"));
+                        assert_eq!(rows[4][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where (post_status = 'publish' or post_status = 'draft') and post_author = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_status not in ('draft') order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                        assert_eq!(rows[3][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_title not like 'dr%' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                        assert_eq!(rows[3][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where post_status like 'pub%' order by id desc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("5"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select sql_calc_found_rows p.id from wp_posts as p left join wp_posts as px on px.post_author = p.post_author where p.post_status='publish' group by p.id order by p.id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select found_rows()" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][0].as_deref(), Some("4"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select option_value from wp_options where option_name='txn_test'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    let value = rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .and_then(|v| v.as_deref());
+                    txn_select_index += 1;
+                    let expected = match txn_select_index {
+                        1 => Some("1"),
+                        2 => None,
+                        3 => Some("2"),
+                        _ => panic!("unexpected txn_test select count"),
+                    };
+                    assert_eq!(value, expected);
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select slug from compat_alter_subq where id = 4" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where slug = 'n-a' ) order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where not exists ( select 1 from compat_alter_subq where id = 999 ) order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "show status like 'threads_connected'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows[0][1].as_deref(), Some("1"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show engines" => match response {
+                MysqlResponse::Rows(rows) => assert!(!rows.is_empty()),
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show grants" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(
+                        rows[0][0].as_deref(),
+                        Some("GRANT ALL PRIVILEGES ON *.* TO 'root'@'%'")
+                    );
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            _ => match response {
+                MysqlResponse::Ok {
+                    affected_rows,
+                    last_insert_id,
+                } => {
+                    let _ = (affected_rows, last_insert_id);
+                }
+                MysqlResponse::Rows(_) => {}
+            },
+        }
+    }
+    assert_eq!(txn_select_index, 3);
+    assert_eq!(timezone_value_index, 2);
+    assert_eq!(timezone_autoload_index, 2);
+    assert_eq!(siteurl_pair_index, 2);
+    assert_eq!(wp_users_show_index_count, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_wp_style_join")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS wp",
+        "USE wp",
+        "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
+        "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
+        "ALTER TABLE wp_posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
+        "ALTER TABLE wp_posts ADD KEY post_author (post_author)",
+        "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
+        "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
+        "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+        "INSERT INTO wp_profiles (user_id, display_name) VALUES (1, 'Ada Lovelace'), (3, 'Linus Torvalds')",
+        "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet, got {:?}", other),
+        }
+    }
+
+    send_com_query(&mut stream, "SELECT post_title FROM wp_posts WHERE id = 10").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("untitled"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(&mut stream, "SELECT post_name FROM wp_posts WHERE id = 10").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some(""));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT DISTINCT p.post_author AS author_id, u.name FROM wp_posts AS p INNER JOIN wp_users AS u ON p.post_author = u.id WHERE u.status = 'active' ORDER BY p.post_author ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+            assert_eq!(rows[1][0].as_deref(), Some("3"));
+            assert_eq!(rows[1][1].as_deref(), Some("Linus"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id, u.name, pr.display_name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id LEFT JOIN wp_profiles AS pr ON pr.user_id = u.id WHERE p.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+            assert_eq!(rows[0][2].as_deref(), Some("Ada Lovelace"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_posts (id, post_author, post_status) VALUES (13, 99, 'publish')",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name IS NULL ORDER BY p.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("13"));
+            assert_eq!(rows[0][1], None);
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name = 'Ada' ORDER BY p.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[1][0].as_deref(), Some("11"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_users (id, status, name) VALUES (4, 'active', 'Margaret')",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT u.id, p.id FROM wp_posts AS p RIGHT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id IS NULL ORDER BY u.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("2"));
+            assert_eq!(rows[0][1], None);
+            assert_eq!(rows[1][0].as_deref(), Some("4"));
+            assert_eq!(rows[1][1], None);
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
 
     Ok(())
 }
@@ -587,6 +1900,428 @@ async fn read_mysql_text_result_rows(
     Ok(rows)
 }
 
+#[derive(Debug)]
+enum MysqlResponse {
+    Ok {
+        affected_rows: u64,
+        last_insert_id: u64,
+    },
+    Rows(Vec<Vec<Option<String>>>),
+}
+
+async fn read_mysql_text_result_rows_after_first_packet(
+    stream: &mut TcpStream,
+    column_count_payload: Vec<u8>,
+) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let mut cur = 0usize;
+    let column_count = decode_lenenc_int(&column_count_payload, &mut cur)?;
+    for _ in 0..column_count {
+        let _ = read_mysql_packet(stream).await?;
+    }
+    let (_seq, eof1) = read_mysql_packet(stream).await?;
+    assert_eq!(eof1.first().copied(), Some(0xfe));
+
+    let mut rows = Vec::new();
+    loop {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
+            break;
+        }
+        rows.push(decode_mysql_text_row(&payload, column_count)?);
+    }
+    Ok(rows)
+}
+
+async fn read_mysql_response(stream: &mut TcpStream) -> anyhow::Result<MysqlResponse> {
+    let (_seq, first_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&first_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
+    if first_payload.first().copied() == Some(0x00) {
+        let (affected_rows, last_insert_id) = decode_mysql_ok_packet(&first_payload)?;
+        return Ok(MysqlResponse::Ok {
+            affected_rows,
+            last_insert_id,
+        });
+    }
+    let rows = read_mysql_text_result_rows_after_first_packet(stream, first_payload).await?;
+    Ok(MysqlResponse::Rows(rows))
+}
+
+#[derive(Debug)]
+struct MysqlStmtPrepareOk {
+    statement_id: u32,
+    column_count: u16,
+    param_count: u16,
+    param_defs: Vec<(String, u8)>,
+    column_defs: Vec<(String, u8)>,
+}
+
+#[derive(Debug, Clone)]
+enum MysqlStmtParamValue {
+    I64(i64),
+    F64(f64),
+    Null,
+    Str(String),
+    LongData,
+}
+
+fn decode_mysql_stmt_prepare_ok(payload: &[u8]) -> anyhow::Result<MysqlStmtPrepareOk> {
+    if payload.len() < 12 || payload.first().copied() != Some(0x00) {
+        return Err(anyhow!("not a COM_STMT_PREPARE OK packet"));
+    }
+    Ok(MysqlStmtPrepareOk {
+        statement_id: u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]),
+        column_count: u16::from_le_bytes([payload[5], payload[6]]),
+        param_count: u16::from_le_bytes([payload[7], payload[8]]),
+        param_defs: Vec::new(),
+        column_defs: Vec::new(),
+    })
+}
+
+fn decode_mysql_column_definition(payload: &[u8]) -> anyhow::Result<(String, u8)> {
+    let mut cursor = 0usize;
+    let mut name = None::<String>;
+    for idx in 0..6 {
+        let field = decode_mysql_lenenc_bytes(payload, &mut cursor)?;
+        if idx == 4 {
+            name = Some(String::from_utf8_lossy(field).to_string());
+        }
+    }
+    if cursor >= payload.len() {
+        return Err(anyhow!("truncated column definition"));
+    }
+    let fixed_len = payload[cursor] as usize;
+    cursor += 1;
+    if fixed_len < 0x0c || cursor + fixed_len > payload.len() {
+        return Err(anyhow!("malformed column definition payload"));
+    }
+    cursor += 2 + 4;
+    let type_code = payload
+        .get(cursor)
+        .copied()
+        .ok_or_else(|| anyhow!("missing column type"))?;
+    Ok((name.unwrap_or_default(), type_code))
+}
+
+fn decode_mysql_eof_status(payload: &[u8]) -> anyhow::Result<u16> {
+    if payload.len() < 5 || payload.first().copied() != Some(0xfe) {
+        return Err(anyhow!("not an EOF packet"));
+    }
+    Ok(u16::from_le_bytes([payload[3], payload[4]]))
+}
+
+fn decode_mysql_lenenc_bytes<'a>(
+    payload: &'a [u8],
+    cursor: &mut usize,
+) -> anyhow::Result<&'a [u8]> {
+    let len = decode_lenenc_int(payload, cursor)?;
+    if *cursor + len > payload.len() {
+        return Err(anyhow!("truncated length-encoded bytes"));
+    }
+    let bytes = &payload[*cursor..*cursor + len];
+    *cursor += len;
+    Ok(bytes)
+}
+
+fn decode_mysql_binary_row(
+    payload: &[u8],
+    column_types: &[u8],
+) -> anyhow::Result<Vec<Option<String>>> {
+    if payload.first().copied() != Some(0x00) {
+        return Err(anyhow!("not a binary result row"));
+    }
+    let null_bitmap_len = (column_types.len() + 7 + 2) / 8;
+    if payload.len() < 1 + null_bitmap_len {
+        return Err(anyhow!("truncated binary result row"));
+    }
+    let null_bitmap = &payload[1..1 + null_bitmap_len];
+    let mut cursor = 1 + null_bitmap_len;
+    let mut row = Vec::with_capacity(column_types.len());
+    for (idx, column_type) in column_types.iter().enumerate() {
+        let bit = idx + 2;
+        if (null_bitmap[bit / 8] & (1u8 << (bit % 8))) != 0 {
+            row.push(None);
+            continue;
+        }
+        let value = match *column_type {
+            0x08 => {
+                if cursor + 8 > payload.len() {
+                    return Err(anyhow!("truncated binary integer column"));
+                }
+                let raw = [
+                    payload[cursor],
+                    payload[cursor + 1],
+                    payload[cursor + 2],
+                    payload[cursor + 3],
+                    payload[cursor + 4],
+                    payload[cursor + 5],
+                    payload[cursor + 6],
+                    payload[cursor + 7],
+                ];
+                cursor += 8;
+                Some(i64::from_le_bytes(raw).to_string())
+            }
+            0x05 => {
+                if cursor + 8 > payload.len() {
+                    return Err(anyhow!("truncated binary float column"));
+                }
+                let raw = [
+                    payload[cursor],
+                    payload[cursor + 1],
+                    payload[cursor + 2],
+                    payload[cursor + 3],
+                    payload[cursor + 4],
+                    payload[cursor + 5],
+                    payload[cursor + 6],
+                    payload[cursor + 7],
+                ];
+                cursor += 8;
+                Some(f64::from_le_bytes(raw).to_string())
+            }
+            _ => {
+                let bytes = decode_mysql_lenenc_bytes(payload, &mut cursor)?;
+                Some(String::from_utf8_lossy(bytes).to_string())
+            }
+        };
+        row.push(value);
+    }
+    Ok(row)
+}
+
+async fn read_mysql_prepare_ok(stream: &mut TcpStream) -> anyhow::Result<MysqlStmtPrepareOk> {
+    let (_seq, first_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&first_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
+    let mut prepare_ok = decode_mysql_stmt_prepare_ok(&first_payload)?;
+    for _ in 0..prepare_ok.param_count {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        prepare_ok
+            .param_defs
+            .push(decode_mysql_column_definition(&payload)?);
+    }
+    if prepare_ok.param_count > 0 {
+        let (_seq, eof) = read_mysql_packet(stream).await?;
+        assert_eq!(eof.first().copied(), Some(0xfe));
+    }
+    for _ in 0..prepare_ok.column_count {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        prepare_ok
+            .column_defs
+            .push(decode_mysql_column_definition(&payload)?);
+    }
+    if prepare_ok.column_count > 0 {
+        let (_seq, eof) = read_mysql_packet(stream).await?;
+        assert_eq!(eof.first().copied(), Some(0xfe));
+    }
+    Ok(prepare_ok)
+}
+
+async fn send_com_stmt_prepare(stream: &mut TcpStream, sql: &str) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(sql.len() + 1);
+    payload.push(0x16);
+    payload.extend_from_slice(sql.as_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_execute(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    params: &[MysqlStmtParamValue],
+) -> anyhow::Result<()> {
+    send_com_stmt_execute_with_flags(stream, statement_id, 0, params).await
+}
+
+async fn send_com_stmt_execute_with_flags(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    flags: u8,
+    params: &[MysqlStmtParamValue],
+) -> anyhow::Result<()> {
+    let mut payload = Vec::new();
+    payload.push(0x17);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.push(flags);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    let null_bitmap_len = params.len().div_ceil(8);
+    let mut null_bitmap = vec![0u8; null_bitmap_len];
+    for (idx, param) in params.iter().enumerate() {
+        if matches!(param, MysqlStmtParamValue::Null) {
+            null_bitmap[idx / 8] |= 1u8 << (idx % 8);
+        }
+    }
+    payload.extend_from_slice(&null_bitmap);
+    payload.push(1);
+    for param in params {
+        match param {
+            MysqlStmtParamValue::I64(_) => {
+                payload.push(0x08);
+                payload.push(0);
+            }
+            MysqlStmtParamValue::F64(_) => {
+                payload.push(0x05);
+                payload.push(0);
+            }
+            MysqlStmtParamValue::Null => {
+                payload.push(0x06);
+                payload.push(0);
+            }
+            MysqlStmtParamValue::Str(_) | MysqlStmtParamValue::LongData => {
+                payload.push(0xfd);
+                payload.push(0);
+            }
+        }
+    }
+    for param in params {
+        match param {
+            MysqlStmtParamValue::Null | MysqlStmtParamValue::LongData => {}
+            MysqlStmtParamValue::I64(v) => payload.extend_from_slice(&v.to_le_bytes()),
+            MysqlStmtParamValue::F64(v) => payload.extend_from_slice(&v.to_le_bytes()),
+            MysqlStmtParamValue::Str(v) => {
+                encode_lenenc_int(&mut payload, v.len());
+                payload.extend_from_slice(v.as_bytes());
+            }
+        }
+    }
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_fetch(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    rows: u32,
+) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(9);
+    payload.push(0x1c);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.extend_from_slice(&rows.to_le_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_long_data(
+    stream: &mut TcpStream,
+    statement_id: u32,
+    param_id: u16,
+    data: &[u8],
+) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(data.len() + 7);
+    payload.push(0x18);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.extend_from_slice(&param_id.to_le_bytes());
+    payload.extend_from_slice(data);
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_reset(stream: &mut TcpStream, statement_id: u32) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(5);
+    payload.push(0x1a);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn send_com_stmt_close(stream: &mut TcpStream, statement_id: u32) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(5);
+    payload.push(0x19);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
+async fn read_mysql_binary_result_rows(
+    stream: &mut TcpStream,
+) -> anyhow::Result<Vec<Vec<Option<String>>>> {
+    let (column_types, _status) = read_mysql_binary_result_header(stream).await?;
+    let (rows, _status) = read_mysql_binary_result_rows_after_header(stream, &column_types).await?;
+    Ok(rows)
+}
+
+async fn read_mysql_binary_result_header(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, u16)> {
+    let (_seq, first_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&first_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
+    let mut cur = 0usize;
+    let column_count = decode_lenenc_int(&first_payload, &mut cur)?;
+    let mut column_types = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        let (_name, column_type) = decode_mysql_column_definition(&payload)?;
+        column_types.push(column_type);
+    }
+    let (_seq, eof1) = read_mysql_packet(stream).await?;
+    Ok((column_types, decode_mysql_eof_status(&eof1)?))
+}
+
+async fn read_mysql_binary_result_rows_after_header(
+    stream: &mut TcpStream,
+    column_types: &[u8],
+) -> anyhow::Result<(Vec<Vec<Option<String>>>, u16)> {
+    let mut rows = Vec::new();
+    loop {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
+            return Ok((rows, decode_mysql_eof_status(&payload)?));
+        }
+        rows.push(decode_mysql_binary_row(&payload, column_types)?);
+    }
+}
+
+async fn read_mysql_stmt_fetch_rows(
+    stream: &mut TcpStream,
+    column_types: &[u8],
+) -> anyhow::Result<(Vec<Vec<Option<String>>>, u16)> {
+    read_mysql_binary_result_rows_after_header(stream, column_types).await
+}
+
+fn compat_corpus_statements() -> Vec<String> {
+    let corpus = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/compat/corpus.sql"
+    ));
+    let mut cleaned = String::new();
+    for line in corpus.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut chars = cleaned.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match quote {
+            Some(q) if ch == q => {
+                if q == '\'' && chars.peek().copied() == Some('\'') {
+                    current.push('\'');
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == ';' => {
+                let stmt = current.trim().to_string();
+                if !stmt.is_empty() {
+                    statements.push(stmt);
+                }
+                current.clear();
+            }
+            None => {}
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+    statements
+}
+
 async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow!("payload too large"));
@@ -602,6 +2337,23 @@ async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> 
     stream.write_all(payload).await?;
     stream.flush().await?;
     Ok(())
+}
+
+fn encode_lenenc_int(buf: &mut Vec<u8>, n: usize) {
+    if n < 251 {
+        buf.push(n as u8);
+    } else if n <= 0xffff {
+        buf.push(0xfc);
+        buf.extend_from_slice(&(n as u16).to_le_bytes());
+    } else if n <= 0x00ff_ffff {
+        buf.push(0xfd);
+        buf.push((n & 0xff) as u8);
+        buf.push(((n >> 8) & 0xff) as u8);
+        buf.push(((n >> 16) & 0xff) as u8);
+    } else {
+        buf.push(0xfe);
+        buf.extend_from_slice(&(n as u64).to_le_bytes());
+    }
 }
 
 fn mysql_handshake_response_packet() -> Vec<u8> {

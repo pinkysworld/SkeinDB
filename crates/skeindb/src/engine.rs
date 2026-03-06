@@ -1270,7 +1270,7 @@ impl Engine {
             "table": table,
             "columns": columns,
             "primary_key": schema.primary_key,
-            "indexes": [],
+            "indexes": mysql_compat_indexes_json(schema),
             "compat_mysql": schema.compat_mysql,
         }))
     }
@@ -1501,6 +1501,243 @@ impl Engine {
         })
     }
 
+    pub fn schema_add_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        index_name: String,
+        columns: Vec<String>,
+        unique: bool,
+    ) -> anyhow::Result<()> {
+        let index_name = index_name.trim().to_string();
+        if index_name.is_empty() {
+            anyhow::bail!("invalid_request: index name must not be empty");
+        }
+        if columns.is_empty() {
+            anyhow::bail!("invalid_request: index requires at least one column");
+        }
+
+        {
+            let (schema, _) = self.get_table_mut(table)?;
+            let mut normalized_columns = Vec::new();
+            let mut seen = HashSet::new();
+            for column in columns.iter() {
+                let Some(schema_column) = schema
+                    .columns
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(column))
+                    .map(|c| c.name.clone())
+                else {
+                    anyhow::bail!("invalid_request: unknown column {column}");
+                };
+                let seen_key = schema_column.to_ascii_lowercase();
+                if seen.insert(seen_key) {
+                    normalized_columns.push(schema_column);
+                }
+            }
+            if normalized_columns.is_empty() {
+                anyhow::bail!("invalid_request: index requires at least one column");
+            }
+
+            let mut unchanged = false;
+            for def in mysql_compat_index_defs(schema) {
+                if def.name.eq_ignore_ascii_case(&index_name) {
+                    unchanged = def.unique == unique && def.columns == normalized_columns;
+                    break;
+                }
+            }
+            if unchanged {
+                return Ok(());
+            }
+
+            set_mysql_compat_index(schema, &index_name, &normalized_columns, unique);
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
+    pub fn schema_modify_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        column: ColumnSchema,
+        default: Option<Lit>,
+    ) -> anyhow::Result<()> {
+        let old_name = old_name.trim();
+        if old_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+        let target_name = column.name.trim().to_string();
+        if target_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+            let Some(col_idx) = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(old_name))
+            else {
+                anyhow::bail!("not_found: column not found: {old_name}");
+            };
+            let existing_name = schema.columns[col_idx].name.clone();
+            let rename = existing_name != target_name;
+
+            if rename
+                && schema
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, c)| idx != col_idx && c.name.eq_ignore_ascii_case(&target_name))
+            {
+                anyhow::bail!("conflict: column already exists: {target_name}");
+            }
+
+            if rename {
+                for entry in tdata.rows.iter_mut() {
+                    let value = entry.row.remove(&existing_name);
+                    if let Some(value) = value {
+                        entry.row.insert(target_name.clone(), value);
+                    } else if let Some(default) = default.as_ref() {
+                        entry.row.insert(target_name.clone(), default.clone());
+                    } else if column.nullable {
+                        entry.row.insert(target_name.clone(), Lit::Null);
+                    }
+                }
+                for pk in schema.primary_key.iter_mut() {
+                    if pk.eq_ignore_ascii_case(&existing_name) {
+                        *pk = target_name.clone();
+                    }
+                }
+                if let Some(next) = schema.auto_inc_next.remove(&existing_name) {
+                    schema.auto_inc_next.insert(target_name.clone(), next);
+                }
+                rename_mysql_compat_column_default(schema, &existing_name, &target_name);
+                rename_mysql_compat_index_columns(schema, &existing_name, &target_name);
+            }
+
+            for entry in tdata.rows.iter_mut() {
+                if !entry.row.contains_key(&target_name) {
+                    entry
+                        .row
+                        .insert(target_name.clone(), default.clone().unwrap_or(Lit::Null));
+                }
+                if !column.nullable
+                    && entry
+                        .row
+                        .get(&target_name)
+                        .is_some_and(|value| matches!(value, Lit::Null))
+                {
+                    if let Some(default) = default.as_ref() {
+                        entry.row.insert(target_name.clone(), default.clone());
+                    } else {
+                        anyhow::bail!(
+                            "invalid_request: non-null column requires default for existing rows"
+                        );
+                    }
+                }
+            }
+
+            schema.columns[col_idx] = ColumnSchema {
+                name: target_name.clone(),
+                r#type: column.r#type.clone(),
+                nullable: column.nullable,
+                auto_increment: column.auto_increment,
+            };
+
+            if column.auto_increment {
+                if !schema.auto_inc_next.contains_key(&target_name) {
+                    let mut next_id = 1u64;
+                    for entry in tdata.rows.iter() {
+                        if entry.deleted {
+                            continue;
+                        }
+                        if let Some(Lit::U64 { v }) = entry.row.get(&target_name) {
+                            next_id = next_id.max(v.saturating_add(1));
+                        }
+                    }
+                    schema.auto_inc_next.insert(target_name.clone(), next_id);
+                }
+            } else {
+                schema.auto_inc_next.remove(&target_name);
+            }
+
+            match default.as_ref() {
+                Some(default) => set_mysql_compat_column_default(schema, &target_name, default),
+                None => remove_mysql_compat_column_default(schema, &target_name),
+            }
+
+            tdata.pk_index.clear();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let pk = extract_pk(schema, &entry.row)?;
+                let key = pk_key(&pk);
+                if tdata.pk_index.insert(key, idx).is_some() {
+                    anyhow::bail!("conflict: duplicate primary key after ALTER TABLE");
+                }
+            }
+
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
+    pub fn schema_drop_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        index_name: &str,
+        if_exists: bool,
+    ) -> anyhow::Result<()> {
+        let removed = {
+            let (schema, _) = self.get_table_mut(table)?;
+            let removed = remove_mysql_compat_index(schema, index_name);
+            if removed {
+                bump_table_version(schema);
+            }
+            removed
+        };
+
+        if !removed {
+            if if_exists {
+                return Ok(());
+            }
+            anyhow::bail!("not_found: index not found: {}", index_name);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
         let (_schema, tdata) = self.get_table(table)?;
 
@@ -1544,6 +1781,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
 
             for mut row in rows {
                 // Fill missing cols and apply auto-increment.
@@ -1551,11 +1789,20 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
+                if mysql_compat_unique_conflict(&unique_indexes, tdata, &row, None).is_some() {
+                    anyhow::bail!("conflict");
+                }
 
                 // Build PK
                 let pk = extract_pk(schema, &row)?;
                 let pk_key_s = pk_key(&pk);
-                if tdata.pk_index.contains_key(&pk_key_s) {
+                let pk_conflict = tdata
+                    .pk_index
+                    .get(&pk_key_s)
+                    .and_then(|idx| tdata.rows.get(*idx))
+                    .map(|entry| !entry.deleted)
+                    .unwrap_or(false);
+                if pk_conflict {
                     anyhow::bail!("conflict");
                 }
 
@@ -1567,6 +1814,7 @@ impl Engine {
                     deleted: false,
                 });
                 tdata.pk_index.insert(pk_key_s, idx);
+                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &row);
 
                 change_pks.push(pk);
                 collect_value_store_items(&row, &mut intern_items);
@@ -1632,37 +1880,46 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
 
-            for entry in tdata.rows.iter_mut() {
-                if entry.deleted {
+            for idx in 0..tdata.rows.len() {
+                if tdata.rows[idx].deleted {
                     continue;
                 }
-                if !eval_predicate(predicate, &entry.row, None, args)? {
+                let current_row = tdata.rows[idx].row.clone();
+                if !eval_predicate(predicate, &current_row, None, args)? {
                     continue;
                 }
 
                 if let Some(tag) = if_match {
-                    let current = row_etag(&entry.row, entry.version);
+                    let current = row_etag(&tdata.rows[idx].row, tdata.rows[idx].version);
                     if current != tag {
                         anyhow::bail!("conflict");
                     }
                 }
 
-                let mut new_row = entry.row.clone();
+                let mut new_row = current_row.clone();
                 for (k, v) in set.iter() {
                     new_row.insert(k.clone(), v.clone());
                 }
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                entry.row = new_row;
-                entry.version = next_row_version(schema);
+                if mysql_compat_unique_conflict(&unique_indexes, tdata, &new_row, Some(idx))
+                    .is_some()
+                {
+                    anyhow::bail!("conflict");
+                }
+                mysql_compat_unique_index_remove_row(&mut unique_indexes, idx, &current_row);
+                tdata.rows[idx].row = new_row;
+                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &tdata.rows[idx].row);
+                tdata.rows[idx].version = next_row_version(schema);
                 affected += 1;
 
-                let pk = extract_pk(schema, &entry.row).ok();
+                let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
                 change_pks.push(pk);
-                collect_value_store_items(&entry.row, &mut intern_items);
-                snapshot_rows.push(entry.row.clone());
+                collect_value_store_items(&tdata.rows[idx].row, &mut intern_items);
+                snapshot_rows.push(tdata.rows[idx].row.clone());
 
                 if let Some(lim) = limit {
                     if affected >= lim {
@@ -6784,6 +7041,7 @@ fn execute_select(
         anyhow::bail!("set operations not implemented in this prototype");
     };
     let SelectBody {
+        distinct,
         projection,
         from,
         r#where,
@@ -6819,93 +7077,96 @@ fn execute_select(
                 .limit
                 .as_ref()
                 .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
-            if let (Some((limit, offset)), Some(hint)) = (
-                has_limit,
-                vector_order_prefilter_hint(&query.order_by, args),
-            ) {
-                let key = TableKey {
-                    db: base.db.clone(),
-                    table: base.table.clone(),
-                };
-                if !engine.views.contains_key(&key)
-                    && engine.oblivious_policy_for(base).level == "off"
-                {
-                    let required = limit.saturating_add(offset);
-                    if required > 0 {
-                        let (schema, tdata) = engine.get_table(base)?;
-                        if let Some(candidates) = vector_prefilter_candidates(
-                            schema,
-                            tdata,
-                            &hint.column,
-                            &hint.query_vec,
-                        ) {
-                            if candidates.len() as u64 >= required {
-                                let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
-                                let columns = projection_columns(projection);
-                                let order = &query.order_by;
-                                let mut rows = Vec::new();
-                                let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
-                                let mut rows_scanned = 0u64;
-                                for idx in candidates.iter() {
-                                    let Some(entry) = tdata.rows.get(*idx) else {
-                                        continue;
-                                    };
-                                    if entry.deleted {
-                                        continue;
-                                    }
-                                    rows_scanned = rows_scanned.saturating_add(1);
-                                    let ctx = row_ctx_from_row(&alias, &entry.row);
-                                    if let Some(pred) = r#where {
-                                        if !eval_predicate(
-                                            pred,
-                                            &BTreeMap::new(),
-                                            Some(&ctx),
-                                            args,
-                                        )? {
+            if !distinct.unwrap_or(false) {
+                if let (Some((limit, offset)), Some(hint)) = (
+                    has_limit,
+                    vector_order_prefilter_hint(&query.order_by, args),
+                ) {
+                    let key = TableKey {
+                        db: base.db.clone(),
+                        table: base.table.clone(),
+                    };
+                    if !engine.views.contains_key(&key)
+                        && engine.oblivious_policy_for(base).level == "off"
+                    {
+                        let required = limit.saturating_add(offset);
+                        if required > 0 {
+                            let (schema, tdata) = engine.get_table(base)?;
+                            if let Some(candidates) = vector_prefilter_candidates(
+                                schema,
+                                tdata,
+                                &hint.column,
+                                &hint.query_vec,
+                            ) {
+                                if candidates.len() as u64 >= required {
+                                    let alias =
+                                        base.r#as.clone().unwrap_or_else(|| base.table.clone());
+                                    let columns = projection_columns(projection);
+                                    let order = &query.order_by;
+                                    let mut rows = Vec::new();
+                                    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+                                    let mut rows_scanned = 0u64;
+                                    for idx in candidates.iter() {
+                                        let Some(entry) = tdata.rows.get(*idx) else {
+                                            continue;
+                                        };
+                                        if entry.deleted {
                                             continue;
                                         }
+                                        rows_scanned = rows_scanned.saturating_add(1);
+                                        let ctx = row_ctx_from_row(&alias, &entry.row);
+                                        if let Some(pred) = r#where {
+                                            if !eval_predicate(
+                                                pred,
+                                                &BTreeMap::new(),
+                                                Some(&ctx),
+                                                args,
+                                            )? {
+                                                continue;
+                                            }
+                                        }
+                                        let mut out_row = Vec::new();
+                                        for item in projection.iter() {
+                                            out_row.push(eval_expr(
+                                                &item.expr,
+                                                &BTreeMap::new(),
+                                                Some(&ctx),
+                                                args,
+                                            )?);
+                                        }
+                                        if order.is_empty() {
+                                            rows.push(out_row);
+                                        } else {
+                                            let keys = eval_order_keys(order, &ctx, args)?;
+                                            items.push((keys, out_row));
+                                        }
                                     }
-                                    let mut out_row = Vec::new();
-                                    for item in projection.iter() {
-                                        out_row.push(eval_expr(
-                                            &item.expr,
-                                            &BTreeMap::new(),
-                                            Some(&ctx),
-                                            args,
-                                        )?);
+
+                                    if !order.is_empty() {
+                                        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+                                        rows = items.into_iter().map(|(_, row)| row).collect();
                                     }
-                                    if order.is_empty() {
-                                        rows.push(out_row);
-                                    } else {
-                                        let keys = eval_order_keys(order, &ctx, args)?;
-                                        items.push((keys, out_row));
+
+                                    if let Some(limit) = &query.limit {
+                                        let off = limit.offset.unwrap_or(0) as usize;
+                                        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+                                        let end = (off + lim).min(rows.len());
+                                        rows = if off >= rows.len() {
+                                            Vec::new()
+                                        } else {
+                                            rows[off..end].to_vec()
+                                        };
                                     }
-                                }
 
-                                if !order.is_empty() {
-                                    items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
-                                    rows = items.into_iter().map(|(_, row)| row).collect();
-                                }
+                                    if let Some(info) = snapshot_info.as_ref() {
+                                        engine.observe_and_plan_snapshot(info, rows_scanned);
+                                    }
+                                    if !index_infos.is_empty() {
+                                        engine.observe_index_advisor(&index_infos, rows_scanned);
+                                    }
 
-                                if let Some(limit) = &query.limit {
-                                    let off = limit.offset.unwrap_or(0) as usize;
-                                    let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
-                                    let end = (off + lim).min(rows.len());
-                                    rows = if off >= rows.len() {
-                                        Vec::new()
-                                    } else {
-                                        rows[off..end].to_vec()
-                                    };
+                                    return Ok((columns, rows));
                                 }
-
-                                if let Some(info) = snapshot_info.as_ref() {
-                                    engine.observe_and_plan_snapshot(info, rows_scanned);
-                                }
-                                if !index_infos.is_empty() {
-                                    engine.observe_index_advisor(&index_infos, rows_scanned);
-                                }
-
-                                return Ok((columns, rows));
                             }
                         }
                     }
@@ -6993,6 +7254,10 @@ fn execute_select(
         rows = items.into_iter().map(|(_, row)| row).collect();
     }
 
+    if distinct.unwrap_or(false) {
+        rows = dedup_select_rows(rows);
+    }
+
     // LIMIT/OFFSET
     if let Some(limit) = &query.limit {
         let off = limit.offset.unwrap_or(0) as usize;
@@ -7015,6 +7280,18 @@ fn execute_select(
     Ok((columns, rows))
 }
 
+fn dedup_select_rows(rows: Vec<Vec<Lit>>) -> Vec<Vec<Lit>> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        let key = serde_json::to_vec(&row).unwrap_or_default();
+        if seen.insert(key) {
+            out.push(row);
+        }
+    }
+    out
+}
+
 fn execute_select_with_keys(
     engine: &Engine,
     query: &Query,
@@ -7026,6 +7303,7 @@ fn execute_select_with_keys(
         anyhow::bail!("not_patchable");
     };
     let SelectBody {
+        distinct,
         projection,
         from,
         r#where,
@@ -7035,7 +7313,7 @@ fn execute_select_with_keys(
     } = select.as_ref();
 
     // Patchability: only simple single-table SELECTs with primary keys.
-    if group_by.is_some() || having.is_some() {
+    if distinct.unwrap_or(false) || group_by.is_some() || having.is_some() {
         anyhow::bail!("not_patchable");
     }
 
@@ -7714,6 +7992,41 @@ fn scan_table(engine: &Engine, base: &BaseTableRef) -> anyhow::Result<Vec<RowCtx
     Ok(out)
 }
 
+fn null_row_ctx_for_base(engine: &Engine, base: &BaseTableRef) -> anyhow::Result<RowCtx> {
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    let column_names = if let Some(view) = engine.views.get(&key) {
+        view.columns.clone()
+    } else {
+        engine
+            .get_schema(&base.db, &base.table)?
+            .columns
+            .iter()
+            .map(|col| col.name.clone())
+            .collect()
+    };
+    let mut ctx = RowCtx::new();
+    for col in column_names {
+        ctx.insert(format!("{}.{}", alias, col), Lit::Null);
+    }
+    Ok(ctx)
+}
+
+fn null_row_ctx_for_ref(engine: &Engine, tref: &TableRef) -> anyhow::Result<RowCtx> {
+    match tref {
+        TableRef::Base(base) => null_row_ctx_for_base(engine, base),
+        TableRef::Join(join) => {
+            let mut ctx = null_row_ctx_for_ref(engine, &join.join.left)?;
+            ctx.extend(null_row_ctx_for_ref(engine, &join.join.right)?);
+            Ok(ctx)
+        }
+        TableRef::Subquery(_) => anyhow::bail!("subqueries in FROM are not implemented"),
+    }
+}
+
 fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Vec<RowCtx>> {
     let left = eval_from(engine, &join.left, args)?;
     let right = eval_from(engine, &join.right, args)?;
@@ -7744,8 +8057,58 @@ fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Ve
                 }
             }
         }
+        JoinType::Left => {
+            let right_nulls = null_row_ctx_for_ref(engine, &join.right)?;
+            for a in left.iter() {
+                let mut matched = false;
+                for b in right.iter() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                            matched = true;
+                        }
+                    } else {
+                        out.push(merged);
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    let mut merged = a.clone();
+                    merged.extend(right_nulls.clone());
+                    out.push(merged);
+                }
+            }
+        }
+        JoinType::Right => {
+            let left_nulls = null_row_ctx_for_ref(engine, &join.left)?;
+            for b in right.iter() {
+                let mut matched = false;
+                for a in left.iter() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                            matched = true;
+                        }
+                    } else {
+                        out.push(merged);
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    let mut merged = left_nulls.clone();
+                    merged.extend(b.clone());
+                    out.push(merged);
+                }
+            }
+        }
         _ => {
-            anyhow::bail!("only INNER and CROSS joins are implemented in this prototype")
+            anyhow::bail!(
+                "only INNER, LEFT, RIGHT, and CROSS joins are implemented in this prototype"
+            )
         }
     }
 
@@ -7772,8 +8135,24 @@ fn eval_predicate(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<bool> {
+    Ok(matches!(
+        eval_predicate_truth(expr, row, ctx, args)?,
+        Some(true)
+    ))
+}
+
+fn eval_predicate_truth(
+    expr: &Expr,
+    row: &RowObject,
+    ctx: Option<&RowCtx>,
+    args: &[Lit],
+) -> anyhow::Result<Option<bool>> {
     let v = eval_expr(expr, row, ctx, args)?;
-    Ok(matches!(v, Lit::Bool { v: true }))
+    Ok(match v {
+        Lit::Bool { v } => Some(v),
+        Lit::Null => None,
+        _ => Some(false),
+    })
 }
 
 fn eval_expr(
@@ -7863,8 +8242,10 @@ fn eval_expr(
                     let inner = a
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("not requires a"))?;
-                    let v = eval_predicate(inner, row, ctx, args)?;
-                    Ok(Lit::Bool { v: !v })
+                    match eval_predicate_truth(inner, row, ctx, args)? {
+                        Some(v) => Ok(Lit::Bool { v: !v }),
+                        None => Ok(Lit::Null),
+                    }
                 }
                 "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
                     let aa = a
@@ -7875,6 +8256,9 @@ fn eval_expr(
                         .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
                     let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
                     let ord = cmp_lit(&va, &vb)?;
                     let out = match op {
                         "eq" => ord == std::cmp::Ordering::Equal,
@@ -7890,16 +8274,28 @@ fn eval_expr(
                 "in" => {
                     let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("in requires a"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
+                    if matches!(va, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
                     let xs = list
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("in requires list"))?;
+                    let mut saw_null = false;
                     for x in xs {
                         let vx = eval_expr(x, row, ctx, args)?;
+                        if matches!(vx, Lit::Null) {
+                            saw_null = true;
+                            continue;
+                        }
                         if cmp_lit(&va, &vx)? == std::cmp::Ordering::Equal {
                             return Ok(Lit::Bool { v: true });
                         }
                     }
-                    Ok(Lit::Bool { v: false })
+                    if saw_null {
+                        Ok(Lit::Null)
+                    } else {
+                        Ok(Lit::Bool { v: false })
+                    }
                 }
                 "between" => {
                     let aa = a
@@ -7914,9 +8310,42 @@ fn eval_expr(
                     let va = eval_expr(aa, row, ctx, args)?;
                     let lo = eval_expr(vlo, row, ctx, args)?;
                     let hi = eval_expr(vhi, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(lo, Lit::Null) || matches!(hi, Lit::Null)
+                    {
+                        return Ok(Lit::Null);
+                    }
                     let ge = cmp_lit(&va, &lo)? != std::cmp::Ordering::Less;
                     let le = cmp_lit(&va, &hi)? != std::cmp::Ordering::Greater;
                     Ok(Lit::Bool { v: ge && le })
+                }
+                "like" | "ilike" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires string-like lhs"))?;
+                    let pattern = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires string-like rhs"))?;
+                    Ok(Lit::Bool {
+                        v: like_pattern_matches(&subject, &pattern, op == "ilike"),
+                    })
+                }
+                "is_null" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("is_null requires a"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    Ok(Lit::Bool {
+                        v: matches!(va, Lit::Null),
+                    })
                 }
                 _ => anyhow::bail!("unsupported op: {op}"),
             }
@@ -7987,12 +8416,19 @@ fn eval_and_list(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<Lit> {
+    let mut saw_null = false;
     for x in xs {
-        if !eval_predicate(x, row, ctx, args)? {
-            return Ok(Lit::Bool { v: false });
+        match eval_predicate_truth(x, row, ctx, args)? {
+            Some(true) => {}
+            Some(false) => return Ok(Lit::Bool { v: false }),
+            None => saw_null = true,
         }
     }
-    Ok(Lit::Bool { v: true })
+    if saw_null {
+        Ok(Lit::Null)
+    } else {
+        Ok(Lit::Bool { v: true })
+    }
 }
 
 fn eval_or_list(
@@ -8001,12 +8437,19 @@ fn eval_or_list(
     ctx: Option<&RowCtx>,
     args: &[Lit],
 ) -> anyhow::Result<Lit> {
+    let mut saw_null = false;
     for x in xs {
-        if eval_predicate(x, row, ctx, args)? {
-            return Ok(Lit::Bool { v: true });
+        match eval_predicate_truth(x, row, ctx, args)? {
+            Some(true) => return Ok(Lit::Bool { v: true }),
+            Some(false) => {}
+            None => saw_null = true,
         }
     }
-    Ok(Lit::Bool { v: false })
+    if saw_null {
+        Ok(Lit::Null)
+    } else {
+        Ok(Lit::Bool { v: false })
+    }
 }
 
 fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
@@ -8022,6 +8465,62 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
         (Lit::U64 { v: x }, Lit::I64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
         _ => Ok(Ordering::Equal),
     }
+}
+
+fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(if *v { "1".to_string() } else { "0".to_string() }),
+        Lit::I64 { v } => Some(v.to_string()),
+        Lit::U64 { v } => Some(v.to_string()),
+        Lit::F64 { v } => Some(v.to_string()),
+        Lit::Dec { v } => Some(v.clone()),
+        Lit::Str { v } => Some(v.clone()),
+        Lit::Bytes { b64 } => Some(b64.clone()),
+        Lit::Json { v } => Some(v.to_string()),
+        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => Some(iso.clone()),
+        Lit::Uuid { v } => Some(v.clone()),
+        Lit::Embedding { .. } => None,
+    }
+}
+
+fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) -> bool {
+    let (subject, pattern) = if case_insensitive {
+        (
+            subject.to_ascii_lowercase().into_bytes(),
+            pattern.to_ascii_lowercase().into_bytes(),
+        )
+    } else {
+        (subject.as_bytes().to_vec(), pattern.as_bytes().to_vec())
+    };
+    let (mut si, mut pi) = (0usize, 0usize);
+    let (mut star_pi, mut star_si) = (None::<usize>, 0usize);
+
+    while si < subject.len() {
+        if pi < pattern.len() && (pattern[pi] == b'_' || pattern[pi] == subject[si]) {
+            si += 1;
+            pi += 1;
+            continue;
+        }
+        if pi < pattern.len() && pattern[pi] == b'%' {
+            star_pi = Some(pi);
+            pi += 1;
+            star_si = si;
+            continue;
+        }
+        if let Some(saved_pi) = star_pi {
+            pi = saved_pi + 1;
+            star_si += 1;
+            si = star_si;
+            continue;
+        }
+        return false;
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'%' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 #[derive(Debug)]
@@ -9742,11 +10241,406 @@ fn apply_defaults_and_autoinc(
             *next += 1;
             continue;
         }
+        if let Some(default) = mysql_compat_column_default(schema, &col.name) {
+            row.insert(col.name.clone(), default);
+            continue;
+        }
         if col.nullable {
             row.insert(col.name.clone(), Lit::Null);
         }
     }
     Ok(())
+}
+
+fn mysql_compat_column_default(schema: &TableSchema, column: &str) -> Option<Lit> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("column_defaults"))
+        .and_then(|v| v.get(column))
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+#[derive(Debug, Clone)]
+struct CompatIndexDef {
+    name: String,
+    columns: Vec<String>,
+    unique: bool,
+}
+
+fn mysql_compat_index_defs(schema: &TableSchema) -> Vec<CompatIndexDef> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("indexes"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(mysql_compat_index_from_value)
+        .collect()
+}
+
+fn mysql_compat_indexes_json(schema: &TableSchema) -> Vec<serde_json::Value> {
+    schema
+        .compat_mysql
+        .as_ref()
+        .and_then(|v| v.get("indexes"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn mysql_compat_index_from_value(value: &serde_json::Value) -> Option<CompatIndexDef> {
+    let name = value.get("name").and_then(|v| v.as_str())?.to_string();
+    let columns = value
+        .get("columns")
+        .and_then(|v| v.as_array())?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return None;
+    }
+    Some(CompatIndexDef {
+        name,
+        columns,
+        unique: value
+            .get("unique")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[String]) -> bool {
+    let mut compared = false;
+    for column in columns {
+        let Some(left) = row.get(column) else {
+            return false;
+        };
+        let Some(right) = other.get(column) else {
+            return false;
+        };
+        if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+            return false;
+        }
+        compared = true;
+        if left != right {
+            return false;
+        }
+    }
+    compared
+}
+
+#[derive(Debug, Clone)]
+struct MySqlCompatUniqueRuntimeIndex {
+    name: String,
+    columns: Vec<String>,
+    keys: HashMap<String, Vec<usize>>,
+}
+
+fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String> {
+    let mut values = Vec::with_capacity(columns.len());
+    for column in columns {
+        let value = row.get(column)?.clone();
+        if matches!(value, Lit::Null) {
+            return None;
+        }
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    Some(secondary_index_value_key(&values))
+}
+
+fn mysql_compat_unique_runtime_indexes(
+    schema: &TableSchema,
+    tdata: &TableData,
+) -> Vec<MySqlCompatUniqueRuntimeIndex> {
+    mysql_compat_index_defs(schema)
+        .into_iter()
+        .filter(|index| index.unique)
+        .map(|index| {
+            let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let Some(key) = mysql_compat_unique_key(&index.columns, &entry.row) else {
+                    continue;
+                };
+                keys.entry(key).or_default().push(idx);
+            }
+            MySqlCompatUniqueRuntimeIndex {
+                name: index.name,
+                columns: index.columns,
+                keys,
+            }
+        })
+        .collect()
+}
+
+fn mysql_compat_unique_index_add_row(
+    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
+    idx: usize,
+    row: &RowObject,
+) {
+    for index in indexes.iter_mut() {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        index.keys.entry(key).or_default().push(idx);
+    }
+}
+
+fn mysql_compat_unique_index_remove_row(
+    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
+    idx: usize,
+    row: &RowObject,
+) {
+    for index in indexes.iter_mut() {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        let mut remove_bucket = false;
+        if let Some(values) = index.keys.get_mut(&key) {
+            values.retain(|candidate| *candidate != idx);
+            remove_bucket = values.is_empty();
+        }
+        if remove_bucket {
+            index.keys.remove(&key);
+        }
+    }
+}
+
+fn mysql_compat_unique_conflict(
+    indexes: &[MySqlCompatUniqueRuntimeIndex],
+    tdata: &TableData,
+    row: &RowObject,
+    skip_idx: Option<usize>,
+) -> Option<String> {
+    for index in indexes {
+        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
+            continue;
+        };
+        let Some(candidates) = index.keys.get(&key) else {
+            continue;
+        };
+        for idx in candidates {
+            if skip_idx == Some(*idx) {
+                continue;
+            }
+            let Some(entry) = tdata.rows.get(*idx) else {
+                continue;
+            };
+            if entry.deleted {
+                continue;
+            }
+            if row_matches_compat_index(row, &entry.row, &index.columns) {
+                return Some(index.name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    defaults.insert(
+        column.to_string(),
+        serde_json::to_value(default).unwrap_or(serde_json::Value::Null),
+    );
+    root.insert(
+        "column_defaults".to_string(),
+        serde_json::Value::Object(defaults),
+    );
+    schema.compat_mysql = Some(serde_json::Value::Object(root));
+}
+
+fn remove_mysql_compat_column_default(schema: &mut TableSchema, column: &str) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    defaults.retain(|name, _| !name.eq_ignore_ascii_case(column));
+    if defaults.is_empty() {
+        root.remove("column_defaults");
+    } else {
+        root.insert(
+            "column_defaults".to_string(),
+            serde_json::Value::Object(defaults),
+        );
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn rename_mysql_compat_column_default(schema: &mut TableSchema, old_name: &str, new_name: &str) {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut defaults = root
+        .get("column_defaults")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut moved_value = None;
+    defaults.retain(|name, value| {
+        if name.eq_ignore_ascii_case(old_name) {
+            moved_value = Some(value.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if let Some(value) = moved_value {
+        defaults.insert(new_name.to_string(), value);
+    }
+    if defaults.is_empty() {
+        root.remove("column_defaults");
+    } else {
+        root.insert(
+            "column_defaults".to_string(),
+            serde_json::Value::Object(defaults),
+        );
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn rename_mysql_compat_index_columns(schema: &mut TableSchema, old_name: &str, new_name: &str) {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    for entry in indexes.iter_mut() {
+        let Some(columns) = entry.get_mut("columns").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for column in columns.iter_mut() {
+            if column
+                .as_str()
+                .map(|name| name.eq_ignore_ascii_case(old_name))
+                .unwrap_or(false)
+            {
+                *column = serde_json::Value::String(new_name.to_string());
+            }
+        }
+    }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn set_mysql_compat_index(schema: &mut TableSchema, name: &str, columns: &[String], unique: bool) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut replaced = false;
+    for entry in indexes.iter_mut() {
+        let same_name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(name))
+            .unwrap_or(false);
+        if !same_name {
+            continue;
+        }
+        *entry = serde_json::json!({
+            "name": name,
+            "columns": columns,
+            "unique": unique,
+        });
+        replaced = true;
+        break;
+    }
+    if !replaced {
+        indexes.push(serde_json::json!({
+            "name": name,
+            "columns": columns,
+            "unique": unique,
+        }));
+    }
+    root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    schema.compat_mysql = Some(serde_json::Value::Object(root));
+}
+
+fn remove_mysql_compat_index(schema: &mut TableSchema, name: &str) -> bool {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let original_len = indexes.len();
+    indexes.retain(|entry| {
+        !entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(name))
+            .unwrap_or(false)
+    });
+    let removed = indexes.len() != original_len;
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+    removed
 }
 
 #[derive(Debug, Clone)]
@@ -11688,6 +12582,9 @@ fn apply_schema_change(
                     }
                 }
                 schema.auto_inc_next.insert(name.clone(), next_id);
+            }
+            if let Some(default) = default.as_ref() {
+                set_mysql_compat_column_default(schema, name, default);
             }
             schema.columns.push(ColumnSchema {
                 name: name.clone(),
@@ -16637,6 +17534,487 @@ mod tests {
     }
 
     #[test]
+    fn query_select_supports_left_join_with_null_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("left_join_null_rows");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "author_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ada".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 10 }), ("author_id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 11 }), ("author_id", Lit::U64 { v: 9 })]),
+            ],
+            None,
+        )?;
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "author_id".to_string(),
+                                table: Some("p".to_string()),
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "name".to_string(),
+                                table: Some("u".to_string()),
+                            },
+                            r#as: None,
+                        },
+                    ],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Left,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "posts".to_string(),
+                                r#as: Some("p".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "users".to_string(),
+                                r#as: Some("u".to_string()),
+                            })),
+                            on: Some(eq_expr(
+                                Expr::Col {
+                                    col: "author_id".to_string(),
+                                    table: Some("p".to_string()),
+                                },
+                                Expr::Col {
+                                    col: "id".to_string(),
+                                    table: Some("u".to_string()),
+                                },
+                            )),
+                        },
+                    })]),
+                    r#where: Some(Expr::Op {
+                        op: "is_null".to_string(),
+                        a: Some(Box::new(Expr::Col {
+                            col: "name".to_string(),
+                            table: Some("u".to_string()),
+                        })),
+                        b: None,
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    }),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: vec![OrderBy {
+                expr: Expr::Col {
+                    col: "author_id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                dir: Some(OrderDir::Asc),
+            }],
+            limit: None,
+            lock: None,
+        };
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 9 }, Lit::Null]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_treats_null_predicates_as_unknown() -> anyhow::Result<()> {
+        let dir = temp_dir("null_predicate_truth");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "title".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "excerpt".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "Hello".to_string(),
+                        },
+                    ),
+                    ("excerpt", Lit::Null),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "Draft".to_string(),
+                        },
+                    ),
+                    (
+                        "excerpt",
+                        Lit::Str {
+                            v: "Preview".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "World".to_string(),
+                        },
+                    ),
+                    ("excerpt", Lit::Null),
+                ]),
+            ],
+            None,
+        )?;
+
+        let eq_null = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                },
+                Expr::Lit { lit: Lit::Null },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &eq_null, &[])?;
+        assert!(rows.is_empty());
+
+        let like_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "like".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "P%".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, rows) = execute_select(&engine, &like_query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
+
+        let in_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "in".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "excerpt".to_string(),
+                    table: None,
+                })),
+                b: None,
+                args: None,
+                list: Some(vec![
+                    Expr::Lit {
+                        lit: Lit::Str {
+                            v: "Preview".to_string(),
+                        },
+                    },
+                    Expr::Lit { lit: Lit::Null },
+                ]),
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, rows) = execute_select(&engine, &in_query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_right_join_with_null_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("right_join_null_rows");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "author_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Ada".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Linus".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 10 }),
+                ("author_id", Lit::U64 { v: 1 }),
+            ])],
+            None,
+        )?;
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: Some("u".to_string()),
+                            },
+                            r#as: None,
+                        },
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "id".to_string(),
+                                table: Some("p".to_string()),
+                            },
+                            r#as: None,
+                        },
+                    ],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Right,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "posts".to_string(),
+                                r#as: Some("p".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "users".to_string(),
+                                r#as: Some("u".to_string()),
+                            })),
+                            on: Some(eq_expr(
+                                Expr::Col {
+                                    col: "author_id".to_string(),
+                                    table: Some("p".to_string()),
+                                },
+                                Expr::Col {
+                                    col: "id".to_string(),
+                                    table: Some("u".to_string()),
+                                },
+                            )),
+                        },
+                    })]),
+                    r#where: Some(Expr::Op {
+                        op: "is_null".to_string(),
+                        a: Some(Box::new(Expr::Col {
+                            col: "id".to_string(),
+                            table: Some("p".to_string()),
+                        })),
+                        b: None,
+                        args: None,
+                        list: None,
+                        lo: None,
+                        hi: None,
+                    }),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: vec![OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("u".to_string()),
+                },
+                dir: Some(OrderDir::Asc),
+            }],
+            limit: None,
+            lock: None,
+        };
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 4 }, Lit::Null]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn vector_prefilter_candidates_match_bucket() -> anyhow::Result<()> {
         let dir = temp_dir("vector_prefilter");
         let mut engine = Engine::open(&dir)?;
@@ -18295,6 +19673,271 @@ mod tests {
             }),
             Some(5)
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_unique_index_enforcement_tracks_updates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_unique_runtime_index");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "email_unique",
+                    "columns": ["email"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "a@example.com".to_string(),
+            },
+        );
+        let mut predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        let err = engine
+            .data_update(&table, &predicate, &set, None, None, &[])
+            .expect_err("expected unique conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "c@example.com".to_string(),
+            },
+        );
+        let moved = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(moved.affected, 1);
+
+        set.insert(
+            "email".to_string(),
+            Lit::Str {
+                v: "b@example.com".to_string(),
+            },
+        );
+        predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        let reused = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(reused.affected, 1);
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected duplicate insert conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_modify_and_change_column_updates_schema_rows_and_indexes() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("mysql_modify_change_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": ""}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "world".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.schema_modify_mysql_compat_column(
+            &table,
+            "slug",
+            ColumnSchema {
+                name: "slug".to_string(),
+                r#type: type_desc("str"),
+                nullable: false,
+                auto_increment: false,
+            },
+            Some(Lit::Str {
+                v: "n-a".to_string(),
+            }),
+        )?;
+
+        engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 3 })])], None)?;
+        let row_three = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            row_three.row.get("slug"),
+            Some(&Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+
+        engine.schema_modify_mysql_compat_column(
+            &table,
+            "slug",
+            ColumnSchema {
+                name: "post_slug".to_string(),
+                r#type: type_desc("str"),
+                nullable: false,
+                auto_increment: false,
+            },
+            Some(Lit::Str {
+                v: "n-a".to_string(),
+            }),
+        )?;
+
+        let renamed = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            renamed.row.get("post_slug"),
+            Some(&Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert!(!renamed.row.contains_key("slug"));
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "post_slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("conflict"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
