@@ -49,7 +49,7 @@ SkeinDB adoption strategy:
 - Translated arithmetic expressions now also include baseline `+`, `-`, `*`, `/`, and `%` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses, including common numeric ordering/filtering patterns such as `col + 0`
 - Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, and `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
-- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 - Compatibility subquery rewrites now cover top-level `AND` chains that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)`, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; broader correlated/nested forms still remain open
@@ -88,8 +88,8 @@ so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
 pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
 parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverage, baseline arithmetic
-expression coverage, baseline date/time-function coverage, plus `CASE` / `CAST` expression coverage
-including scalar-expression `ORDER BY`, `ALTER TABLE ... RENAME COLUMN`, top-level
+expression coverage, baseline date/time-function coverage, grouped-aggregate `HAVING` coverage,
+plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`, `ALTER TABLE ... RENAME COLUMN`, top-level
 `AND`-chained subquery rewrite coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage
 for creating MySQL compatibility unique indexes.
 

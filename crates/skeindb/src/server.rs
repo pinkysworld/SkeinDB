@@ -1977,12 +1977,38 @@ struct MySqlCompatGroupedAggregateOrder {
     desc: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCompatGroupedAggregateHavingTarget {
+    Group,
+    Aggregate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MySqlCompatGroupedAggregateHavingOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MySqlCompatGroupedAggregateHavingClause {
+    target: MySqlCompatGroupedAggregateHavingTarget,
+    op: MySqlCompatGroupedAggregateHavingOp,
+    value: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct MySqlCompatGroupedAggregateQuery {
     group_alias: String,
     aggregate_alias: String,
     aggregate_op: MySqlCompatAggregateOp,
     source_sql: String,
+    having: Vec<MySqlCompatGroupedAggregateHavingClause>,
     order_by: Vec<MySqlCompatGroupedAggregateOrder>,
     limit: Option<LimitClause>,
 }
@@ -2155,6 +2181,162 @@ fn mysql_grouped_order_matches_group_column(
     }
 }
 
+fn mysql_grouped_aggregate_having_target_for_raw(
+    raw: &str,
+    group_expr_raw: &str,
+    group_col: &str,
+    group_table: Option<&str>,
+    group_alias: &str,
+    aggregate_expr_raw: &str,
+    aggregate_alias: &str,
+) -> Option<MySqlCompatGroupedAggregateHavingTarget> {
+    let trimmed = trim_wrapping_parentheses(raw.trim());
+    if trimmed.eq_ignore_ascii_case(group_alias) || trimmed.eq_ignore_ascii_case(group_expr_raw) {
+        return Some(MySqlCompatGroupedAggregateHavingTarget::Group);
+    }
+    if trimmed.eq_ignore_ascii_case(aggregate_alias)
+        || trimmed.eq_ignore_ascii_case(aggregate_expr_raw)
+    {
+        return Some(MySqlCompatGroupedAggregateHavingTarget::Aggregate);
+    }
+    let (col, table) = parse_sql_column_ref(trimmed)?;
+    if table.is_none() && col.eq_ignore_ascii_case(group_alias) {
+        return Some(MySqlCompatGroupedAggregateHavingTarget::Group);
+    }
+    if sql_column_refs_match(&col, table.as_deref(), group_col, group_table)
+        || (table.is_none() && col.eq_ignore_ascii_case(group_col))
+    {
+        return Some(MySqlCompatGroupedAggregateHavingTarget::Group);
+    }
+    if table.is_none() && col.eq_ignore_ascii_case(aggregate_alias) {
+        return Some(MySqlCompatGroupedAggregateHavingTarget::Aggregate);
+    }
+    None
+}
+
+fn mysql_parse_grouped_aggregate_having_clauses(
+    having_sql: &str,
+    group_expr_raw: &str,
+    group_col: &str,
+    group_table: Option<&str>,
+    group_alias: &str,
+    aggregate_expr_raw: &str,
+    aggregate_alias: &str,
+) -> Option<Vec<MySqlCompatGroupedAggregateHavingClause>> {
+    let mut clauses = Vec::new();
+    for part in split_top_level_and(trim_wrapping_parentheses(having_sql)) {
+        let clause = trim_wrapping_parentheses(part.trim());
+        if clause.is_empty() {
+            return None;
+        }
+        if let Some(idx) = find_keyword_top_level(clause, "is") {
+            let left = clause[..idx].trim();
+            let right = clause[idx + 2..].trim();
+            let target = mysql_grouped_aggregate_having_target_for_raw(
+                left,
+                group_expr_raw,
+                group_col,
+                group_table,
+                group_alias,
+                aggregate_expr_raw,
+                aggregate_alias,
+            )?;
+            let op = if right.eq_ignore_ascii_case("null") {
+                MySqlCompatGroupedAggregateHavingOp::IsNull
+            } else if right.eq_ignore_ascii_case("not null") {
+                MySqlCompatGroupedAggregateHavingOp::IsNotNull
+            } else {
+                return None;
+            };
+            clauses.push(MySqlCompatGroupedAggregateHavingClause {
+                target,
+                op,
+                value: None,
+            });
+            continue;
+        }
+
+        let bytes = clause.as_bytes();
+        let mut i = 0usize;
+        let mut depth = 0u32;
+        let mut quote = 0u8;
+        let mut parsed = None::<MySqlCompatGroupedAggregateHavingClause>;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quote != 0 {
+                if b == quote {
+                    if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2;
+                        continue;
+                    }
+                    quote = 0;
+                }
+                i += 1;
+                continue;
+            }
+            match b {
+                b'\'' | b'"' | b'`' => {
+                    quote = b;
+                    i += 1;
+                    continue;
+                }
+                b'(' => {
+                    depth = depth.saturating_add(1);
+                    i += 1;
+                    continue;
+                }
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            if depth == 0 {
+                for (token, op) in [
+                    (">=", MySqlCompatGroupedAggregateHavingOp::Ge),
+                    ("<=", MySqlCompatGroupedAggregateHavingOp::Le),
+                    ("<>", MySqlCompatGroupedAggregateHavingOp::Ne),
+                    ("!=", MySqlCompatGroupedAggregateHavingOp::Ne),
+                    ("=", MySqlCompatGroupedAggregateHavingOp::Eq),
+                    (">", MySqlCompatGroupedAggregateHavingOp::Gt),
+                    ("<", MySqlCompatGroupedAggregateHavingOp::Lt),
+                ] {
+                    if clause[i..].starts_with(token) {
+                        let left = clause[..i].trim();
+                        let right = clause[i + token.len()..].trim();
+                        if left.is_empty() || right.is_empty() {
+                            return None;
+                        }
+                        let target = mysql_grouped_aggregate_having_target_for_raw(
+                            left,
+                            group_expr_raw,
+                            group_col,
+                            group_table,
+                            group_alias,
+                            aggregate_expr_raw,
+                            aggregate_alias,
+                        )?;
+                        let lit = parse_sql_lit(right).ok()?;
+                        parsed = Some(MySqlCompatGroupedAggregateHavingClause {
+                            target,
+                            op,
+                            value: mysql_default_cell_value(&lit),
+                        });
+                        break;
+                    }
+                }
+                if parsed.is_some() {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        clauses.push(parsed?);
+    }
+    Some(clauses)
+}
+
 fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAggregateQuery> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
@@ -2181,18 +2363,23 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
         return None;
     }
     group_tail = group_tail[group_key_end..].trim();
-    if group_tail
-        .get(..7)
-        .map(|chunk| chunk.eq_ignore_ascii_case("having "))
-        .unwrap_or(false)
-    {
-        return None;
-    }
 
+    let mut having_sql = None::<String>;
     let mut order_sql = None::<String>;
     let mut limit_sql = None::<String>;
     let mut offset_sql = None::<String>;
     while !group_tail.is_empty() {
+        if group_tail.to_ascii_lowercase().starts_with("having ") {
+            let tail = group_tail[6..].trim_start();
+            let next = ["order by", "limit", "offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            having_sql = Some(tail[..next].trim().to_string());
+            group_tail = tail[next..].trim();
+            continue;
+        }
         if group_tail.to_ascii_lowercase().starts_with("order by ") {
             let tail = group_tail[8..].trim_start();
             let next = ["limit", "offset"]
@@ -2248,6 +2435,7 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
     let (aggregate_select_expr, aggregate_default_alias, aggregate_op) = aggregate?;
     let group_idx = if aggregate_idx == 0 { 1 } else { 0 };
     let (group_expr_raw, group_alias_raw) = &projection_items[group_idx];
+    let aggregate_expr_raw = projection_items[aggregate_idx].0.clone();
     let (group_col, group_table) = parse_sql_column_ref(group_expr_raw)?;
     let group_select_expr = group_table
         .as_ref()
@@ -2268,6 +2456,20 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
     if aggregate_alias.is_empty() {
         return None;
     }
+
+    let having = if let Some(having_sql) = having_sql.as_deref() {
+        mysql_parse_grouped_aggregate_having_clauses(
+            having_sql,
+            group_expr_raw,
+            &group_col,
+            group_table.as_deref(),
+            &group_alias,
+            &aggregate_expr_raw,
+            &aggregate_alias,
+        )?
+    } else {
+        Vec::new()
+    };
 
     if let Ok(position) = group_by_expr.parse::<usize>() {
         if position == 0 || position > projection_items.len() || position - 1 != group_idx {
@@ -2337,6 +2539,7 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
         aggregate_alias,
         aggregate_op,
         source_sql,
+        having,
         order_by,
         limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref()).ok()?,
     })
@@ -2367,6 +2570,44 @@ fn mysql_numeric_text_ordering(
         (Some(_), None) => Some(std::cmp::Ordering::Greater),
         (Some(lhs), Some(rhs)) => {
             parse(lhs).and_then(|lhs| parse(rhs).and_then(|rhs| lhs.partial_cmp(&rhs)))
+        }
+    }
+}
+
+fn mysql_grouped_aggregate_having_clause_matches(
+    row: &[Option<String>],
+    clause: &MySqlCompatGroupedAggregateHavingClause,
+) -> bool {
+    let left = match clause.target {
+        MySqlCompatGroupedAggregateHavingTarget::Group => {
+            row.first().and_then(|value| value.as_deref())
+        }
+        MySqlCompatGroupedAggregateHavingTarget::Aggregate => {
+            row.get(1).and_then(|value| value.as_deref())
+        }
+    };
+    match clause.op {
+        MySqlCompatGroupedAggregateHavingOp::IsNull => left.is_none(),
+        MySqlCompatGroupedAggregateHavingOp::IsNotNull => left.is_some(),
+        op => {
+            let Some(right) = clause.value.as_deref() else {
+                return false;
+            };
+            let Some(left) = left else {
+                return false;
+            };
+            let cmp = mysql_numeric_text_ordering(Some(left), Some(right))
+                .unwrap_or_else(|| mysql_text_ordering(Some(left), Some(right)));
+            match op {
+                MySqlCompatGroupedAggregateHavingOp::Eq => cmp == std::cmp::Ordering::Equal,
+                MySqlCompatGroupedAggregateHavingOp::Ne => cmp != std::cmp::Ordering::Equal,
+                MySqlCompatGroupedAggregateHavingOp::Lt => cmp == std::cmp::Ordering::Less,
+                MySqlCompatGroupedAggregateHavingOp::Le => cmp != std::cmp::Ordering::Greater,
+                MySqlCompatGroupedAggregateHavingOp::Gt => cmp == std::cmp::Ordering::Greater,
+                MySqlCompatGroupedAggregateHavingOp::Ge => cmp != std::cmp::Ordering::Less,
+                MySqlCompatGroupedAggregateHavingOp::IsNull
+                | MySqlCompatGroupedAggregateHavingOp::IsNotNull => false,
+            }
         }
     }
 }
@@ -2610,6 +2851,15 @@ async fn mysql_try_grouped_aggregate_query_outcome(
             vec![group_key, aggregate_value]
         })
         .collect::<Vec<_>>();
+
+    if !query.having.is_empty() {
+        out_rows.retain(|row| {
+            query
+                .having
+                .iter()
+                .all(|clause| mysql_grouped_aggregate_having_clause_matches(row, clause))
+        });
+    }
 
     if !query.order_by.is_empty() {
         out_rows.sort_by(|left, right| {
@@ -15287,6 +15537,26 @@ mod tests {
             ]
         );
 
+        let grouped_having = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT id, AVG(score) AS avg_score FROM app.users GROUP BY id HAVING avg_score >= 2 ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            grouped_having,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "avg_score".to_string(),
+                    column_type: MySqlStmtColumnType::Double,
+                },
+            ]
+        );
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -15588,6 +15858,25 @@ mod tests {
             "SELECT post_status, post_author FROM wp_posts"
         );
         assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::Max);
+        assert!(parsed.having.is_empty());
+
+        let parsed = mysql_parse_grouped_aggregate_query(
+            "SELECT post_status, COUNT(*) AS status_count FROM wp_posts GROUP BY post_status HAVING COUNT(*) > 1 AND post_status = 'publish' ORDER BY status_count DESC",
+        )
+        .expect("parse grouped aggregate having query");
+        assert_eq!(parsed.having.len(), 2);
+        assert_eq!(
+            parsed.having[0].target,
+            MySqlCompatGroupedAggregateHavingTarget::Aggregate
+        );
+        assert_eq!(parsed.having[0].op, MySqlCompatGroupedAggregateHavingOp::Gt);
+        assert_eq!(parsed.having[0].value.as_deref(), Some("1"));
+        assert_eq!(
+            parsed.having[1].target,
+            MySqlCompatGroupedAggregateHavingTarget::Group
+        );
+        assert_eq!(parsed.having[1].op, MySqlCompatGroupedAggregateHavingOp::Eq);
+        assert_eq!(parsed.having[1].value.as_deref(), Some("publish"));
     }
 
     #[test]

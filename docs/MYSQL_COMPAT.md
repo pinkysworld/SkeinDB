@@ -55,7 +55,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - literal session-variable selects with MySQL-style `LIMIT` forms (`LIMIT n`, `LIMIT offset,n`, `LIMIT n OFFSET offset`) for bootstrap probes such as `SELECT @@version_comment`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
-  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
+  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
   - compatibility rewrite for WordPress-style non-aggregate `GROUP BY` de-dup queries when grouped columns map to the full projected column set (including `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()` flows)
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
@@ -69,7 +69,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - limited subquery compatibility rewrites for common adoption paths: `... WHERE <col> [NOT] IN (SELECT ...)` and `... WHERE [NOT] EXISTS (SELECT ...)`, including top-level `AND` chains that mix one or more of those predicates with translated non-subquery filters plus simple correlated rewrites for base-table subqueries whose outer references are top-level equality clauses (including equality-based correlated `IN` and multi-column `EXISTS` membership rewrites)
   - `SET autocommit` (including qualified/session forms), `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
   - compatibility no-op handling for `LOCK TABLES` / `UNLOCK TABLES`
-- `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented, including scalar-function, arithmetic-expression, baseline date/time-function, `CASE` / `CAST`, expression-ordering, and correlated-subquery coverage.
+- `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented, including scalar-function, arithmetic-expression, baseline date/time-function, grouped-aggregate `HAVING`, `CASE` / `CAST`, expression-ordering, and correlated-subquery coverage.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.

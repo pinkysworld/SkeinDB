@@ -705,6 +705,25 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_prepare(
         &mut stream,
+        "SELECT id, AVG(score) AS avg_score FROM wp_metrics GROUP BY id HAVING avg_score >= 1 ORDER BY id ASC",
+    )
+    .await?;
+    let aggregate_having_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(
+        aggregate_having_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("avg_score".to_string(), 0x05),]
+    );
+
+    send_com_stmt_execute(&mut stream, aggregate_having_stmt.statement_id, &[]).await?;
+    let aggregate_having_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        aggregate_having_rows,
+        vec![vec![Some("1".to_string()), Some("1.5".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, aggregate_having_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
         "SELECT LENGTH(name) AS name_len, IF(1, name, 'missing') AS chosen_name, LOCATE('ra', name) AS hit_pos FROM wp_users WHERE id = ?",
     )
     .await?;
@@ -1690,6 +1709,26 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][1].as_deref(), Some("1"));
                         assert_eq!(rows[1][0].as_deref(), Some("publish"));
                         assert_eq!(rows[1][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, count(*) as status_count from wp_posts group by post_status having status_count > 1 order by status_count desc, post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[0][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, count(*) as status_count from wp_posts group by post_status having count(*) > 1 and post_status = 'publish' order by status_count desc, post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[0][1].as_deref(), Some("4"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
