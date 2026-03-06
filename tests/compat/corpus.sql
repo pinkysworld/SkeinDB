@@ -238,6 +238,18 @@ SELECT SUM(post_author) AS author_sum
   FROM wp_posts
  WHERE post_status = 'publish';
 
+SELECT MIN(post_author) AS min_author
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT MAX(post_author) AS max_author
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+SELECT AVG(post_author) AS avg_author
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
 SELECT post_status, COUNT(*) AS status_count
   FROM wp_posts
  GROUP BY post_status
@@ -248,6 +260,11 @@ SELECT post_author, SUM(post_author) AS author_sum_by_author
  WHERE post_status = 'publish'
  GROUP BY post_author
  ORDER BY post_author ASC;
+
+SELECT post_status, MAX(post_author) AS max_author_by_status
+  FROM wp_posts
+ GROUP BY post_status
+ ORDER BY post_status ASC;
 
 SELECT ID
   FROM wp_posts
@@ -366,6 +383,27 @@ SELECT id
  )
  ORDER BY id ASC
  LIMIT 0, 2;
+
+CREATE TABLE compat_dropcol (
+  id BIGINT UNSIGNED NOT NULL,
+  keep_col VARCHAR(20) NOT NULL DEFAULT '',
+  drop_col VARCHAR(20) NULL,
+  PRIMARY KEY (id),
+  KEY drop_col_idx (drop_col)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO compat_dropcol (id, keep_col, drop_col)
+VALUES (1, 'stay', 'gone');
+
+ALTER TABLE compat_dropcol
+  DROP COLUMN drop_col;
+
+SHOW FULL COLUMNS FROM compat_dropcol;
+SHOW INDEX FROM compat_dropcol;
+
+SELECT keep_col
+  FROM compat_dropcol
+ WHERE id = 1;
 
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;

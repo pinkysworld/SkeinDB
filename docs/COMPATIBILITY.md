@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -32,7 +32,7 @@ SkeinDB adoption strategy:
 - DROP INDEX
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
-- ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
+- ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
 - ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
 - DROP TABLE
 
@@ -45,7 +45,7 @@ SkeinDB adoption strategy:
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
-- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 

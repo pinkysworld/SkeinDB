@@ -37,7 +37,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW` (`DATABASES`, `TABLES`, `COLUMNS`)
   - `USE`
   - `CREATE DATABASE`, `CREATE TABLE`, `CREATE [UNIQUE] INDEX`, `DROP INDEX`, `DROP TABLE`
-  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses), `ALTER TABLE ... MODIFY [COLUMN]`, `ALTER TABLE ... CHANGE [COLUMN]`, `ALTER TABLE ... ADD [UNIQUE] KEY`, and `ALTER TABLE ... DROP [KEY|INDEX]`
+  - `ALTER TABLE ... ADD COLUMN` (including compatibility handling for `AFTER` / `FIRST` position clauses), `ALTER TABLE ... MODIFY [COLUMN]`, `ALTER TABLE ... CHANGE [COLUMN]`, `ALTER TABLE ... DROP COLUMN`, `ALTER TABLE ... ADD [UNIQUE] KEY`, and `ALTER TABLE ... DROP [KEY|INDEX]`
   - `INSERT`, `INSERT IGNORE`, `REPLACE`, `UPDATE`, `DELETE`
   - `INSERT ... ON DUPLICATE KEY UPDATE` (declared key-aware compatibility routing)
   - `SQL_CALC_FOUND_ROWS` and `FOUND_ROWS()`
@@ -55,7 +55,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - literal session-variable selects with MySQL-style `LIMIT` forms (`LIMIT n`, `LIMIT offset,n`, `LIMIT n OFFSET offset`) for bootstrap probes such as `SELECT @@version_comment`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
-  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
+  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
   - compatibility rewrite for WordPress-style non-aggregate `GROUP BY` de-dup queries when grouped columns map to the full projected column set (including `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()` flows)
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
@@ -73,7 +73,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) complete duplicate-key enforcement hardening from the current in-memory probe indexes to full durable/reusable secondary-index-backed unique-key semantics
-2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (subqueries, richer aggregates, and broader `ALTER TABLE` variants beyond `ADD COLUMN` / `ADD|DROP [KEY|INDEX]`)
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (deeper correlated/nested subqueries, broader function coverage, and broader `ALTER TABLE` variants beyond the current `ADD/MODIFY/CHANGE/DROP COLUMN` plus index metadata surface)
 3) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers
 
 ---

@@ -1960,6 +1960,9 @@ enum MySqlCompatAggregateOp {
     CountRows,
     CountNonNull,
     Sum,
+    Min,
+    Max,
+    Avg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1988,9 +1991,11 @@ struct MySqlCompatGroupedAggregateQuery {
 struct MySqlCompatGroupedAggregateState {
     row_count: u64,
     non_null_count: u64,
-    sum_total: f64,
-    sum_all_i64: bool,
-    sum_saw_value: bool,
+    numeric_total: f64,
+    numeric_all_i64: bool,
+    numeric_saw_value: bool,
+    min_value: Option<String>,
+    max_value: Option<String>,
 }
 
 impl MySqlCompatGroupedAggregateState {
@@ -1998,9 +2003,11 @@ impl MySqlCompatGroupedAggregateState {
         Self {
             row_count: 0,
             non_null_count: 0,
-            sum_total: 0.0,
-            sum_all_i64: true,
-            sum_saw_value: false,
+            numeric_total: 0.0,
+            numeric_all_i64: true,
+            numeric_saw_value: false,
+            min_value: None,
+            max_value: None,
         }
     }
 }
@@ -2034,18 +2041,86 @@ fn mysql_parse_aggregate_projection_expr(
         ));
     }
     if aggregate_lower.starts_with("sum(") && aggregate_lower.ends_with(')') {
-        let arg = aggregate_expr[4..aggregate_expr.len() - 1].trim();
-        let (col, table) = parse_sql_column_ref(arg)?;
-        let select_expr = table
-            .map(|table| format!("{table}.{col}"))
-            .unwrap_or(col.clone());
-        return Some((
-            Some(select_expr.clone()),
-            format!("SUM({select_expr})"),
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "sum",
             MySqlCompatAggregateOp::Sum,
-        ));
+        );
+    }
+    if aggregate_lower.starts_with("min(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "min",
+            MySqlCompatAggregateOp::Min,
+        );
+    }
+    if aggregate_lower.starts_with("max(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "max",
+            MySqlCompatAggregateOp::Max,
+        );
+    }
+    if aggregate_lower.starts_with("avg(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "avg",
+            MySqlCompatAggregateOp::Avg,
+        );
     }
     None
+}
+
+fn mysql_parse_column_aggregate_projection(
+    aggregate_expr: &str,
+    function_name: &str,
+    op: MySqlCompatAggregateOp,
+) -> Option<(Option<String>, String, MySqlCompatAggregateOp)> {
+    let arg_start = function_name.len() + 1;
+    let arg = aggregate_expr[arg_start..aggregate_expr.len() - 1].trim();
+    let (col, table) = parse_sql_column_ref(arg)?;
+    let select_expr = table
+        .map(|table| format!("{table}.{col}"))
+        .unwrap_or(col.clone());
+    Some((
+        Some(select_expr.clone()),
+        format!("{}({select_expr})", function_name.to_ascii_uppercase()),
+        op,
+    ))
+}
+
+fn mysql_parse_numeric_aggregate_value(raw: &str) -> Result<(f64, bool), RpcError> {
+    if let Ok(value) = raw.parse::<i64>() {
+        return Ok((value as f64, true));
+    }
+    if let Ok(value) = raw.parse::<f64>() {
+        return Ok((value, false));
+    }
+    Err(RpcError::new(
+        "not_supported",
+        "numeric aggregate compatibility currently supports only numeric result values",
+    ))
+}
+
+fn mysql_render_numeric_aggregate_value(value: f64, prefer_integer: bool) -> String {
+    if prefer_integer && value.fract() == 0.0 {
+        return (value as i64).to_string();
+    }
+    let mut rendered = value.to_string();
+    if rendered.contains('.') {
+        while rendered.ends_with('0') {
+            rendered.pop();
+        }
+        if rendered.ends_with('.') {
+            rendered.pop();
+        }
+    }
+    rendered
+}
+
+fn mysql_aggregate_value_ordering(left: &str, right: &str) -> std::cmp::Ordering {
+    mysql_numeric_text_ordering(Some(left), Some(right))
+        .unwrap_or_else(|| mysql_text_ordering(Some(left), Some(right)))
 }
 
 fn mysql_parse_projection_expr_alias(item: &str) -> (String, Option<String>) {
@@ -2372,24 +2447,44 @@ async fn mysql_try_simple_aggregate_query_outcome(
                     continue;
                 };
                 saw_value = true;
-                if let Ok(value) = raw.parse::<i64>() {
-                    total += value as f64;
-                } else if let Ok(value) = raw.parse::<f64>() {
-                    all_i64 = false;
-                    total += value;
-                } else {
-                    return Err(RpcError::new(
-                        "not_supported",
-                        "SUM compatibility currently supports only numeric result values",
-                    ));
-                }
+                let (value, is_i64) = mysql_parse_numeric_aggregate_value(raw)?;
+                all_i64 &= is_i64;
+                total += value;
             }
             if !saw_value {
                 None
-            } else if all_i64 {
-                Some((total as i64).to_string())
             } else {
-                Some(total.to_string())
+                Some(mysql_render_numeric_aggregate_value(total, all_i64))
+            }
+        }
+        MySqlCompatAggregateOp::Min => rows
+            .iter()
+            .filter_map(|row| row.first().and_then(|value| value.clone()))
+            .min_by(|left, right| mysql_aggregate_value_ordering(left, right)),
+        MySqlCompatAggregateOp::Max => rows
+            .iter()
+            .filter_map(|row| row.first().and_then(|value| value.clone()))
+            .max_by(|left, right| mysql_aggregate_value_ordering(left, right)),
+        MySqlCompatAggregateOp::Avg => {
+            let mut total = 0.0f64;
+            let mut count = 0u64;
+            let mut all_i64 = true;
+            for row in &rows {
+                let Some(raw) = row.first().and_then(|value| value.as_deref()) else {
+                    continue;
+                };
+                let (value, is_i64) = mysql_parse_numeric_aggregate_value(raw)?;
+                all_i64 &= is_i64;
+                total += value;
+                count = count.saturating_add(1);
+            }
+            if count == 0 {
+                None
+            } else {
+                Some(mysql_render_numeric_aggregate_value(
+                    total / count as f64,
+                    all_i64,
+                ))
             }
         }
     };
@@ -2442,21 +2537,42 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                     state.non_null_count = state.non_null_count.saturating_add(1);
                 }
             }
-            MySqlCompatAggregateOp::Sum => {
+            MySqlCompatAggregateOp::Sum | MySqlCompatAggregateOp::Avg => {
                 let Some(raw) = aggregate_value else {
                     continue;
                 };
-                state.sum_saw_value = true;
-                if let Ok(value) = raw.parse::<i64>() {
-                    state.sum_total += value as f64;
-                } else if let Ok(value) = raw.parse::<f64>() {
-                    state.sum_all_i64 = false;
-                    state.sum_total += value;
-                } else {
-                    return Err(RpcError::new(
-                        "not_supported",
-                        "SUM compatibility currently supports only numeric result values",
-                    ));
+                let (value, is_i64) = mysql_parse_numeric_aggregate_value(raw)?;
+                state.non_null_count = state.non_null_count.saturating_add(1);
+                state.numeric_saw_value = true;
+                state.numeric_all_i64 &= is_i64;
+                state.numeric_total += value;
+            }
+            MySqlCompatAggregateOp::Min => {
+                let Some(raw) = aggregate_value else {
+                    continue;
+                };
+                state.non_null_count = state.non_null_count.saturating_add(1);
+                if state
+                    .min_value
+                    .as_deref()
+                    .map(|current| mysql_aggregate_value_ordering(raw, current).is_lt())
+                    .unwrap_or(true)
+                {
+                    state.min_value = Some(raw.to_string());
+                }
+            }
+            MySqlCompatAggregateOp::Max => {
+                let Some(raw) = aggregate_value else {
+                    continue;
+                };
+                state.non_null_count = state.non_null_count.saturating_add(1);
+                if state
+                    .max_value
+                    .as_deref()
+                    .map(|current| mysql_aggregate_value_ordering(raw, current).is_gt())
+                    .unwrap_or(true)
+                {
+                    state.max_value = Some(raw.to_string());
                 }
             }
         }
@@ -2469,12 +2585,25 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                 MySqlCompatAggregateOp::CountRows => Some(state.row_count.to_string()),
                 MySqlCompatAggregateOp::CountNonNull => Some(state.non_null_count.to_string()),
                 MySqlCompatAggregateOp::Sum => {
-                    if !state.sum_saw_value {
+                    if !state.numeric_saw_value {
                         None
-                    } else if state.sum_all_i64 {
-                        Some((state.sum_total as i64).to_string())
                     } else {
-                        Some(state.sum_total.to_string())
+                        Some(mysql_render_numeric_aggregate_value(
+                            state.numeric_total,
+                            state.numeric_all_i64,
+                        ))
+                    }
+                }
+                MySqlCompatAggregateOp::Min => state.min_value,
+                MySqlCompatAggregateOp::Max => state.max_value,
+                MySqlCompatAggregateOp::Avg => {
+                    if !state.numeric_saw_value || state.non_null_count == 0 {
+                        None
+                    } else {
+                        Some(mysql_render_numeric_aggregate_value(
+                            state.numeric_total / state.non_null_count as f64,
+                            state.numeric_all_i64,
+                        ))
                     }
                 }
             };
@@ -7460,6 +7589,10 @@ enum SqlPlan {
         column: SchemaColumnInfo,
         default: Option<Lit>,
     },
+    AlterTableDropColumn {
+        table: BaseTableRef,
+        column_name: String,
+    },
     AlterTableAddIndex {
         table: BaseTableRef,
         index_name: String,
@@ -9173,6 +9306,34 @@ fn parse_alter_table_drop_index_clause(clause: &str) -> Result<Option<String>, R
     Ok(Some(index_name))
 }
 
+fn parse_alter_table_drop_column_clause(clause: &str) -> Result<Option<String>, RpcError> {
+    let mut tail = clause.trim();
+    if tail.len() >= 6 && tail[..6].eq_ignore_ascii_case("column") {
+        tail = tail[6..].trim_start();
+    }
+    let tokens: Vec<&str> = tail.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE DROP COLUMN requires a column name",
+        ));
+    }
+    if matches!(
+        tokens[0].to_ascii_lowercase().as_str(),
+        "primary" | "foreign" | "constraint"
+    ) {
+        return Ok(None);
+    }
+    let column_name = clean_sql_ident(tokens[0]);
+    if column_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE DROP COLUMN requires a valid column name",
+        ));
+    }
+    Ok(Some(column_name))
+}
+
 fn parse_alter_table_column_spec(
     clause: &str,
     name_idx: usize,
@@ -9228,7 +9389,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let Some((action_idx, action)) = action_match else {
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / DROP COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
         ));
     };
 
@@ -9242,9 +9403,12 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
                 if_exists: false,
             });
         }
+        if let Some(column_name) = parse_alter_table_drop_column_clause(clause)? {
+            return Ok(SqlPlan::AlterTableDropColumn { table, column_name });
+        }
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE DROP currently supports only DROP [KEY|INDEX]",
+            "ALTER TABLE DROP currently supports only DROP COLUMN and DROP [KEY|INDEX]",
         ));
     }
 
@@ -9644,6 +9808,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::AlterTableAddColumn { .. }
         | SqlPlan::AlterTableModifyColumn { .. }
         | SqlPlan::AlterTableChangeColumn { .. }
+        | SqlPlan::AlterTableDropColumn { .. }
         | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
         SqlPlan::DropTable { .. } => "drop_table",
@@ -9680,6 +9845,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
         | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
+        | Ok(SqlPlan::AlterTableDropColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
@@ -10385,6 +10551,17 @@ async fn sql_exec_alter_table_modify_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_drop_column(
+    state: &AppState,
+    table: BaseTableRef,
+    column_name: String,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_drop_mysql_compat_column(&table, &column_name)
+        .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 async fn sql_exec_alter_table_add_index(
     state: &AppState,
     table: BaseTableRef,
@@ -10843,6 +11020,16 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "operation": "change_column",
                 "old_column": old_name,
                 "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableDropColumn { table, column_name } => {
+            sql_exec_alter_table_drop_column(state, table.clone(), column_name.clone()).await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "drop_column",
+                "column": column_name
             }))
         }
         SqlPlan::AlterTableAddIndex {
@@ -13932,6 +14119,13 @@ mod tests {
         assert_eq!(parsed.1, "SELECT score FROM wp_postmeta");
         assert_eq!(parsed.2, MySqlCompatAggregateOp::Sum);
 
+        let parsed =
+            mysql_parse_simple_aggregate_query("SELECT AVG(score) AS avg_score FROM wp_postmeta")
+                .expect("parse avg query");
+        assert_eq!(parsed.0, "avg_score");
+        assert_eq!(parsed.1, "SELECT score FROM wp_postmeta");
+        assert_eq!(parsed.2, MySqlCompatAggregateOp::Avg);
+
         assert!(mysql_parse_simple_aggregate_query("SELECT id FROM wp_posts").is_none());
         assert!(mysql_parse_simple_aggregate_query(
             "SELECT post_status, COUNT(*) FROM wp_posts GROUP BY post_status"
@@ -13968,6 +14162,18 @@ mod tests {
             Some(0)
         );
         assert_eq!(parsed.limit.as_ref().and_then(|limit| limit.limit), Some(2));
+
+        let parsed = mysql_parse_grouped_aggregate_query(
+            "SELECT post_status, MAX(post_author) AS max_author FROM wp_posts GROUP BY post_status ORDER BY max_author DESC",
+        )
+        .expect("parse grouped max aggregate query");
+        assert_eq!(parsed.group_alias, "post_status");
+        assert_eq!(parsed.aggregate_alias, "max_author");
+        assert_eq!(
+            parsed.source_sql,
+            "SELECT post_status, post_author FROM wp_posts"
+        );
+        assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::Max);
     }
 
     #[test]
@@ -14144,6 +14350,18 @@ mod tests {
                 v: "slug".to_string()
             })
         );
+    }
+
+    #[test]
+    fn parse_alter_table_drop_column_roundtrip() {
+        let plan = parse_sql_plan("ALTER TABLE app.posts DROP COLUMN post_name", Some("app"))
+            .expect("parse alter table drop column");
+        let SqlPlan::AlterTableDropColumn { table, column_name } = plan else {
+            panic!("expected alter table drop column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(column_name, "post_name");
     }
 
     #[test]

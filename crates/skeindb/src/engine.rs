@@ -1704,6 +1704,75 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_drop_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        let column_name = column_name.trim();
+        if column_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+            let Some(col_idx) = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(column_name))
+            else {
+                anyhow::bail!("not_found: column not found: {column_name}");
+            };
+            let existing_name = schema.columns[col_idx].name.clone();
+
+            if schema
+                .primary_key
+                .iter()
+                .any(|pk| pk.eq_ignore_ascii_case(&existing_name))
+            {
+                anyhow::bail!(
+                    "not_supported: ALTER TABLE DROP COLUMN does not yet support primary key columns"
+                );
+            }
+
+            schema.columns.remove(col_idx);
+            schema
+                .auto_inc_next
+                .retain(|name, _| !name.eq_ignore_ascii_case(&existing_name));
+            remove_mysql_compat_column_default(schema, &existing_name);
+            remove_mysql_compat_index_column(schema, &existing_name);
+
+            for entry in tdata.rows.iter_mut() {
+                entry.row.remove(&existing_name);
+            }
+
+            tdata.pk_index.clear();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let pk = extract_pk(schema, &entry.row)?;
+                let key = pk_key(&pk);
+                if tdata.pk_index.insert(key, idx).is_some() {
+                    anyhow::bail!("conflict: duplicate primary key after ALTER TABLE");
+                }
+            }
+
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn schema_drop_mysql_compat_index(
         &mut self,
         table: &BaseTableRef,
@@ -10560,6 +10629,40 @@ fn rename_mysql_compat_index_columns(schema: &mut TableSchema, old_name: &str, n
             }
         }
     }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn remove_mysql_compat_index_column(schema: &mut TableSchema, column_name: &str) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    indexes.retain_mut(|entry| {
+        let Some(columns) = entry.get_mut("columns").and_then(|v| v.as_array_mut()) else {
+            return false;
+        };
+        columns.retain(|value| {
+            !value
+                .as_str()
+                .map(|name| name.eq_ignore_ascii_case(column_name))
+                .unwrap_or(false)
+        });
+        !columns.is_empty()
+    });
     if indexes.is_empty() {
         root.remove("indexes");
     } else {
@@ -19938,6 +20041,124 @@ mod tests {
             )
             .expect_err("expected renamed unique index conflict");
         assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_drop_column_updates_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_drop_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "metrics",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "keep_col".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "drop_col".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "drop_col": {"t": "str", "v": "legacy"}
+                },
+                "indexes": [{
+                    "name": "drop_col_idx",
+                    "columns": ["drop_col"],
+                    "unique": false
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "metrics".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "keep_col",
+                    Lit::Str {
+                        v: "stay".to_string(),
+                    },
+                ),
+                (
+                    "drop_col",
+                    Lit::Str {
+                        v: "gone".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_drop_mysql_compat_column(&table, "drop_col")?;
+
+        let desc = engine.describe_table("app", "metrics")?;
+        let columns = desc
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].get("name").and_then(|v| v.as_str()), Some("id"));
+        assert_eq!(
+            columns[1].get("name").and_then(|v| v.as_str()),
+            Some("keep_col")
+        );
+        assert!(desc
+            .get("compat_mysql")
+            .and_then(|v| v.get("column_defaults"))
+            .and_then(|v| v.get("drop_col"))
+            .is_none());
+        assert!(desc
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .map(|indexes| indexes.is_empty())
+            .unwrap_or(true));
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("keep_col"),
+            Some(&Lit::Str {
+                v: "stay".to_string()
+            })
+        );
+        assert!(!fetched.row.contains_key("drop_col"));
+
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "keep_col",
+                    Lit::Str {
+                        v: "still".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

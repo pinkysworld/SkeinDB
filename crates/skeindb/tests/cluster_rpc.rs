@@ -850,6 +850,53 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
         ]
     );
 
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (4, 5, 3.0)",
+    )
+    .await?;
+    let (_seq, ok_insert_extra) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_extra)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT MIN(sort_order) AS min_sort FROM wp_postmeta",
+    )
+    .await?;
+    let min_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(min_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT MAX(sort_order) AS max_sort FROM wp_postmeta",
+    )
+    .await?;
+    let max_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(max_rows, vec![vec![Some("5".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT AVG(weight) AS avg_weight FROM wp_postmeta",
+    )
+    .await?;
+    let avg_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(avg_rows, vec![vec![Some("2.25".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, MAX(weight) AS max_weight FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC",
+    )
+    .await?;
+    let grouped_max_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_max_rows,
+        vec![
+            vec![None, None],
+            vec![Some("2".to_string()), Some("1.5".to_string())],
+            vec![Some("5".to_string()), Some("3.0".to_string())],
+        ]
+    );
+
     Ok(())
 }
 
@@ -1365,6 +1412,33 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select min(post_author) as min_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select max(post_author) as max_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select avg(post_author) as avg_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select count(*) as user_count from wp_users" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -1394,6 +1468,18 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[1][1].as_deref(), Some("4"));
                         assert_eq!(rows[2][0].as_deref(), Some("3"));
                         assert_eq!(rows[2][1].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, max(post_author) as max_author_by_status from wp_posts group by post_status order by post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("draft"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[1][1].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
@@ -1526,6 +1612,29 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "show full columns from compat_dropcol" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("keep_col"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from compat_dropcol" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert_eq!(rows[0][4].as_deref(), Some("id"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select keep_col from compat_dropcol where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("stay"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show status like 'threads_connected'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][1].as_deref(), Some("1"));
