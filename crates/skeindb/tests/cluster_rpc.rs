@@ -1581,6 +1581,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show full columns from compat_alter_subq" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 3);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("parent_id"));
+                    assert_eq!(rows[2][0].as_deref(), Some("post_slug"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select post_slug from compat_alter_subq where id = 4" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1592,7 +1608,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
-            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where slug = 'n-a' ) order by id asc limit 0, 2" => {
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where post_slug = 'n-a' ) order by id asc limit 0, 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 2);
@@ -1608,6 +1624,51 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows.len(), 2);
                         assert_eq!(rows[0][0].as_deref(), Some("1"));
                         assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) and id > 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where post_slug = 'n-a' ) and parent_id is not null order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where lower(post_slug) = 'n-a' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select lower(post_slug), upper(post_slug), length(post_slug), char_length(post_slug), coalesce(parent_id, 0), ifnull(parent_id, 0), concat(post_slug, '-', ifnull(parent_id, 0)) from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("N-A"));
+                        assert_eq!(rows[0][2].as_deref(), Some("3"));
+                        assert_eq!(rows[0][3].as_deref(), Some("3"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1"));
+                        assert_eq!(rows[0][5].as_deref(), Some("1"));
+                        assert_eq!(rows[0][6].as_deref(), Some("n-a-1"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

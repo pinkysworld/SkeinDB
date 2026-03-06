@@ -355,6 +355,15 @@ SELECT slug
   FROM compat_alter_subq
  WHERE id = 4;
 
+ALTER TABLE compat_alter_subq
+  RENAME COLUMN slug TO post_slug;
+
+SHOW FULL COLUMNS FROM compat_alter_subq;
+
+SELECT post_slug
+  FROM compat_alter_subq
+ WHERE id = 4;
+
 SELECT id
   FROM compat_alter_subq
  WHERE parent_id IN (
@@ -369,7 +378,7 @@ SELECT id
  WHERE EXISTS (
    SELECT 1
      FROM compat_alter_subq
-    WHERE slug = 'n-a'
+    WHERE post_slug = 'n-a'
  )
  ORDER BY id ASC
  LIMIT 0, 2;
@@ -383,6 +392,42 @@ SELECT id
  )
  ORDER BY id ASC
  LIMIT 0, 2;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE parent_id IN (
+   SELECT id
+     FROM compat_alter_subq
+    WHERE id < 3
+ )
+   AND id > 1
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE EXISTS (
+   SELECT 1
+     FROM compat_alter_subq
+    WHERE post_slug = 'n-a'
+ )
+   AND parent_id IS NOT NULL
+ ORDER BY id ASC
+ LIMIT 0, 2;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE LOWER(post_slug) = 'n-a'
+ ORDER BY id ASC;
+
+SELECT LOWER(post_slug),
+       UPPER(post_slug),
+       LENGTH(post_slug),
+       CHAR_LENGTH(post_slug),
+       COALESCE(parent_id, 0),
+       IFNULL(parent_id, 0),
+       CONCAT(post_slug, '-', IFNULL(parent_id, 0))
+  FROM compat_alter_subq
+ WHERE id = 4;
 
 CREATE TABLE compat_dropcol (
   id BIGINT UNSIGNED NOT NULL,

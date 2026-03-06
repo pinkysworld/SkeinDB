@@ -31,23 +31,25 @@ SkeinDB adoption strategy:
 - CREATE INDEX / CREATE UNIQUE INDEX
 - DROP INDEX
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
-- `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
-- ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
+- `UNIQUE KEY` semantics are enforced for inserts/updates through in-memory compatibility key indexes, but the current implementation is not yet backed by a durable reusable secondary index structure
+- ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `RENAME COLUMN` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
 - ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
 - DROP TABLE
 
 ### DML
 - INSERT / INSERT IGNORE / REPLACE
 - INSERT ... ON DUPLICATE KEY UPDATE
-- `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata; the implementation remains scan-based rather than backed by a true secondary index structure
+- `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata backed by in-memory compatibility key indexes; durable reusable secondary-index parity is still open
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
+- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
+- Compatibility subquery rewrites now cover top-level `AND` chains that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)`; correlated/nested forms still remain open
 
 ### MySQL wire protocol
 - Handshake + `mysql_native_password`
@@ -82,7 +84,8 @@ The MySQL integration suite now executes that corpus end-to-end over the wire li
 so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
 pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
-and parenthesized `AND` / `OR` filter queries.
+parenthesized `AND` / `OR` filter queries, MySQL scalar-function coverage, `ALTER TABLE ... RENAME COLUMN`,
+and top-level `AND`-chained subquery rewrite coverage.
 
 ---
 

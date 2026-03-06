@@ -2816,23 +2816,19 @@ fn mysql_parse_select_where_parts(sql: &str) -> Option<(String, String, String)>
 }
 
 fn mysql_parse_in_subquery_where_clause(where_clause: &str) -> Option<(String, bool, String)> {
-    if split_top_level_or(where_clause).len() != 1 || split_top_level_and(where_clause).len() != 1 {
+    let clause = trim_wrapping_parentheses(where_clause.trim());
+    let (idx, negated, token_len) = if let Some(idx) = find_keyword_top_level(clause, "not in") {
+        (idx, true, "not in".len())
+    } else if let Some(idx) = find_keyword_top_level(clause, "in") {
+        (idx, false, "in".len())
+    } else {
         return None;
-    }
-
-    let (idx, negated, token_len) =
-        if let Some(idx) = find_keyword_top_level(where_clause, "not in") {
-            (idx, true, "not in".len())
-        } else if let Some(idx) = find_keyword_top_level(where_clause, "in") {
-            (idx, false, "in".len())
-        } else {
-            return None;
-        };
-    let lhs = where_clause[..idx].trim();
+    };
+    let lhs = clause[..idx].trim();
     if lhs.is_empty() {
         return None;
     }
-    let rhs = where_clause[idx + token_len..].trim_start();
+    let rhs = clause[idx + token_len..].trim_start();
     if !rhs.starts_with('(') {
         return None;
     }
@@ -2848,10 +2844,7 @@ fn mysql_parse_in_subquery_where_clause(where_clause: &str) -> Option<(String, b
 }
 
 fn mysql_parse_exists_subquery_where_clause(where_clause: &str) -> Option<(bool, String)> {
-    if split_top_level_or(where_clause).len() != 1 || split_top_level_and(where_clause).len() != 1 {
-        return None;
-    }
-    let clause = where_clause.trim();
+    let clause = trim_wrapping_parentheses(where_clause.trim());
     let lower = clause.to_ascii_lowercase();
     let (negated, rest) = if lower.starts_with("exists") {
         (false, clause[6..].trim_start())
@@ -2872,6 +2865,38 @@ fn mysql_parse_exists_subquery_where_clause(where_clause: &str) -> Option<(bool,
         return None;
     }
     Some((negated, subquery_sql.to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MySqlSubqueryCompatPredicate {
+    In {
+        lhs: String,
+        negated: bool,
+        subquery_sql: String,
+    },
+    Exists {
+        negated: bool,
+        subquery_sql: String,
+    },
+}
+
+fn mysql_parse_subquery_compat_predicate(
+    where_clause: &str,
+) -> Option<MySqlSubqueryCompatPredicate> {
+    if let Some((lhs, negated, subquery_sql)) = mysql_parse_in_subquery_where_clause(where_clause) {
+        return Some(MySqlSubqueryCompatPredicate::In {
+            lhs,
+            negated,
+            subquery_sql,
+        });
+    }
+    if let Some((negated, subquery_sql)) = mysql_parse_exists_subquery_where_clause(where_clause) {
+        return Some(MySqlSubqueryCompatPredicate::Exists {
+            negated,
+            subquery_sql,
+        });
+    }
+    None
 }
 
 fn mysql_rebuild_select_with_where(
@@ -2949,85 +2974,101 @@ async fn mysql_try_select_subquery_compat_outcome(
     let Some((prefix, where_clause, suffix)) = mysql_parse_select_where_parts(sql) else {
         return Ok(None);
     };
+    let normalized_where = trim_wrapping_parentheses(&where_clause);
+    if split_top_level_or(normalized_where).len() != 1 {
+        return Ok(None);
+    }
 
-    if let Some((lhs, negated, subquery_sql)) = mysql_parse_in_subquery_where_clause(&where_clause)
-    {
-        let subquery_result = sql_exec(
-            state,
-            SqlExecParams {
-                sql: subquery_sql,
-                explain: false,
-                default_db: default_db.map(|db| db.to_string()),
-                result_format: Some(ResultFormat::RowsJson),
-            },
-        )
-        .await?;
-        let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
-        let rewritten_where = if lits.is_empty() {
-            if negated {
-                None
-            } else {
-                Some("1 = 0".to_string())
-            }
-        } else {
-            let values = lits
-                .iter()
-                .map(mysql_render_default_lit)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let op = if negated { "NOT IN" } else { "IN" };
-            Some(format!("{lhs} {op} ({values})"))
+    let mut saw_subquery_predicate = false;
+    let mut rewritten_parts = Vec::new();
+    for part in split_top_level_and(normalized_where) {
+        let Some(predicate) = mysql_parse_subquery_compat_predicate(&part) else {
+            rewritten_parts.push(part);
+            continue;
         };
-        let rewritten_sql =
-            mysql_rebuild_select_with_where(&prefix, rewritten_where.as_deref(), &suffix);
-        let rewritten_result = sql_exec(
-            state,
-            SqlExecParams {
-                sql: rewritten_sql,
-                explain: false,
-                default_db: default_db.map(|db| db.to_string()),
-                result_format: Some(ResultFormat::RowsJson),
-            },
-        )
-        .await?;
-        return mysql_query_outcome_from_sql_exec_result(&rewritten_result).map(Some);
+        saw_subquery_predicate = true;
+        match predicate {
+            MySqlSubqueryCompatPredicate::In {
+                lhs,
+                negated,
+                subquery_sql,
+            } => {
+                let subquery_result = sql_exec(
+                    state,
+                    SqlExecParams {
+                        sql: subquery_sql,
+                        explain: false,
+                        default_db: default_db.map(|db| db.to_string()),
+                        result_format: Some(ResultFormat::RowsJson),
+                    },
+                )
+                .await?;
+                let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
+                if lits.is_empty() {
+                    if !negated {
+                        rewritten_parts.push("1 = 0".to_string());
+                    }
+                } else {
+                    let values = lits
+                        .iter()
+                        .map(mysql_render_default_lit)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let op = if negated { "NOT IN" } else { "IN" };
+                    rewritten_parts.push(format!("{lhs} {op} ({values})"));
+                }
+            }
+            MySqlSubqueryCompatPredicate::Exists {
+                negated,
+                subquery_sql,
+            } => {
+                let subquery_result = sql_exec(
+                    state,
+                    SqlExecParams {
+                        sql: subquery_sql,
+                        explain: false,
+                        default_db: default_db.map(|db| db.to_string()),
+                        result_format: Some(ResultFormat::RowsJson),
+                    },
+                )
+                .await?;
+                let rows = subquery_result
+                    .get("result")
+                    .and_then(|v| v.get("data"))
+                    .and_then(|v| v.get("rows"))
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+                let exists = !rows.is_empty();
+                let keep_rows = if negated { !exists } else { exists };
+                if !keep_rows {
+                    rewritten_parts.push("1 = 0".to_string());
+                }
+            }
+        }
     }
 
-    if let Some((negated, subquery_sql)) = mysql_parse_exists_subquery_where_clause(&where_clause) {
-        let subquery_result = sql_exec(
-            state,
-            SqlExecParams {
-                sql: subquery_sql,
-                explain: false,
-                default_db: default_db.map(|db| db.to_string()),
-                result_format: Some(ResultFormat::RowsJson),
-            },
-        )
-        .await?;
-        let rows = subquery_result
-            .get("result")
-            .and_then(|v| v.get("data"))
-            .and_then(|v| v.get("rows"))
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
-        let exists = !rows.is_empty();
-        let keep_rows = if negated { !exists } else { exists };
-        let rewritten_where = if keep_rows { None } else { Some("1 = 0") };
-        let rewritten_sql = mysql_rebuild_select_with_where(&prefix, rewritten_where, &suffix);
-        let rewritten_result = sql_exec(
-            state,
-            SqlExecParams {
-                sql: rewritten_sql,
-                explain: false,
-                default_db: default_db.map(|db| db.to_string()),
-                result_format: Some(ResultFormat::RowsJson),
-            },
-        )
-        .await?;
-        return mysql_query_outcome_from_sql_exec_result(&rewritten_result).map(Some);
+    if !saw_subquery_predicate {
+        return Ok(None);
     }
 
-    Ok(None)
+    let rewritten_where = if rewritten_parts.is_empty() {
+        None
+    } else {
+        Some(rewritten_parts.join(" AND "))
+    };
+    let rewritten_sql =
+        mysql_rebuild_select_with_where(&prefix, rewritten_where.as_deref(), &suffix);
+    let rewritten_result = sql_exec(
+        state,
+        SqlExecParams {
+            sql: rewritten_sql,
+            explain: false,
+            default_db: default_db.map(|db| db.to_string()),
+            result_format: Some(ResultFormat::RowsJson),
+        },
+    )
+    .await?;
+    mysql_query_outcome_from_sql_exec_result(&rewritten_result).map(Some)
 }
 
 async fn mysql_try_compat_query_outcome(
@@ -7589,6 +7630,11 @@ enum SqlPlan {
         column: SchemaColumnInfo,
         default: Option<Lit>,
     },
+    AlterTableRenameColumn {
+        table: BaseTableRef,
+        old_name: String,
+        new_name: String,
+    },
     AlterTableDropColumn {
         table: BaseTableRef,
         column_name: String,
@@ -8089,6 +8135,26 @@ fn parse_sql_column_ref(raw: &str) -> Option<(String, Option<String>)> {
     Some((cleaned, None))
 }
 
+fn parse_sql_function_call(raw: &str) -> Option<(String, Vec<String>)> {
+    let expr = raw.trim();
+    let open_idx = expr.find('(')?;
+    let close_idx = find_matching_parenthesis(expr, open_idx)?;
+    if close_idx + 1 != expr.len() {
+        return None;
+    }
+    let name = clean_sql_ident(&expr[..open_idx]);
+    if name.is_empty() || !name.bytes().all(|b| is_sql_ident_char(b) || b == b'.') {
+        return None;
+    }
+    let args_sql = expr[open_idx + 1..close_idx].trim();
+    let args = if args_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_csv_top_level(args_sql)
+    };
+    Some((name.to_ascii_lowercase(), args))
+}
+
 fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
     let s = raw.trim();
     let is_lit = s.starts_with('\'')
@@ -8101,6 +8167,17 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
     if is_lit {
         return Ok(Expr::Lit {
             lit: parse_sql_lit(s)?,
+        });
+    }
+    if let Some((name, args_raw)) = parse_sql_function_call(s) {
+        let args = args_raw
+            .into_iter()
+            .map(|arg| parse_sql_scalar_expr(&arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Expr::Func {
+            name,
+            args,
+            distinct: None,
         });
     }
     if let Some((col, table)) = parse_sql_column_ref(s) {
@@ -9375,10 +9452,32 @@ fn parse_alter_table_column_spec(
     ))
 }
 
+fn parse_alter_table_rename_column_clause(clause: &str) -> Result<(String, String), RpcError> {
+    let mut tail = clause.trim();
+    if tail.len() >= 6 && tail[..6].eq_ignore_ascii_case("column") {
+        tail = tail[6..].trim_start();
+    }
+    let Some(to_idx) = find_keyword_top_level(tail, "to") else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME COLUMN requires old and new column names",
+        ));
+    };
+    let old_name = clean_sql_ident(tail[..to_idx].trim());
+    let new_name = clean_sql_ident(tail[to_idx + 2..].trim());
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME COLUMN requires valid old and new column names",
+        ));
+    }
+    Ok((old_name, new_name))
+}
+
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
     let mut action_match = None::<(usize, &'static str)>;
-    for action in ["add", "drop", "modify", "change"] {
+    for action in ["add", "drop", "modify", "change", "rename"] {
         if let Some(idx) = find_keyword_top_level(tail, action) {
             match action_match {
                 Some((best_idx, _)) if best_idx <= idx => {}
@@ -9389,7 +9488,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let Some((action_idx, action)) = action_match else {
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / DROP COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / RENAME COLUMN / DROP COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
         ));
     };
 
@@ -9450,6 +9549,25 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
             old_name,
             column,
             default,
+        });
+    }
+
+    if action.eq_ignore_ascii_case("rename") {
+        if !clause
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("column")
+        {
+            return Err(RpcError::new(
+                "not_supported",
+                "ALTER TABLE RENAME currently supports only RENAME COLUMN",
+            ));
+        }
+        let (old_name, new_name) = parse_alter_table_rename_column_clause(clause)?;
+        return Ok(SqlPlan::AlterTableRenameColumn {
+            table,
+            old_name,
+            new_name,
         });
     }
 
@@ -9808,6 +9926,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::AlterTableAddColumn { .. }
         | SqlPlan::AlterTableModifyColumn { .. }
         | SqlPlan::AlterTableChangeColumn { .. }
+        | SqlPlan::AlterTableRenameColumn { .. }
         | SqlPlan::AlterTableDropColumn { .. }
         | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
@@ -9845,6 +9964,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
         | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
+        | Ok(SqlPlan::AlterTableRenameColumn { table, .. })
         | Ok(SqlPlan::AlterTableDropColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
@@ -10551,6 +10671,18 @@ async fn sql_exec_alter_table_modify_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_rename_column(
+    state: &AppState,
+    table: BaseTableRef,
+    old_name: String,
+    new_name: String,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_rename_mysql_compat_column(&table, &old_name, &new_name)
+        .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 async fn sql_exec_alter_table_drop_column(
     state: &AppState,
     table: BaseTableRef,
@@ -11020,6 +11152,27 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "operation": "change_column",
                 "old_column": old_name,
                 "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableRenameColumn {
+            table,
+            old_name,
+            new_name,
+        } => {
+            sql_exec_alter_table_rename_column(
+                state,
+                table.clone(),
+                old_name.clone(),
+                new_name.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "rename_column",
+                "old_column": old_name,
+                "column": new_name
             }))
         }
         SqlPlan::AlterTableDropColumn { table, column_name } => {
@@ -14075,10 +14228,14 @@ mod tests {
             "SELECT 1 FROM compat_alter_subq WHERE id = 999"
         );
 
-        assert!(mysql_parse_in_subquery_where_clause(
-            "parent_id IN (SELECT id FROM compat_alter_subq) AND id > 1",
-        )
-        .is_none());
+        let and_parts =
+            split_top_level_and("parent_id IN (SELECT id FROM compat_alter_subq) AND id > 1");
+        assert_eq!(and_parts.len(), 2);
+        assert!(matches!(
+            mysql_parse_subquery_compat_predicate(&and_parts[0]),
+            Some(MySqlSubqueryCompatPredicate::In { .. })
+        ));
+        assert!(mysql_parse_subquery_compat_predicate(&and_parts[1]).is_none());
     }
 
     #[test]
@@ -14350,6 +14507,43 @@ mod tests {
                 v: "slug".to_string()
             })
         );
+
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts RENAME COLUMN post_slug TO post_name",
+            Some("app"),
+        )
+        .expect("parse alter table rename column");
+        let SqlPlan::AlterTableRenameColumn {
+            table,
+            old_name,
+            new_name,
+        } = plan
+        else {
+            panic!("expected alter table rename column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(old_name, "post_slug");
+        assert_eq!(new_name, "post_name");
+    }
+
+    #[test]
+    fn parse_sql_scalar_expr_supports_mysql_function_calls() {
+        let expr = parse_sql_scalar_expr("CONCAT(LOWER(post_slug), '-', IFNULL(parent_id, 0))")
+            .expect("parse mysql scalar function expression");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = expr
+        else {
+            panic!("expected function expr");
+        };
+        assert_eq!(name, "concat");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(args[0], Expr::Func { .. }));
+        assert!(matches!(args[2], Expr::Func { .. }));
     }
 
     #[test]

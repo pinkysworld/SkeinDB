@@ -1704,6 +1704,29 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_rename_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<()> {
+        let (mut column, default) = {
+            let (schema, _) = self.get_table(table)?;
+            let Some(existing_column) = schema
+                .columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(old_name))
+                .cloned()
+            else {
+                anyhow::bail!("not_found: column not found: {old_name}");
+            };
+            let default = mysql_compat_column_default(schema, &existing_column.name);
+            (existing_column, default)
+        };
+        column.name = new_name.trim().to_string();
+        self.schema_modify_mysql_compat_column(table, old_name, column, default)
+    }
+
     pub fn schema_drop_mysql_compat_column(
         &mut self,
         table: &BaseTableRef,
@@ -7976,7 +7999,19 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             }
             let allowed = matches!(
                 name.as_str(),
-                "lower" | "upper" | "vector.cosine" | "vector.dot" | "vector.l2"
+                "lower"
+                    | "lcase"
+                    | "upper"
+                    | "ucase"
+                    | "length"
+                    | "char_length"
+                    | "character_length"
+                    | "coalesce"
+                    | "ifnull"
+                    | "concat"
+                    | "vector.cosine"
+                    | "vector.dot"
+                    | "vector.l2"
             );
             if !allowed {
                 anyhow::bail!("invalid_request: unsupported function in wasm plan");
@@ -8424,29 +8459,88 @@ fn eval_expr(
         } => {
             let name = name.as_str();
             match name {
-                "lower" => {
+                "lower" | "lcase" => {
                     let x = fargs
-                        .get(0)
+                        .first()
                         .ok_or_else(|| anyhow::anyhow!("lower requires arg"))?;
                     let v = eval_expr(x, row, ctx, args)?;
-                    match v {
-                        Lit::Str { v } => Ok(Lit::Str {
-                            v: v.to_lowercase(),
-                        }),
-                        _ => Ok(Lit::Null),
-                    }
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.to_lowercase(),
+                    })
                 }
-                "upper" => {
+                "upper" | "ucase" => {
                     let x = fargs
-                        .get(0)
+                        .first()
                         .ok_or_else(|| anyhow::anyhow!("upper requires arg"))?;
                     let v = eval_expr(x, row, ctx, args)?;
-                    match v {
-                        Lit::Str { v } => Ok(Lit::Str {
-                            v: v.to_uppercase(),
-                        }),
-                        _ => Ok(Lit::Null),
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.to_uppercase(),
+                    })
+                }
+                "length" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("length requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 { v: v.len() as u64 })
+                }
+                "char_length" | "character_length" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("char_length requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: v.chars().count() as u64,
+                    })
+                }
+                "coalesce" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("coalesce requires at least one arg");
                     }
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if !matches!(value, Lit::Null) {
+                            return Ok(value);
+                        }
+                    }
+                    Ok(Lit::Null)
+                }
+                "ifnull" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("ifnull requires 2 args");
+                    }
+                    let first = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(first, Lit::Null) {
+                        eval_expr(&fargs[1], row, ctx, args)
+                    } else {
+                        Ok(first)
+                    }
+                }
+                "concat" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("concat requires at least one arg");
+                    }
+                    let mut out = String::new();
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        let Some(text) = lit_to_string_for_like(&value) else {
+                            return Ok(Lit::Null);
+                        };
+                        out.push_str(&text);
+                    }
+                    Ok(Lit::Str { v: out })
                 }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
@@ -17950,6 +18044,170 @@ mod tests {
     }
 
     #[test]
+    fn query_select_supports_mysql_scalar_functions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_scalar_functions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hé".to_string(),
+                    },
+                ),
+                ("parent_id", Lit::Null),
+            ])],
+            None,
+        )?;
+
+        let lower_expr = Expr::Func {
+            name: "lower".to_string(),
+            args: vec![Expr::Col {
+                col: "slug".to_string(),
+                table: None,
+            }],
+            distinct: None,
+        };
+        let ifnull_expr = Expr::Func {
+            name: "ifnull".to_string(),
+            args: vec![
+                Expr::Col {
+                    col: "parent_id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 0 },
+                },
+            ],
+            distinct: None,
+        };
+        let query = base_query(
+            "app",
+            "posts",
+            vec![
+                lower_expr.clone(),
+                Expr::Func {
+                    name: "upper".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "length".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "char_length".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "coalesce".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "parent_id".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::U64 { v: 0 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                ifnull_expr.clone(),
+                Expr::Func {
+                    name: "concat".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "-".to_string() },
+                        },
+                        ifnull_expr,
+                    ],
+                    distinct: None,
+                },
+            ],
+            Some(eq_expr(
+                lower_expr,
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "hé".to_string(),
+                    },
+                },
+            )),
+        );
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::Str {
+                    v: "hé".to_string()
+                },
+                Lit::Str {
+                    v: "HÉ".to_string()
+                },
+                Lit::U64 { v: 3 },
+                Lit::U64 { v: 2 },
+                Lit::U64 { v: 0 },
+                Lit::U64 { v: 0 },
+                Lit::Str {
+                    v: "hé-0".to_string()
+                },
+            ]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn query_select_supports_right_join_with_null_rows() -> anyhow::Result<()> {
         let dir = temp_dir("right_join_null_rows");
         let mut engine = Engine::open(&dir)?;
@@ -20030,6 +20288,118 @@ mod tests {
                 &table,
                 vec![row(&[
                     ("id", Lit::U64 { v: 4 }),
+                    (
+                        "post_slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_column_updates_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": "n-a"}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_rename_mysql_compat_column(&table, "slug", "post_slug")?;
+
+        let desc = engine.describe_table("app", "posts")?;
+        assert!(desc
+            .get("compat_mysql")
+            .and_then(|v| v.get("column_defaults"))
+            .and_then(|v| v.get("slug"))
+            .is_none());
+        assert_eq!(
+            desc.get("compat_mysql")
+                .and_then(|v| v.get("column_defaults"))
+                .and_then(|v| v.get("post_slug"))
+                .and_then(|v| serde_json::from_value::<Lit>(v.clone()).ok()),
+            Some(Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert_eq!(
+            desc.get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("columns"))
+                .and_then(|v| v.as_array())
+                .and_then(|cols| cols.first())
+                .and_then(|v| v.as_str()),
+            Some("post_slug")
+        );
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("post_slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+        assert!(!fetched.row.contains_key("slug"));
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
                     (
                         "post_slug",
                         Lit::Str {
