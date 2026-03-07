@@ -195,9 +195,19 @@ SELECT DATE(post_date), YEAR(post_date), MONTH(post_date), DAY(post_date), HOUR(
   FROM wp_posts
  WHERE ID = 1;
 
+SELECT DATE_FORMAT(post_date, '%Y-%m-%d %H:%i:%s'),
+       FROM_UNIXTIME(UNIX_TIMESTAMP(post_date))
+  FROM wp_posts
+ WHERE ID = 1;
+
 SELECT ID
   FROM wp_posts
  WHERE DATE(post_date) = '2020-01-03'
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE DATE_FORMAT(post_date, '%Y-%m-%d') = '2020-01-03'
  ORDER BY ID ASC;
 
 SELECT ID
@@ -479,6 +489,8 @@ SELECT TRIM('  n-a  '),
 SELECT IF(1, post_slug, 'miss'),
        LOCATE('a', post_slug),
        INSTR(post_slug, 'a'),
+       FIND_IN_SET(post_slug, 'miss,n-a,root'),
+       ISNULL(parent_id),
        ABS(-7),
        ROUND(1.75, 1),
        FLOOR(1.75),
@@ -507,6 +519,11 @@ SELECT parent_id + 1,
 SELECT id
   FROM compat_alter_subq
  WHERE CAST(parent_id AS UNSIGNED) = 1
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
+ WHERE FIND_IN_SET(post_slug, 'n-a,miss') > 0
  ORDER BY id ASC;
 
 SELECT id

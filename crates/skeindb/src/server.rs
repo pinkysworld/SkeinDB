@@ -4388,9 +4388,8 @@ fn mysql_stmt_expr_type(
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Func { name, args, .. } => match name.as_str() {
-            "count" | "length" | "char_length" | "character_length" | "locate" | "instr" => {
-                MySqlStmtColumnType::LongLong
-            }
+            "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
+            | "find_in_set" | "isnull" => MySqlStmtColumnType::LongLong,
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
             | "unix_timestamp" => MySqlStmtColumnType::LongLong,
             "avg" | "round" => MySqlStmtColumnType::Double,
@@ -4405,9 +4404,11 @@ fn mysql_stmt_expr_type(
                 .reduce(mysql_stmt_merge_column_types)
                 .unwrap_or(MySqlStmtColumnType::VarString),
             "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
-            | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "now"
-            | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
-            | "current_time" | "localtime" => MySqlStmtColumnType::VarString,
+            | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "date_format"
+            | "from_unixtime" | "now" | "current_timestamp" | "localtimestamp" | "curdate"
+            | "current_date" | "curtime" | "current_time" | "localtime" => {
+                MySqlStmtColumnType::VarString
+            }
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -15474,6 +15475,43 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT DATE_FORMAT(p.created_at, '%Y-%m-%d %H:%i:%s') AS created_fmt, FROM_UNIXTIME(UNIX_TIMESTAMP(p.created_at)) AS created_from_ts, FIND_IN_SET(CAST(p.id AS CHAR), '9,7,5') AS id_rank, ISNULL(p.created_at) AS created_is_null FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse extended mysql function projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let extended_datetime_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            extended_datetime_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_fmt".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_from_ts".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "id_rank".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_is_null".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -16090,6 +16128,33 @@ mod tests {
         assert!(distinct.is_none());
         assert!(matches!(args[0], Expr::Func { .. }));
         assert!(matches!(args[2], Expr::Func { .. }));
+
+        let find_in_set = parse_sql_scalar_expr("FIND_IN_SET(post_slug, 'draft,publish')")
+            .expect("parse find_in_set expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = find_in_set
+        else {
+            panic!("expected find_in_set function expr");
+        };
+        assert_eq!(name, "find_in_set");
+        assert_eq!(args.len(), 2);
+        assert!(distinct.is_none());
+
+        let isnull = parse_sql_scalar_expr("ISNULL(parent_id)").expect("parse isnull expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = isnull
+        else {
+            panic!("expected isnull function expr");
+        };
+        assert_eq!(name, "isnull");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
     }
 
     #[test]
@@ -16169,6 +16234,35 @@ mod tests {
         };
         assert_eq!(name, "current_timestamp");
         assert!(args.is_empty());
+
+        let formatted = parse_sql_scalar_expr("DATE_FORMAT(post_date, '%Y-%m-%d %H:%i:%s')")
+            .expect("parse date_format expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = formatted
+        else {
+            panic!("expected date_format function expr");
+        };
+        assert_eq!(name, "date_format");
+        assert_eq!(args.len(), 2);
+        assert!(distinct.is_none());
+
+        let from_unixtime = parse_sql_scalar_expr("FROM_UNIXTIME(UNIX_TIMESTAMP(post_date))")
+            .expect("parse from_unixtime expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = from_unixtime
+        else {
+            panic!("expected from_unixtime function expr");
+        };
+        assert_eq!(name, "from_unixtime");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
+        assert!(matches!(args[0], Expr::Func { .. }));
     }
 
     #[test]

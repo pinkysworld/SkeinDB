@@ -874,6 +874,41 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
     send_com_stmt_close(&mut stream, datetime_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATE_FORMAT(occurred_at, '%Y-%m-%d %H:%i:%s') AS occurred_fmt, FROM_UNIXTIME(UNIX_TIMESTAMP(occurred_at)) AS occurred_from_ts, FIND_IN_SET(CAST(id AS CHAR), '9,1,5') AS id_rank, ISNULL(occurred_at) AS occurred_is_null FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let extended_datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(extended_datetime_stmt.param_count, 1);
+    assert_eq!(
+        extended_datetime_stmt.column_defs,
+        vec![
+            ("occurred_fmt".to_string(), 0xfd),
+            ("occurred_from_ts".to_string(), 0xfd),
+            ("id_rank".to_string(), 0x08),
+            ("occurred_is_null".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        extended_datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let extended_datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        extended_datetime_rows,
+        vec![vec![
+            Some("2020-01-02 03:04:05".to_string()),
+            Some("2020-01-02 03:04:05".to_string()),
+            Some("2".to_string()),
+            Some("0".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, extended_datetime_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
