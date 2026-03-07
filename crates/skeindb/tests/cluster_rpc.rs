@@ -909,6 +909,48 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
     send_com_stmt_close(&mut stream, extended_datetime_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATEDIFF(occurred_at, '2020-01-01 00:00:00') AS occurred_day_diff, TIMESTAMPDIFF(HOUR, '2020-01-02 00:00:00', occurred_at) AS occurred_hour_diff FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let diff_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(diff_stmt.param_count, 1);
+    assert_eq!(
+        diff_stmt.column_defs,
+        vec![
+            ("occurred_day_diff".to_string(), 0x08),
+            ("occurred_hour_diff".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        diff_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let diff_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        diff_rows,
+        vec![vec![Some("1".to_string()), Some("3".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, diff_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT outer_q.id FROM wp_events AS outer_q WHERE (EXISTS (SELECT 1 FROM wp_events AS inner_q WHERE inner_q.id = outer_q.id) AND outer_q.id > 0) OR outer_q.id = 999 ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(subquery_stmt.param_count, 0);
+    assert_eq!(subquery_stmt.column_defs, vec![("id".to_string(), 0x08)]);
+
+    send_com_stmt_execute(&mut stream, subquery_stmt.statement_id, &[]).await?;
+    let subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(subquery_rows, vec![vec![Some("1".to_string())]]);
+    send_com_stmt_close(&mut stream, subquery_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -1597,7 +1639,40 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select date_format(post_date, '%y-%m-%d %h:%i:%s'), from_unixtime(unix_timestamp(post_date)) from wp_posts where id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-01 00:00:00".to_string()),
+                                Some("2020-01-01 00:00:00".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select datediff(post_date, '2020-01-01 00:00:00'), timestampdiff(hour, '2020-01-01 00:00:00', post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0], vec![Some("1".to_string()), Some("24".to_string())]);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from wp_posts where date(post_date) = '2020-01-03' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date_format(post_date, '%y-%m-%d') = '2020-01-03' order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 1);
@@ -1612,6 +1687,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows.len(), 2);
                         assert_eq!(rows[0][0].as_deref(), Some("5"));
                         assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where datediff(post_date, '2020-01-01 00:00:00') >= 2 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("5"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
@@ -1969,6 +2055,18 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) or id = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[3][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from compat_alter_subq where lower(post_slug) = 'n-a' order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -2110,6 +2208,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[1][0].as_deref(), Some("3"));
                         assert_eq!(rows[2][0].as_deref(), Some("4"));
                         assert_eq!(rows[3][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where ( exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) and outer_q.id > 1 ) or outer_q.id = 1 order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

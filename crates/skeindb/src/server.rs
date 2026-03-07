@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    future::Future,
     net::SocketAddr,
     path::PathBuf,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -3260,6 +3262,12 @@ struct MySqlCorrelatedSubqueryRewrite {
     rewritten_subquery_sql: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MySqlSubqueryCompatWhereRewrite {
+    sql: String,
+    saw_subquery: bool,
+}
+
 fn mysql_parse_simple_select_projection_sql(sql: &str) -> Option<Vec<String>> {
     let trimmed = sql.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -3483,6 +3491,192 @@ fn mysql_render_correlated_subquery_match_clause(
     }
 }
 
+async fn mysql_rewrite_subquery_compat_predicate(
+    state: &AppState,
+    predicate: MySqlSubqueryCompatPredicate,
+    default_db: Option<&str>,
+) -> Result<String, RpcError> {
+    match predicate {
+        MySqlSubqueryCompatPredicate::In {
+            lhs,
+            negated,
+            subquery_sql,
+        } => {
+            if let Some(rewrite) =
+                mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, Some(&lhs))
+            {
+                let subquery_result = sql_exec(
+                    state,
+                    SqlExecParams {
+                        sql: rewrite.rewritten_subquery_sql,
+                        explain: false,
+                        default_db: default_db.map(|db| db.to_string()),
+                        result_format: Some(ResultFormat::RowsJson),
+                    },
+                )
+                .await?;
+                let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
+                return Ok(mysql_render_correlated_subquery_match_clause(
+                    &rewrite.outer_exprs,
+                    &rows,
+                    negated,
+                )
+                .unwrap_or_else(|| {
+                    if negated {
+                        "1 = 1".to_string()
+                    } else {
+                        "1 = 0".to_string()
+                    }
+                }));
+            }
+            let subquery_result = sql_exec(
+                state,
+                SqlExecParams {
+                    sql: subquery_sql,
+                    explain: false,
+                    default_db: default_db.map(|db| db.to_string()),
+                    result_format: Some(ResultFormat::RowsJson),
+                },
+            )
+            .await?;
+            let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
+            if lits.is_empty() {
+                return Ok(if negated {
+                    "1 = 1".to_string()
+                } else {
+                    "1 = 0".to_string()
+                });
+            }
+            let values = lits
+                .iter()
+                .map(mysql_render_default_lit)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let op = if negated { "NOT IN" } else { "IN" };
+            Ok(format!("{lhs} {op} ({values})"))
+        }
+        MySqlSubqueryCompatPredicate::Exists {
+            negated,
+            subquery_sql,
+        } => {
+            if let Some(rewrite) =
+                mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, None)
+            {
+                let subquery_result = sql_exec(
+                    state,
+                    SqlExecParams {
+                        sql: rewrite.rewritten_subquery_sql,
+                        explain: false,
+                        default_db: default_db.map(|db| db.to_string()),
+                        result_format: Some(ResultFormat::RowsJson),
+                    },
+                )
+                .await?;
+                let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
+                return Ok(mysql_render_correlated_subquery_match_clause(
+                    &rewrite.outer_exprs,
+                    &rows,
+                    negated,
+                )
+                .unwrap_or_else(|| {
+                    if negated {
+                        "1 = 1".to_string()
+                    } else {
+                        "1 = 0".to_string()
+                    }
+                }));
+            }
+            let subquery_result = sql_exec(
+                state,
+                SqlExecParams {
+                    sql: subquery_sql,
+                    explain: false,
+                    default_db: default_db.map(|db| db.to_string()),
+                    result_format: Some(ResultFormat::RowsJson),
+                },
+            )
+            .await?;
+            let rows = subquery_result
+                .get("result")
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.get("rows"))
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+            let exists = !rows.is_empty();
+            Ok(if negated == exists {
+                "1 = 0".to_string()
+            } else {
+                "1 = 1".to_string()
+            })
+        }
+    }
+}
+
+fn mysql_rewrite_subquery_compat_where_clause<'a>(
+    state: &'a AppState,
+    where_clause: &'a str,
+    default_db: Option<&'a str>,
+) -> Pin<
+    Box<dyn Future<Output = Result<Option<MySqlSubqueryCompatWhereRewrite>, RpcError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let trimmed = trim_wrapping_parentheses(where_clause.trim());
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let or_parts = split_top_level_or(trimmed);
+        if or_parts.len() > 1 {
+            let mut rewritten = Vec::with_capacity(or_parts.len());
+            let mut saw_subquery = false;
+            for part in or_parts {
+                let Some(result) =
+                    mysql_rewrite_subquery_compat_where_clause(state, &part, default_db).await?
+                else {
+                    return Ok(None);
+                };
+                saw_subquery |= result.saw_subquery;
+                rewritten.push(format!("({})", result.sql));
+            }
+            return Ok(Some(MySqlSubqueryCompatWhereRewrite {
+                sql: rewritten.join(" OR "),
+                saw_subquery,
+            }));
+        }
+
+        let and_parts = split_top_level_and(trimmed);
+        if and_parts.len() > 1 {
+            let mut rewritten = Vec::with_capacity(and_parts.len());
+            let mut saw_subquery = false;
+            for part in and_parts {
+                let Some(result) =
+                    mysql_rewrite_subquery_compat_where_clause(state, &part, default_db).await?
+                else {
+                    return Ok(None);
+                };
+                saw_subquery |= result.saw_subquery;
+                rewritten.push(format!("({})", result.sql));
+            }
+            return Ok(Some(MySqlSubqueryCompatWhereRewrite {
+                sql: rewritten.join(" AND "),
+                saw_subquery,
+            }));
+        }
+
+        if let Some(predicate) = mysql_parse_subquery_compat_predicate(trimmed) {
+            return Ok(Some(MySqlSubqueryCompatWhereRewrite {
+                sql: mysql_rewrite_subquery_compat_predicate(state, predicate, default_db).await?,
+                saw_subquery: true,
+            }));
+        }
+
+        Ok(Some(MySqlSubqueryCompatWhereRewrite {
+            sql: trimmed.to_string(),
+            saw_subquery: false,
+        }))
+    })
+}
+
 fn mysql_query_outcome_from_sql_exec_result(result: &Value) -> Result<MySqlQueryOutcome, RpcError> {
     let statement = result
         .get("statement")
@@ -3507,140 +3701,16 @@ async fn mysql_try_select_subquery_compat_outcome(
     let Some((prefix, where_clause, suffix)) = mysql_parse_select_where_parts(sql) else {
         return Ok(None);
     };
-    let normalized_where = trim_wrapping_parentheses(&where_clause);
-    if split_top_level_or(normalized_where).len() != 1 {
+    let Some(rewrite) =
+        mysql_rewrite_subquery_compat_where_clause(state, &where_clause, default_db).await?
+    else {
         return Ok(None);
-    }
-
-    let mut saw_subquery_predicate = false;
-    let mut rewritten_parts = Vec::new();
-    for part in split_top_level_and(normalized_where) {
-        let Some(predicate) = mysql_parse_subquery_compat_predicate(&part) else {
-            rewritten_parts.push(part);
-            continue;
-        };
-        saw_subquery_predicate = true;
-        match predicate {
-            MySqlSubqueryCompatPredicate::In {
-                lhs,
-                negated,
-                subquery_sql,
-            } => {
-                if let Some(rewrite) =
-                    mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, Some(&lhs))
-                {
-                    let subquery_result = sql_exec(
-                        state,
-                        SqlExecParams {
-                            sql: rewrite.rewritten_subquery_sql,
-                            explain: false,
-                            default_db: default_db.map(|db| db.to_string()),
-                            result_format: Some(ResultFormat::RowsJson),
-                        },
-                    )
-                    .await?;
-                    let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
-                    if let Some(clause) = mysql_render_correlated_subquery_match_clause(
-                        &rewrite.outer_exprs,
-                        &rows,
-                        negated,
-                    ) {
-                        rewritten_parts.push(clause);
-                    } else if !negated {
-                        rewritten_parts.push("1 = 0".to_string());
-                    }
-                    continue;
-                }
-                let subquery_result = sql_exec(
-                    state,
-                    SqlExecParams {
-                        sql: subquery_sql,
-                        explain: false,
-                        default_db: default_db.map(|db| db.to_string()),
-                        result_format: Some(ResultFormat::RowsJson),
-                    },
-                )
-                .await?;
-                let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
-                if lits.is_empty() {
-                    if !negated {
-                        rewritten_parts.push("1 = 0".to_string());
-                    }
-                } else {
-                    let values = lits
-                        .iter()
-                        .map(mysql_render_default_lit)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let op = if negated { "NOT IN" } else { "IN" };
-                    rewritten_parts.push(format!("{lhs} {op} ({values})"));
-                }
-            }
-            MySqlSubqueryCompatPredicate::Exists {
-                negated,
-                subquery_sql,
-            } => {
-                if let Some(rewrite) =
-                    mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, None)
-                {
-                    let subquery_result = sql_exec(
-                        state,
-                        SqlExecParams {
-                            sql: rewrite.rewritten_subquery_sql,
-                            explain: false,
-                            default_db: default_db.map(|db| db.to_string()),
-                            result_format: Some(ResultFormat::RowsJson),
-                        },
-                    )
-                    .await?;
-                    let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
-                    if let Some(clause) = mysql_render_correlated_subquery_match_clause(
-                        &rewrite.outer_exprs,
-                        &rows,
-                        negated,
-                    ) {
-                        rewritten_parts.push(clause);
-                    } else if !negated {
-                        rewritten_parts.push("1 = 0".to_string());
-                    }
-                    continue;
-                }
-                let subquery_result = sql_exec(
-                    state,
-                    SqlExecParams {
-                        sql: subquery_sql,
-                        explain: false,
-                        default_db: default_db.map(|db| db.to_string()),
-                        result_format: Some(ResultFormat::RowsJson),
-                    },
-                )
-                .await?;
-                let rows = subquery_result
-                    .get("result")
-                    .and_then(|v| v.get("data"))
-                    .and_then(|v| v.get("rows"))
-                    .and_then(|v| v.as_array())
-                    .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
-                let exists = !rows.is_empty();
-                let keep_rows = if negated { !exists } else { exists };
-                if !keep_rows {
-                    rewritten_parts.push("1 = 0".to_string());
-                }
-            }
-        }
-    }
-
-    if !saw_subquery_predicate {
-        return Ok(None);
-    }
-
-    let rewritten_where = if rewritten_parts.is_empty() {
-        None
-    } else {
-        Some(rewritten_parts.join(" AND "))
     };
-    let rewritten_sql =
-        mysql_rebuild_select_with_where(&prefix, rewritten_where.as_deref(), &suffix);
+    if !rewrite.saw_subquery {
+        return Ok(None);
+    }
+
+    let rewritten_sql = mysql_rebuild_select_with_where(&prefix, Some(&rewrite.sql), &suffix);
     let rewritten_result = sql_exec(
         state,
         SqlExecParams {
@@ -4389,7 +4459,9 @@ fn mysql_stmt_expr_type(
         },
         Expr::Func { name, args, .. } => match name.as_str() {
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
-            | "find_in_set" | "isnull" => MySqlStmtColumnType::LongLong,
+            | "find_in_set" | "isnull" | "datediff" | "timestampdiff" => {
+                MySqlStmtColumnType::LongLong
+            }
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
             | "unix_timestamp" => MySqlStmtColumnType::LongLong,
             "avg" | "round" => MySqlStmtColumnType::Double,
@@ -4471,9 +4543,17 @@ async fn mysql_stmt_prepare_columns_for_translated_select(
     sql: &str,
     default_db: Option<&str>,
 ) -> Option<Vec<MySqlStmtPrepareColumn>> {
+    let parsed_plan = parse_sql_plan(sql, default_db).or_else(|_| {
+        let (prefix, _where_clause, suffix) = mysql_parse_select_where_parts(sql)
+            .ok_or_else(|| RpcError::new("not_supported", "unsupported SELECT statement"))?;
+        parse_sql_plan(
+            &mysql_rebuild_select_with_where(&prefix, Some("1 = 1"), &suffix),
+            default_db,
+        )
+    });
     let Ok(SqlPlan::Select {
         from, projection, ..
-    }) = parse_sql_plan(sql, default_db)
+    }) = parsed_plan
     else {
         return None;
     };
@@ -8921,6 +9001,41 @@ fn mysql_parse_no_paren_scalar_function(raw: &str) -> Option<String> {
     .then_some(lower)
 }
 
+fn mysql_parse_special_scalar_function_expr(raw: &str) -> Result<Option<Expr>, RpcError> {
+    let Some((name, args_raw)) = parse_sql_function_call(raw) else {
+        return Ok(None);
+    };
+    if name != "timestampdiff" {
+        return Ok(None);
+    }
+    if args_raw.len() != 3 {
+        return Err(RpcError::new(
+            "invalid_request",
+            "TIMESTAMPDIFF requires a unit plus two datetime expressions",
+        ));
+    }
+    let unit = clean_sql_ident(&args_raw[0]);
+    if unit.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "TIMESTAMPDIFF requires a non-empty unit",
+        ));
+    }
+    Ok(Some(Expr::Func {
+        name,
+        args: vec![
+            Expr::Lit {
+                lit: Lit::Str {
+                    v: unit.to_ascii_lowercase(),
+                },
+            },
+            parse_sql_scalar_expr(&args_raw[1])?,
+            parse_sql_scalar_expr(&args_raw[2])?,
+        ],
+        distinct: None,
+    }))
+}
+
 fn mysql_is_unary_plus_minus(expr: &str, idx: usize) -> bool {
     let bytes = expr.as_bytes();
     if idx >= bytes.len() || !matches!(bytes[idx], b'+' | b'-') {
@@ -9399,6 +9514,9 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
                 hi: None,
             });
         }
+    }
+    if let Some(expr) = mysql_parse_special_scalar_function_expr(s)? {
+        return Ok(expr);
     }
     if let Some((name, args_raw)) = parse_sql_function_call(s) {
         let args = args_raw
@@ -15512,6 +15630,35 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT DATEDIFF(p.created_at, '2020-01-01 00:00:00') AS created_day_diff, TIMESTAMPDIFF(HOUR, '2020-01-01 00:00:00', p.created_at) AS created_hour_diff FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse datediff/timestampdiff projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let datediff_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            datediff_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_day_diff".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_hour_diff".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -15593,6 +15740,51 @@ mod tests {
                     column_type: MySqlStmtColumnType::Double,
                 },
             ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mysql_stmt_prepare_columns_support_subquery_compat_selects() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_stmt_prepare_subquery_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "nodes",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT outer_q.id FROM app.nodes AS outer_q WHERE (EXISTS (SELECT 1 FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id) AND outer_q.id > 1) OR outer_q.id = 1 ORDER BY outer_q.id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "id".to_string(),
+                column_type: MySqlStmtColumnType::LongLong,
+            }]
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -16263,6 +16455,35 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert!(distinct.is_none());
         assert!(matches!(args[0], Expr::Func { .. }));
+
+        let datediff = parse_sql_scalar_expr("DATEDIFF(post_date, post_modified)")
+            .expect("parse datediff expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = datediff
+        else {
+            panic!("expected datediff function expr");
+        };
+        assert_eq!(name, "datediff");
+        assert_eq!(args.len(), 2);
+        assert!(distinct.is_none());
+
+        let timestampdiff = parse_sql_scalar_expr("TIMESTAMPDIFF(HOUR, post_date, post_modified)")
+            .expect("parse timestampdiff expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = timestampdiff
+        else {
+            panic!("expected timestampdiff function expr");
+        };
+        assert_eq!(name, "timestampdiff");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[0], Expr::Lit { lit: Lit::Str { v } } if v == "hour"));
     }
 
     #[test]

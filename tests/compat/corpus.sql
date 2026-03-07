@@ -200,6 +200,11 @@ SELECT DATE_FORMAT(post_date, '%Y-%m-%d %H:%i:%s'),
   FROM wp_posts
  WHERE ID = 1;
 
+SELECT DATEDIFF(post_date, '2020-01-01 00:00:00'),
+       TIMESTAMPDIFF(HOUR, '2020-01-01 00:00:00', post_date)
+  FROM wp_posts
+ WHERE ID = 2;
+
 SELECT ID
   FROM wp_posts
  WHERE DATE(post_date) = '2020-01-03'
@@ -215,6 +220,11 @@ SELECT ID
  WHERE YEAR(post_date) = 2020
  ORDER BY UNIX_TIMESTAMP(post_date) DESC
  LIMIT 0, 2;
+
+SELECT ID
+  FROM wp_posts
+ WHERE DATEDIFF(post_date, '2020-01-01 00:00:00') >= 2
+ ORDER BY ID ASC;
 
 SELECT p.post_author, u.user_login
   FROM wp_posts AS p
@@ -462,6 +472,16 @@ SELECT id
 
 SELECT id
   FROM compat_alter_subq
+ WHERE parent_id IN (
+   SELECT id
+     FROM compat_alter_subq
+    WHERE id < 3
+ )
+    OR id = 1
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
  WHERE LOWER(post_slug) = 'n-a'
  ORDER BY id ASC;
 
@@ -564,6 +584,19 @@ SELECT outer_q.id
      FROM compat_alter_subq AS inner_q
     WHERE inner_q.parent_id = outer_q.parent_id
  )
+ ORDER BY outer_q.id ASC;
+
+SELECT outer_q.id
+  FROM compat_alter_subq AS outer_q
+ WHERE (
+   EXISTS (
+     SELECT 1
+       FROM compat_alter_subq AS inner_q
+      WHERE inner_q.parent_id = outer_q.id
+   )
+   AND outer_q.id > 1
+ )
+    OR outer_q.id = 1
  ORDER BY outer_q.id ASC;
 
 CREATE TABLE compat_dropcol (
