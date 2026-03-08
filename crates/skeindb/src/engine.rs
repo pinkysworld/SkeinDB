@@ -5723,6 +5723,7 @@ impl Engine {
                             tdata.pk_index.insert(pk_key(&pk), idx);
                         }
                     }
+                    ensure_mysql_compat_secondary_indexes(schema, &tdata);
                 }
 
                 self.tables.insert(
@@ -8053,6 +8054,11 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "month"
                     | "day"
                     | "dayofmonth"
+                    | "weekday"
+                    | "dayofweek"
+                    | "dayofyear"
+                    | "monthname"
+                    | "dayname"
                     | "hour"
                     | "minute"
                     | "second"
@@ -8988,7 +8994,7 @@ fn eval_expr(
                         iso: mysql_format_date_parts(date),
                     })
                 }
-                "year" | "month" | "day" | "dayofmonth" => {
+                "year" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek" | "dayofyear" => {
                     if fargs.len() != 1 {
                         anyhow::bail!("{name} requires 1 arg");
                     }
@@ -8999,9 +9005,30 @@ fn eval_expr(
                     let out = match name {
                         "year" => i64::from(date.year),
                         "month" => i64::from(date.month),
+                        "weekday" => mysql_weekday_monday_index(date),
+                        "dayofweek" => mysql_weekday_index(date) as i64 + 1,
+                        "dayofyear" => i64::from(mysql_day_of_year(date)),
                         _ => i64::from(date.day),
                     };
                     Ok(Lit::I64 { v: out })
+                }
+                "monthname" | "dayname" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let out = match name {
+                        "monthname" => MYSQL_MONTH_NAMES
+                            .get(date.month.saturating_sub(1) as usize)
+                            .copied(),
+                        _ => MYSQL_WEEKDAY_NAMES.get(mysql_weekday_index(date)).copied(),
+                    };
+                    Ok(out
+                        .map(|v| Lit::Str { v: v.to_string() })
+                        .unwrap_or(Lit::Null))
                 }
                 "hour" | "minute" | "second" => {
                     if fargs.len() != 1 {
@@ -9757,6 +9784,10 @@ fn mysql_day_of_year(date: MySqlDateParts) -> u16 {
 
 fn mysql_weekday_index(date: MySqlDateParts) -> usize {
     (mysql_days_from_civil(date) + 4).rem_euclid(7) as usize
+}
+
+fn mysql_weekday_monday_index(date: MySqlDateParts) -> i64 {
+    ((mysql_weekday_index(date) + 6) % 7) as i64
 }
 
 fn mysql_12_hour(hour: u8) -> u8 {
@@ -18232,6 +18263,12 @@ mod tests {
 
         let reopened = Engine::open(&dir)?;
         let (schema, tdata) = reopened.get_table(&table)?;
+        let secondary_index_count = tdata
+            .secondary_indexes
+            .lock()
+            .map(|guard| guard.len())
+            .unwrap_or_default();
+        assert_eq!(secondary_index_count, 1);
         let mut filters = HashMap::new();
         filters.insert(
             "city".to_string(),
@@ -20334,6 +20371,46 @@ mod tests {
                     distinct: None,
                 },
                 Expr::Func {
+                    name: "weekday".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayofweek".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayofyear".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "monthname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
                     name: "hour".to_string(),
                     args: vec![Expr::Col {
                         col: "published_at".to_string(),
@@ -20503,6 +20580,15 @@ mod tests {
                 Lit::I64 { v: 1 },
                 Lit::I64 { v: 2 },
                 Lit::I64 { v: 3 },
+                Lit::I64 { v: 5 },
+                Lit::I64 { v: 2 },
+                Lit::Str {
+                    v: "January".to_string(),
+                },
+                Lit::Str {
+                    v: "Thursday".to_string(),
+                },
+                Lit::I64 { v: 3 },
                 Lit::I64 { v: 4 },
                 Lit::I64 { v: 5 },
                 Lit::I64 { v: 1_577_934_245 },
@@ -20632,6 +20718,37 @@ mod tests {
         let (_cols, datediff_filtered_rows) =
             execute_select(&engine, &datediff_filtered_query, &[])?;
         assert_eq!(datediff_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let dayname_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "dayname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Friday".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, dayname_filtered_rows) = execute_select(&engine, &dayname_filtered_query, &[])?;
+        assert_eq!(dayname_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let date_add_filtered_query = base_query(
             "app",

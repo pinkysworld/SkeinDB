@@ -205,6 +205,14 @@ SELECT DATEDIFF(post_date, '2020-01-01 00:00:00'),
   FROM wp_posts
  WHERE ID = 2;
 
+SELECT WEEKDAY(post_date),
+       DAYOFWEEK(post_date),
+       DAYOFYEAR(post_date),
+       MONTHNAME(post_date),
+       DAYNAME(post_date)
+  FROM wp_posts
+ WHERE ID = 2;
+
 SELECT DATE_ADD(post_date, INTERVAL 2 DAY),
        DATE_SUB(post_date, INTERVAL 3 HOUR),
        TIMESTAMPADD(MINUTE, 30, post_date)
@@ -230,6 +238,11 @@ SELECT ID
 SELECT ID
   FROM wp_posts
  WHERE DATEDIFF(post_date, '2020-01-01 00:00:00') >= 2
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE DAYNAME(post_date) = 'Friday'
  ORDER BY ID ASC;
 
 SELECT ID

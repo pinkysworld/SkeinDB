@@ -939,6 +939,43 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_prepare(
         &mut stream,
+        "SELECT WEEKDAY(occurred_at) AS occurred_weekday, DAYOFWEEK(occurred_at) AS occurred_day_of_week, DAYOFYEAR(occurred_at) AS occurred_day_of_year, MONTHNAME(occurred_at) AS occurred_month_name, DAYNAME(occurred_at) AS occurred_day_name FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let named_datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(named_datetime_stmt.param_count, 1);
+    assert_eq!(
+        named_datetime_stmt.column_defs,
+        vec![
+            ("occurred_weekday".to_string(), 0x08),
+            ("occurred_day_of_week".to_string(), 0x08),
+            ("occurred_day_of_year".to_string(), 0x08),
+            ("occurred_month_name".to_string(), 0xfd),
+            ("occurred_day_name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        named_datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let named_datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        named_datetime_rows,
+        vec![vec![
+            Some("3".to_string()),
+            Some("5".to_string()),
+            Some("2".to_string()),
+            Some("January".to_string()),
+            Some("Thursday".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, named_datetime_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
         "SELECT DATE_ADD(occurred_at, INTERVAL 2 DAY) AS occurred_plus_two_days, DATE_SUB(occurred_at, INTERVAL 3 HOUR) AS occurred_minus_three_hours, TIMESTAMPADD(MINUTE, 30, occurred_at) AS occurred_plus_half_hour FROM wp_events WHERE id = ?",
     )
     .await?;
@@ -1713,6 +1750,24 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select weekday(post_date), dayofweek(post_date), dayofyear(post_date), monthname(post_date), dayname(post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("3".to_string()),
+                                Some("5".to_string()),
+                                Some("2".to_string()),
+                                Some("January".to_string()),
+                                Some("Thursday".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select date_add(post_date, interval 2 day), date_sub(post_date, interval 3 hour), timestampadd(minute, 30, post_date) from wp_posts where id = 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1764,6 +1819,15 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][0].as_deref(), Some("3"));
                         assert_eq!(rows[1][0].as_deref(), Some("4"));
                         assert_eq!(rows[2][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where dayname(post_date) = 'friday' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

@@ -4437,9 +4437,8 @@ fn mysql_stmt_expr_type(
         },
         Expr::Func { name, args, .. } => match name.as_str() {
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
-            | "find_in_set" | "isnull" | "datediff" | "timestampdiff" => {
-                MySqlStmtColumnType::LongLong
-            }
+            | "find_in_set" | "isnull" | "datediff" | "timestampdiff" | "weekday" | "dayofweek"
+            | "dayofyear" => MySqlStmtColumnType::LongLong,
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
             | "unix_timestamp" => MySqlStmtColumnType::LongLong,
             "avg" | "round" => MySqlStmtColumnType::Double,
@@ -4457,7 +4456,9 @@ fn mysql_stmt_expr_type(
             | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "date_format"
             | "from_unixtime" | "date_add" | "date_sub" | "timestampadd" | "now"
             | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
-            | "current_time" | "localtime" => MySqlStmtColumnType::VarString,
+            | "current_time" | "localtime" | "monthname" | "dayname" => {
+                MySqlStmtColumnType::VarString
+            }
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -15777,6 +15778,47 @@ mod tests {
         let SqlPlan::Select {
             from, projection, ..
         } = parse_sql_plan(
+            "SELECT WEEKDAY(p.created_at) AS created_weekday, DAYOFWEEK(p.created_at) AS created_day_of_week, DAYOFYEAR(p.created_at) AS created_day_of_year, MONTHNAME(p.created_at) AS created_month_name, DAYNAME(p.created_at) AS created_day_name FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse weekday/dayname projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let named_datetime_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            named_datetime_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_weekday".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_day_of_week".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_day_of_year".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_month_name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_day_name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
             "SELECT DATE_ADD(p.created_at, INTERVAL 2 DAY) AS created_plus_two_days, DATE_SUB(p.created_at, INTERVAL 3 HOUR) AS created_minus_three_hours, TIMESTAMPADD(MINUTE, 30, p.created_at) AS created_plus_half_hour FROM app.posts AS p",
             Some("app"),
         )
@@ -16749,6 +16791,32 @@ mod tests {
         assert_eq!(args.len(), 3);
         assert!(distinct.is_none());
         assert!(matches!(&args[0], Expr::Lit { lit: Lit::Str { v } } if v == "minute"));
+
+        let weekday = parse_sql_scalar_expr("WEEKDAY(post_date)").expect("parse weekday expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = weekday
+        else {
+            panic!("expected weekday function expr");
+        };
+        assert_eq!(name, "weekday");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
+
+        let dayname = parse_sql_scalar_expr("DAYNAME(post_date)").expect("parse dayname expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = dayname
+        else {
+            panic!("expected dayname function expr");
+        };
+        assert_eq!(name, "dayname");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
 
         let adddate = parse_sql_scalar_expr("ADDDATE(post_date, 2)").expect("parse adddate expr");
         let Expr::Func {
