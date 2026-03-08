@@ -1251,6 +1251,128 @@ impl Engine {
         Ok(())
     }
 
+    pub fn rename_table(
+        &mut self,
+        source: &BaseTableRef,
+        target: &BaseTableRef,
+    ) -> anyhow::Result<()> {
+        if source.db == target.db && source.table == target.table {
+            return Ok(());
+        }
+
+        if !self.catalog.databases.contains_key(&source.db) {
+            anyhow::bail!("not_found: database not found: {}", source.db);
+        }
+        if !self.catalog.databases.contains_key(&target.db) {
+            anyhow::bail!("not_found: database not found: {}", target.db);
+        }
+        if !self
+            .catalog
+            .databases
+            .get(&source.db)
+            .map(|database| database.tables.contains_key(&source.table))
+            .unwrap_or(false)
+        {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        }
+        if self
+            .catalog
+            .databases
+            .get(&target.db)
+            .map(|database| database.tables.contains_key(&target.table))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "conflict: table already exists: {}.{}",
+                target.db,
+                target.table
+            );
+        }
+
+        let source_key = TableKey {
+            db: source.db.clone(),
+            table: source.table.clone(),
+        };
+        let target_key = TableKey {
+            db: target.db.clone(),
+            table: target.table.clone(),
+        };
+        if !self.tables.contains_key(&source_key) {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        }
+
+        let Some(mut schema) = self
+            .catalog
+            .databases
+            .get_mut(&source.db)
+            .and_then(|database| database.tables.remove(&source.table))
+        else {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        };
+        let Some(tdata) = self.tables.remove(&source_key) else {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        };
+
+        bump_table_version(&mut schema);
+        self.catalog
+            .databases
+            .get_mut(&target.db)
+            .expect("target db validated above")
+            .tables
+            .insert(target.table.clone(), schema);
+        self.tables.insert(target_key.clone(), tdata);
+
+        let next_version = self.schema_version_for(&source_key).saturating_add(1);
+        self.schema_versions.remove(&source_key);
+        self.set_schema_version(&target_key, next_version);
+
+        if let Some(policy) = self.oblivious_policies.remove(&source_key) {
+            self.oblivious_policies.insert(target_key.clone(), policy);
+        }
+        if let Some(policy) = self.merge_policies.remove(&source_key) {
+            self.merge_policies.insert(target_key.clone(), policy);
+        }
+        if let Some(mut coverage) = self.edge_coverage.remove(&source_key) {
+            coverage.table = target_key.clone();
+            self.edge_coverage.insert(target_key.clone(), coverage);
+        }
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            if let Some(mut table_snaps) = snapshots.snapshots.remove(&source_key) {
+                for snapshot in table_snaps.iter_mut() {
+                    snapshot.db = target.db.clone();
+                    snapshot.table = target.table.clone();
+                }
+                snapshots.snapshots.insert(target_key.clone(), table_snaps);
+            }
+            if let Some(patterns) = snapshots.patterns.by_table.remove(&source_key) {
+                snapshots
+                    .patterns
+                    .by_table
+                    .insert(target_key.clone(), patterns);
+            }
+        }
+        if let Ok(mut advisor) = self.index_advisor.lock() {
+            if let Some(patterns) = advisor.by_table.remove(&source_key) {
+                advisor.by_table.insert(target_key.clone(), patterns);
+            }
+        }
+
+        self.cached_select.lock().unwrap().clear();
+        self.cached_patch.lock().unwrap().clear();
+
+        self.persist_catalog()?;
+        self.persist_table(&target.db, &target.table)?;
+        remove_file_if_exists(&self.table_path(&source.db, &source.table))?;
+        remove_file_if_exists(&self.table_segment_path(&source.db, &source.table))?;
+        self.persist_schema_versions_best_effort();
+        self.persist_oblivious_best_effort();
+        self.persist_merge_policies_best_effort();
+        self.persist_snapshots_best_effort();
+        self.persist_advisor_patterns_best_effort();
+        self.cleanup_database_table_dir_if_empty(&source.db);
+        Ok(())
+    }
+
     pub fn describe_table(&self, db: &str, table: &str) -> anyhow::Result<serde_json::Value> {
         let schema = self.get_schema(db, table)?;
         let columns: Vec<serde_json::Value> = schema
@@ -23454,6 +23576,149 @@ mod tests {
             ])],
             None,
         )?;
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_table_preserves_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_table");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": "n-a"}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let source = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        let target = BaseTableRef {
+            db: "app".to_string(),
+            table: "archived_posts".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &source,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.rename_table(&source, &target)?;
+        assert_eq!(
+            engine.list_tables("app")?,
+            vec!["archived_posts".to_string()]
+        );
+        assert!(engine.data_get(&source, vec![Lit::U64 { v: 1 }]).is_err());
+
+        let desc = engine.describe_table("app", "archived_posts")?;
+        assert_eq!(
+            desc.get("compat_mysql")
+                .and_then(|v| v.get("column_defaults"))
+                .and_then(|v| v.get("slug"))
+                .and_then(|v| serde_json::from_value::<Lit>(v.clone()).ok()),
+            Some(Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert_eq!(
+            desc.get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("slug_unique")
+        );
+
+        let fetched = engine.data_get(&target, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        assert_eq!(
+            reopened.list_tables("app")?,
+            vec!["archived_posts".to_string()]
+        );
+        let reopened_desc = reopened.describe_table("app", "archived_posts")?;
+        assert_eq!(
+            reopened_desc
+                .get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("columns"))
+                .and_then(|v| v.as_array())
+                .and_then(|cols| cols.first())
+                .and_then(|v| v.as_str()),
+            Some("slug")
+        );
+
+        let reopened_fetched = reopened.data_get(&target, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            reopened_fetched.row.get("slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+
+        let err = reopened
+            .data_insert(
+                &target,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("conflict"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

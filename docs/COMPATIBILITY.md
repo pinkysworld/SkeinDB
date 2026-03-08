@@ -32,7 +32,7 @@ SkeinDB adoption strategy:
 - DROP INDEX
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates through in-memory compatibility key indexes, creating a MySQL compatibility `UNIQUE INDEX` now rejects pre-existing duplicate rows, and MySQL compatibility `KEY` / `UNIQUE KEY` metadata now seeds and is best-effort restored into the prototype's in-memory secondary-index prefilter path on reopen; the current implementation is still not backed by a durable reusable secondary index structure
-- ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `RENAME COLUMN` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
+- ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `RENAME COLUMN` / `RENAME [TO|AS] [db.]new_table` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
 - ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
 - DROP TABLE
 
@@ -91,9 +91,9 @@ parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverag
 expression coverage, extended date/time-function/formatting coverage including `DATEDIFF` / `TIMESTAMPDIFF`,
 `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, plus baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, grouped-aggregate
 `HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`,
-`ALTER TABLE ... RENAME COLUMN`, parenthesized boolean-tree subquery rewrite coverage, baseline nested
-subquery compatibility coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage for
-creating MySQL compatibility unique indexes.
+`ALTER TABLE ... RENAME COLUMN`, `ALTER TABLE ... RENAME [TO|AS]`, parenthesized boolean-tree
+subquery rewrite coverage, baseline nested subquery compatibility coverage, simple correlated `EXISTS`
+coverage, and duplicate-check coverage for creating MySQL compatibility unique indexes.
 
 ---
 

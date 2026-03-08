@@ -8623,6 +8623,10 @@ enum SqlPlan {
         old_name: String,
         new_name: String,
     },
+    AlterTableRenameTable {
+        table: BaseTableRef,
+        new_table: BaseTableRef,
+    },
     AlterTableDropColumn {
         table: BaseTableRef,
         column_name: String,
@@ -11191,6 +11195,30 @@ fn parse_alter_table_rename_column_clause(clause: &str) -> Result<(String, Strin
     Ok((old_name, new_name))
 }
 
+fn parse_alter_table_rename_table_clause(
+    clause: &str,
+    table: &BaseTableRef,
+) -> Result<BaseTableRef, RpcError> {
+    let tail = clause.trim();
+    let rest = if tail.len() >= 2
+        && (tail[..2].eq_ignore_ascii_case("to") || tail[..2].eq_ignore_ascii_case("as"))
+    {
+        tail[2..].trim_start()
+    } else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME requires TO/AS <new_table>",
+        ));
+    };
+    if rest.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME requires a target table name",
+        ));
+    }
+    parse_table_ref(rest, Some(table.db.as_str()))
+}
+
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
     let mut action_match = None::<(usize, &'static str)>;
@@ -11205,7 +11233,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let Some((action_idx, action)) = action_match else {
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / RENAME COLUMN / DROP COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / RENAME COLUMN / RENAME TO / DROP COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
         ));
     };
 
@@ -11270,22 +11298,20 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     }
 
     if action.eq_ignore_ascii_case("rename") {
-        if !clause
+        if clause
             .trim_start()
             .to_ascii_lowercase()
             .starts_with("column")
         {
-            return Err(RpcError::new(
-                "not_supported",
-                "ALTER TABLE RENAME currently supports only RENAME COLUMN",
-            ));
+            let (old_name, new_name) = parse_alter_table_rename_column_clause(clause)?;
+            return Ok(SqlPlan::AlterTableRenameColumn {
+                table,
+                old_name,
+                new_name,
+            });
         }
-        let (old_name, new_name) = parse_alter_table_rename_column_clause(clause)?;
-        return Ok(SqlPlan::AlterTableRenameColumn {
-            table,
-            old_name,
-            new_name,
-        });
+        let new_table = parse_alter_table_rename_table_clause(clause, &table)?;
+        return Ok(SqlPlan::AlterTableRenameTable { table, new_table });
     }
 
     if let Some((index_name, columns, unique)) = parse_alter_table_add_index_clause(clause)? {
@@ -11644,6 +11670,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         | SqlPlan::AlterTableModifyColumn { .. }
         | SqlPlan::AlterTableChangeColumn { .. }
         | SqlPlan::AlterTableRenameColumn { .. }
+        | SqlPlan::AlterTableRenameTable { .. }
         | SqlPlan::AlterTableDropColumn { .. }
         | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
@@ -11682,6 +11709,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
         | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
         | Ok(SqlPlan::AlterTableRenameColumn { table, .. })
+        | Ok(SqlPlan::AlterTableRenameTable { table, .. })
         | Ok(SqlPlan::AlterTableDropColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
@@ -12400,6 +12428,16 @@ async fn sql_exec_alter_table_rename_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_rename_table(
+    state: &AppState,
+    table: BaseTableRef,
+    new_table: BaseTableRef,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.rename_table(&table, &new_table).map_err(to_rpc_error)?;
+    Ok(())
+}
+
 async fn sql_exec_alter_table_drop_column(
     state: &AppState,
     table: BaseTableRef,
@@ -12890,6 +12928,16 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "operation": "rename_column",
                 "old_column": old_name,
                 "column": new_name
+            }))
+        }
+        SqlPlan::AlterTableRenameTable { table, new_table } => {
+            sql_exec_alter_table_rename_table(state, table.clone(), new_table.clone()).await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "rename_table",
+                "new_table": new_table
             }))
         }
         SqlPlan::AlterTableDropColumn { table, column_name } => {
@@ -17189,6 +17237,33 @@ mod tests {
         assert_eq!(table.db, "app");
         assert_eq!(table.table, "posts");
         assert_eq!(column_name, "post_name");
+    }
+
+    #[test]
+    fn parse_alter_table_rename_table_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts RENAME TO archived_posts",
+            Some("app"),
+        )
+        .expect("parse alter table rename to");
+        let SqlPlan::AlterTableRenameTable { table, new_table } = plan else {
+            panic!("expected alter table rename table plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "posts");
+        assert_eq!(new_table.db, "app");
+        assert_eq!(new_table.table, "archived_posts");
+
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.posts RENAME AS archive.posts_2020",
+            Some("app"),
+        )
+        .expect("parse alter table rename as");
+        let SqlPlan::AlterTableRenameTable { new_table, .. } = plan else {
+            panic!("expected alter table rename table plan");
+        };
+        assert_eq!(new_table.db, "archive");
+        assert_eq!(new_table.table, "posts_2020");
     }
 
     #[test]

@@ -2465,6 +2465,51 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show tables from skein_test like 'compat_rename_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("compat_rename_dst"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show full columns from compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("slug"));
+                    assert_eq!(rows[1][5].as_deref(), Some("seed"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert!(rows.iter().any(|row| {
+                        row[2].as_deref() == Some("slug_unique")
+                            && row[1].as_deref() == Some("0")
+                            && row[4].as_deref() == Some("slug")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show create table compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("UNIQUE KEY `slug_unique` (`slug`)"));
+                    assert!(ddl.contains("DEFAULT 'seed'"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select slug from compat_rename_dst where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("hello"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show status like 'threads_connected'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][1].as_deref(), Some("1"));

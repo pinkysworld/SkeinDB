@@ -681,6 +681,28 @@ SELECT keep_col
   FROM compat_dropcol
  WHERE id = 1;
 
+CREATE TABLE compat_rename_src (
+  id BIGINT UNSIGNED NOT NULL,
+  slug VARCHAR(20) NOT NULL DEFAULT 'seed',
+  PRIMARY KEY (id),
+  UNIQUE KEY slug_unique (slug)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO compat_rename_src (id, slug)
+VALUES (1, 'hello');
+
+ALTER TABLE compat_rename_src
+  RENAME TO compat_rename_dst;
+
+SHOW TABLES FROM skein_test LIKE 'compat_rename_%';
+SHOW FULL COLUMNS FROM compat_rename_dst;
+SHOW INDEX FROM compat_rename_dst;
+SHOW CREATE TABLE compat_rename_dst;
+
+SELECT slug
+  FROM compat_rename_dst
+ WHERE id = 1;
+
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;
 SHOW GRANTS;
