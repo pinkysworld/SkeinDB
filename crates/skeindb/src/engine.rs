@@ -8059,6 +8059,9 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "unix_timestamp"
                     | "datediff"
                     | "timestampdiff"
+                    | "date_add"
+                    | "date_sub"
+                    | "timestampadd"
                     | "now"
                     | "current_timestamp"
                     | "localtimestamp"
@@ -9069,6 +9072,26 @@ fn eval_expr(
                     };
                     Ok(mysql_from_unixtime_lit(&value, format.as_deref()).unwrap_or(Lit::Null))
                 }
+                "date_add" | "date_sub" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("{name} requires a datetime, unit, and amount");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let unit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let amount = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(amount) = lit_to_i64(&amount) else {
+                        return Ok(Lit::Null);
+                    };
+                    let amount = if name == "date_sub" {
+                        amount.saturating_neg()
+                    } else {
+                        amount
+                    };
+                    Ok(mysql_datetime_add_interval_lit(&value, &unit, amount).unwrap_or(Lit::Null))
+                }
                 "timestampdiff" => {
                     if fargs.len() != 3 {
                         anyhow::bail!("timestampdiff requires a unit plus two datetime args");
@@ -9082,6 +9105,21 @@ fn eval_expr(
                     Ok(mysql_timestampdiff_lit(&unit, &start, &end)
                         .map(|v| Lit::I64 { v })
                         .unwrap_or(Lit::Null))
+                }
+                "timestampadd" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("timestampadd requires a unit, amount, and datetime");
+                    }
+                    let unit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let amount = eval_expr(&fargs[1], row, ctx, args)?;
+                    let value = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(amount) = lit_to_i64(&amount) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_datetime_add_interval_lit(&value, &unit, amount).unwrap_or(Lit::Null))
                 }
                 "now" | "current_timestamp" | "localtimestamp" => {
                     if !fargs.is_empty() {
@@ -9844,10 +9882,71 @@ fn mysql_from_unixtime_lit(lit: &Lit, format: Option<&str>) -> Option<Lit> {
     }
 }
 
-fn mysql_timestampdiff_lit(unit: &str, start: &Lit, end: &Lit) -> Option<i64> {
+fn mysql_normalize_interval_unit(unit: &str) -> String {
     let normalized = unit.trim().to_ascii_lowercase();
-    let normalized = normalized.strip_prefix("sql_tsi_").unwrap_or(&normalized);
-    match normalized {
+    normalized
+        .strip_prefix("sql_tsi_")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn mysql_add_months(date: MySqlDateParts, months: i64) -> Option<MySqlDateParts> {
+    let total_months = i64::from(date.year) * 12 + i64::from(date.month) - 1 + months;
+    let year = i32::try_from(total_months.div_euclid(12)).ok()?;
+    let month = total_months.rem_euclid(12) as u8 + 1;
+    let day = date.day.min(mysql_days_in_month(year, month));
+    Some(MySqlDateParts { year, month, day })
+}
+
+fn mysql_datetime_add_interval_lit(value: &Lit, unit: &str, amount: i64) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let had_time = time.is_some();
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    let normalized = mysql_normalize_interval_unit(unit);
+    let wants_datetime = matches!(normalized.as_str(), "hour" | "minute" | "second") || had_time;
+
+    let (next_date, next_time) = match normalized.as_str() {
+        "year" => (mysql_add_months(date, amount.saturating_mul(12))?, time),
+        "quarter" => (mysql_add_months(date, amount.saturating_mul(3))?, time),
+        "month" => (mysql_add_months(date, amount)?, time),
+        "week" | "day" | "hour" | "minute" | "second" => {
+            let factor = match normalized.as_str() {
+                "week" => 86_400 * 7,
+                "day" => 86_400,
+                "hour" => 3_600,
+                "minute" => 60,
+                _ => 1,
+            };
+            let base_seconds = mysql_days_from_civil(date)
+                .checked_mul(86_400)?
+                .checked_add(i64::from(time.hour) * 3_600)?
+                .checked_add(i64::from(time.minute) * 60)?
+                .checked_add(i64::from(time.second))?;
+            let target_seconds = base_seconds.checked_add(amount.checked_mul(factor)?)?;
+            mysql_datetime_parts_from_unix_seconds(target_seconds)
+        }
+        _ => return None,
+    };
+
+    Some(if wants_datetime {
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(next_date, next_time),
+        }
+    } else {
+        Lit::Date {
+            iso: mysql_format_date_parts(next_date),
+        }
+    })
+}
+
+fn mysql_timestampdiff_lit(unit: &str, start: &Lit, end: &Lit) -> Option<i64> {
+    let normalized = mysql_normalize_interval_unit(unit);
+    match normalized.as_str() {
         "month" | "quarter" | "year" => {
             let start = mysql_date_time_parts_with_defaults(start)?;
             let end = mysql_date_time_parts_with_defaults(end)?;
@@ -9860,7 +9959,7 @@ fn mysql_timestampdiff_lit(unit: &str, start: &Lit, end: &Lit) -> Option<i64> {
             } else if months < 0 && end_partial > start_partial {
                 months += 1;
             }
-            Some(match normalized {
+            Some(match normalized.as_str() {
                 "month" => months,
                 "quarter" => months / 3,
                 _ => months / 12,
@@ -9870,7 +9969,7 @@ fn mysql_timestampdiff_lit(unit: &str, start: &Lit, end: &Lit) -> Option<i64> {
             let start_seconds = mysql_unix_timestamp_from_lit(start)?;
             let end_seconds = mysql_unix_timestamp_from_lit(end)?;
             let diff_seconds = end_seconds - start_seconds;
-            Some(match normalized {
+            Some(match normalized.as_str() {
                 "microsecond" => diff_seconds.saturating_mul(1_000_000),
                 "second" => diff_seconds,
                 "minute" => diff_seconds / 60,
@@ -20328,6 +20427,60 @@ mod tests {
                     ],
                     distinct: None,
                 },
+                Expr::Func {
+                    name: "date_add".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "date_sub".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hour".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 3 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "timestampadd".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "minute".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 30 },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
             ],
             Some(eq_expr(
                 Expr::Col {
@@ -20361,6 +20514,15 @@ mod tests {
                 },
                 Lit::I64 { v: 1 },
                 Lit::I64 { v: 3 },
+                Lit::Datetime {
+                    iso: "2020-01-04 03:04:05".to_string(),
+                },
+                Lit::Datetime {
+                    iso: "2020-01-02 00:04:05".to_string(),
+                },
+                Lit::Datetime {
+                    iso: "2020-01-02 03:34:05".to_string(),
+                },
             ]]
         );
 
@@ -20470,6 +20632,48 @@ mod tests {
         let (_cols, datediff_filtered_rows) =
             execute_select(&engine, &datediff_filtered_query, &[])?;
         assert_eq!(datediff_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let date_add_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "date_add".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2020-01-04 06:07:08".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, date_add_filtered_rows) =
+            execute_select(&engine, &date_add_filtered_query, &[])?;
+        assert_eq!(date_add_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let mut ordered_query = base_query(
             "app",

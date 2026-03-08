@@ -205,6 +205,12 @@ SELECT DATEDIFF(post_date, '2020-01-01 00:00:00'),
   FROM wp_posts
  WHERE ID = 2;
 
+SELECT DATE_ADD(post_date, INTERVAL 2 DAY),
+       DATE_SUB(post_date, INTERVAL 3 HOUR),
+       TIMESTAMPADD(MINUTE, 30, post_date)
+  FROM wp_posts
+ WHERE ID = 2;
+
 SELECT ID
   FROM wp_posts
  WHERE DATE(post_date) = '2020-01-03'
@@ -224,6 +230,11 @@ SELECT ID
 SELECT ID
   FROM wp_posts
  WHERE DATEDIFF(post_date, '2020-01-01 00:00:00') >= 2
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE DATE_ADD(post_date, INTERVAL 1 DAY) = '2020-01-04 00:00:00'
  ORDER BY ID ASC;
 
 SELECT p.post_author, u.user_login

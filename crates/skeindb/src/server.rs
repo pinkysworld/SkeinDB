@@ -4477,10 +4477,9 @@ fn mysql_stmt_expr_type(
                 .unwrap_or(MySqlStmtColumnType::VarString),
             "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
             | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "date_format"
-            | "from_unixtime" | "now" | "current_timestamp" | "localtimestamp" | "curdate"
-            | "current_date" | "curtime" | "current_time" | "localtime" => {
-                MySqlStmtColumnType::VarString
-            }
+            | "from_unixtime" | "date_add" | "date_sub" | "timestampadd" | "now"
+            | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
+            | "current_time" | "localtime" => MySqlStmtColumnType::VarString,
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -9001,39 +9000,176 @@ fn mysql_parse_no_paren_scalar_function(raw: &str) -> Option<String> {
     .then_some(lower)
 }
 
+fn mysql_find_last_top_level_whitespace(raw: &str) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut split = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == quote {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && b.is_ascii_whitespace() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if !raw[..start].trim().is_empty() && !raw[i..].trim().is_empty() {
+                split = Some(start);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    split
+}
+
+fn mysql_parse_interval_scalar_arg(raw: &str) -> Result<Option<(Expr, String)>, RpcError> {
+    let trimmed = raw.trim();
+    if !trimmed
+        .get(..8)
+        .map(|prefix| prefix.eq_ignore_ascii_case("interval"))
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let rest = trimmed[8..].trim_start();
+    let Some(split_idx) = mysql_find_last_top_level_whitespace(rest) else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "INTERVAL requires both a value expression and unit",
+        ));
+    };
+    let amount_sql = rest[..split_idx].trim();
+    let unit_sql = rest[split_idx..].trim();
+    if amount_sql.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "INTERVAL requires a non-empty value expression",
+        ));
+    }
+    let unit = clean_sql_ident(unit_sql);
+    if unit.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "INTERVAL requires a non-empty unit",
+        ));
+    }
+    Ok(Some((
+        parse_sql_scalar_expr(amount_sql)?,
+        unit.to_ascii_lowercase(),
+    )))
+}
+
 fn mysql_parse_special_scalar_function_expr(raw: &str) -> Result<Option<Expr>, RpcError> {
     let Some((name, args_raw)) = parse_sql_function_call(raw) else {
         return Ok(None);
     };
-    if name != "timestampdiff" {
-        return Ok(None);
-    }
-    if args_raw.len() != 3 {
-        return Err(RpcError::new(
-            "invalid_request",
-            "TIMESTAMPDIFF requires a unit plus two datetime expressions",
-        ));
-    }
-    let unit = clean_sql_ident(&args_raw[0]);
-    if unit.is_empty() {
-        return Err(RpcError::new(
-            "invalid_request",
-            "TIMESTAMPDIFF requires a non-empty unit",
-        ));
-    }
-    Ok(Some(Expr::Func {
-        name,
-        args: vec![
-            Expr::Lit {
+    match name.as_str() {
+        "timestampdiff" | "timestampadd" => {
+            if args_raw.len() != 3 {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    format!(
+                        "{name_upper} requires a unit plus two datetime expressions",
+                        name_upper = name.to_ascii_uppercase()
+                    ),
+                ));
+            }
+            let unit = clean_sql_ident(&args_raw[0]);
+            if unit.is_empty() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    format!(
+                        "{name_upper} requires a non-empty unit",
+                        name_upper = name.to_ascii_uppercase()
+                    ),
+                ));
+            }
+            let mut args = vec![Expr::Lit {
                 lit: Lit::Str {
                     v: unit.to_ascii_lowercase(),
                 },
-            },
-            parse_sql_scalar_expr(&args_raw[1])?,
-            parse_sql_scalar_expr(&args_raw[2])?,
-        ],
-        distinct: None,
-    }))
+            }];
+            args.push(parse_sql_scalar_expr(&args_raw[1])?);
+            args.push(parse_sql_scalar_expr(&args_raw[2])?);
+            Ok(Some(Expr::Func {
+                name,
+                args,
+                distinct: None,
+            }))
+        }
+        "date_add" | "date_sub" | "adddate" | "subdate" => {
+            if args_raw.len() != 2 {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    format!(
+                        "{name_upper} requires a datetime expression and interval",
+                        name_upper = name.to_ascii_uppercase()
+                    ),
+                ));
+            }
+            let value = parse_sql_scalar_expr(&args_raw[0])?;
+            let (amount, unit) =
+                if let Some((amount, unit)) = mysql_parse_interval_scalar_arg(&args_raw[1])? {
+                    (amount, unit)
+                } else if matches!(name.as_str(), "adddate" | "subdate") {
+                    (parse_sql_scalar_expr(&args_raw[1])?, "day".to_string())
+                } else {
+                    return Err(RpcError::new(
+                        "invalid_request",
+                        format!(
+                            "{name_upper} requires INTERVAL <expr> <unit> syntax",
+                            name_upper = name.to_ascii_uppercase()
+                        ),
+                    ));
+                };
+            Ok(Some(Expr::Func {
+                name: if matches!(name.as_str(), "date_add" | "adddate") {
+                    "date_add".to_string()
+                } else {
+                    "date_sub".to_string()
+                },
+                args: vec![
+                    value,
+                    Expr::Lit {
+                        lit: Lit::Str { v: unit },
+                    },
+                    amount,
+                ],
+                distinct: None,
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn mysql_is_unary_plus_minus(expr: &str, idx: usize) -> bool {
@@ -15659,6 +15795,39 @@ mod tests {
                 },
             ]
         );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
+            "SELECT DATE_ADD(p.created_at, INTERVAL 2 DAY) AS created_plus_two_days, DATE_SUB(p.created_at, INTERVAL 3 HOUR) AS created_minus_three_hours, TIMESTAMPADD(MINUTE, 30, p.created_at) AS created_plus_half_hour FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse date add/sub/timestampadd projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let interval_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            interval_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_plus_two_days".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_minus_three_hours".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_plus_half_hour".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -16484,6 +16653,65 @@ mod tests {
         assert_eq!(args.len(), 3);
         assert!(distinct.is_none());
         assert!(matches!(&args[0], Expr::Lit { lit: Lit::Str { v } } if v == "hour"));
+
+        let date_add = parse_sql_scalar_expr("DATE_ADD(post_date, INTERVAL 2 DAY)")
+            .expect("parse date_add expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = date_add
+        else {
+            panic!("expected date_add function expr");
+        };
+        assert_eq!(name, "date_add");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[1], Expr::Lit { lit: Lit::Str { v } } if v == "day"));
+
+        let date_sub = parse_sql_scalar_expr("DATE_SUB(post_date, INTERVAL 3 HOUR)")
+            .expect("parse date_sub expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = date_sub
+        else {
+            panic!("expected date_sub function expr");
+        };
+        assert_eq!(name, "date_sub");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[1], Expr::Lit { lit: Lit::Str { v } } if v == "hour"));
+
+        let timestampadd = parse_sql_scalar_expr("TIMESTAMPADD(MINUTE, 30, post_date)")
+            .expect("parse timestampadd expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = timestampadd
+        else {
+            panic!("expected timestampadd function expr");
+        };
+        assert_eq!(name, "timestampadd");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[0], Expr::Lit { lit: Lit::Str { v } } if v == "minute"));
+
+        let adddate = parse_sql_scalar_expr("ADDDATE(post_date, 2)").expect("parse adddate expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = adddate
+        else {
+            panic!("expected adddate function expr");
+        };
+        assert_eq!(name, "date_add");
+        assert_eq!(args.len(), 3);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[1], Expr::Lit { lit: Lit::Str { v } } if v == "day"));
     }
 
     #[test]

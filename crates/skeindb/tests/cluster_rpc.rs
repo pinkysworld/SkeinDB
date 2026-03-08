@@ -939,6 +939,39 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_prepare(
         &mut stream,
+        "SELECT DATE_ADD(occurred_at, INTERVAL 2 DAY) AS occurred_plus_two_days, DATE_SUB(occurred_at, INTERVAL 3 HOUR) AS occurred_minus_three_hours, TIMESTAMPADD(MINUTE, 30, occurred_at) AS occurred_plus_half_hour FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let interval_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(interval_stmt.param_count, 1);
+    assert_eq!(
+        interval_stmt.column_defs,
+        vec![
+            ("occurred_plus_two_days".to_string(), 0xfd),
+            ("occurred_minus_three_hours".to_string(), 0xfd),
+            ("occurred_plus_half_hour".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        interval_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let interval_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        interval_rows,
+        vec![vec![
+            Some("2020-01-04 03:04:05".to_string()),
+            Some("2020-01-02 00:04:05".to_string()),
+            Some("2020-01-02 03:34:05".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, interval_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
         "SELECT outer_q.id FROM wp_events AS outer_q WHERE (EXISTS (SELECT 1 FROM wp_events AS inner_q WHERE inner_q.id = outer_q.id) AND outer_q.id > 0) OR outer_q.id = 999 ORDER BY outer_q.id ASC",
     )
     .await?;
@@ -1663,6 +1696,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select date_add(post_date, interval 2 day), date_sub(post_date, interval 3 hour), timestampadd(minute, 30, post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-04 00:00:00".to_string()),
+                                Some("2020-01-01 21:00:00".to_string()),
+                                Some("2020-01-02 00:30:00".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select id from wp_posts where date(post_date) = '2020-01-03' order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1698,6 +1747,15 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][0].as_deref(), Some("3"));
                         assert_eq!(rows[1][0].as_deref(), Some("4"));
                         assert_eq!(rows[2][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date_add(post_date, interval 1 day) = '2020-01-04 00:00:00' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

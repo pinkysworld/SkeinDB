@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-03-07
+Last updated: 2026-03-08
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -47,7 +47,7 @@ SkeinDB adoption strategy:
 - MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
 - Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
 - Translated arithmetic expressions now also include baseline `+`, `-`, `*`, `/`, and `%` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses, including common numeric ordering/filtering patterns such as `col + 0`
-- Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `DATE_FORMAT`, `FROM_UNIXTIME`, `DATEDIFF`, `TIMESTAMPDIFF`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, and `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`
+- Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `DATE_FORMAT`, `FROM_UNIXTIME`, `DATEDIFF`, `TIMESTAMPDIFF`, baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` (with `INTERVAL <expr> <unit>` syntax) and `TIMESTAMPADD`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, and `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
@@ -59,7 +59,7 @@ SkeinDB adoption strategy:
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
-- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, and `DATEDIFF` / `TIMESTAMPDIFF`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, plus `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, `DATEDIFF` / `TIMESTAMPDIFF`, and baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, plus `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
 - Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
@@ -88,11 +88,11 @@ so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
 pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
 parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverage, baseline arithmetic
-expression coverage, extended date/time-function/formatting coverage including `DATEDIFF` / `TIMESTAMPDIFF`,
-grouped-aggregate `HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression
-`ORDER BY`, `ALTER TABLE ... RENAME COLUMN`, parenthesized boolean-tree subquery rewrite coverage,
-simple correlated `EXISTS` coverage, and duplicate-check coverage for creating MySQL compatibility
-unique indexes.
+expression coverage, extended date/time-function/formatting coverage including `DATEDIFF` / `TIMESTAMPDIFF`
+plus baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, grouped-aggregate
+`HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`,
+`ALTER TABLE ... RENAME COLUMN`, parenthesized boolean-tree subquery rewrite coverage, simple correlated
+`EXISTS` coverage, and duplicate-check coverage for creating MySQL compatibility unique indexes.
 
 ---
 
