@@ -8059,6 +8059,9 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "dayofyear"
                     | "monthname"
                     | "dayname"
+                    | "quarter"
+                    | "last_day"
+                    | "extract"
                     | "hour"
                     | "minute"
                     | "second"
@@ -8994,23 +8997,13 @@ fn eval_expr(
                         iso: mysql_format_date_parts(date),
                     })
                 }
-                "year" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek" | "dayofyear" => {
+                "year" | "quarter" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek"
+                | "dayofyear" => {
                     if fargs.len() != 1 {
                         anyhow::bail!("{name} requires 1 arg");
                     }
                     let value = eval_expr(&fargs[0], row, ctx, args)?;
-                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
-                        return Ok(Lit::Null);
-                    };
-                    let out = match name {
-                        "year" => i64::from(date.year),
-                        "month" => i64::from(date.month),
-                        "weekday" => mysql_weekday_monday_index(date),
-                        "dayofweek" => mysql_weekday_index(date) as i64 + 1,
-                        "dayofyear" => i64::from(mysql_day_of_year(date)),
-                        _ => i64::from(date.day),
-                    };
-                    Ok(Lit::I64 { v: out })
+                    Ok(mysql_extract_datetime_unit_lit(name, &value).unwrap_or(Lit::Null))
                 }
                 "monthname" | "dayname" => {
                     if fargs.len() != 1 {
@@ -9030,28 +9023,30 @@ fn eval_expr(
                         .map(|v| Lit::Str { v: v.to_string() })
                         .unwrap_or(Lit::Null))
                 }
+                "extract" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("extract requires a unit plus one datetime arg");
+                    }
+                    let unit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let value = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_extract_datetime_unit_lit(&unit, &value).unwrap_or(Lit::Null))
+                }
+                "last_day" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("last_day requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_last_day_lit(&value).unwrap_or(Lit::Null))
+                }
                 "hour" | "minute" | "second" => {
                     if fargs.len() != 1 {
                         anyhow::bail!("{name} requires 1 arg");
                     }
                     let value = eval_expr(&fargs[0], row, ctx, args)?;
-                    let Some((date, time)) = mysql_parse_date_time_lit_parts(&value) else {
-                        return Ok(Lit::Null);
-                    };
-                    let time = time.unwrap_or(MySqlTimeParts {
-                        hour: 0,
-                        minute: 0,
-                        second: 0,
-                    });
-                    if time.hour == 0 && time.minute == 0 && time.second == 0 && date.is_none() {
-                        return Ok(Lit::Null);
-                    }
-                    let out = match name {
-                        "hour" => i64::from(time.hour),
-                        "minute" => i64::from(time.minute),
-                        _ => i64::from(time.second),
-                    };
-                    Ok(Lit::I64 { v: out })
+                    Ok(mysql_extract_datetime_unit_lit(name, &value).unwrap_or(Lit::Null))
                 }
                 "date_format" => {
                     if fargs.len() != 2 {
@@ -9788,6 +9783,63 @@ fn mysql_weekday_index(date: MySqlDateParts) -> usize {
 
 fn mysql_weekday_monday_index(date: MySqlDateParts) -> i64 {
     ((mysql_weekday_index(date) + 6) % 7) as i64
+}
+
+fn mysql_quarter(date: MySqlDateParts) -> i64 {
+    i64::from((date.month.saturating_sub(1) / 3) + 1)
+}
+
+fn mysql_extract_datetime_unit_lit(unit: &str, value: &Lit) -> Option<Lit> {
+    let normalized = unit.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "year" | "quarter" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek"
+        | "dayofyear" => {
+            let (Some(date), _) = mysql_parse_date_time_lit_parts(value)? else {
+                return None;
+            };
+            let out = match normalized.as_str() {
+                "year" => i64::from(date.year),
+                "quarter" => mysql_quarter(date),
+                "month" => i64::from(date.month),
+                "weekday" => mysql_weekday_monday_index(date),
+                "dayofweek" => mysql_weekday_index(date) as i64 + 1,
+                "dayofyear" => i64::from(mysql_day_of_year(date)),
+                _ => i64::from(date.day),
+            };
+            Some(Lit::I64 { v: out })
+        }
+        "hour" | "minute" | "second" => {
+            let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+            let time = time.unwrap_or(MySqlTimeParts {
+                hour: 0,
+                minute: 0,
+                second: 0,
+            });
+            if time.hour == 0 && time.minute == 0 && time.second == 0 && date.is_none() {
+                return None;
+            }
+            let out = match normalized.as_str() {
+                "hour" => i64::from(time.hour),
+                "minute" => i64::from(time.minute),
+                _ => i64::from(time.second),
+            };
+            Some(Lit::I64 { v: out })
+        }
+        _ => None,
+    }
+}
+
+fn mysql_last_day_lit(value: &Lit) -> Option<Lit> {
+    let (Some(date), _) = mysql_parse_date_time_lit_parts(value)? else {
+        return None;
+    };
+    Some(Lit::Date {
+        iso: mysql_format_date_parts(MySqlDateParts {
+            year: date.year,
+            month: date.month,
+            day: mysql_days_in_month(date.year, date.month),
+        }),
+    })
 }
 
 fn mysql_12_hour(hour: u8) -> u8 {
@@ -20411,6 +20463,52 @@ mod tests {
                     distinct: None,
                 },
                 Expr::Func {
+                    name: "quarter".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "last_day".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "year".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hour".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
                     name: "hour".to_string(),
                     args: vec![Expr::Col {
                         col: "published_at".to_string(),
@@ -20588,6 +20686,12 @@ mod tests {
                 Lit::Str {
                     v: "Thursday".to_string(),
                 },
+                Lit::I64 { v: 1 },
+                Lit::Date {
+                    iso: "2020-01-31".to_string(),
+                },
+                Lit::I64 { v: 2020 },
+                Lit::I64 { v: 3 },
                 Lit::I64 { v: 3 },
                 Lit::I64 { v: 4 },
                 Lit::I64 { v: 5 },
@@ -20749,6 +20853,42 @@ mod tests {
         );
         let (_cols, dayname_filtered_rows) = execute_select(&engine, &dayname_filtered_query, &[])?;
         assert_eq!(dayname_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let extract_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 3 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, extract_filtered_rows) = execute_select(&engine, &extract_filtered_query, &[])?;
+        assert_eq!(extract_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let date_add_filtered_query = base_query(
             "app",

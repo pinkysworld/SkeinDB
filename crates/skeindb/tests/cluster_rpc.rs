@@ -976,6 +976,41 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
 
     send_com_stmt_prepare(
         &mut stream,
+        "SELECT QUARTER(occurred_at) AS occurred_quarter, LAST_DAY(occurred_at) AS occurred_last_day, EXTRACT(YEAR FROM occurred_at) AS occurred_extract_year, EXTRACT(HOUR FROM occurred_at) AS occurred_extract_hour FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let extract_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(extract_stmt.param_count, 1);
+    assert_eq!(
+        extract_stmt.column_defs,
+        vec![
+            ("occurred_quarter".to_string(), 0x08),
+            ("occurred_last_day".to_string(), 0xfd),
+            ("occurred_extract_year".to_string(), 0x08),
+            ("occurred_extract_hour".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        extract_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let extract_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        extract_rows,
+        vec![vec![
+            Some("1".to_string()),
+            Some("2020-01-31".to_string()),
+            Some("2020".to_string()),
+            Some("3".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, extract_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
         "SELECT DATE_ADD(occurred_at, INTERVAL 2 DAY) AS occurred_plus_two_days, DATE_SUB(occurred_at, INTERVAL 3 HOUR) AS occurred_minus_three_hours, TIMESTAMPADD(MINUTE, 30, occurred_at) AS occurred_plus_half_hour FROM wp_events WHERE id = ?",
     )
     .await?;
@@ -1768,6 +1803,23 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select quarter(post_date), last_day(post_date), extract(year from post_date), extract(hour from post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("2020-01-31".to_string()),
+                                Some("2020".to_string()),
+                                Some("0".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select date_add(post_date, interval 2 day), date_sub(post_date, interval 3 hour), timestampadd(minute, 30, post_date) from wp_posts where id = 2" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1824,6 +1876,15 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
             }
             "select id from wp_posts where dayname(post_date) = 'friday' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where extract(day from post_date) = 3 order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 1);
@@ -2366,6 +2427,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 1);
                         assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where not ( outer_q.id = 1 or exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("5"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

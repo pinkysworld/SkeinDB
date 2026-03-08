@@ -213,6 +213,13 @@ SELECT WEEKDAY(post_date),
   FROM wp_posts
  WHERE ID = 2;
 
+SELECT QUARTER(post_date),
+       LAST_DAY(post_date),
+       EXTRACT(YEAR FROM post_date),
+       EXTRACT(HOUR FROM post_date)
+  FROM wp_posts
+ WHERE ID = 2;
+
 SELECT DATE_ADD(post_date, INTERVAL 2 DAY),
        DATE_SUB(post_date, INTERVAL 3 HOUR),
        TIMESTAMPADD(MINUTE, 30, post_date)
@@ -243,6 +250,11 @@ SELECT ID
 SELECT ID
   FROM wp_posts
  WHERE DAYNAME(post_date) = 'Friday'
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE EXTRACT(DAY FROM post_date) = 3
  ORDER BY ID ASC;
 
 SELECT ID
@@ -635,6 +647,18 @@ SELECT id
     )
  )
  ORDER BY id ASC;
+
+SELECT outer_q.id
+  FROM compat_alter_subq AS outer_q
+ WHERE NOT (
+   outer_q.id = 1
+   OR EXISTS (
+     SELECT 1
+       FROM compat_alter_subq AS inner_q
+      WHERE inner_q.parent_id = outer_q.id
+   )
+ )
+ ORDER BY outer_q.id ASC;
 
 CREATE TABLE compat_dropcol (
   id BIGINT UNSIGNED NOT NULL,

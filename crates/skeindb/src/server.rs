@@ -3569,6 +3569,158 @@ async fn mysql_rewrite_subquery_compat_predicate(
     }
 }
 
+fn mysql_split_top_level_comparison(clause: &str) -> Option<(String, &'static str, String)> {
+    let bytes = clause.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0u32;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            let op = if clause[i..].starts_with("<=") {
+                Some("<=")
+            } else if clause[i..].starts_with(">=") {
+                Some(">=")
+            } else if clause[i..].starts_with("!=") {
+                Some("!=")
+            } else if clause[i..].starts_with("<>") {
+                Some("<>")
+            } else if clause[i..].starts_with("=") {
+                Some("=")
+            } else if clause[i..].starts_with("<") {
+                Some("<")
+            } else if clause[i..].starts_with(">") {
+                Some(">")
+            } else {
+                None
+            };
+            if let Some(op) = op {
+                let left = clause[..i].trim();
+                let right = clause[i + op.len()..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left.to_string(), op, right.to_string()));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn mysql_negate_leaf_predicate_sql(sql: &str) -> Option<String> {
+    let trimmed = trim_wrapping_parentheses(sql.trim());
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(expr) = lower
+        .strip_suffix(" is not null")
+        .map(|_| trimmed[..trimmed.len() - " is not null".len()].trim())
+    {
+        return Some(format!("{expr} IS NULL"));
+    }
+    if let Some(expr) = lower
+        .strip_suffix(" is null")
+        .map(|_| trimmed[..trimmed.len() - " is null".len()].trim())
+    {
+        return Some(format!("{expr} IS NOT NULL"));
+    }
+    if let Some((left, op, right)) = mysql_split_top_level_comparison(trimmed) {
+        let negated = match op {
+            "=" => "<>",
+            "!=" | "<>" => "=",
+            "<" => ">=",
+            "<=" => ">",
+            ">" => "<=",
+            ">=" => "<",
+            _ => return None,
+        };
+        return Some(format!("{left} {negated} {right}"));
+    }
+    if let Some(idx) = find_keyword_top_level(trimmed, "not in") {
+        let left = trimmed[..idx].trim();
+        let right = trimmed[idx + "not in".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Some(format!("{left} IN {right}"));
+        }
+    }
+    if let Some(idx) = find_keyword_top_level(trimmed, "in") {
+        let left = trimmed[..idx].trim();
+        let right = trimmed[idx + "in".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Some(format!("{left} NOT IN {right}"));
+        }
+    }
+    if let Some(idx) = find_keyword_top_level(trimmed, "not like") {
+        let left = trimmed[..idx].trim();
+        let right = trimmed[idx + "not like".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Some(format!("{left} LIKE {right}"));
+        }
+    }
+    if let Some(idx) = find_keyword_top_level(trimmed, "like") {
+        let left = trimmed[..idx].trim();
+        let right = trimmed[idx + "like".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Some(format!("{left} NOT LIKE {right}"));
+        }
+    }
+    None
+}
+
+fn mysql_negate_rewritten_where_sql(sql: &str) -> Option<String> {
+    let trimmed = trim_wrapping_parentheses(sql.trim());
+    if trimmed.is_empty() {
+        return None;
+    }
+    let or_parts = split_top_level_or(trimmed);
+    if or_parts.len() > 1 {
+        let rewritten = or_parts
+            .into_iter()
+            .map(|part| mysql_negate_rewritten_where_sql(&part).map(|sql| format!("({sql})")))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(rewritten.join(" AND "));
+    }
+    let and_parts = split_top_level_and(trimmed);
+    if and_parts.len() > 1 {
+        let rewritten = and_parts
+            .into_iter()
+            .map(|part| mysql_negate_rewritten_where_sql(&part).map(|sql| format!("({sql})")))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(rewritten.join(" OR "));
+    }
+    mysql_negate_leaf_predicate_sql(trimmed)
+}
+
 fn mysql_rewrite_subquery_compat_where_clause<'a>(
     state: &'a AppState,
     where_clause: &'a str,
@@ -3617,6 +3769,31 @@ fn mysql_rewrite_subquery_compat_where_clause<'a>(
             return Ok(Some(MySqlSubqueryCompatWhereRewrite {
                 sql: rewritten.join(" AND "),
                 saw_subquery,
+            }));
+        }
+
+        if trimmed
+            .get(..3)
+            .map(|prefix| prefix.eq_ignore_ascii_case("not"))
+            .unwrap_or(false)
+            && trimmed[3..]
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_whitespace() || ch == '(')
+                .unwrap_or(false)
+        {
+            let inner = trimmed[3..].trim_start();
+            let Some(result) =
+                mysql_rewrite_subquery_compat_where_clause(state, inner, default_db).await?
+            else {
+                return Ok(None);
+            };
+            let Some(negated_sql) = mysql_negate_rewritten_where_sql(&result.sql) else {
+                return Ok(None);
+            };
+            return Ok(Some(MySqlSubqueryCompatWhereRewrite {
+                sql: negated_sql,
+                saw_subquery: result.saw_subquery,
             }));
         }
 
@@ -4438,7 +4615,7 @@ fn mysql_stmt_expr_type(
         Expr::Func { name, args, .. } => match name.as_str() {
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
             | "find_in_set" | "isnull" | "datediff" | "timestampdiff" | "weekday" | "dayofweek"
-            | "dayofyear" => MySqlStmtColumnType::LongLong,
+            | "dayofyear" | "quarter" | "extract" => MySqlStmtColumnType::LongLong,
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
             | "unix_timestamp" => MySqlStmtColumnType::LongLong,
             "avg" | "round" => MySqlStmtColumnType::Double,
@@ -4456,7 +4633,7 @@ fn mysql_stmt_expr_type(
             | "right" | "substring" | "substr" | "replace" | "concat" | "date" | "date_format"
             | "from_unixtime" | "date_add" | "date_sub" | "timestampadd" | "now"
             | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
-            | "current_time" | "localtime" | "monthname" | "dayname" => {
+            | "current_time" | "localtime" | "monthname" | "dayname" | "last_day" => {
                 MySqlStmtColumnType::VarString
             }
             _ => MySqlStmtColumnType::VarString,
@@ -9073,6 +9250,47 @@ fn mysql_parse_special_scalar_function_expr(raw: &str) -> Result<Option<Expr>, R
         return Ok(None);
     };
     match name.as_str() {
+        "extract" => {
+            if args_raw.len() != 1 {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "EXTRACT requires a unit and FROM expression",
+                ));
+            }
+            let raw_arg = args_raw.first().map(|arg| arg.trim()).unwrap_or_default();
+            let Some(from_idx) = find_keyword_top_level(raw_arg, "from") else {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "EXTRACT requires <unit> FROM <expr> syntax",
+                ));
+            };
+            let unit = clean_sql_ident(raw_arg[..from_idx].trim());
+            if unit.is_empty() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "EXTRACT requires a non-empty unit",
+                ));
+            }
+            let value_sql = raw_arg[from_idx + 4..].trim();
+            if value_sql.is_empty() {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "EXTRACT requires a non-empty expression",
+                ));
+            }
+            Ok(Some(Expr::Func {
+                name,
+                args: vec![
+                    Expr::Lit {
+                        lit: Lit::Str {
+                            v: unit.to_ascii_lowercase(),
+                        },
+                    },
+                    parse_sql_scalar_expr(value_sql)?,
+                ],
+                distinct: None,
+            }))
+        }
         "timestampdiff" | "timestampadd" => {
             if args_raw.len() != 3 {
                 return Err(RpcError::new(
@@ -15819,6 +16037,43 @@ mod tests {
         let SqlPlan::Select {
             from, projection, ..
         } = parse_sql_plan(
+            "SELECT QUARTER(p.created_at) AS created_quarter, LAST_DAY(p.created_at) AS created_last_day, EXTRACT(YEAR FROM p.created_at) AS created_extract_year, EXTRACT(HOUR FROM p.created_at) AS created_extract_hour FROM app.posts AS p",
+            Some("app"),
+        )
+        .expect("parse extract/last_day projection")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let extract_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &projection,
+            &datetime_table_descs,
+        );
+        assert_eq!(
+            extract_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "created_quarter".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_last_day".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_extract_year".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "created_extract_hour".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
             "SELECT DATE_ADD(p.created_at, INTERVAL 2 DAY) AS created_plus_two_days, DATE_SUB(p.created_at, INTERVAL 3 HOUR) AS created_minus_three_hours, TIMESTAMPADD(MINUTE, 30, p.created_at) AS created_plus_half_hour FROM app.posts AS p",
             Some("app"),
         )
@@ -15990,6 +16245,20 @@ mod tests {
             }]
         );
 
+        let negated_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT outer_q.id FROM app.nodes AS outer_q WHERE NOT (outer_q.id = 1 OR EXISTS (SELECT 1 FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id)) ORDER BY outer_q.id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            negated_columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "id".to_string(),
+                column_type: MySqlStmtColumnType::LongLong,
+            }]
+        );
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -16048,6 +16317,25 @@ mod tests {
             panic!("expected result set");
         };
         assert_eq!(rows, vec![vec![Some("3".to_string())]]);
+
+        let negated_outcome = mysql_try_compat_query_outcome(
+            &state,
+            "SELECT outer_q.id FROM app.nodes AS outer_q WHERE NOT (outer_q.id = 1 OR EXISTS (SELECT 1 FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id)) ORDER BY outer_q.id ASC",
+            Some("app"),
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{:?}", err))?
+        .expect("negated compat outcome");
+        let MySqlQueryOutcome::ResultSet {
+            rows: negated_rows, ..
+        } = negated_outcome
+        else {
+            panic!("expected result set");
+        };
+        assert_eq!(
+            negated_rows,
+            vec![vec![Some("3".to_string())], vec![Some("4".to_string())],]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -16817,6 +17105,47 @@ mod tests {
         assert_eq!(name, "dayname");
         assert_eq!(args.len(), 1);
         assert!(distinct.is_none());
+
+        let quarter = parse_sql_scalar_expr("QUARTER(post_date)").expect("parse quarter expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = quarter
+        else {
+            panic!("expected quarter function expr");
+        };
+        assert_eq!(name, "quarter");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
+
+        let last_day = parse_sql_scalar_expr("LAST_DAY(post_date)").expect("parse last_day expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = last_day
+        else {
+            panic!("expected last_day function expr");
+        };
+        assert_eq!(name, "last_day");
+        assert_eq!(args.len(), 1);
+        assert!(distinct.is_none());
+
+        let extract =
+            parse_sql_scalar_expr("EXTRACT(QUARTER FROM post_date)").expect("parse extract expr");
+        let Expr::Func {
+            name,
+            args,
+            distinct,
+        } = extract
+        else {
+            panic!("expected extract function expr");
+        };
+        assert_eq!(name, "extract");
+        assert_eq!(args.len(), 2);
+        assert!(distinct.is_none());
+        assert!(matches!(&args[0], Expr::Lit { lit: Lit::Str { v } } if v == "quarter"));
 
         let adddate = parse_sql_scalar_expr("ADDDATE(post_date, 2)").expect("parse adddate expr");
         let Expr::Func {
