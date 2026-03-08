@@ -645,6 +645,23 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
     );
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT id FROM wp_users WHERE id = (SELECT id FROM wp_users WHERE name = 'Grace') ORDER BY id ASC",
+    )
+    .await?;
+    let scalar_subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(scalar_subquery_stmt.param_count, 0);
+    assert_eq!(
+        scalar_subquery_stmt.column_defs,
+        vec![("id".to_string(), 0x08),]
+    );
+
+    send_com_stmt_execute(&mut stream, scalar_subquery_stmt.statement_id, &[]).await?;
+    let scalar_subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(scalar_subquery_rows, vec![vec![Some("8".to_string())]]);
+    send_com_stmt_close(&mut stream, scalar_subquery_stmt.statement_id).await?;
+
     send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_posts").await?;
     let (_seq, ok_drop_posts) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_drop_posts)?.0, 0);
@@ -2200,6 +2217,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][0].as_deref(), Some("2"));
                         assert_eq!(rows[1][0].as_deref(), Some("3"));
                         assert_eq!(rows[2][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id = ( select parent_id from compat_alter_subq where id = 4 ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

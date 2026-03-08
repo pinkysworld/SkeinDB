@@ -3130,6 +3130,35 @@ enum MySqlSubqueryCompatPredicate {
         negated: bool,
         subquery_sql: String,
     },
+    Compare {
+        other_sql: String,
+        op: String,
+        subquery_sql: String,
+        subquery_on_left: bool,
+    },
+}
+
+fn mysql_parse_scalar_subquery_select(raw: &str) -> Option<String> {
+    let trimmed = trim_wrapping_parentheses(raw.trim());
+    trimmed
+        .to_ascii_lowercase()
+        .starts_with("select ")
+        .then_some(trimmed.to_string())
+}
+
+fn mysql_parse_scalar_subquery_compare_where_clause(
+    where_clause: &str,
+) -> Option<(String, String, String, bool)> {
+    let clause = trim_wrapping_parentheses(where_clause.trim());
+    let (left, op, right) = mysql_split_top_level_comparison(clause)?;
+    match (
+        mysql_parse_scalar_subquery_select(&left),
+        mysql_parse_scalar_subquery_select(&right),
+    ) {
+        (Some(subquery_sql), None) => Some((right, op.to_string(), subquery_sql, true)),
+        (None, Some(subquery_sql)) => Some((left, op.to_string(), subquery_sql, false)),
+        _ => None,
+    }
 }
 
 fn mysql_parse_subquery_compat_predicate(
@@ -3146,6 +3175,16 @@ fn mysql_parse_subquery_compat_predicate(
         return Some(MySqlSubqueryCompatPredicate::Exists {
             negated,
             subquery_sql,
+        });
+    }
+    if let Some((other_sql, op, subquery_sql, subquery_on_left)) =
+        mysql_parse_scalar_subquery_compare_where_clause(where_clause)
+    {
+        return Some(MySqlSubqueryCompatPredicate::Compare {
+            other_sql,
+            op,
+            subquery_sql,
+            subquery_on_left,
         });
     }
     None
@@ -3414,6 +3453,18 @@ fn mysql_extract_subquery_first_column_lits(
         .collect())
 }
 
+fn mysql_extract_scalar_subquery_lit(outcome: &MySqlQueryOutcome) -> Result<Lit, RpcError> {
+    let lits = mysql_extract_subquery_first_column_lits(outcome)?;
+    match lits.as_slice() {
+        [] => Ok(Lit::Null),
+        [lit] => Ok(lit.clone()),
+        _ => Err(RpcError::new(
+            "not_supported",
+            "scalar subquery compatibility currently requires at most one row",
+        )),
+    }
+}
+
 fn mysql_extract_subquery_row_lits(outcome: &MySqlQueryOutcome) -> Result<Vec<Vec<Lit>>, RpcError> {
     let (columns, rows) = mysql_subquery_outcome_result_rows(outcome)?;
     if columns.is_empty() {
@@ -3564,6 +3615,22 @@ async fn mysql_rewrite_subquery_compat_predicate(
                 "1 = 0".to_string()
             } else {
                 "1 = 1".to_string()
+            })
+        }
+        MySqlSubqueryCompatPredicate::Compare {
+            other_sql,
+            op,
+            subquery_sql,
+            subquery_on_left,
+        } => {
+            let subquery_result =
+                mysql_exec_subquery_query_outcome(state, &subquery_sql, default_db).await?;
+            let lit = mysql_extract_scalar_subquery_lit(&subquery_result)?;
+            let scalar_sql = mysql_render_default_lit(&lit);
+            Ok(if subquery_on_left {
+                format!("{scalar_sql} {op} {other_sql}")
+            } else {
+                format!("{other_sql} {op} {scalar_sql}")
             })
         }
     }
@@ -16307,6 +16374,20 @@ mod tests {
             }]
         );
 
+        let scalar_compare_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT id FROM app.nodes WHERE parent_id = (SELECT parent_id FROM app.nodes WHERE id = 4) ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            scalar_compare_columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "id".to_string(),
+                column_type: MySqlStmtColumnType::LongLong,
+            }]
+        );
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -16383,6 +16464,26 @@ mod tests {
         assert_eq!(
             negated_rows,
             vec![vec![Some("3".to_string())], vec![Some("4".to_string())],]
+        );
+
+        let scalar_compare_outcome = mysql_try_compat_query_outcome(
+            &state,
+            "SELECT id FROM app.nodes WHERE parent_id = (SELECT parent_id FROM app.nodes WHERE id = 4) ORDER BY id ASC",
+            Some("app"),
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{:?}", err))?
+        .expect("scalar-compare compat outcome");
+        let MySqlQueryOutcome::ResultSet {
+            rows: scalar_compare_rows,
+            ..
+        } = scalar_compare_outcome
+        else {
+            panic!("expected result set");
+        };
+        assert_eq!(
+            scalar_compare_rows,
+            vec![vec![Some("2".to_string())], vec![Some("4".to_string())],]
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -16540,6 +16641,18 @@ mod tests {
         assert_eq!(
             exists_parsed.1,
             "SELECT 1 FROM compat_alter_subq WHERE id = 999"
+        );
+
+        assert_eq!(
+            mysql_parse_subquery_compat_predicate(
+                "parent_id = (SELECT parent_id FROM compat_alter_subq WHERE id = 4)"
+            ),
+            Some(MySqlSubqueryCompatPredicate::Compare {
+                other_sql: "parent_id".to_string(),
+                op: "=".to_string(),
+                subquery_sql: "SELECT parent_id FROM compat_alter_subq WHERE id = 4".to_string(),
+                subquery_on_left: false,
+            })
         );
 
         let and_parts =

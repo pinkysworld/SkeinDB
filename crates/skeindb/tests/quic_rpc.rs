@@ -703,12 +703,15 @@ async fn quic_migration_rewrite_preview_recursive_cte() -> anyhow::Result<()> {
 #[tokio::test]
 async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
     let _guard = quic_test_guard().await;
-    let harness = TestHarness::start("quic_vector")?;
-    let client = QuicClient::connect(harness.port, harness.cert_der).await?;
+    let harness = TestHarness::start("quic_vector").context("start vector QUIC harness")?;
+    let client = QuicClient::connect(harness.port, harness.cert_der)
+        .await
+        .context("connect vector QUIC client")?;
 
     let resp = client
         .rpc("schema.create_database", json!({"db": "app"}))
-        .await?;
+        .await
+        .context("vector test create database")?;
     assert!(resp.ok);
 
     let resp = client
@@ -724,7 +727,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 "primary_key": ["id"]
             }),
         )
-        .await?;
+        .await
+        .context("vector test create table")?;
     assert!(resp.ok);
 
     let resp = client
@@ -739,7 +743,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 ]
             }),
         )
-        .await?;
+        .await
+        .context("vector test insert embeddings")?;
     assert!(resp.ok);
 
     let resp = client
@@ -753,7 +758,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 "include_row": true
             }),
         )
-        .await?;
+        .await
+        .context("vector test search embeddings")?;
     assert!(resp.ok);
     let matches = resp.result.expect("missing result")["matches"]
         .as_array()

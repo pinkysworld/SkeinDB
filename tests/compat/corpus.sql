@@ -458,6 +458,15 @@ SELECT id
 
 SELECT id
   FROM compat_alter_subq
+ WHERE parent_id = (
+   SELECT parent_id
+     FROM compat_alter_subq
+    WHERE id = 4
+ )
+ ORDER BY id ASC;
+
+SELECT id
+  FROM compat_alter_subq
  WHERE EXISTS (
    SELECT 1
      FROM compat_alter_subq

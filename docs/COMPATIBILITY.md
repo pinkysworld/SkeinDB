@@ -52,14 +52,14 @@ SkeinDB adoption strategy:
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
-- Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; broader correlated/nested forms still remain open
+- Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` and simple scalar comparison predicates such as `col = (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; scalar-subquery comparisons currently require one projected column and at most one row, and broader correlated/nested forms still remain open
 
 ### MySQL wire protocol
 - Handshake + `mysql_native_password`
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
-- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, `DATEDIFF` / `TIMESTAMPDIFF`, `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, and baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, plus `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, `DATEDIFF` / `TIMESTAMPDIFF`, `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, and baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, including the current `IN` / `EXISTS` / simple scalar-compare subset, plus `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
 - Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
@@ -92,8 +92,9 @@ expression coverage, extended date/time-function/formatting coverage including `
 `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, plus baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, grouped-aggregate
 `HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`,
 `ALTER TABLE ... RENAME COLUMN`, `ALTER TABLE ... RENAME [TO|AS]`, parenthesized boolean-tree
-subquery rewrite coverage, baseline nested subquery compatibility coverage, simple correlated `EXISTS`
-coverage, and duplicate-check coverage for creating MySQL compatibility unique indexes.
+subquery rewrite coverage, baseline nested subquery compatibility coverage, simple scalar-subquery
+comparison coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage for creating
+MySQL compatibility unique indexes.
 
 ---
 
