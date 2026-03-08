@@ -52,7 +52,7 @@ SkeinDB adoption strategy:
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
-- Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)`, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; broader correlated/nested forms still remain open
+- Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)`, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; broader correlated/nested forms still remain open
 
 ### MySQL wire protocol
 - Handshake + `mysql_native_password`
@@ -91,8 +91,9 @@ parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverag
 expression coverage, extended date/time-function/formatting coverage including `DATEDIFF` / `TIMESTAMPDIFF`
 plus baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, grouped-aggregate
 `HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`,
-`ALTER TABLE ... RENAME COLUMN`, parenthesized boolean-tree subquery rewrite coverage, simple correlated
-`EXISTS` coverage, and duplicate-check coverage for creating MySQL compatibility unique indexes.
+`ALTER TABLE ... RENAME COLUMN`, parenthesized boolean-tree subquery rewrite coverage, baseline nested
+subquery compatibility coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage for
+creating MySQL compatibility unique indexes.
 
 ---
 

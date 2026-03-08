@@ -3370,80 +3370,66 @@ fn mysql_rebuild_select_with_where(
     sql
 }
 
-fn mysql_extract_subquery_first_column_lits(result: &Value) -> Result<Vec<Lit>, RpcError> {
-    let data = result
-        .get("result")
-        .and_then(|v| v.get("data"))
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing data"))?;
-    let columns = data
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing columns"))?;
+fn mysql_subquery_outcome_result_rows(
+    outcome: &MySqlQueryOutcome,
+) -> Result<(&[String], &[Vec<Option<String>>]), RpcError> {
+    match outcome {
+        MySqlQueryOutcome::ResultSet { columns, rows } => Ok((columns, rows)),
+        MySqlQueryOutcome::Ok { .. } => Err(RpcError::new(
+            "not_supported",
+            "subquery compatibility currently supports only SELECT subqueries",
+        )),
+    }
+}
+
+fn mysql_subquery_text_cell_to_lit(cell: Option<&str>) -> Lit {
+    let Some(raw) = cell else {
+        return Lit::Null;
+    };
+    if let Ok(value) = raw.parse::<i64>() {
+        return Lit::I64 { v: value };
+    }
+    if let Ok(value) = raw.parse::<u64>() {
+        return Lit::U64 { v: value };
+    }
+    if let Ok(value) = raw.parse::<f64>() {
+        return Lit::F64 { v: value };
+    }
+    Lit::Str { v: raw.to_string() }
+}
+
+fn mysql_extract_subquery_first_column_lits(
+    outcome: &MySqlQueryOutcome,
+) -> Result<Vec<Lit>, RpcError> {
+    let (columns, rows) = mysql_subquery_outcome_result_rows(outcome)?;
     if columns.len() != 1 {
         return Err(RpcError::new(
             "not_supported",
             "subquery compatibility currently requires a single projected column",
         ));
     }
-    let rows = data
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
-    let mut values = Vec::with_capacity(rows.len());
-    for row in rows {
-        let row_items = row
-            .as_array()
-            .ok_or_else(|| RpcError::new("internal", "subquery row must be an array"))?;
-        let Some(value) = row_items.first() else {
-            continue;
-        };
-        let lit = serde_json::from_value::<Lit>(value.clone())
-            .map_err(|_| RpcError::new("not_supported", "subquery value could not be decoded"))?;
-        values.push(lit);
-    }
-    Ok(values)
+    Ok(rows
+        .iter()
+        .map(|row| mysql_subquery_text_cell_to_lit(row.first().and_then(|value| value.as_deref())))
+        .collect())
 }
 
-fn mysql_extract_subquery_row_lits(result: &Value) -> Result<Vec<Vec<Lit>>, RpcError> {
-    let data = result
-        .get("result")
-        .and_then(|v| v.get("data"))
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing data"))?;
-    let columns = data
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing columns"))?;
+fn mysql_extract_subquery_row_lits(outcome: &MySqlQueryOutcome) -> Result<Vec<Vec<Lit>>, RpcError> {
+    let (columns, rows) = mysql_subquery_outcome_result_rows(outcome)?;
     if columns.is_empty() {
         return Err(RpcError::new(
             "not_supported",
             "subquery compatibility currently requires at least one projected column",
         ));
     }
-    let rows = data
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
-    let mut decoded_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let row_items = row
-            .as_array()
-            .ok_or_else(|| RpcError::new("internal", "subquery row must be an array"))?;
-        if row_items.len() != columns.len() {
-            return Err(RpcError::new(
-                "internal",
-                "subquery row does not match projected column count",
-            ));
-        }
-        let mut decoded = Vec::with_capacity(row_items.len());
-        for value in row_items {
-            let lit = serde_json::from_value::<Lit>(value.clone()).map_err(|_| {
-                RpcError::new("not_supported", "subquery value could not be decoded")
-            })?;
-            decoded.push(lit);
-        }
-        decoded_rows.push(decoded);
-    }
-    Ok(decoded_rows)
+    Ok(rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| mysql_subquery_text_cell_to_lit(value.as_deref()))
+                .collect::<Vec<_>>()
+        })
+        .collect())
 }
 
 fn mysql_render_correlated_subquery_match_clause(
@@ -3505,14 +3491,10 @@ async fn mysql_rewrite_subquery_compat_predicate(
             if let Some(rewrite) =
                 mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, Some(&lhs))
             {
-                let subquery_result = sql_exec(
+                let subquery_result = mysql_exec_subquery_query_outcome(
                     state,
-                    SqlExecParams {
-                        sql: rewrite.rewritten_subquery_sql,
-                        explain: false,
-                        default_db: default_db.map(|db| db.to_string()),
-                        result_format: Some(ResultFormat::RowsJson),
-                    },
+                    &rewrite.rewritten_subquery_sql,
+                    default_db,
                 )
                 .await?;
                 let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
@@ -3529,16 +3511,8 @@ async fn mysql_rewrite_subquery_compat_predicate(
                     }
                 }));
             }
-            let subquery_result = sql_exec(
-                state,
-                SqlExecParams {
-                    sql: subquery_sql,
-                    explain: false,
-                    default_db: default_db.map(|db| db.to_string()),
-                    result_format: Some(ResultFormat::RowsJson),
-                },
-            )
-            .await?;
+            let subquery_result =
+                mysql_exec_subquery_query_outcome(state, &subquery_sql, default_db).await?;
             let lits = mysql_extract_subquery_first_column_lits(&subquery_result)?;
             if lits.is_empty() {
                 return Ok(if negated {
@@ -3562,14 +3536,10 @@ async fn mysql_rewrite_subquery_compat_predicate(
             if let Some(rewrite) =
                 mysql_try_rewrite_correlated_subquery(&subquery_sql, default_db, None)
             {
-                let subquery_result = sql_exec(
+                let subquery_result = mysql_exec_subquery_query_outcome(
                     state,
-                    SqlExecParams {
-                        sql: rewrite.rewritten_subquery_sql,
-                        explain: false,
-                        default_db: default_db.map(|db| db.to_string()),
-                        result_format: Some(ResultFormat::RowsJson),
-                    },
+                    &rewrite.rewritten_subquery_sql,
+                    default_db,
                 )
                 .await?;
                 let rows = mysql_extract_subquery_row_lits(&subquery_result)?;
@@ -3586,22 +3556,9 @@ async fn mysql_rewrite_subquery_compat_predicate(
                     }
                 }));
             }
-            let subquery_result = sql_exec(
-                state,
-                SqlExecParams {
-                    sql: subquery_sql,
-                    explain: false,
-                    default_db: default_db.map(|db| db.to_string()),
-                    result_format: Some(ResultFormat::RowsJson),
-                },
-            )
-            .await?;
-            let rows = subquery_result
-                .get("result")
-                .and_then(|v| v.get("data"))
-                .and_then(|v| v.get("rows"))
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| RpcError::new("internal", "subquery result missing rows"))?;
+            let subquery_result =
+                mysql_exec_subquery_query_outcome(state, &subquery_sql, default_db).await?;
+            let (_, rows) = mysql_subquery_outcome_result_rows(&subquery_result)?;
             let exists = !rows.is_empty();
             Ok(if negated == exists {
                 "1 = 0".to_string()
@@ -3691,6 +3648,27 @@ fn mysql_query_outcome_from_sql_exec_result(result: &Value) -> Result<MySqlQuery
     let (columns, rows) =
         mysql_extract_result_data(result).map_err(|err| RpcError::new("internal", err))?;
     Ok(MySqlQueryOutcome::ResultSet { columns, rows })
+}
+
+async fn mysql_exec_subquery_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<MySqlQueryOutcome, RpcError> {
+    if let Some(outcome) = mysql_try_compat_query_outcome(state, sql, default_db).await? {
+        return Ok(outcome);
+    }
+    let result = sql_exec(
+        state,
+        SqlExecParams {
+            sql: sql.to_string(),
+            explain: false,
+            default_db: default_db.map(|db| db.to_string()),
+            result_format: Some(ResultFormat::RowsJson),
+        },
+    )
+    .await?;
+    mysql_query_outcome_from_sql_exec_result(&result)
 }
 
 async fn mysql_try_select_subquery_compat_outcome(
@@ -15955,6 +15933,79 @@ mod tests {
                 column_type: MySqlStmtColumnType::LongLong,
             }]
         );
+
+        let nested_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT id FROM app.nodes WHERE parent_id IN (SELECT id FROM app.nodes WHERE id IN (SELECT parent_id FROM app.nodes WHERE id = 3)) ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            nested_columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "id".to_string(),
+                column_type: MySqlStmtColumnType::LongLong,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mysql_subquery_compat_supports_nested_selects() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_nested_subquery_compat");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "nodes",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "nodes".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("parent_id", Lit::Null)]),
+                row(&[("id", Lit::U64 { v: 2 }), ("parent_id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 3 }), ("parent_id", Lit::U64 { v: 2 })]),
+                row(&[("id", Lit::U64 { v: 4 }), ("parent_id", Lit::U64 { v: 1 })]),
+            ],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let outcome = mysql_try_compat_query_outcome(
+            &state,
+            "SELECT id FROM app.nodes WHERE parent_id IN (SELECT id FROM app.nodes WHERE id IN (SELECT parent_id FROM app.nodes WHERE id = 3)) ORDER BY id ASC",
+            Some("app"),
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{:?}", err))?
+        .expect("compat outcome");
+        let MySqlQueryOutcome::ResultSet { rows, .. } = outcome else {
+            panic!("expected result set");
+        };
+        assert_eq!(rows, vec![vec![Some("3".to_string())]]);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

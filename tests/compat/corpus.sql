@@ -610,6 +610,19 @@ SELECT outer_q.id
     OR outer_q.id = 1
  ORDER BY outer_q.id ASC;
 
+SELECT id
+  FROM compat_alter_subq
+ WHERE parent_id IN (
+   SELECT id
+     FROM compat_alter_subq
+    WHERE id IN (
+      SELECT parent_id
+        FROM compat_alter_subq
+       WHERE id = 3
+    )
+ )
+ ORDER BY id ASC;
+
 CREATE TABLE compat_dropcol (
   id BIGINT UNSIGNED NOT NULL,
   keep_col VARCHAR(20) NOT NULL DEFAULT '',

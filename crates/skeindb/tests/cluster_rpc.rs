@@ -984,6 +984,23 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     assert_eq!(subquery_rows, vec![vec![Some("1".to_string())]]);
     send_com_stmt_close(&mut stream, subquery_stmt.statement_id).await?;
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT outer_q.id FROM wp_events AS outer_q WHERE outer_q.id IN (SELECT mid_q.id FROM wp_events AS mid_q WHERE mid_q.id IN (SELECT inner_q.id FROM wp_events AS inner_q WHERE inner_q.id = 1)) ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let nested_subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(nested_subquery_stmt.param_count, 0);
+    assert_eq!(
+        nested_subquery_stmt.column_defs,
+        vec![("id".to_string(), 0x08)]
+    );
+
+    send_com_stmt_execute(&mut stream, nested_subquery_stmt.statement_id, &[]).await?;
+    let nested_subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(nested_subquery_rows, vec![vec![Some("1".to_string())]]);
+    send_com_stmt_close(&mut stream, nested_subquery_stmt.statement_id).await?;
+
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
     assert_eq!(cursor_stmt.column_defs, select_stmt.column_defs);
@@ -2276,6 +2293,15 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows.len(), 2);
                         assert_eq!(rows[0][0].as_deref(), Some("1"));
                         assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id in ( select parent_id from compat_alter_subq where id = 3 ) ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
