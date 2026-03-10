@@ -116,4 +116,8 @@ Recent documentation updates (2026-02-24):
 
 ## License
 
-TBD (choose MIT/Apache-2.0 later).
+Copyright 2026 pinkysworld
+
+Licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) for the full license text.
+
+All distributions (including commercial use) must retain the copyright notice and the [NOTICE](NOTICE) file crediting pinkysworld as the original founder and copyright holder.
