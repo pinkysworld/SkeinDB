@@ -8695,6 +8695,17 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "make_set"
                     | "export_set"
                     | "quote"
+                    | "substring_index"
+                    | "ascii"
+                    | "ord"
+                    | "char"
+                    | "strcmp"
+                    | "bit_length"
+                    | "octet_length"
+                    | "regexp_replace"
+                    | "regexp_substr"
+                    | "to_base64"
+                    | "from_base64"
                     | "vector.cosine"
                     | "vector.dot"
                     | "vector.l2"
@@ -10500,6 +10511,186 @@ fn eval_expr(
                     Ok(Lit::Str {
                         v: format!("'{escaped}'"),
                     })
+                }
+                "substring_index" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("substring_index requires 3 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let delim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let count = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(delim) = lit_to_string_for_like(&delim) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    if delim.is_empty() {
+                        return Ok(Lit::Str { v: String::new() });
+                    }
+                    let parts: Vec<&str> = s.split(&delim).collect();
+                    let result = if count >= 0 {
+                        let n = (count as usize).min(parts.len());
+                        parts[..n].join(&delim)
+                    } else {
+                        let n = ((-count) as usize).min(parts.len());
+                        parts[parts.len() - n..].join(&delim)
+                    };
+                    Ok(Lit::Str { v: result })
+                }
+                "ascii" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("ascii requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let code = s.bytes().next().map(|b| b as i64).unwrap_or(0);
+                    Ok(Lit::I64 { v: code })
+                }
+                "ord" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("ord requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let code = s.chars().next().map(|c| c as i64).unwrap_or(0);
+                    Ok(Lit::I64 { v: code })
+                }
+                "char" => {
+                    let mut result = String::new();
+                    for arg in fargs.iter() {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        if let Some(code) = lit_to_i64(&val) {
+                            if code >= 0 && code <= 0x10FFFF {
+                                if let Some(c) = char::from_u32(code as u32) {
+                                    result.push(c);
+                                }
+                            }
+                        }
+                    }
+                    Ok(Lit::Str { v: result })
+                }
+                "strcmp" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("strcmp requires 2 args");
+                    }
+                    let a = eval_expr(&fargs[0], row, ctx, args)?;
+                    let b = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(a) = lit_to_string_for_like(&a) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(b) = lit_to_string_for_like(&b) else {
+                        return Ok(Lit::Null);
+                    };
+                    let cmp = a.cmp(&b);
+                    Ok(Lit::I64 {
+                        v: match cmp {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        },
+                    })
+                }
+                "bit_length" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("bit_length requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: (s.len() * 8) as i64,
+                    })
+                }
+                "octet_length" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("octet_length requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 { v: s.len() as i64 })
+                }
+                "regexp_replace" => {
+                    if fargs.len() < 3 || fargs.len() > 6 {
+                        anyhow::bail!("regexp_replace requires 3-6 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pat = eval_expr(&fargs[1], row, ctx, args)?;
+                    let repl = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pat) = lit_to_string_for_like(&pat) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(repl) = lit_to_string_for_like(&repl) else {
+                        return Ok(Lit::Null);
+                    };
+                    let re = regex::Regex::new(&pat)
+                        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+                    Ok(Lit::Str {
+                        v: re.replace_all(&s, repl.as_str()).to_string(),
+                    })
+                }
+                "regexp_substr" => {
+                    if fargs.len() < 2 || fargs.len() > 5 {
+                        anyhow::bail!("regexp_substr requires 2-5 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pat = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pat) = lit_to_string_for_like(&pat) else {
+                        return Ok(Lit::Null);
+                    };
+                    let re = regex::Regex::new(&pat)
+                        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+                    match re.find(&s) {
+                        Some(m) => Ok(Lit::Str {
+                            v: m.as_str().to_string(),
+                        }),
+                        None => Ok(Lit::Null),
+                    }
+                }
+                "to_base64" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("to_base64 requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    use base64::Engine as _;
+                    Ok(Lit::Str {
+                        v: base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+                    })
+                }
+                "from_base64" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("from_base64 requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    use base64::Engine as _;
+                    match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                        Ok(bytes) => Ok(Lit::Str {
+                            v: String::from_utf8_lossy(&bytes).to_string(),
+                        }),
+                        Err(_) => Ok(Lit::Null),
+                    }
                 }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {

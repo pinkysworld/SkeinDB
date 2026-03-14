@@ -2034,6 +2034,16 @@ enum MySqlCompatAggregateOp {
     GroupConcat,
 }
 
+// ── Multi-column GROUP BY support ───────────────────────────────────────
+#[derive(Debug, Clone)]
+struct MySqlCompatMultiGroupedAggregateQuery {
+    group_aliases: Vec<String>,
+    aggregate_aliases: Vec<String>,
+    aggregate_ops: Vec<MySqlCompatAggregateOp>,
+    source_sql: String,
+    limit: Option<LimitClause>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MySqlCompatGroupedAggregateOrderTarget {
     Group,
@@ -2981,6 +2991,307 @@ async fn mysql_try_simple_aggregate_query_outcome(
 
     Ok(Some(MySqlQueryOutcome::ResultSet {
         columns: vec![query.alias],
+        rows: out_rows,
+    }))
+}
+
+// ── Multi-column GROUP BY parser ────────────────────────────────────────
+fn mysql_parse_multi_grouped_aggregate_query(
+    sql: &str,
+) -> Option<MySqlCompatMultiGroupedAggregateQuery> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    let from_idx = find_keyword_top_level(rest, "from")?;
+    let projection = rest[..from_idx].trim();
+    let from_tail = rest[from_idx..].trim();
+    let group_idx = find_keyword_top_level(from_tail, "group by")?;
+    let source_from_tail = from_tail[..group_idx].trim().to_string();
+    if source_from_tail.is_empty() {
+        return None;
+    }
+    let mut group_tail = from_tail[group_idx + "group by".len()..].trim();
+    let group_key_end = ["having", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(group_tail, keyword))
+        .min()
+        .unwrap_or(group_tail.len());
+    let group_by_expr = group_tail[..group_key_end].trim().to_string();
+    if group_by_expr.is_empty() {
+        return None;
+    }
+    group_tail = group_tail[group_key_end..].trim();
+
+    let mut limit_sql = None::<String>;
+    let mut offset_sql = None::<String>;
+    // We skip HAVING / ORDER BY for multi-column — only parse LIMIT/OFFSET
+    while !group_tail.is_empty() {
+        let gl = group_tail.to_ascii_lowercase();
+        if gl.starts_with("having ") || gl.starts_with("order by ") {
+            // These require the single-column handler's matching logic — bail
+            return None;
+        }
+        if gl.starts_with("limit ") {
+            let tail = group_tail[5..].trim_start();
+            let next = ["offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            limit_sql = Some(tail[..next].trim().to_string());
+            group_tail = tail[next..].trim();
+            continue;
+        }
+        if gl.starts_with("offset ") {
+            let tail = group_tail[6..].trim_start();
+            offset_sql = Some(tail.trim().to_string());
+            group_tail = "";
+            continue;
+        }
+        return None;
+    }
+
+    let projection_items = split_csv_top_level(projection);
+    // Requires at least 3 items (distinguishes from 2-item single-column handler)
+    if projection_items.len() < 3 {
+        return None;
+    }
+    let projection_items = projection_items
+        .iter()
+        .map(|item| mysql_parse_projection_expr_alias(item))
+        .collect::<Vec<_>>();
+
+    let mut group_cols = Vec::new();
+    let mut group_aliases = Vec::new();
+    let mut aggregate_aliases = Vec::new();
+    let mut aggregate_ops = Vec::new();
+    let mut source_exprs = Vec::new();
+
+    for (expr, alias_opt) in &projection_items {
+        if let Some((_select_expr, default_alias, op)) = mysql_parse_aggregate_projection_expr(expr)
+        {
+            let alias = alias_opt
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(default_alias);
+            aggregate_aliases.push(alias);
+            aggregate_ops.push(op);
+        } else if let Some((col, table)) = parse_sql_column_ref(expr) {
+            let select_expr = table
+                .as_ref()
+                .map(|t| format!("{t}.{col}"))
+                .unwrap_or_else(|| col.clone());
+            let alias = alias_opt
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| col.clone());
+            group_cols.push(select_expr.clone());
+            group_aliases.push(alias);
+            source_exprs.push(select_expr);
+        } else {
+            return None;
+        }
+    }
+    if group_cols.is_empty() || aggregate_ops.is_empty() {
+        return None;
+    }
+
+    // Validate GROUP BY columns match projected group columns
+    let group_by_parts = split_csv_top_level(&group_by_expr);
+    if group_by_parts.len() != group_cols.len() {
+        return None;
+    }
+    for part in &group_by_parts {
+        let part_trimmed = part.trim();
+        if let Ok(pos) = part_trimmed.parse::<usize>() {
+            if pos == 0 || pos > projection_items.len() {
+                return None;
+            }
+        } else {
+            let found = group_cols
+                .iter()
+                .any(|gc| gc.eq_ignore_ascii_case(part_trimmed))
+                || group_aliases
+                    .iter()
+                    .any(|ga| ga.eq_ignore_ascii_case(part_trimmed));
+            if !found {
+                return None;
+            }
+        }
+    }
+
+    let source_sql = format!("SELECT {} {}", source_exprs.join(", "), source_from_tail);
+
+    Some(MySqlCompatMultiGroupedAggregateQuery {
+        group_aliases,
+        aggregate_aliases,
+        aggregate_ops,
+        source_sql,
+        limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref()).ok()?,
+    })
+}
+
+// ── Multi-column GROUP BY executor ──────────────────────────────────────
+async fn mysql_try_multi_grouped_aggregate_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let Some(query) = mysql_parse_multi_grouped_aggregate_query(sql) else {
+        return Ok(None);
+    };
+    let num_groups = query.group_aliases.len();
+    let params = SqlExecParams {
+        sql: query.source_sql,
+        explain: false,
+        default_db: default_db.map(|db| db.to_string()),
+        result_format: Some(ResultFormat::RowsJson),
+    };
+    let result = sql_exec(state, params).await?;
+    let (_, rows) =
+        mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
+
+    let mut grouped_rows =
+        Vec::<(Vec<Option<String>>, Vec<MySqlCompatGroupedAggregateState>)>::new();
+    let mut grouped_lookup = HashMap::<Vec<Option<String>>, usize>::new();
+    for row in rows {
+        let group_key: Vec<Option<String>> = row.iter().take(num_groups).cloned().collect();
+        let entry_idx = if let Some(idx) = grouped_lookup.get(&group_key).copied() {
+            idx
+        } else {
+            let states = query
+                .aggregate_ops
+                .iter()
+                .map(|_| MySqlCompatGroupedAggregateState::new())
+                .collect();
+            grouped_rows.push((group_key.clone(), states));
+            let idx = grouped_rows.len().saturating_sub(1);
+            grouped_lookup.insert(group_key, idx);
+            idx
+        };
+        let states = &mut grouped_rows[entry_idx].1;
+        for (agg_idx, op) in query.aggregate_ops.iter().enumerate() {
+            let agg_state = &mut states[agg_idx];
+            agg_state.row_count = agg_state.row_count.saturating_add(1);
+            match op {
+                MySqlCompatAggregateOp::CountRows => {}
+                MySqlCompatAggregateOp::CountNonNull => {
+                    agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                }
+                MySqlCompatAggregateOp::CountDistinct => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        agg_state.distinct_values.insert(raw.clone());
+                    }
+                }
+                MySqlCompatAggregateOp::Sum | MySqlCompatAggregateOp::Avg => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        if let Ok((value, is_i64)) = mysql_parse_numeric_aggregate_value(raw) {
+                            agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                            agg_state.numeric_saw_value = true;
+                            agg_state.numeric_all_i64 &= is_i64;
+                            agg_state.numeric_total += value;
+                        }
+                    }
+                }
+                MySqlCompatAggregateOp::Min => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                        if agg_state
+                            .min_value
+                            .as_deref()
+                            .map(|current| mysql_aggregate_value_ordering(raw, current).is_lt())
+                            .unwrap_or(true)
+                        {
+                            agg_state.min_value = Some(raw.clone());
+                        }
+                    }
+                }
+                MySqlCompatAggregateOp::Max => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                        if agg_state
+                            .max_value
+                            .as_deref()
+                            .map(|current| mysql_aggregate_value_ordering(raw, current).is_gt())
+                            .unwrap_or(true)
+                        {
+                            agg_state.max_value = Some(raw.clone());
+                        }
+                    }
+                }
+                MySqlCompatAggregateOp::GroupConcat => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        agg_state.concat_values.push(raw.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out_rows: Vec<Vec<Option<String>>> = grouped_rows
+        .into_iter()
+        .map(|(group_key, states)| {
+            let mut row = group_key;
+            for (agg_idx, op) in query.aggregate_ops.iter().enumerate() {
+                let st = &states[agg_idx];
+                let val = match op {
+                    MySqlCompatAggregateOp::CountRows => Some(st.row_count.to_string()),
+                    MySqlCompatAggregateOp::CountNonNull => Some(st.non_null_count.to_string()),
+                    MySqlCompatAggregateOp::CountDistinct => {
+                        Some(st.distinct_values.len().to_string())
+                    }
+                    MySqlCompatAggregateOp::Sum => {
+                        if !st.numeric_saw_value {
+                            None
+                        } else {
+                            Some(mysql_render_numeric_aggregate_value(
+                                st.numeric_total,
+                                st.numeric_all_i64,
+                            ))
+                        }
+                    }
+                    MySqlCompatAggregateOp::Min => st.min_value.clone(),
+                    MySqlCompatAggregateOp::Max => st.max_value.clone(),
+                    MySqlCompatAggregateOp::Avg => {
+                        if !st.numeric_saw_value || st.non_null_count == 0 {
+                            None
+                        } else {
+                            Some(mysql_render_numeric_aggregate_value(
+                                st.numeric_total / st.non_null_count as f64,
+                                st.numeric_all_i64,
+                            ))
+                        }
+                    }
+                    MySqlCompatAggregateOp::GroupConcat => {
+                        if st.concat_values.is_empty() {
+                            None
+                        } else {
+                            Some(st.concat_values.join(","))
+                        }
+                    }
+                };
+                row.push(val);
+            }
+            row
+        })
+        .collect();
+
+    if let Some(limit) = query.limit {
+        let offset = limit.offset.unwrap_or(0) as usize;
+        if offset > 0 {
+            out_rows = out_rows.into_iter().skip(offset).collect();
+        }
+        if let Some(limit) = limit.limit {
+            out_rows = out_rows.into_iter().take(limit as usize).collect();
+        }
+    }
+
+    let mut columns = query.group_aliases;
+    columns.extend(query.aggregate_aliases);
+    Ok(Some(MySqlQueryOutcome::ResultSet {
+        columns,
         rows: out_rows,
     }))
 }
@@ -4247,6 +4558,12 @@ async fn mysql_try_compat_query_outcome(
                 )),
             ]],
         }));
+    }
+
+    if let Some(result) =
+        mysql_try_multi_grouped_aggregate_query_outcome(state, trimmed, default_db).await?
+    {
+        return Ok(Some(result));
     }
 
     if let Some(result) =
@@ -14845,6 +15162,115 @@ fn information_schema_select_result(
             "XA",
             "SAVEPOINTS",
         ]
+    } else if table.table.eq_ignore_ascii_case("routines") {
+        // Empty stub — no stored procedures/functions yet
+        vec![
+            "SPECIFIC_NAME",
+            "ROUTINE_CATALOG",
+            "ROUTINE_SCHEMA",
+            "ROUTINE_NAME",
+            "ROUTINE_TYPE",
+            "DATA_TYPE",
+            "ROUTINE_DEFINITION",
+            "IS_DETERMINISTIC",
+            "SECURITY_TYPE",
+            "CREATED",
+        ]
+    } else if table.table.eq_ignore_ascii_case("triggers") {
+        // Empty stub — no triggers yet
+        vec![
+            "TRIGGER_CATALOG",
+            "TRIGGER_SCHEMA",
+            "TRIGGER_NAME",
+            "EVENT_MANIPULATION",
+            "EVENT_OBJECT_CATALOG",
+            "EVENT_OBJECT_SCHEMA",
+            "EVENT_OBJECT_TABLE",
+            "ACTION_STATEMENT",
+            "ACTION_TIMING",
+            "CREATED",
+        ]
+    } else if table.table.eq_ignore_ascii_case("views") {
+        // Empty stub — no persisted views yet
+        vec![
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "VIEW_DEFINITION",
+            "CHECK_OPTION",
+            "IS_UPDATABLE",
+            "DEFINER",
+            "SECURITY_TYPE",
+        ]
+    } else if table.table.eq_ignore_ascii_case("processlist") {
+        // Single-row stub for current connection
+        let mut row = BTreeMap::new();
+        row.insert("ID".to_string(), Lit::U64 { v: 1 });
+        row.insert(
+            "USER".to_string(),
+            Lit::Str {
+                v: "root".to_string(),
+            },
+        );
+        row.insert(
+            "HOST".to_string(),
+            Lit::Str {
+                v: "localhost".to_string(),
+            },
+        );
+        row.insert(
+            "DB".to_string(),
+            Lit::Str {
+                v: "default".to_string(),
+            },
+        );
+        row.insert(
+            "COMMAND".to_string(),
+            Lit::Str {
+                v: "Query".to_string(),
+            },
+        );
+        row.insert("TIME".to_string(), Lit::U64 { v: 0 });
+        row.insert(
+            "STATE".to_string(),
+            Lit::Str {
+                v: "executing".to_string(),
+            },
+        );
+        row.insert("INFO".to_string(), Lit::Str { v: String::new() });
+        rows.push(row);
+        vec![
+            "ID", "USER", "HOST", "DB", "COMMAND", "TIME", "STATE", "INFO",
+        ]
+    } else if table.table.eq_ignore_ascii_case("user_privileges") {
+        // Single-row stub for root@localhost
+        let mut row = BTreeMap::new();
+        row.insert(
+            "GRANTEE".to_string(),
+            Lit::Str {
+                v: "'root'@'localhost'".to_string(),
+            },
+        );
+        row.insert(
+            "TABLE_CATALOG".to_string(),
+            Lit::Str {
+                v: "def".to_string(),
+            },
+        );
+        row.insert(
+            "PRIVILEGE_TYPE".to_string(),
+            Lit::Str {
+                v: "ALL PRIVILEGES".to_string(),
+            },
+        );
+        row.insert(
+            "IS_GRANTABLE".to_string(),
+            Lit::Str {
+                v: "YES".to_string(),
+            },
+        );
+        rows.push(row);
+        vec!["GRANTEE", "TABLE_CATALOG", "PRIVILEGE_TYPE", "IS_GRANTABLE"]
     } else {
         return Err(RpcError::new(
             "not_supported",

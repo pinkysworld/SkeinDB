@@ -1079,3 +1079,52 @@ SELECT GROUP_CONCAT(post_title SEPARATOR ', ') FROM wp_posts;
 -- ============================================================
 SHOW ENGINES;
 SHOW PLUGINS;
+
+-- ============================================================
+-- Multi-column GROUP BY
+-- ============================================================
+SELECT post_status, post_author, COUNT(*) FROM wp_posts GROUP BY post_status, post_author;
+SELECT post_status, post_author, COUNT(*), MAX(ID) FROM wp_posts GROUP BY post_status, post_author;
+
+-- ============================================================
+-- SUBSTRING_INDEX / ASCII / ORD / CHAR / STRCMP
+-- ============================================================
+SELECT SUBSTRING_INDEX('www.mysql.com', '.', 2);
+SELECT SUBSTRING_INDEX('www.mysql.com', '.', -1);
+SELECT ASCII('A');
+SELECT ORD('A');
+SELECT CHAR(65);
+SELECT STRCMP('a', 'b');
+SELECT STRCMP('b', 'a');
+
+-- ============================================================
+-- BIT_LENGTH / OCTET_LENGTH
+-- ============================================================
+SELECT BIT_LENGTH('hello');
+SELECT OCTET_LENGTH('hello');
+
+-- ============================================================
+-- REGEXP_REPLACE / REGEXP_SUBSTR
+-- ============================================================
+SELECT REGEXP_REPLACE('abc def ghi', '[a-z]+', 'X');
+SELECT REGEXP_SUBSTR('abc 123 def', '[0-9]+');
+
+-- ============================================================
+-- TO_BASE64 / FROM_BASE64
+-- ============================================================
+SELECT TO_BASE64('hello');
+SELECT FROM_BASE64('aGVsbG8=');
+
+-- ============================================================
+-- information_schema stubs (routines, triggers, views, processlist, user_privileges)
+-- ============================================================
+SELECT * FROM information_schema.routines;
+SELECT * FROM information_schema.triggers;
+SELECT * FROM information_schema.views;
+SELECT * FROM information_schema.processlist;
+SELECT * FROM information_schema.user_privileges;
+
+-- ============================================================
+-- SHOW TABLE STATUS
+-- ============================================================
+SHOW TABLE STATUS;
