@@ -1032,3 +1032,50 @@ SELECT CRC32('hello');
 SELECT MD5('hello');
 SELECT SHA1('hello');
 SELECT SHA2('hello', 256);
+
+-- ============================================================
+-- JSON_REMOVE / JSON_REPLACE / JSON_INSERT
+-- ============================================================
+SELECT JSON_REMOVE('{"a":1,"b":2,"c":3}', '$.b');
+SELECT JSON_REPLACE('{"a":1,"b":2}', '$.b', 99);
+SELECT JSON_INSERT('{"a":1}', '$.b', 2);
+
+-- ============================================================
+-- information_schema virtual tables
+-- ============================================================
+SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.tables WHERE TABLE_SCHEMA = 'default';
+SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE TABLE_SCHEMA = 'default' LIMIT 5;
+SELECT * FROM information_schema.schemata;
+SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME FROM information_schema.statistics WHERE TABLE_SCHEMA = 'default';
+SELECT * FROM information_schema.key_column_usage WHERE TABLE_SCHEMA = 'default';
+SELECT * FROM information_schema.table_constraints WHERE TABLE_SCHEMA = 'default';
+SELECT * FROM information_schema.character_sets;
+SELECT * FROM information_schema.collations;
+SELECT * FROM information_schema.engines;
+
+-- ============================================================
+-- EXPLAIN with table extraction
+-- ============================================================
+EXPLAIN SELECT * FROM wp_posts WHERE ID = 1;
+
+-- ============================================================
+-- Additional string / math functions
+-- ============================================================
+SELECT TRUNCATE(3.14159, 2);
+SELECT FORMAT(1234567.891, 2);
+SELECT INSERT('Hello World', 7, 5, 'MySQL');
+SELECT MAKE_SET(5, 'a', 'b', 'c');
+SELECT EXPORT_SET(5, 'Y', 'N', ',', 4);
+SELECT QUOTE('hello');
+SELECT UNHEX(HEX('abc'));
+
+-- ============================================================
+-- GROUP_CONCAT
+-- ============================================================
+SELECT GROUP_CONCAT(post_title SEPARATOR ', ') FROM wp_posts;
+
+-- ============================================================
+-- SHOW ENGINES / SHOW PLUGINS
+-- ============================================================
+SHOW ENGINES;
+SHOW PLUGINS;

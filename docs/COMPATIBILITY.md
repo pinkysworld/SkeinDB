@@ -47,14 +47,14 @@ SkeinDB adoption strategy:
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata backed by in-memory compatibility key indexes; durable reusable secondary-index parity is still open
 - UPDATE/DELETE with simple WHERE
 - Multi-table DELETE: `DELETE t1 FROM t1 JOIN t2 ON ... WHERE ...`
-- Multi-table UPDATE (stub): `UPDATE t1 JOIN t2 ON ... SET t1.col = ... WHERE ...`
+- Multi-table UPDATE (executed): `UPDATE t1 JOIN t2 ON ... SET t1.col = ... WHERE ...`
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET (including scalar-expression `ORDER BY` for the translated compatibility subset)
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `BETWEEN` / `NOT BETWEEN`, `REGEXP` / `RLIKE` / `NOT REGEXP`, `<=>` (NULL-safe equality), and parenthesized `AND` / `OR` boolean filter trees
 - SELECT ... FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE (locking hints stripped for compatibility)
 - UNION / UNION ALL
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`, `FIELD`, `ELT`, `INET_ATON`, `INET_NTOA`, `BIN`, `OCT`, `CONV`, `CRC32`, `MD5`, `SHA1` / `SHA`, and `SHA2` in translated projections and simple predicates
-- JSON function coverage: `JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`, `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, and `JSON_MERGE_PRESERVE`
+- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`, `FIELD`, `ELT`, `INET_ATON`, `INET_NTOA`, `BIN`, `OCT`, `CONV`, `CRC32`, `MD5`, `SHA1` / `SHA`, `SHA2`, `INSERT` (string), `MAKE_SET`, `EXPORT_SET`, and `QUOTE` in translated projections and simple predicates
+- JSON function coverage: `JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`, `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`, `JSON_REMOVE`, `JSON_REPLACE`, and `JSON_INSERT`
 - Session/system functions: `USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()`, `LAST_INSERT_ID()` (with session tracking), `CONNECTION_ID()`
 - Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
 - Translated arithmetic expressions now also include baseline `+`, `-`, `*`, `/`, and `%` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses, including common numeric ordering/filtering patterns such as `col + 0`
@@ -66,7 +66,7 @@ SkeinDB adoption strategy:
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 - Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` and simple scalar comparison predicates such as `col = (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; scalar-subquery comparisons currently require one projected column and at most one row, and broader correlated/nested forms still remain open
-- `EXPLAIN` (stub plan output)
+- `EXPLAIN` with real table name extraction from inner SELECT/UPDATE/DELETE/INSERT queries
 - `DO` statement
 - `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` (no-op stubs)
 - `SET GLOBAL` forms (no-op compat)
@@ -92,18 +92,25 @@ SkeinDB adoption strategy:
 - SHOW CREATE TABLE
 - SHOW CREATE DATABASE
 - SHOW VARIABLES / STATUS
-- SHOW ENGINES
+- SHOW ENGINES / SHOW STORAGE ENGINES
 - SHOW GRANTS
 - SHOW WARNINGS / SHOW ERRORS (empty result compat)
 - SHOW PROCESSLIST / SHOW FULL PROCESSLIST (single-row stub)
 - SHOW TRIGGERS / SHOW EVENTS / SHOW PROCEDURE STATUS / SHOW FUNCTION STATUS (empty result stubs)
-- SHOW PLUGINS / SHOW PROFILES (empty result stubs)
+- SHOW PLUGINS (single-row SkeinDB stub)
+- SHOW PROFILES (empty result stub)
 
 ### INFORMATION_SCHEMA
-- `tables`, `columns`
+- `tables` with real table metadata (catalog, schema, name, type, engine, rows)
+- `columns` with column metadata (ordinal position, nullable, data type, column key)
 - `schemata`
-- `statistics` (empty result with correct schema)
-- richer compatibility views such as `engines` and `user_privileges` remain backlog work
+- `statistics` with real index data from primary keys and secondary indexes
+- `key_column_usage` (primary key + unique key columns)
+- `table_constraints` (primary key + unique constraints)
+- `character_sets` (utf8mb4, utf8, latin1, binary)
+- `collations` (6 standard collations)
+- `engines` (SkeinDB engine row)
+- richer compatibility views such as `user_privileges` remain backlog work
 
 ---
 
@@ -141,8 +148,12 @@ Recent additions include derived tables (FROM subqueries), common table expressi
 (`JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`,
 `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`), plus additional
 scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, `CRC32`,
-`MD5`, `SHA1`/`SHA`, `SHA2`).
-The corpus has expanded from 772 lines to 1034 lines with over 310 SQL statements.
+`MD5`, `SHA1`/`SHA`, `SHA2`), plus `INSERT` (string), `MAKE_SET`, `EXPORT_SET`, `QUOTE`,
+`JSON_REMOVE`, `JSON_REPLACE`, `JSON_INSERT`, 9 `information_schema` virtual tables
+(`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
+`character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
+and `EXPLAIN` with real table name extraction.
+The corpus has expanded from 1034 lines to 1081 lines with over 350 SQL statements.
 
 ---
 

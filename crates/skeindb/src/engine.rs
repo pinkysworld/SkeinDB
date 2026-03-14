@@ -8691,6 +8691,10 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "uuid"
                     | "sleep"
                     | "benchmark"
+                    | "insert"
+                    | "make_set"
+                    | "export_set"
+                    | "quote"
                     | "vector.cosine"
                     | "vector.dot"
                     | "vector.l2"
@@ -8705,6 +8709,9 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "json_set"
                     | "json_keys"
                     | "json_merge_preserve"
+                    | "json_remove"
+                    | "json_replace"
+                    | "json_insert"
                     | "field"
                     | "elt"
                     | "inet_aton"
@@ -10381,6 +10388,119 @@ fn eval_expr(
                 }
                 "sleep" => Ok(Lit::I64 { v: 0 }),
                 "benchmark" => Ok(Lit::I64 { v: 0 }),
+                "insert" => {
+                    // MySQL INSERT(str, pos, len, newstr)
+                    if fargs.len() != 4 {
+                        anyhow::bail!("insert requires 4 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pos = eval_expr(&fargs[1], row, ctx, args)?;
+                    let len = eval_expr(&fargs[2], row, ctx, args)?;
+                    let newstr = eval_expr(&fargs[3], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pos) = lit_to_i64(&pos) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(len) = lit_to_i64(&len) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(newstr) = lit_to_string_for_like(&newstr) else {
+                        return Ok(Lit::Null);
+                    };
+                    if pos < 1 || pos as usize > s.len() {
+                        return Ok(Lit::Str { v: s });
+                    }
+                    let start = (pos - 1) as usize;
+                    let end = (start + len as usize).min(s.len());
+                    let result = format!("{}{}{}", &s[..start], newstr, &s[end..]);
+                    Ok(Lit::Str { v: result })
+                }
+                "make_set" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("make_set requires at least 2 args");
+                    }
+                    let bits = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(bits) = lit_to_i64(&bits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let bits = bits as u64;
+                    let mut parts = Vec::new();
+                    for (i, arg) in fargs[1..].iter().enumerate() {
+                        if bits & (1u64 << i) != 0 {
+                            let val = eval_expr(arg, row, ctx, args)?;
+                            if let Some(s) = lit_to_string_for_like(&val) {
+                                parts.push(s);
+                            }
+                        }
+                    }
+                    Ok(Lit::Str { v: parts.join(",") })
+                }
+                "export_set" => {
+                    if fargs.len() < 3 || fargs.len() > 5 {
+                        anyhow::bail!("export_set requires 3-5 args");
+                    }
+                    let bits = eval_expr(&fargs[0], row, ctx, args)?;
+                    let on = eval_expr(&fargs[1], row, ctx, args)?;
+                    let off = eval_expr(&fargs[2], row, ctx, args)?;
+                    let sep = if fargs.len() >= 4 {
+                        eval_expr(&fargs[3], row, ctx, args)?
+                    } else {
+                        Lit::Str { v: ",".to_string() }
+                    };
+                    let nbits = if fargs.len() >= 5 {
+                        eval_expr(&fargs[4], row, ctx, args)?
+                    } else {
+                        Lit::U64 { v: 64 }
+                    };
+                    let Some(bits) = lit_to_i64(&bits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let bits = bits as u64;
+                    let Some(on) = lit_to_string_for_like(&on) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(off) = lit_to_string_for_like(&off) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(sep) = lit_to_string_for_like(&sep) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(nbits) = lit_to_i64(&nbits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let nbits = (nbits as usize).min(64);
+                    let mut parts = Vec::with_capacity(nbits);
+                    for i in 0..nbits {
+                        if bits & (1u64 << i) != 0 {
+                            parts.push(on.clone());
+                        } else {
+                            parts.push(off.clone());
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: parts.join(&sep),
+                    })
+                }
+                "quote" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("quote requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(val, Lit::Null) {
+                        return Ok(Lit::Str {
+                            v: "NULL".to_string(),
+                        });
+                    }
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
+                    Ok(Lit::Str {
+                        v: format!("'{escaped}'"),
+                    })
+                }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
                         anyhow::bail!("{name} requires 2 args");
@@ -10659,6 +10779,84 @@ fn eval_expr(
                     }
                     Ok(Lit::Str {
                         v: serde_json::to_string(&result).unwrap_or_default(),
+                    })
+                }
+                "json_remove" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_remove requires a doc and at least one path");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for path_expr in &fargs[1..] {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        mysql_json_path_remove(&mut parsed, &path);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_replace" => {
+                    // Like JSON_SET but only replaces existing paths
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_replace requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        // Only set if path already exists
+                        if mysql_json_path_extract(&parsed, &path).is_some() {
+                            let jval = mysql_lit_to_json_value(&val_lit);
+                            mysql_json_path_set(&mut parsed, &path, jval);
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_insert" => {
+                    // Like JSON_SET but only inserts new paths (does not replace existing)
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_insert requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        // Only set if path does NOT already exist
+                        if mysql_json_path_extract(&parsed, &path).is_none() {
+                            let jval = mysql_lit_to_json_value(&val_lit);
+                            mysql_json_path_set(&mut parsed, &path, jval);
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
                     })
                 }
                 "field" => {
@@ -10976,6 +11174,94 @@ fn mysql_json_path_extract(doc: &serde_json::Value, path: &str) -> Option<serde_
         }
     }
     Some(current)
+}
+
+/// Remove a value at a JSONPath location.
+fn mysql_json_path_remove(doc: &mut serde_json::Value, path: &str) {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return;
+    }
+    let rest = &path[1..];
+    if rest.is_empty() {
+        return; // Cannot remove root
+    }
+    let mut segments: Vec<JsonPathSeg> = Vec::new();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next();
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                segments.push(JsonPathSeg::Key(key));
+            }
+            Some('[') => {
+                chars.next();
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    segments.push(JsonPathSeg::Index(idx));
+                }
+            }
+            _ => break,
+        }
+    }
+    if segments.is_empty() {
+        return;
+    }
+    // Navigate to parent and remove the last segment
+    let mut current = &mut *doc;
+    for seg in &segments[..segments.len() - 1] {
+        match seg {
+            JsonPathSeg::Key(key) => {
+                if !current.is_object() {
+                    return;
+                }
+                let Some(next) = current.as_object_mut().unwrap().get_mut(key) else {
+                    return;
+                };
+                current = next;
+            }
+            JsonPathSeg::Index(idx) => {
+                if !current.is_array() {
+                    return;
+                }
+                let arr = current.as_array_mut().unwrap();
+                if *idx >= arr.len() {
+                    return;
+                }
+                current = &mut arr[*idx];
+            }
+        }
+    }
+    match segments.last().unwrap() {
+        JsonPathSeg::Key(key) => {
+            if let serde_json::Value::Object(map) = current {
+                map.remove(key);
+            }
+        }
+        JsonPathSeg::Index(idx) => {
+            if let serde_json::Value::Array(arr) = current {
+                if *idx < arr.len() {
+                    arr.remove(*idx);
+                }
+            }
+        }
+    }
 }
 
 /// Set a value at a JSONPath location (supports `$.key` and `$[n]`).
