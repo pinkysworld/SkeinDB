@@ -124,6 +124,7 @@ const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
+const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
 const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +139,24 @@ struct RowEntryDisk {
     version: u64,
     #[serde(default)]
     deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondaryIndexCacheDisk {
+    format_version: u32,
+    row_count: u64,
+    #[serde(default)]
+    indexes: Vec<SecondaryIndexDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondaryIndexDisk {
+    built_version: u64,
+    columns: Vec<String>,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    keys: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1364,6 +1383,7 @@ impl Engine {
         self.persist_table(&target.db, &target.table)?;
         remove_file_if_exists(&self.table_path(&source.db, &source.table))?;
         remove_file_if_exists(&self.table_segment_path(&source.db, &source.table))?;
+        remove_file_if_exists(&self.table_secondary_index_path(&source.db, &source.table))?;
         self.persist_schema_versions_best_effort();
         self.persist_oblivious_best_effort();
         self.persist_merge_policies_best_effort();
@@ -1956,6 +1976,53 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_rename_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<()> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        if old_name.is_empty() || new_name.is_empty() {
+            anyhow::bail!("invalid_request: index names must not be empty");
+        }
+
+        {
+            let (schema, _) = self.get_table_mut(table)?;
+            let index_defs = mysql_compat_index_defs(schema);
+            let Some(existing_name) = index_defs
+                .iter()
+                .find(|def| def.name.eq_ignore_ascii_case(old_name))
+                .map(|def| def.name.clone())
+            else {
+                anyhow::bail!("not_found: index not found: {old_name}");
+            };
+            if index_defs.iter().any(|def| {
+                !def.name.eq_ignore_ascii_case(&existing_name)
+                    && def.name.eq_ignore_ascii_case(new_name)
+            }) {
+                anyhow::bail!("conflict: index already exists: {new_name}");
+            }
+            if rename_mysql_compat_index(schema, &existing_name, new_name) {
+                bump_table_version(schema);
+            } else {
+                return Ok(());
+            }
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
         let (_schema, tdata) = self.get_table(table)?;
 
@@ -1999,7 +2066,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
-            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
             for mut row in rows {
                 // Fill missing cols and apply auto-increment.
@@ -2007,8 +2074,8 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(&unique_indexes, tdata, &row, None).is_some() {
-                    anyhow::bail!("conflict");
+                if let Some(index_name) = mysql_compat_unique_conflict(schema, tdata, &row, None)? {
+                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
                 }
 
                 // Build PK
@@ -2021,7 +2088,10 @@ impl Engine {
                     .map(|entry| !entry.deleted)
                     .unwrap_or(false);
                 if pk_conflict {
-                    anyhow::bail!("conflict");
+                    anyhow::bail!(
+                        "conflict: {}",
+                        duplicate_key_message(primary_key_index_name(schema))
+                    );
                 }
 
                 let version = next_row_version(schema);
@@ -2032,7 +2102,7 @@ impl Engine {
                     deleted: false,
                 });
                 tdata.pk_index.insert(pk_key_s, idx);
-                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &row);
+                secondary_index_add_row(tdata, idx, &row)?;
 
                 change_pks.push(pk);
                 collect_value_store_items(&row, &mut intern_items);
@@ -2051,6 +2121,7 @@ impl Engine {
             }
 
             bump_table_version(schema);
+            set_secondary_indexes_built_version(tdata, schema.table_version)?;
         }
 
         if !intern_items.is_empty() {
@@ -2098,7 +2169,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
-            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
             for idx in 0..tdata.rows.len() {
                 if tdata.rows[idx].deleted {
@@ -2123,14 +2194,26 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(&unique_indexes, tdata, &new_row, Some(idx))
-                    .is_some()
-                {
-                    anyhow::bail!("conflict");
+                let current_pk_key = pk_key(&extract_pk(schema, &current_row)?);
+                if primary_key_conflict_key(schema, tdata, &new_row, Some(idx))?.is_some() {
+                    anyhow::bail!(
+                        "conflict: {}",
+                        duplicate_key_message(primary_key_index_name(schema))
+                    );
                 }
-                mysql_compat_unique_index_remove_row(&mut unique_indexes, idx, &current_row);
+                if let Some(index_name) =
+                    mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx))?
+                {
+                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
+                }
+                let new_pk_key = pk_key(&extract_pk(schema, &new_row)?);
+                secondary_index_remove_row(tdata, idx, &current_row)?;
                 tdata.rows[idx].row = new_row;
-                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &tdata.rows[idx].row);
+                secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
+                if current_pk_key != new_pk_key {
+                    tdata.pk_index.remove(&current_pk_key);
+                    tdata.pk_index.insert(new_pk_key, idx);
+                }
                 tdata.rows[idx].version = next_row_version(schema);
                 affected += 1;
 
@@ -2148,6 +2231,7 @@ impl Engine {
 
             if affected > 0 {
                 bump_table_version(schema);
+                set_secondary_indexes_built_version(tdata, schema.table_version)?;
             }
         }
 
@@ -2192,18 +2276,22 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
-            for entry in tdata.rows.iter_mut() {
-                if entry.deleted {
+            for idx in 0..tdata.rows.len() {
+                if tdata.rows[idx].deleted {
                     continue;
                 }
-                if !eval_predicate(predicate, &entry.row, None, args)? {
+                let row_before_delete = tdata.rows[idx].row.clone();
+                if !eval_predicate(predicate, &row_before_delete, None, args)? {
                     continue;
                 }
+                secondary_index_remove_row(tdata, idx, &row_before_delete)?;
+                let entry = &mut tdata.rows[idx];
                 entry.deleted = true;
                 entry.version = next_row_version(schema);
                 affected += 1;
-                let pk = extract_pk(schema, &entry.row).ok();
+                let pk = extract_pk(schema, &row_before_delete).ok();
                 if let Some(ref pk) = pk {
                     snapshot_pks.push(pk.clone());
                 }
@@ -2217,6 +2305,7 @@ impl Engine {
 
             if affected > 0 {
                 bump_table_version(schema);
+                set_secondary_indexes_built_version(tdata, schema.table_version)?;
             }
         }
 
@@ -5707,6 +5796,7 @@ impl Engine {
 
         remove_file_if_exists(&self.table_path(db, table))?;
         remove_file_if_exists(&self.table_segment_path(db, table))?;
+        remove_file_if_exists(&self.table_secondary_index_path(db, table))?;
         Ok(())
     }
 
@@ -5722,6 +5812,13 @@ impl Engine {
             .join("tables")
             .join(db)
             .join(format!("{table}.rseg"))
+    }
+
+    fn table_secondary_index_path(&self, db: &str, table: &str) -> PathBuf {
+        self.data_dir
+            .join("tables")
+            .join(db)
+            .join(format!("{table}.sidx.json"))
     }
 
     fn load_table_rows_json_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
@@ -5749,6 +5846,98 @@ impl Engine {
             TableStorageMode::Segment | TableStorageMode::Dual => from_segment().or_else(from_json),
         };
         loaded.unwrap_or_default()
+    }
+
+    fn load_table_secondary_indexes_best_effort(
+        &self,
+        db: &str,
+        table: &str,
+        row_count: usize,
+    ) -> HashMap<String, SecondaryIndex> {
+        let path = self.table_secondary_index_path(db, table);
+        let Some(disk) = load_json::<SecondaryIndexCacheDisk>(&path) else {
+            return HashMap::new();
+        };
+        if disk.format_version != SECONDARY_INDEX_CACHE_FORMAT_VERSION
+            || disk.row_count != row_count as u64
+        {
+            return HashMap::new();
+        }
+
+        let mut indexes = HashMap::new();
+        for disk_index in disk.indexes {
+            let columns = dedup_in_order(&disk_index.columns);
+            if columns.is_empty() {
+                continue;
+            }
+            let mut include = dedup_in_order(&disk_index.include);
+            include.retain(|col| !columns.iter().any(|existing| existing == col));
+            if disk_index
+                .keys
+                .values()
+                .flatten()
+                .any(|idx| *idx >= row_count)
+            {
+                continue;
+            }
+            indexes.insert(
+                secondary_index_key(&columns, &include),
+                SecondaryIndex {
+                    built_version: disk_index.built_version,
+                    columns,
+                    include,
+                    keys: disk_index.keys,
+                },
+            );
+        }
+        indexes
+    }
+
+    fn persist_table_secondary_indexes(
+        &self,
+        db: &str,
+        table: &str,
+        schema: &TableSchema,
+        tdata: &TableData,
+    ) -> anyhow::Result<()> {
+        ensure_mysql_compat_secondary_indexes(schema, tdata);
+
+        let path = self.table_secondary_index_path(db, table);
+        let mut guard = tdata
+            .secondary_indexes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        for index in guard.values_mut() {
+            if index.built_version != schema.table_version {
+                *index = build_secondary_index(
+                    schema.table_version,
+                    &index.columns,
+                    &index.include,
+                    &tdata.rows,
+                );
+            }
+        }
+        if guard.is_empty() {
+            remove_file_if_exists(&path)?;
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let disk = SecondaryIndexCacheDisk {
+            format_version: SECONDARY_INDEX_CACHE_FORMAT_VERSION,
+            row_count: tdata.rows.len() as u64,
+            indexes: guard
+                .values()
+                .map(|index| SecondaryIndexDisk {
+                    built_version: index.built_version,
+                    columns: index.columns.clone(),
+                    include: index.include.clone(),
+                    keys: index.keys.clone(),
+                })
+                .collect(),
+        };
+        save_json(&path, &disk)
     }
 
     fn persist_table(&self, db: &str, table: &str) -> anyhow::Result<()> {
@@ -5795,7 +5984,9 @@ impl Engine {
                 fs::write(segment_path, bytes)?;
                 Ok(())
             }
-        }
+        }?;
+        let schema = self.get_schema(db, table)?;
+        self.persist_table_secondary_indexes(db, table, schema, tdata)
     }
 
     pub fn checkpoint_for_shutdown(&mut self) -> anyhow::Result<()> {
@@ -5831,8 +6022,11 @@ impl Engine {
         for (db, d) in self.catalog.databases.iter() {
             for (table, _) in d.tables.iter() {
                 let rows = self.load_table_rows_best_effort_for_mode(db, table);
+                let secondary_indexes =
+                    self.load_table_secondary_indexes_best_effort(db, table, rows.len());
                 let mut tdata = TableData {
                     rows,
+                    secondary_indexes: Mutex::new(secondary_indexes),
                     ..TableData::default()
                 };
                 // Build pk index.
@@ -8202,9 +8396,45 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "current_time"
                     | "localtime"
                     | "date_format"
+                    | "str_to_date"
                     | "from_unixtime"
+                    | "week"
+                    | "yearweek"
+                    | "convert_tz"
+                    | "utc_timestamp"
+                    | "utc_date"
+                    | "utc_time"
+                    | "sysdate"
+                    | "addtime"
+                    | "subtime"
+                    | "time_to_sec"
+                    | "sec_to_time"
                     | "find_in_set"
                     | "isnull"
+                    | "concat_ws"
+                    | "repeat"
+                    | "reverse"
+                    | "lpad"
+                    | "rpad"
+                    | "space"
+                    | "hex"
+                    | "unhex"
+                    | "format"
+                    | "sign"
+                    | "sqrt"
+                    | "pow"
+                    | "power"
+                    | "truncate"
+                    | "log"
+                    | "ln"
+                    | "log2"
+                    | "log10"
+                    | "exp"
+                    | "pi"
+                    | "rand"
+                    | "uuid"
+                    | "sleep"
+                    | "benchmark"
                     | "vector.cosine"
                     | "vector.dot"
                     | "vector.l2"
@@ -8462,6 +8692,12 @@ fn eval_predicate_truth(
         Lit::Null => None,
         _ => Some(false),
     })
+}
+
+/// Evaluate a constant expression (no row context). Used for SELECT without FROM.
+pub(crate) fn eval_const_expr(expr: &Expr) -> anyhow::Result<Lit> {
+    let empty = BTreeMap::new();
+    eval_expr(expr, &empty, None, &[])
 }
 
 fn eval_expr(
@@ -9283,6 +9519,481 @@ fn eval_expr(
                     }
                     Ok(mysql_current_time_lit())
                 }
+                "str_to_date" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("str_to_date requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let format = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(format) = lit_to_string_for_like(&format) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_str_to_date(&value, &format).unwrap_or(Lit::Null))
+                }
+                "week" => {
+                    if fargs.is_empty() || fargs.len() > 2 {
+                        anyhow::bail!("week requires 1 or 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 { v: mysql_iso_week(date) as i64 })
+                }
+                "yearweek" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("yearweek requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let week = mysql_iso_week(date);
+                    let year = if date.month == 1 && week > 50 {
+                        date.year - 1
+                    } else if date.month == 12 && week == 1 {
+                        date.year + 1
+                    } else {
+                        date.year
+                    };
+                    Ok(Lit::I64 { v: i64::from(year) * 100 + week as i64 })
+                }
+                "convert_tz" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("convert_tz requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from_tz = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to_tz = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(from_tz) = lit_to_string_for_like(&from_tz) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(to_tz) = lit_to_string_for_like(&to_tz) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_convert_tz(&value, &from_tz, &to_tz).unwrap_or(Lit::Null))
+                }
+                "utc_timestamp" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_timestamp does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "utc_date" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_date does not accept args");
+                    }
+                    Ok(mysql_current_date_lit())
+                }
+                "utc_time" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_time does not accept args");
+                    }
+                    Ok(mysql_current_time_lit())
+                }
+                "sysdate" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("sysdate does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "addtime" | "subtime" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let interval = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(interval_str) = lit_to_string_for_like(&interval) else {
+                        return Ok(Lit::Null);
+                    };
+                    let secs = mysql_time_str_to_seconds(&interval_str).unwrap_or(0);
+                    let secs = if name == "subtime" { -secs } else { secs };
+                    Ok(mysql_datetime_add_seconds(&value, secs).unwrap_or(Lit::Null))
+                }
+                "time_to_sec" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("time_to_sec requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(text) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 { v: mysql_time_str_to_seconds(&text).unwrap_or(0) })
+                }
+                "sec_to_time" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sec_to_time requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(secs) = lit_to_i64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_seconds_to_time_lit(secs))
+                }
+                "concat_ws" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("concat_ws requires at least 2 args");
+                    }
+                    let sep = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(sep) = lit_to_string_for_like(&sep) else {
+                        return Ok(Lit::Null);
+                    };
+                    let mut parts = Vec::new();
+                    for arg in &fargs[1..] {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if matches!(value, Lit::Null) {
+                            continue;
+                        }
+                        if let Some(text) = lit_to_string_for_like(&value) {
+                            parts.push(text);
+                        }
+                    }
+                    Ok(Lit::Str { v: parts.join(&sep) })
+                }
+                "repeat" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("repeat requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    let count = count.max(0) as usize;
+                    Ok(Lit::Str { v: value.repeat(count) })
+                }
+                "reverse" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("reverse requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str { v: value.chars().rev().collect() })
+                }
+                "lpad" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("lpad requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len = eval_expr(&fargs[1], row, ctx, args)?;
+                    let pad = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(len), Some(pad)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_i64(&len),
+                        lit_to_string_for_like(&pad),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    let len = len.max(0) as usize;
+                    let char_count = value.chars().count();
+                    if char_count >= len {
+                        Ok(Lit::Str { v: value.chars().take(len).collect() })
+                    } else if pad.is_empty() {
+                        Ok(Lit::Str { v: value })
+                    } else {
+                        let need = len - char_count;
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let prefix: String = pad_chars.iter().cycle().take(need).collect();
+                        Ok(Lit::Str { v: format!("{prefix}{value}") })
+                    }
+                }
+                "rpad" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("rpad requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len = eval_expr(&fargs[1], row, ctx, args)?;
+                    let pad = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(len), Some(pad)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_i64(&len),
+                        lit_to_string_for_like(&pad),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    let len = len.max(0) as usize;
+                    let char_count = value.chars().count();
+                    if char_count >= len {
+                        Ok(Lit::Str { v: value.chars().take(len).collect() })
+                    } else if pad.is_empty() {
+                        Ok(Lit::Str { v: value })
+                    } else {
+                        let need = len - char_count;
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let suffix: String = pad_chars.iter().cycle().take(need).collect();
+                        Ok(Lit::Str { v: format!("{value}{suffix}") })
+                    }
+                }
+                "space" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("space requires 1 arg");
+                    }
+                    let n = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_i64(&n) else {
+                        return Ok(Lit::Null);
+                    };
+                    let n = n.max(0) as usize;
+                    Ok(Lit::Str { v: " ".repeat(n) })
+                }
+                "hex" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("hex requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::Str { v: format!("{:X}", *v as u64) }),
+                        Lit::U64 { v } => Ok(Lit::Str { v: format!("{v:X}") }),
+                        Lit::F64 { v } => Ok(Lit::Str { v: format!("{:X}", *v as u64) }),
+                        _ => {
+                            let Some(s) = lit_to_string_for_like(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            if let Ok(n) = s.parse::<i64>() {
+                                Ok(Lit::Str { v: format!("{:X}", n as u64) })
+                            } else {
+                                let hex: String = s.bytes().map(|b| format!("{b:02X}")).collect();
+                                Ok(Lit::Str { v: hex })
+                            }
+                        }
+                    }
+                }
+                "unhex" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("unhex requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if s.len() % 2 != 0 {
+                        return Ok(Lit::Null);
+                    }
+                    let mut bytes = Vec::with_capacity(s.len() / 2);
+                    let chars: Vec<u8> = s.bytes().collect();
+                    for chunk in chars.chunks(2) {
+                        let hi = match chunk[0] {
+                            b'0'..=b'9' => chunk[0] - b'0',
+                            b'a'..=b'f' => chunk[0] - b'a' + 10,
+                            b'A'..=b'F' => chunk[0] - b'A' + 10,
+                            _ => return Ok(Lit::Null),
+                        };
+                        let lo = match chunk[1] {
+                            b'0'..=b'9' => chunk[1] - b'0',
+                            b'a'..=b'f' => chunk[1] - b'a' + 10,
+                            b'A'..=b'F' => chunk[1] - b'A' + 10,
+                            _ => return Ok(Lit::Null),
+                        };
+                        bytes.push(hi << 4 | lo);
+                    }
+                    Ok(Lit::Str {
+                        v: String::from_utf8(bytes).unwrap_or_default(),
+                    })
+                }
+                "format" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("format requires 2 args");
+                    }
+                    let num = eval_expr(&fargs[0], row, ctx, args)?;
+                    let decimals = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(num) = lit_to_f64(&num) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(decimals) = lit_to_i64(&decimals) else {
+                        return Ok(Lit::Null);
+                    };
+                    let decimals = decimals.max(0) as usize;
+                    let rounded = format!("{:.prec$}", num, prec = decimals);
+                    let (int_part, frac_part) = rounded
+                        .split_once('.')
+                        .map(|(i, f)| (i.to_string(), Some(f.to_string())))
+                        .unwrap_or((rounded.clone(), None));
+                    let negative = int_part.starts_with('-');
+                    let digits: &str = if negative { &int_part[1..] } else { &int_part };
+                    let mut formatted = String::new();
+                    let len = digits.len();
+                    for (i, ch) in digits.chars().enumerate() {
+                        if i > 0 && (len - i) % 3 == 0 {
+                            formatted.push(',');
+                        }
+                        formatted.push(ch);
+                    }
+                    if negative {
+                        formatted = format!("-{formatted}");
+                    }
+                    if let Some(frac) = frac_part {
+                        formatted = format!("{formatted}.{frac}");
+                    }
+                    Ok(Lit::Str { v: formatted })
+                }
+                "sign" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sign requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::I64 { v: v.signum() }),
+                        Lit::U64 { v } => Ok(Lit::I64 { v: if *v == 0 { 0 } else { 1 } }),
+                        _ => {
+                            let Some(f) = lit_to_f64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::I64 {
+                                v: if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 },
+                            })
+                        }
+                    }
+                }
+                "sqrt" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sqrt requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f < 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.sqrt() })
+                }
+                "pow" | "power" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let base = eval_expr(&fargs[0], row, ctx, args)?;
+                    let exp = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (Some(base), Some(exp)) = (lit_to_f64(&base), lit_to_f64(&exp)) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: base.powf(exp) })
+                }
+                "truncate" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("truncate requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let decimals = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(decimals) = lit_to_i64(&decimals) else {
+                        return Ok(Lit::Null);
+                    };
+                    let factor = 10f64.powi(decimals as i32);
+                    Ok(Lit::F64 { v: (value * factor).trunc() / factor })
+                }
+                "log" | "ln" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.ln() })
+                }
+                "log2" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("log2 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.log2() })
+                }
+                "log10" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("log10 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.log10() })
+                }
+                "exp" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("exp requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: f.exp() })
+                }
+                "pi" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("pi does not accept args");
+                    }
+                    Ok(Lit::F64 { v: PI })
+                }
+                "rand" => {
+                    if !fargs.is_empty() && fargs.len() > 1 {
+                        anyhow::bail!("rand accepts 0 or 1 args");
+                    }
+                    let nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .subsec_nanos();
+                    let pseudo = ((nanos as f64) / 1_000_000_000.0).fract();
+                    Ok(Lit::F64 { v: pseudo })
+                }
+                "uuid" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("uuid does not accept args");
+                    }
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let nanos = now.as_nanos();
+                    let secs = now.as_secs();
+                    let bytes: [u8; 16] = [
+                        (nanos >> 56) as u8, (nanos >> 48) as u8,
+                        (nanos >> 40) as u8, (nanos >> 32) as u8,
+                        (nanos >> 24) as u8, (nanos >> 16) as u8,
+                        ((nanos >> 8) as u8 & 0x0f) | 0x40,
+                        (nanos as u8),
+                        ((secs >> 8) as u8 & 0x3f) | 0x80,
+                        secs as u8,
+                        (secs >> 16) as u8, (secs >> 24) as u8,
+                        (secs >> 32) as u8, (secs >> 40) as u8,
+                        (secs >> 48) as u8, (secs >> 56) as u8,
+                    ];
+                    let uuid = format!(
+                        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8], bytes[9], bytes[10], bytes[11],
+                        bytes[12], bytes[13], bytes[14], bytes[15],
+                    );
+                    Ok(Lit::Str { v: uuid })
+                }
+                "sleep" => {
+                    Ok(Lit::I64 { v: 0 })
+                }
+                "benchmark" => {
+                    Ok(Lit::I64 { v: 0 })
+                }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
                         anyhow::bail!("{name} requires 2 args");
@@ -10056,6 +10767,251 @@ fn mysql_current_time_lit() -> Lit {
     }
 }
 
+/// Parse a date/datetime from a string using MySQL %-format specifiers (inverse of DATE_FORMAT).
+fn mysql_str_to_date(input: &str, format: &str) -> Option<Lit> {
+    let mut year: Option<i32> = None;
+    let mut month: Option<u8> = None;
+    let mut day: Option<u8> = None;
+    let mut hour: Option<u8> = None;
+    let mut minute: Option<u8> = None;
+    let mut second: Option<u8> = None;
+
+    let input_bytes = input.as_bytes();
+    let mut pos = 0usize;
+    let mut fmt_chars = format.chars();
+    while let Some(ch) = fmt_chars.next() {
+        if ch != '%' {
+            if pos < input_bytes.len() && input_bytes[pos] == ch as u8 {
+                pos += 1;
+            }
+            continue;
+        }
+        let Some(token) = fmt_chars.next() else { break };
+        match token {
+            'Y' => {
+                let (v, adv) = parse_digits(input, pos, 4)?;
+                year = Some(v as i32);
+                pos += adv;
+            }
+            'y' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                year = Some(if v >= 70 { 1900 + v as i32 } else { 2000 + v as i32 });
+                pos += adv;
+            }
+            'm' | 'c' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                month = Some(v as u8);
+                pos += adv;
+            }
+            'd' | 'e' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                day = Some(v as u8);
+                pos += adv;
+            }
+            'H' | 'k' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                hour = Some(v as u8);
+                pos += adv;
+            }
+            'h' | 'I' | 'l' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                hour = Some(v as u8);
+                pos += adv;
+            }
+            'i' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                minute = Some(v as u8);
+                pos += adv;
+            }
+            's' | 'S' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                second = Some(v as u8);
+                pos += adv;
+            }
+            _ => {}
+        }
+    }
+
+    let has_time = hour.is_some() || minute.is_some() || second.is_some();
+    if year.is_some() || month.is_some() || day.is_some() {
+        let date = MySqlDateParts {
+            year: year.unwrap_or(0),
+            month: month.unwrap_or(0),
+            day: day.unwrap_or(0),
+        };
+        if has_time {
+            let time = MySqlTimeParts {
+                hour: hour.unwrap_or(0),
+                minute: minute.unwrap_or(0),
+                second: second.unwrap_or(0),
+            };
+            Some(Lit::Datetime {
+                iso: mysql_format_datetime_parts(date, time),
+            })
+        } else {
+            Some(Lit::Date {
+                iso: mysql_format_date_parts(date),
+            })
+        }
+    } else if has_time {
+        let time = MySqlTimeParts {
+            hour: hour.unwrap_or(0),
+            minute: minute.unwrap_or(0),
+            second: second.unwrap_or(0),
+        };
+        Some(Lit::Time {
+            iso: mysql_format_time_parts(time),
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse up to `max_digits` decimal digits starting at `pos` in `input`.
+fn parse_digits(input: &str, pos: usize, max_digits: usize) -> Option<(u64, usize)> {
+    let bytes = input.as_bytes();
+    let mut value = 0u64;
+    let mut count = 0usize;
+    while count < max_digits && pos + count < bytes.len() && bytes[pos + count].is_ascii_digit() {
+        value = value * 10 + u64::from(bytes[pos + count] - b'0');
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    Some((value, count))
+}
+
+/// ISO week number for a date (Monday-based, ISO 8601).
+fn mysql_iso_week(date: MySqlDateParts) -> u8 {
+    let jan4 = MySqlDateParts { year: date.year, month: 1, day: 4 };
+    let jan4_dow = (mysql_days_from_civil(jan4) + 3).rem_euclid(7); // 0=Mon
+    let iso_year_start = mysql_days_from_civil(jan4) - jan4_dow;
+    let current_day = mysql_days_from_civil(date);
+    let diff = current_day - iso_year_start;
+    if diff < 0 {
+        // Belongs to last week of previous year
+        let prev_jan4 = MySqlDateParts { year: date.year - 1, month: 1, day: 4 };
+        let prev_jan4_dow = (mysql_days_from_civil(prev_jan4) + 3).rem_euclid(7);
+        let prev_iso_start = mysql_days_from_civil(prev_jan4) - prev_jan4_dow;
+        return ((current_day - prev_iso_start) / 7 + 1) as u8;
+    }
+    let week = (diff / 7 + 1) as u8;
+    if week > 52 {
+        // Check if it belongs to week 1 of next year
+        let next_jan4 = MySqlDateParts { year: date.year + 1, month: 1, day: 4 };
+        let next_jan4_dow = (mysql_days_from_civil(next_jan4) + 3).rem_euclid(7);
+        let next_iso_start = mysql_days_from_civil(next_jan4) - next_jan4_dow;
+        if current_day >= next_iso_start {
+            return 1;
+        }
+    }
+    week
+}
+
+/// CONVERT_TZ: apply numeric hour offset conversion.
+fn mysql_convert_tz(value: &Lit, from_tz: &str, to_tz: &str) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let time = time.unwrap_or(MySqlTimeParts { hour: 0, minute: 0, second: 0 });
+    let from_offset = mysql_parse_tz_offset(from_tz)?;
+    let to_offset = mysql_parse_tz_offset(to_tz)?;
+    let delta = to_offset - from_offset;
+    if delta == 0 {
+        return Some(value.clone());
+    }
+    let base_seconds = mysql_days_from_civil(date) * 86_400
+        + i64::from(time.hour) * 3_600
+        + i64::from(time.minute) * 60
+        + i64::from(time.second)
+        + delta;
+    let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base_seconds);
+    Some(Lit::Datetime {
+        iso: mysql_format_datetime_parts(new_date, new_time),
+    })
+}
+
+fn mysql_parse_tz_offset(tz: &str) -> Option<i64> {
+    let trimmed = tz.trim();
+    if trimmed.eq_ignore_ascii_case("utc") || trimmed == "+00:00" || trimmed == "-00:00" {
+        return Some(0);
+    }
+    let (sign, rest) = if let Some(rest) = trimmed.strip_prefix('+') {
+        (1i64, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('-') {
+        (-1i64, rest)
+    } else {
+        return None;
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hours = parts[0].parse::<i64>().ok()?;
+    let minutes = parts[1].parse::<i64>().ok()?;
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+/// Parse a time string like "HH:MM:SS" or "HH:MM" into total seconds.
+fn mysql_time_str_to_seconds(s: &str) -> Option<i64> {
+    let trimmed = s.trim();
+    let (sign, rest) = if let Some(r) = trimmed.strip_prefix('-') {
+        (-1i64, r)
+    } else {
+        (1i64, trimmed)
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    match parts.len() {
+        3 => {
+            let h = parts[0].parse::<i64>().ok()?;
+            let m = parts[1].parse::<i64>().ok()?;
+            let s = parts[2].parse::<i64>().ok()?;
+            Some(sign * (h * 3_600 + m * 60 + s))
+        }
+        2 => {
+            let h = parts[0].parse::<i64>().ok()?;
+            let m = parts[1].parse::<i64>().ok()?;
+            Some(sign * (h * 3_600 + m * 60))
+        }
+        1 => {
+            let s = parts[0].parse::<i64>().ok()?;
+            Some(sign * s)
+        }
+        _ => None,
+    }
+}
+
+/// Add seconds to a datetime/date/time Lit.
+fn mysql_datetime_add_seconds(value: &Lit, secs: i64) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let had_time = time.is_some();
+    let time = time.unwrap_or(MySqlTimeParts { hour: 0, minute: 0, second: 0 });
+    let base = mysql_days_from_civil(date) * 86_400
+        + i64::from(time.hour) * 3_600
+        + i64::from(time.minute) * 60
+        + i64::from(time.second)
+        + secs;
+    let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base);
+    Some(if had_time {
+        Lit::Datetime { iso: mysql_format_datetime_parts(new_date, new_time) }
+    } else {
+        Lit::Datetime { iso: mysql_format_datetime_parts(new_date, new_time) }
+    })
+}
+
+/// SEC_TO_TIME: convert integer seconds to a time string.
+fn mysql_seconds_to_time_lit(secs: i64) -> Lit {
+    let sign = if secs < 0 { "-" } else { "" };
+    let abs = secs.unsigned_abs();
+    let h = abs / 3_600;
+    let m = (abs % 3_600) / 60;
+    let s = abs % 60;
+    Lit::Str {
+        v: format!("{}{:02}:{:02}:{:02}", sign, h, m, s),
+    }
+}
+
 fn mysql_unix_timestamp_from_lit(lit: &Lit) -> Option<i64> {
     let (date, time) = mysql_parse_date_time_lit_parts(lit)?;
     let date = date?;
@@ -10377,6 +11333,90 @@ fn build_secondary_index(
         include: include.to_vec(),
         keys,
     }
+}
+
+fn secondary_index_row_key(columns: &[String], row: &RowObject) -> Option<String> {
+    let mut values = Vec::with_capacity(columns.len());
+    for col in columns {
+        let value = row.get(col)?.clone();
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    Some(secondary_index_value_key(&values))
+}
+
+fn rebuild_secondary_indexes_if_stale(
+    schema: &TableSchema,
+    tdata: &TableData,
+) -> anyhow::Result<()> {
+    ensure_mysql_compat_secondary_indexes(schema, tdata);
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        if index.built_version != schema.table_version {
+            *index = build_secondary_index(
+                schema.table_version,
+                &index.columns,
+                &index.include,
+                &tdata.rows,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn secondary_index_add_row(tdata: &TableData, idx: usize, row: &RowObject) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        let Some(key) = secondary_index_row_key(&index.columns, row) else {
+            continue;
+        };
+        index.keys.entry(key).or_default().push(idx);
+    }
+    Ok(())
+}
+
+fn secondary_index_remove_row(
+    tdata: &TableData,
+    idx: usize,
+    row: &RowObject,
+) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        let Some(key) = secondary_index_row_key(&index.columns, row) else {
+            continue;
+        };
+        let mut remove_bucket = false;
+        if let Some(values) = index.keys.get_mut(&key) {
+            values.retain(|candidate| *candidate != idx);
+            remove_bucket = values.is_empty();
+        }
+        if remove_bucket {
+            index.keys.remove(&key);
+        }
+    }
+    Ok(())
+}
+
+fn set_secondary_indexes_built_version(tdata: &TableData, version: u64) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        index.built_version = version;
+    }
+    Ok(())
 }
 
 fn register_secondary_index(
@@ -12043,13 +13083,6 @@ fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[Strin
     compared
 }
 
-#[derive(Debug, Clone)]
-struct MySqlCompatUniqueRuntimeIndex {
-    name: String,
-    columns: Vec<String>,
-    keys: HashMap<String, Vec<usize>>,
-}
-
 fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String> {
     let mut values = Vec::with_capacity(columns.len());
     for column in columns {
@@ -12065,77 +13098,59 @@ fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String
     Some(secondary_index_value_key(&values))
 }
 
-fn mysql_compat_unique_runtime_indexes(
+fn duplicate_key_message(index_name: &str) -> String {
+    format!("duplicate key for {index_name}")
+}
+
+fn primary_key_index_name(schema: &TableSchema) -> &str {
+    if schema.primary_key.is_empty() {
+        "PRIMARY KEY"
+    } else {
+        "PRIMARY"
+    }
+}
+
+fn primary_key_conflict_key(
     schema: &TableSchema,
-    tdata: &TableData,
-) -> Vec<MySqlCompatUniqueRuntimeIndex> {
-    mysql_compat_index_defs(schema)
-        .into_iter()
-        .filter(|index| index.unique)
-        .map(|index| {
-            let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
-            for (idx, entry) in tdata.rows.iter().enumerate() {
-                if entry.deleted {
-                    continue;
-                }
-                let Some(key) = mysql_compat_unique_key(&index.columns, &entry.row) else {
-                    continue;
-                };
-                keys.entry(key).or_default().push(idx);
-            }
-            MySqlCompatUniqueRuntimeIndex {
-                name: index.name,
-                columns: index.columns,
-                keys,
-            }
-        })
-        .collect()
-}
-
-fn mysql_compat_unique_index_add_row(
-    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
-    idx: usize,
-    row: &RowObject,
-) {
-    for index in indexes.iter_mut() {
-        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
-            continue;
-        };
-        index.keys.entry(key).or_default().push(idx);
-    }
-}
-
-fn mysql_compat_unique_index_remove_row(
-    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
-    idx: usize,
-    row: &RowObject,
-) {
-    for index in indexes.iter_mut() {
-        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
-            continue;
-        };
-        let mut remove_bucket = false;
-        if let Some(values) = index.keys.get_mut(&key) {
-            values.retain(|candidate| *candidate != idx);
-            remove_bucket = values.is_empty();
-        }
-        if remove_bucket {
-            index.keys.remove(&key);
-        }
-    }
-}
-
-fn mysql_compat_unique_conflict(
-    indexes: &[MySqlCompatUniqueRuntimeIndex],
     tdata: &TableData,
     row: &RowObject,
     skip_idx: Option<usize>,
-) -> Option<String> {
-    for index in indexes {
+) -> anyhow::Result<Option<String>> {
+    let pk = extract_pk(schema, row)?;
+    let key = pk_key(&pk);
+    let conflict = tdata
+        .pk_index
+        .get(&key)
+        .copied()
+        .filter(|idx| skip_idx != Some(*idx))
+        .and_then(|idx| tdata.rows.get(idx))
+        .map(|entry| !entry.deleted)
+        .unwrap_or(false);
+    Ok(if conflict { Some(key) } else { None })
+}
+
+fn mysql_compat_unique_conflict(
+    schema: &TableSchema,
+    tdata: &TableData,
+    row: &RowObject,
+    skip_idx: Option<usize>,
+) -> anyhow::Result<Option<String>> {
+    rebuild_secondary_indexes_if_stale(schema, tdata)?;
+    let guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in mysql_compat_index_defs(schema)
+        .into_iter()
+        .filter(|index| index.unique)
+    {
         let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
             continue;
         };
-        let Some(candidates) = index.keys.get(&key) else {
+        let Some(secondary) = guard.get(&secondary_index_key(&index.columns, &[])) else {
+            continue;
+        };
+        let Some(candidates) = secondary.keys.get(&key) else {
             continue;
         };
         for idx in candidates {
@@ -12149,11 +13164,11 @@ fn mysql_compat_unique_conflict(
                 continue;
             }
             if row_matches_compat_index(row, &entry.row, &index.columns) {
-                return Some(index.name.clone());
+                return Ok(Some(index.name));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn mysql_compat_validate_unique_columns(
@@ -12170,7 +13185,7 @@ fn mysql_compat_validate_unique_columns(
             continue;
         };
         if seen.insert(key, idx).is_some() {
-            anyhow::bail!("conflict: duplicate key for unique index {index_name}");
+            anyhow::bail!("conflict: {}", duplicate_key_message(index_name));
         }
     }
     Ok(())
@@ -12405,6 +13420,48 @@ fn remove_mysql_compat_index(schema: &mut TableSchema, name: &str) -> bool {
         Some(serde_json::Value::Object(root))
     };
     removed
+}
+
+fn rename_mysql_compat_index(schema: &mut TableSchema, old_name: &str, new_name: &str) -> bool {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return false;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut renamed = false;
+    for entry in indexes.iter_mut() {
+        let same_name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(old_name))
+            .unwrap_or(false);
+        if !same_name {
+            continue;
+        }
+        if let Some(name) = entry.get_mut("name") {
+            *name = serde_json::Value::String(new_name.to_string());
+            renamed = true;
+        }
+        break;
+    }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+    renamed
 }
 
 #[derive(Debug, Clone)]
@@ -23098,7 +24155,7 @@ mod tests {
         let err = engine
             .data_update(&table, &predicate, &set, None, None, &[])
             .expect_err("expected unique conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
 
         set.insert(
             "email".to_string(),
@@ -23142,7 +24199,195 @@ mod tests {
                 None,
             )
             .expect_err("expected duplicate insert conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn primary_key_updates_reject_duplicates_and_refresh_pk_lookup() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_primary_key_update_conflict");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert("id".to_string(), Lit::U64 { v: 1 });
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        let err = engine
+            .data_update(&table, &predicate, &set, None, None, &[])
+            .expect_err("expected primary-key duplicate conflict");
+        assert!(err.to_string().contains("duplicate key"));
+
+        set.insert("id".to_string(), Lit::U64 { v: 3 });
+        let moved = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(moved.affected, 1);
+        assert!(engine.data_get(&table, vec![Lit::U64 { v: 2 }]).is_err());
+        let moved_row = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            moved_row.row.get("email"),
+            Some(&Lit::Str {
+                v: "b@example.com".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn secondary_index_cache_persists_and_reloads() -> anyhow::Result<()> {
+        let dir = temp_dir("secondary_index_cache_persist");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "email_unique",
+                    "columns": ["email"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let index_cache_path = engine.table_secondary_index_path("app", "users");
+        let disk = load_json::<SecondaryIndexCacheDisk>(&index_cache_path)
+            .expect("secondary index cache should be persisted");
+        assert_eq!(disk.format_version, SECONDARY_INDEX_CACHE_FORMAT_VERSION);
+        assert_eq!(disk.row_count, 2);
+        assert_eq!(disk.indexes.len(), 1);
+
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        let (_schema, tdata) = reopened.get_table(&table)?;
+        let index_count = tdata
+            .secondary_indexes
+            .lock()
+            .map(|guard| guard.len())
+            .unwrap_or_default();
+        assert_eq!(index_count, 1);
+        let err = reopened
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected duplicate-key conflict after reopen");
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -23345,7 +24590,7 @@ mod tests {
                 None,
             )
             .expect_err("expected renamed unique index conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -23457,7 +24702,7 @@ mod tests {
                 None,
             )
             .expect_err("expected renamed unique index conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -23576,6 +24821,97 @@ mod tests {
             ])],
             None,
         )?;
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_index_updates_schema_metadata() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_index");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_rename_mysql_compat_index(&table, "slug_unique", "slug_login_uq")?;
+
+        let desc = engine.describe_table("app", "posts")?;
+        let indexes = desc
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("slug_login_uq")
+        );
+        assert_eq!(
+            indexes[0].get("columns").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::Value::String("slug".to_string())])
+        );
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("duplicate key"));
+        assert!(err.to_string().contains("slug_login_uq"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -23718,7 +25054,7 @@ mod tests {
                 None,
             )
             .expect_err("expected renamed unique index conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

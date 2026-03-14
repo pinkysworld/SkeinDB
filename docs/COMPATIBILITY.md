@@ -26,10 +26,13 @@ SkeinDB adoption strategy:
 ## 2) v0.1 SQL surface (current baseline)
 
 ### DDL
-- CREATE DATABASE / DROP DATABASE / USE
+- CREATE DATABASE / DROP DATABASE / DROP SCHEMA (with IF EXISTS) / USE
 - CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
 - CREATE INDEX / CREATE UNIQUE INDEX
 - DROP INDEX
+- TRUNCATE TABLE (rewrite to DELETE FROM)
+- RENAME TABLE ... TO ... (rewrite to ALTER TABLE RENAME)
+- CREATE VIEW / DROP VIEW (no-op stubs)
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates through in-memory compatibility key indexes, creating a MySQL compatibility `UNIQUE INDEX` now rejects pre-existing duplicate rows, and MySQL compatibility `KEY` / `UNIQUE KEY` metadata now seeds and is best-effort restored into the prototype's in-memory secondary-index prefilter path on reopen; the current implementation is still not backed by a durable reusable secondary index structure
 - ALTER TABLE `ADD COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN` / `RENAME COLUMN` / `RENAME [TO|AS] [db.]new_table` / `DROP COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
@@ -38,25 +41,38 @@ SkeinDB adoption strategy:
 
 ### DML
 - INSERT / INSERT IGNORE / REPLACE
+- INSERT ... SELECT
 - INSERT ... ON DUPLICATE KEY UPDATE
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata backed by in-memory compatibility key indexes; durable reusable secondary-index parity is still open
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET (including scalar-expression `ORDER BY` for the translated compatibility subset)
-- SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
+- SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `BETWEEN` / `NOT BETWEEN`, and parenthesized `AND` / `OR` boolean filter trees
+- SELECT ... FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE (locking hints stripped for compatibility)
+- UNION / UNION ALL
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, and `CONCAT` in translated projections and simple predicates
+- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, and `BENCHMARK` in translated projections and simple predicates
+- Session/system functions: `USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()`, `LAST_INSERT_ID()` (with session tracking), `CONNECTION_ID()`
 - Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
 - Translated arithmetic expressions now also include baseline `+`, `-`, `*`, `/`, and `%` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses, including common numeric ordering/filtering patterns such as `col + 0`
-- Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `WEEKDAY`, `DAYOFWEEK`, `DAYOFYEAR`, `MONTHNAME`, `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `DATE_FORMAT`, `FROM_UNIXTIME`, `DATEDIFF`, `TIMESTAMPDIFF`, baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` (with `INTERVAL <expr> <unit>` syntax) and `TIMESTAMPADD`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, and `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`
+- Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `WEEKDAY`, `DAYOFWEEK`, `DAYOFYEAR`, `MONTHNAME`, `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `DATE_FORMAT`, `FROM_UNIXTIME`, `DATEDIFF`, `TIMESTAMPDIFF`, baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` (with `INTERVAL <expr> <unit>` syntax) and `TIMESTAMPADD`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`, `STR_TO_DATE`, `WEEK`, `YEARWEEK`, `CONVERT_TZ`, `UTC_TIMESTAMP`, `UTC_DATE`, `UTC_TIME`, `SYSDATE`, `ADDTIME`, `SUBTIME`, `TIME_TO_SEC`, and `SEC_TO_TIME`
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
-- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, and `AVG(col)` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)`, and `GROUP_CONCAT()` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 - Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` and simple scalar comparison predicates such as `col = (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; scalar-subquery comparisons currently require one projected column and at most one row, and broader correlated/nested forms still remain open
+- `EXPLAIN` (stub plan output)
+- `DO` statement
+- `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` (no-op stubs)
+- `SET GLOBAL` forms (no-op compat)
+- `START TRANSACTION`, `BEGIN`, `COMMIT`, `ROLLBACK`
+- `FLUSH` / `ANALYZE` / `OPTIMIZE` / `CHECK` / `REPAIR TABLE` (no-op compat)
+- `KILL` command (no-op)
 
 ### MySQL wire protocol
 - Handshake + `mysql_native_password`
 - COM_QUERY over the current SQL-translation subset
+- `COM_INIT_DB` (0x02) wire protocol command
+- `COM_STATISTICS` (0x09) wire protocol command
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
 - Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, simple join projections, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, `DATEDIFF` / `TIMESTAMPDIFF`, `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, and baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, including the current `IN` / `EXISTS` / simple scalar-compare subset, plus `CASE` / `CAST`, and simple aggregate / grouped-aggregate compatibility queries), and prepared result rows are returned in the binary row protocol
@@ -68,13 +84,20 @@ SkeinDB adoption strategy:
 - SHOW [FULL] COLUMNS
 - SHOW INDEX
 - SHOW CREATE TABLE
+- SHOW CREATE DATABASE
 - SHOW VARIABLES / STATUS
 - SHOW ENGINES
 - SHOW GRANTS
+- SHOW WARNINGS / SHOW ERRORS (empty result compat)
+- SHOW PROCESSLIST / SHOW FULL PROCESSLIST (single-row stub)
+- SHOW TRIGGERS / SHOW EVENTS / SHOW PROCEDURE STATUS / SHOW FUNCTION STATUS (empty result stubs)
+- SHOW PLUGINS / SHOW PROFILES (empty result stubs)
 
 ### INFORMATION_SCHEMA
 - `tables`, `columns`
-- richer compatibility views such as `statistics`, `engines`, and `user_privileges` remain backlog work
+- `schemata`
+- `statistics` (empty result with correct schema)
+- richer compatibility views such as `engines` and `user_privileges` remain backlog work
 
 ---
 
@@ -93,8 +116,20 @@ expression coverage, extended date/time-function/formatting coverage including `
 `HAVING` coverage, plus `CASE` / `CAST` expression coverage including scalar-expression `ORDER BY`,
 `ALTER TABLE ... RENAME COLUMN`, `ALTER TABLE ... RENAME [TO|AS]`, parenthesized boolean-tree
 subquery rewrite coverage, baseline nested subquery compatibility coverage, simple scalar-subquery
-comparison coverage, simple correlated `EXISTS` coverage, and duplicate-check coverage for creating
-MySQL compatibility unique indexes.
+comparison coverage, simple correlated `EXISTS` coverage, duplicate-check coverage for creating
+MySQL compatibility unique indexes, `BETWEEN` / `NOT BETWEEN`, `COUNT(DISTINCT col)`, `GROUP_CONCAT()`,
+`INSERT ... SELECT`, `UNION` / `UNION ALL`, `TRUNCATE TABLE`, `DROP DATABASE`, `RENAME TABLE`,
+session functions (`USER()`, `LAST_INSERT_ID()`, `CONNECTION_ID()`), `EXPLAIN` stub, `DO` statement,
+`SAVEPOINT` stubs, locking hint stripping, `information_schema.schemata` / `information_schema.statistics`,
+additional `SHOW` commands (WARNINGS, ERRORS, PROCESSLIST, TRIGGERS, EVENTS, PROCEDURE STATUS,
+FUNCTION STATUS, PLUGINS, PROFILES, CREATE DATABASE), additional scalar functions (`CONCAT_WS`,
+`REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW`,
+`TRUNCATE`, `LOG`/`LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`),
+additional date/time functions (`STR_TO_DATE`, `WEEK`, `YEARWEEK`, `CONVERT_TZ`, `UTC_TIMESTAMP`,
+`UTC_DATE`, `UTC_TIME`, `SYSDATE`, `ADDTIME`, `SUBTIME`, `TIME_TO_SEC`, `SEC_TO_TIME`), wire
+protocol additions (`COM_INIT_DB`, `COM_STATISTICS`), and no-op stubs for `CREATE VIEW`/`DROP VIEW`,
+`FLUSH`/`ANALYZE`/`OPTIMIZE`/`CHECK`/`REPAIR TABLE`, `SET GLOBAL`, and `KILL`.
+The corpus has expanded from 772 lines to 947 lines with 283 SQL statements.
 
 ---
 

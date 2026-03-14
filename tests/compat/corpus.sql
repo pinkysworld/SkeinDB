@@ -169,13 +169,22 @@ CREATE UNIQUE INDEX user_login_unique ON wp_users (user_login);
 
 SHOW INDEX FROM wp_users;
 
+ALTER TABLE wp_users RENAME INDEX user_login_unique TO user_login_renamed;
+
+SHOW INDEX FROM wp_users;
+
 INSERT IGNORE INTO wp_users (id, user_login)
 VALUES (5, 'ada');
 
 SELECT COUNT(*) AS user_count
   FROM wp_users;
 
-ALTER TABLE wp_users DROP INDEX user_login_unique;
+SELECT COUNT(*) AS user_count
+  FROM wp_users
+HAVING COUNT(*) >= 3
+   AND user_count = 3;
+
+ALTER TABLE wp_users DROP INDEX user_login_renamed;
 
 SHOW INDEX FROM wp_users;
 
@@ -186,6 +195,11 @@ VALUES
   (2, '2020-01-03 00:00:00', 'publish', 'World'),
   (2, '2020-01-04 00:00:00', 'publish', 'More'),
   (3, '2020-01-05 00:00:00', 'publish', 'Even More');
+
+SELECT u.id, u.user_login, p.post_title
+  FROM wp_users AS u
+  INNER JOIN wp_posts AS p USING (id)
+ ORDER BY u.id ASC;
 
 SELECT post_name
   FROM wp_posts
@@ -292,6 +306,41 @@ SELECT p.ID, u.user_login, ux.user_login
  WHERE p.ID = 1
  ORDER BY p.ID ASC;
 
+SELECT p.ID post_id, u.user_login author_login
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID = 1;
+
+SELECT DISTINCT p.post_author AS author_id, u.user_login
+  FROM wp_posts AS p, wp_users AS u
+ WHERE p.post_author = u.id
+ ORDER BY p.post_author ASC;
+
+SELECT *
+  FROM wp_users
+ GROUP BY id, user_login
+HAVING id = 1
+ ORDER BY id ASC;
+
+SELECT *
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID = 1;
+
+SELECT p.*, u.user_login
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID = 1;
+
+SELECT skein_test.wp_posts.*, u.user_login
+  FROM skein_test.wp_posts
+  LEFT JOIN skein_test.wp_users AS u
+    ON wp_posts.post_author = u.id
+ WHERE wp_posts.ID = 1;
+
 SELECT ID
   FROM wp_posts
  WHERE post_title = NULL
@@ -337,6 +386,12 @@ SELECT post_status, COUNT(*) AS status_count
  GROUP BY post_status
 HAVING COUNT(*) > 1 AND post_status = 'publish'
  ORDER BY status_count DESC, post_status ASC;
+
+SELECT p.ID AS post_id, p.post_status
+  FROM wp_posts AS p
+ GROUP BY p.ID, p.post_status
+HAVING post_id = 1 AND p.post_status = 'publish'
+ ORDER BY p.ID ASC;
 
 SELECT post_author, SUM(post_author) AS author_sum_by_author
   FROM wp_posts
@@ -711,6 +766,181 @@ SHOW CREATE TABLE compat_rename_dst;
 SELECT slug
   FROM compat_rename_dst
  WHERE id = 1;
+
+-- BETWEEN support
+SELECT ID
+  FROM wp_posts
+ WHERE ID BETWEEN 2 AND 4
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE ID NOT BETWEEN 2 AND 4
+ ORDER BY ID ASC;
+
+SELECT ID
+  FROM wp_posts
+ WHERE post_date BETWEEN '2020-01-02 00:00:00' AND '2020-01-04 00:00:00'
+ ORDER BY ID ASC;
+
+-- TRUNCATE TABLE
+CREATE TABLE compat_truncate (
+  id BIGINT UNSIGNED NOT NULL,
+  val VARCHAR(20) NOT NULL DEFAULT '',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO compat_truncate (id, val) VALUES (1, 'a'), (2, 'b');
+TRUNCATE TABLE compat_truncate;
+SELECT COUNT(*) AS cnt FROM compat_truncate;
+
+-- SHOW WARNINGS (should return empty result)
+SHOW WARNINGS;
+
+-- EXPLAIN stub
+EXPLAIN SELECT * FROM wp_posts WHERE ID = 1;
+
+-- RENAME TABLE
+CREATE TABLE compat_rename_test (
+  id BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+INSERT INTO compat_rename_test (id) VALUES (1);
+RENAME TABLE compat_rename_test TO compat_renamed;
+SELECT id FROM compat_renamed WHERE id = 1;
+
+-- SHOW CREATE DATABASE
+SHOW CREATE DATABASE skein_test;
+
+-- START TRANSACTION (synonym for BEGIN)
+START TRANSACTION;
+INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('start_txn_test', '1', 'no');
+COMMIT;
+SELECT option_value FROM wp_options WHERE option_name='start_txn_test';
+
+-- COUNT(DISTINCT)
+SELECT COUNT(DISTINCT post_status) AS distinct_statuses
+  FROM wp_posts;
+
+SELECT COUNT(DISTINCT post_author) AS distinct_authors
+  FROM wp_posts
+ WHERE post_status = 'publish';
+
+-- INSERT ... SELECT
+CREATE TABLE compat_insert_select (
+  id BIGINT UNSIGNED NOT NULL,
+  val VARCHAR(200) NOT NULL DEFAULT '',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO compat_insert_select (id, val)
+SELECT ID, post_title FROM wp_posts WHERE post_status = 'publish';
+
+SELECT COUNT(*) AS cnt FROM compat_insert_select;
+
+-- information_schema.schemata
+SELECT SCHEMA_NAME
+  FROM information_schema.schemata
+ WHERE SCHEMA_NAME = 'skein_test';
+
+-- UNION / UNION ALL
+SELECT ID FROM wp_posts WHERE post_status = 'publish'
+UNION ALL
+SELECT ID FROM wp_posts WHERE post_status = 'draft';
+
+SELECT post_status FROM wp_posts WHERE ID = 1
+UNION
+SELECT post_status FROM wp_posts WHERE ID = 2;
+
+-- GROUP_CONCAT
+SELECT GROUP_CONCAT(post_status) AS statuses
+  FROM wp_posts
+ WHERE ID <= 3;
+
+-- COUNT(DISTINCT) with GROUP BY
+SELECT post_author, COUNT(DISTINCT post_status) AS status_count
+  FROM wp_posts
+ GROUP BY post_author
+ ORDER BY post_author ASC;
+
+-- SHOW PROCESSLIST
+SHOW PROCESSLIST;
+
+-- USER() and friends
+SELECT USER();
+SELECT CURRENT_USER();
+SELECT SESSION_USER();
+SELECT SYSTEM_USER();
+SELECT CONNECTION_ID();
+
+-- LAST_INSERT_ID tracking
+INSERT INTO wp_posts (post_author, post_date, post_status, post_title) VALUES (1, '2020-02-01 00:00:00', 'publish', 'AutoInc');
+SELECT LAST_INSERT_ID();
+
+-- DO statement
+DO 1;
+DO SLEEP(0);
+
+-- SHOW PLUGINS / SHOW PROFILES
+SHOW PLUGINS;
+SHOW PROFILES;
+
+-- Maintenance no-ops
+FLUSH TABLES;
+FLUSH PRIVILEGES;
+ANALYZE TABLE wp_posts;
+OPTIMIZE TABLE wp_posts;
+CHECK TABLE wp_posts;
+
+-- Additional scalar functions
+SELECT CONCAT_WS('-', 'a', 'b', 'c');
+SELECT CONCAT_WS(',', 'hello', NULL, 'world');
+SELECT REPEAT('ab', 3);
+SELECT REVERSE('hello');
+SELECT LPAD('hi', 5, '0');
+SELECT RPAD('hi', 5, '0');
+SELECT SPACE(3);
+SELECT HEX(255);
+SELECT SIGN(-5), SIGN(0), SIGN(5);
+SELECT SQRT(16);
+SELECT POW(2, 10);
+SELECT TRUNCATE(1.999, 1);
+SELECT PI();
+SELECT UUID() AS uuid_val;
+SELECT SLEEP(0);
+SELECT BENCHMARK(1, 1+1);
+
+-- SELECT ... FOR UPDATE (strip locking hints)
+SELECT option_value FROM wp_options WHERE option_name = 'siteurl' FOR UPDATE;
+
+-- STR_TO_DATE
+SELECT STR_TO_DATE('2020-01-15', '%Y-%m-%d');
+
+-- WEEK / YEARWEEK
+SELECT WEEK('2020-01-15');
+SELECT YEARWEEK('2020-01-15');
+
+-- UTC time functions
+SELECT UTC_TIMESTAMP() AS utc_ts;
+
+-- SYSDATE
+SELECT SYSDATE() AS sysdate_ts;
+
+-- CREATE VIEW / DROP VIEW
+CREATE VIEW wp_published AS SELECT ID, post_title FROM wp_posts WHERE post_status = 'publish';
+DROP VIEW IF EXISTS wp_published;
+
+-- SAVEPOINT support
+BEGIN;
+SAVEPOINT sp1;
+INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('savepoint_test', '1', 'no');
+RELEASE SAVEPOINT sp1;
+COMMIT;
+
+-- SHOW TRIGGERS / EVENTS
+SHOW TRIGGERS;
+SHOW EVENTS;
+SHOW PROCEDURE STATUS;
 
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;
