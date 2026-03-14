@@ -1477,7 +1477,11 @@ fn mysql_literal_current_date_time_parts() -> ((i32, u8, u8), (u8, u8, u8)) {
     y += i32::from(m <= 2);
     (
         (y, m, d),
-        ((sod / 3_600) as u8, ((sod % 3_600) / 60) as u8, (sod % 60) as u8),
+        (
+            (sod / 3_600) as u8,
+            ((sod % 3_600) / 60) as u8,
+            (sod % 60) as u8,
+        ),
     )
 }
 
@@ -5166,8 +5170,8 @@ fn mysql_stmt_expr_type(
             | "dayofyear" | "quarter" | "extract" => MySqlStmtColumnType::LongLong,
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
             | "unix_timestamp" | "sign" | "sleep" | "benchmark" => MySqlStmtColumnType::LongLong,
-            "avg" | "round" | "sqrt" | "pow" | "power" | "truncate" | "log" | "ln"
-            | "log2" | "log10" | "exp" | "pi" | "rand" => MySqlStmtColumnType::Double,
+            "avg" | "round" | "sqrt" | "pow" | "power" | "truncate" | "log" | "ln" | "log2"
+            | "log10" | "exp" | "pi" | "rand" => MySqlStmtColumnType::Double,
             "sum" | "abs" | "floor" | "ceil" | "ceiling" | "mod" => args
                 .iter()
                 .map(|expr| mysql_stmt_expr_type(expr, table_descs))
@@ -5179,14 +5183,12 @@ fn mysql_stmt_expr_type(
                 .reduce(mysql_stmt_merge_column_types)
                 .unwrap_or(MySqlStmtColumnType::VarString),
             "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
-            | "right" | "substring" | "substr" | "replace" | "concat" | "concat_ws"
-            | "repeat" | "reverse" | "lpad" | "rpad" | "space" | "hex" | "unhex"
-            | "format" | "uuid" | "date" | "date_format"
-            | "from_unixtime" | "date_add" | "date_sub" | "timestampadd" | "now"
-            | "current_timestamp" | "localtimestamp" | "curdate" | "current_date" | "curtime"
-            | "current_time" | "localtime" | "monthname" | "dayname" | "last_day" => {
-                MySqlStmtColumnType::VarString
-            }
+            | "right" | "substring" | "substr" | "replace" | "concat" | "concat_ws" | "repeat"
+            | "reverse" | "lpad" | "rpad" | "space" | "hex" | "unhex" | "format" | "uuid"
+            | "date" | "date_format" | "from_unixtime" | "date_add" | "date_sub"
+            | "timestampadd" | "now" | "current_timestamp" | "localtimestamp" | "curdate"
+            | "current_date" | "curtime" | "current_time" | "localtime" | "monthname"
+            | "dayname" | "last_day" => MySqlStmtColumnType::VarString,
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -5663,7 +5665,13 @@ async fn mysql_rewrite_cte(
     };
     let (columns, rows) = match inner_result {
         MySqlQueryOutcome::ResultSet { columns, rows } => (columns, rows),
-        _ => return Some(Err((1064, "42000", "CTE body must be a SELECT".to_string()))),
+        _ => {
+            return Some(Err((
+                1064,
+                "42000",
+                "CTE body must be a SELECT".to_string(),
+            )))
+        }
     };
 
     // CREATE the temp table using the CTE name so the outer query can reference it directly
@@ -5693,7 +5701,12 @@ async fn mysql_rewrite_cte(
             }
             None => "NULL".to_string(),
         }));
-        let insert_sql = format!("INSERT INTO `{}` ({}) VALUES ({})", tmp_table, col_list_sql, vals.join(", "));
+        let insert_sql = format!(
+            "INSERT INTO `{}` ({}) VALUES ({})",
+            tmp_table,
+            col_list_sql,
+            vals.join(", ")
+        );
         if let Err(e) = Box::pin(mysql_execute_sql(state, &insert_sql, session)).await {
             let _ = Box::pin(mysql_execute_sql(
                 state,
@@ -5750,7 +5763,11 @@ async fn mysql_rewrite_derived_table(
 
     let inner_sql = trimmed[paren_offset + 1..close_paren].trim();
     // The inner SQL must be a SELECT
-    if !inner_sql.trim_start().to_ascii_lowercase().starts_with("select ") {
+    if !inner_sql
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("select ")
+    {
         return None;
     }
 
@@ -5828,7 +5845,12 @@ async fn mysql_rewrite_derived_table(
             }
             None => "NULL".to_string(),
         }));
-        let insert_sql = format!("INSERT INTO `{}` ({}) VALUES ({})", tmp_table, col_list_sql, vals.join(", "));
+        let insert_sql = format!(
+            "INSERT INTO `{}` ({}) VALUES ({})",
+            tmp_table,
+            col_list_sql,
+            vals.join(", ")
+        );
         if let Err(e) = Box::pin(mysql_execute_sql(state, &insert_sql, session)).await {
             let _ = Box::pin(mysql_execute_sql(
                 state,
@@ -6130,11 +6152,7 @@ async fn mysql_execute_sql(
     }
     // SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT
     {
-        let trimmed_lower = sql
-            .trim()
-            .trim_end_matches(';')
-            .trim()
-            .to_ascii_lowercase();
+        let trimmed_lower = sql.trim().trim_end_matches(';').trim().to_ascii_lowercase();
         if trimmed_lower.starts_with("savepoint ") {
             return Ok(MySqlQueryOutcome::Ok {
                 affected_rows: 0,
@@ -6497,9 +6515,7 @@ async fn mysql_execute_sql(
     {
         let trimmed = sql.trim().trim_end_matches(';').trim();
         let trimmed_lower = trimmed.to_ascii_lowercase();
-        if trimmed_lower.starts_with("delete ")
-            && !trimmed_lower.starts_with("delete from ")
-        {
+        if trimmed_lower.starts_with("delete ") && !trimmed_lower.starts_with("delete from ") {
             // Pattern: DELETE <targets> FROM <table_refs> [WHERE ...]
             let after_delete = &trimmed["delete ".len()..];
             if let Some(from_idx) = find_keyword_top_level(after_delete, "from") {
@@ -11827,7 +11843,13 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
         .find_map(|(token, op)| find_keyword_top_level(clause, token).map(|idx| (idx, op)))
     {
         let left = clause[..idx].trim();
-        let right = clause[idx + if clause[idx..].to_ascii_lowercase().starts_with("regexp") { 6 } else { 5 }..].trim();
+        let right = clause[idx
+            + if clause[idx..].to_ascii_lowercase().starts_with("regexp") {
+                6
+            } else {
+                5
+            }..]
+            .trim();
         if !left.is_empty() && !right.is_empty() {
             return Ok(Expr::Op {
                 op: op.to_string(),

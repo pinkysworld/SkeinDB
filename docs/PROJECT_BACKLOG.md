@@ -187,6 +187,29 @@ Phase 0 verification checklist:
 
 ---
 
+## Phase 25 — PostgreSQL wire protocol compatibility
+- [ ] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate
+- [ ] T401: SCRAM-SHA-256 authentication (`pg_auth.rs`) — RFC 5802/7677 exchange + trust mode
+- [ ] T402: PG session state (`pg_session.rs`) — search_path, DateStyle, TimeZone, tx state (I/T/E), client_encoding, standard_conforming_strings
+- [ ] T403: PG connection handler + listener (`pg_connection.rs`) — SSL negotiation, startup, auth, ParameterStatus batch, ReadyForQuery, command loop on port 5432
+- [ ] T404: PG SQL dialect parser (`pg_parse.rs`) — double-quoted identifiers, $$dollar quoting$$, :: type casts, RETURNING, ILIKE, IS DISTINCT FROM, FETCH FIRST n ROWS ONLY, ARRAY[...], boolean literals
+- [ ] T405: PG DML extensions — INSERT/UPDATE/DELETE...RETURNING, ON CONFLICT DO NOTHING/UPDATE, basic COPY FROM STDIN / TO STDOUT
+- [ ] T406: PG DDL — SERIAL/BIGSERIAL → auto_increment, CREATE SCHEMA → database, CREATE INDEX CONCURRENTLY (accept/ignore), COMMENT ON
+- [ ] T407: PG type OID mapping + encoding (`pg_types.rs`) — bool→16, i64→20, text→25, jsonb→3802, timestamp→1114, arrays; text + binary format
+- [ ] T408: PG result encoding — RowDescription, DataRow, CommandComplete ("INSERT 0 1"), ErrorResponse with SQLSTATE codes
+- [ ] T409: PG system catalogs (`pg_catalog.rs`) — pg_database, pg_namespace, pg_class, pg_attribute, pg_type, pg_index, pg_constraint, pg_proc (stubs), pg_settings, pg_stat_activity
+- [ ] T410: PG startup query handling — SELECT version() → "PostgreSQL 16.0 (SkeinDB)", current_database(), current_schema(), SHOW server_version, Django/Rails/SQLAlchemy bootstrap queries
+- [ ] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders
+- [ ] T412: PG function mapping (`pg_functions.rs`) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, ->>/#>> operators, || concat, ~/~* regex, ARRAY operations, unnest
+- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO
+- [ ] T414: PG SQLSTATE error codes — 42P01 (undefined table), 42703 (undefined column), 23505 (unique violation), 42601 (syntax error), etc.
+- [ ] T415: PG compatibility test corpus (`tests/compat/pg_corpus.sql`) — mirror MySQL corpus structure for PG dialect
+- [ ] T416: PG unit tests — wire round-trips, SCRAM vectors, SQL parse, type encode/decode, catalog queries
+- [ ] T417: PG integration tests — psql end-to-end, psycopg2, node-postgres driver tests
+- [ ] T418: PG compatibility documentation (`docs/PG_COMPAT.md`)
+
+---
+
 ## Research Agenda Extensions (Optional)
 
 The repository includes a January 2026 research agenda with 20 proposals.

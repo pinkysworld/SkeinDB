@@ -294,6 +294,9 @@ pub struct Engine {
     /// Research: edge bundle coverage tracking (R14).
     edge_coverage: HashMap<TableKey, EdgeCoverage>,
 
+    /// Research: HNSW vector indexes for approximate nearest neighbor (R10).
+    hnsw_indexes: HashMap<HnswIndexKey, HnswIndex>,
+
     /// Research: schema evolution tracking (R15).
     schema_versions: HashMap<TableKey, u64>,
     schema_changes: Vec<SchemaChangeEntry>,
@@ -466,7 +469,7 @@ const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 1;
 
-const DP_BUDGET_FORMAT_VERSION: u32 = 1;
+const DP_BUDGET_FORMAT_VERSION: u32 = 2;
 const DP_AUDIT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,6 +481,14 @@ struct DpBudget {
     consumed_delta: f64,
     refresh_window_ms: Option<u64>,
     refreshed_at_ms: u64,
+    /// Rényi DP composition tracker: accumulated RDP cost at multiple alpha orders.
+    /// Each entry is (alpha, rdp_epsilon). Conversion to (ε,δ)-DP uses:
+    ///   ε = rdp_epsilon - ln(δ)/(α-1)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rdp_alphas: Vec<(f64, f64)>,
+    /// Number of composed queries (for advanced composition theorem).
+    #[serde(default)]
+    query_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -695,6 +706,18 @@ struct ViewState {
     last_change_seq: u64,
     stale: bool,
     last_refresh_mode: String,
+}
+
+/// Edge in the view dependency graph.
+#[derive(Debug, Clone)]
+struct ViewDepEdge {
+    view_db: String,
+    view_name: String,
+    depends_on_db: String,
+    depends_on_table: String,
+    columns: Vec<String>,
+    is_view: bool,
+    stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1081,6 +1104,7 @@ impl Engine {
             merge_wasm_registry: HashMap::new(),
             views: HashMap::new(),
             edge_coverage: HashMap::new(),
+            hnsw_indexes: HashMap::new(),
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
@@ -3499,6 +3523,9 @@ impl Engine {
             self.persist_catalog()?;
             self.persist_table(&params.table.db, &params.table.table)?;
             self.persist_changes_best_effort();
+
+            // Rebuild HNSW index for this table+column.
+            self.rebuild_hnsw_index(&params.table, &params.column);
         }
 
         Ok(VectorInsertResult {
@@ -3539,8 +3566,85 @@ impl Engine {
             }
         }
 
-        let query_bucket = embedding_lsh_bucket(query_vec);
         let include_row = params.include_row.unwrap_or(false);
+
+        // Try HNSW index for fast approximate search (when no filter is set).
+        let hnsw_key = HnswIndexKey {
+            table: TableKey {
+                db: params.table.db.clone(),
+                table: params.table.table.clone(),
+            },
+            column: params.column.clone(),
+        };
+        if params.filter.is_none() && !use_lsh {
+            if let Some(hnsw) = self.hnsw_indexes.get(&hnsw_key) {
+                if hnsw.count > 0 && hnsw.dims == dims {
+                    let column = params.column.clone();
+                    let all_vectors = |row_idx: usize| -> Option<Vec<f32>> {
+                        let entry = tdata.rows.get(row_idx)?;
+                        if entry.deleted {
+                            return None;
+                        }
+                        let lit = entry.row.get(&column)?;
+                        let (_, v, _) = embedding_ref(lit).ok()?;
+                        Some(v.to_vec())
+                    };
+                    let ef_search = (k * 4).max(64).min(512);
+                    let results = hnsw.search(query_vec, k, ef_search, &all_vectors);
+                    let mut matches = Vec::new();
+                    for (node_idx, _distance) in results {
+                        if node_idx >= hnsw.nodes.len() {
+                            continue;
+                        }
+                        let row_idx = hnsw.nodes[node_idx].row_idx;
+                        let Some(entry) = tdata.rows.get(row_idx) else {
+                            continue;
+                        };
+                        if entry.deleted {
+                            continue;
+                        }
+                        let Some(lit) = entry.row.get(&params.column) else {
+                            continue;
+                        };
+                        let (_, row_vec, row_model) = match embedding_ref(lit) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if let Some(model) = query_model {
+                            if row_model != Some(model) {
+                                continue;
+                            }
+                        }
+                        let score = vector_score(metric, query_vec, row_vec)?;
+                        let pk = extract_pk(schema, &entry.row)?;
+                        let embedding_id = embedding_id_for_lit(lit)?;
+                        matches.push(VectorSearchMatch {
+                            pk,
+                            score,
+                            embedding_id: hex16(&embedding_id),
+                            row: if include_row {
+                                Some(entry.row.clone())
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                    matches.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| pk_key(&a.pk).cmp(&pk_key(&b.pk)))
+                    });
+                    if matches.len() > k {
+                        matches.truncate(k);
+                    }
+                    return Ok(VectorSearchResult { matches });
+                }
+            }
+        }
+
+        // Fallback: brute-force scan with optional LSH bucketing.
+        let query_bucket = embedding_lsh_bucket(query_vec);
         let mut matches = Vec::new();
         for entry in tdata.rows.iter() {
             if entry.deleted {
@@ -3598,6 +3702,64 @@ impl Engine {
         }
 
         Ok(VectorSearchResult { matches })
+    }
+
+    /// Rebuild (or build) the HNSW index for a given table+column.
+    fn rebuild_hnsw_index(&mut self, table: &BaseTableRef, column: &str) {
+        let Ok((schema, tdata)) = self.get_table(table) else {
+            return;
+        };
+        let col = schema.columns.iter().find(|c| c.name == column);
+        let Some(col) = col else { return };
+        if col.r#type.kind != "embedding" {
+            return;
+        }
+
+        // Collect all active embeddings with their row indexes.
+        let mut vectors: Vec<(usize, Vec<f32>, u32)> = Vec::new();
+        for (row_idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get(column) else {
+                continue;
+            };
+            let Ok((dims, v, _)) = embedding_ref(lit) else {
+                continue;
+            };
+            vectors.push((row_idx, v.to_vec(), dims));
+        }
+
+        if vectors.is_empty() {
+            return;
+        }
+
+        let dims = vectors[0].2;
+        let metric = VectorMetric::Cosine; // default metric for index
+        let mut hnsw = HnswIndex::new(dims, metric);
+
+        // Collect all vectors for the closure.
+        let all_vecs: Vec<(usize, Vec<f32>)> = vectors
+            .iter()
+            .map(|(idx, v, _)| (*idx, v.clone()))
+            .collect();
+        let vec_lookup: HashMap<usize, Vec<f32>> = all_vecs.into_iter().collect();
+
+        let all_vectors =
+            |row_idx: usize| -> Option<Vec<f32>> { vec_lookup.get(&row_idx).cloned() };
+
+        for (row_idx, vec, _) in vectors.iter() {
+            hnsw.insert(*row_idx, vec, &all_vectors);
+        }
+
+        let key = HnswIndexKey {
+            table: TableKey {
+                db: table.db.clone(),
+                table: table.table.clone(),
+            },
+            column: column.to_string(),
+        };
+        self.hnsw_indexes.insert(key, hnsw);
     }
 
     pub fn vector_index_status(
@@ -3894,6 +4056,8 @@ impl Engine {
             consumed_delta: 0.0,
             refresh_window_ms: params.refresh_window_ms,
             refreshed_at_ms: now_ms,
+            rdp_alphas: Vec::new(),
+            query_count: 0,
         };
 
         self.dp_budgets.insert(params.principal.clone(), budget);
@@ -4133,6 +4297,13 @@ impl Engine {
             dp_refresh_budget(budget, now_ms);
             budget.consumed_epsilon += params.epsilon;
             budget.consumed_delta += delta;
+
+            // Update Rényi DP composition tracker for tighter multi-query bounds.
+            let avg_sensitivity =
+                resolved.iter().map(|s| s.sensitivity).sum::<f64>() / resolved.len().max(1) as f64;
+            let _rdp_eps =
+                dp_rdp_compose(budget, &mechanism, avg_sensitivity, params.epsilon, delta);
+
             budget_json = Some(dp_budget_summary(budget));
 
             let aggregates = resolved.iter().map(dp_agg_label).collect();
@@ -4341,7 +4512,9 @@ impl Engine {
             "preceding_hash": preceding_hash,
             "following_hash": following_hash,
             "chain_head": chain_head,
-            "record_count": records.len()
+            "record_count": records.len(),
+            "merkle_root": forensic_merkle_root(&records),
+            "chain_merkle_root": forensic_merkle_root(&self.forensic_chain),
         });
 
         let out_records = records
@@ -5285,14 +5458,17 @@ impl Engine {
         params: ViewExplainDepsParams,
     ) -> anyhow::Result<ViewExplainDepsResult> {
         let key = TableKey {
-            db: params.view.db,
-            table: params.view.table,
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
         };
         let view = self
             .views
             .get(&key)
             .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
-        let deps = view
+
+        // Build full transitive dependency graph from this view.
+        let graph = self.view_dependency_graph();
+        let direct_deps: Vec<serde_json::Value> = view
             .deps
             .iter()
             .map(|d| {
@@ -5303,6 +5479,37 @@ impl Engine {
                 })
             })
             .collect();
+
+        // Find transitive deps (views that this view depends on transitively).
+        let mut transitive = Vec::new();
+        let mut queue: Vec<(String, String)> = view
+            .deps
+            .iter()
+            .map(|d| (d.db.clone(), d.table.clone()))
+            .collect();
+        let mut visited = HashSet::new();
+        visited.insert((params.view.db, params.view.table));
+        while let Some((db, tbl)) = queue.pop() {
+            if !visited.insert((db.clone(), tbl.clone())) {
+                continue;
+            }
+            for edge in &graph {
+                if edge.view_db == db && edge.view_name == tbl {
+                    transitive.push(serde_json::json!({
+                        "path": format!("{}.{} -> {}.{}", edge.view_db, edge.view_name, edge.depends_on_db, edge.depends_on_table),
+                        "is_view": edge.is_view,
+                        "stale": edge.stale,
+                    }));
+                    queue.push((edge.depends_on_db.clone(), edge.depends_on_table.clone()));
+                }
+            }
+        }
+
+        let mut deps = direct_deps;
+        if !transitive.is_empty() {
+            deps.push(serde_json::json!({ "transitive": transitive }));
+        }
+
         Ok(ViewExplainDepsResult { deps })
     }
 
@@ -5457,22 +5664,68 @@ impl Engine {
     }
 
     fn mark_views_stale(&mut self, db: &str, table: &str) {
+        // Cascade invalidation through view dependency graph.
+        // A view can depend on a base table or on another view.
+        let mut stale_tables: Vec<(String, String)> = vec![(db.to_string(), table.to_string())];
+        let mut visited = HashSet::new();
         let mut touched = false;
-        for view in self.views.values_mut() {
-            if view
-                .deps
+
+        while let Some((sdb, stbl)) = stale_tables.pop() {
+            let key = (sdb.clone(), stbl.clone());
+            if visited.contains(&key) {
+                continue;
+            }
+            visited.insert(key);
+
+            // Find all views that depend on (sdb, stbl).
+            let view_keys: Vec<TableKey> = self
+                .views
                 .iter()
-                .any(|dep| dep.db == db && dep.table == table)
-            {
-                if !view.stale {
-                    view.stale = true;
-                    touched = true;
+                .filter(|(_, view)| {
+                    view.deps
+                        .iter()
+                        .any(|dep| dep.db == sdb && dep.table == stbl)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            for vk in view_keys {
+                if let Some(view) = self.views.get_mut(&vk) {
+                    if !view.stale {
+                        view.stale = true;
+                        touched = true;
+                    }
+                    // This view is now stale — cascade to views that depend on it.
+                    stale_tables.push((vk.db.clone(), vk.table.clone()));
                 }
             }
         }
+
         if touched {
             self.persist_views_best_effort();
         }
+    }
+
+    /// Build the full view dependency graph for `view.explain_deps`.
+    fn view_dependency_graph(&self) -> Vec<ViewDepEdge> {
+        let mut edges = Vec::new();
+        for (key, view) in &self.views {
+            for dep in &view.deps {
+                edges.push(ViewDepEdge {
+                    view_db: key.db.clone(),
+                    view_name: key.table.clone(),
+                    depends_on_db: dep.db.clone(),
+                    depends_on_table: dep.table.clone(),
+                    columns: dep.columns.clone(),
+                    is_view: self.views.contains_key(&TableKey {
+                        db: dep.db.clone(),
+                        table: dep.table.clone(),
+                    }),
+                    stale: view.stale,
+                });
+            }
+        }
+        edges
     }
 
     fn oblivious_policy_for(&self, table: &BaseTableRef) -> ObliviousPolicy {
@@ -9635,7 +9888,9 @@ fn eval_expr(
                     let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
                         return Ok(Lit::Null);
                     };
-                    Ok(Lit::I64 { v: mysql_iso_week(date) as i64 })
+                    Ok(Lit::I64 {
+                        v: mysql_iso_week(date) as i64,
+                    })
                 }
                 "yearweek" => {
                     if fargs.len() != 1 {
@@ -9653,7 +9908,9 @@ fn eval_expr(
                     } else {
                         date.year
                     };
-                    Ok(Lit::I64 { v: i64::from(year) * 100 + week as i64 })
+                    Ok(Lit::I64 {
+                        v: i64::from(year) * 100 + week as i64,
+                    })
                 }
                 "convert_tz" => {
                     if fargs.len() != 3 {
@@ -9715,7 +9972,9 @@ fn eval_expr(
                     let Some(text) = lit_to_string_for_like(&value) else {
                         return Ok(Lit::Null);
                     };
-                    Ok(Lit::I64 { v: mysql_time_str_to_seconds(&text).unwrap_or(0) })
+                    Ok(Lit::I64 {
+                        v: mysql_time_str_to_seconds(&text).unwrap_or(0),
+                    })
                 }
                 "sec_to_time" => {
                     if fargs.len() != 1 {
@@ -9745,7 +10004,9 @@ fn eval_expr(
                             parts.push(text);
                         }
                     }
-                    Ok(Lit::Str { v: parts.join(&sep) })
+                    Ok(Lit::Str {
+                        v: parts.join(&sep),
+                    })
                 }
                 "repeat" => {
                     if fargs.len() != 2 {
@@ -9760,7 +10021,9 @@ fn eval_expr(
                         return Ok(Lit::Null);
                     };
                     let count = count.max(0) as usize;
-                    Ok(Lit::Str { v: value.repeat(count) })
+                    Ok(Lit::Str {
+                        v: value.repeat(count),
+                    })
                 }
                 "reverse" => {
                     if fargs.len() != 1 {
@@ -9770,7 +10033,9 @@ fn eval_expr(
                     let Some(value) = lit_to_string_for_like(&value) else {
                         return Ok(Lit::Null);
                     };
-                    Ok(Lit::Str { v: value.chars().rev().collect() })
+                    Ok(Lit::Str {
+                        v: value.chars().rev().collect(),
+                    })
                 }
                 "lpad" => {
                     if fargs.len() != 3 {
@@ -9789,14 +10054,18 @@ fn eval_expr(
                     let len = len.max(0) as usize;
                     let char_count = value.chars().count();
                     if char_count >= len {
-                        Ok(Lit::Str { v: value.chars().take(len).collect() })
+                        Ok(Lit::Str {
+                            v: value.chars().take(len).collect(),
+                        })
                     } else if pad.is_empty() {
                         Ok(Lit::Str { v: value })
                     } else {
                         let need = len - char_count;
                         let pad_chars: Vec<char> = pad.chars().collect();
                         let prefix: String = pad_chars.iter().cycle().take(need).collect();
-                        Ok(Lit::Str { v: format!("{prefix}{value}") })
+                        Ok(Lit::Str {
+                            v: format!("{prefix}{value}"),
+                        })
                     }
                 }
                 "rpad" => {
@@ -9816,14 +10085,18 @@ fn eval_expr(
                     let len = len.max(0) as usize;
                     let char_count = value.chars().count();
                     if char_count >= len {
-                        Ok(Lit::Str { v: value.chars().take(len).collect() })
+                        Ok(Lit::Str {
+                            v: value.chars().take(len).collect(),
+                        })
                     } else if pad.is_empty() {
                         Ok(Lit::Str { v: value })
                     } else {
                         let need = len - char_count;
                         let pad_chars: Vec<char> = pad.chars().collect();
                         let suffix: String = pad_chars.iter().cycle().take(need).collect();
-                        Ok(Lit::Str { v: format!("{value}{suffix}") })
+                        Ok(Lit::Str {
+                            v: format!("{value}{suffix}"),
+                        })
                     }
                 }
                 "space" => {
@@ -9844,15 +10117,23 @@ fn eval_expr(
                     let value = eval_expr(&fargs[0], row, ctx, args)?;
                     match &value {
                         Lit::Null => Ok(Lit::Null),
-                        Lit::I64 { v } => Ok(Lit::Str { v: format!("{:X}", *v as u64) }),
-                        Lit::U64 { v } => Ok(Lit::Str { v: format!("{v:X}") }),
-                        Lit::F64 { v } => Ok(Lit::Str { v: format!("{:X}", *v as u64) }),
+                        Lit::I64 { v } => Ok(Lit::Str {
+                            v: format!("{:X}", *v as u64),
+                        }),
+                        Lit::U64 { v } => Ok(Lit::Str {
+                            v: format!("{v:X}"),
+                        }),
+                        Lit::F64 { v } => Ok(Lit::Str {
+                            v: format!("{:X}", *v as u64),
+                        }),
                         _ => {
                             let Some(s) = lit_to_string_for_like(&value) else {
                                 return Ok(Lit::Null);
                             };
                             if let Ok(n) = s.parse::<i64>() {
-                                Ok(Lit::Str { v: format!("{:X}", n as u64) })
+                                Ok(Lit::Str {
+                                    v: format!("{:X}", n as u64),
+                                })
                             } else {
                                 let hex: String = s.bytes().map(|b| format!("{b:02X}")).collect();
                                 Ok(Lit::Str { v: hex })
@@ -9936,13 +10217,21 @@ fn eval_expr(
                     match &value {
                         Lit::Null => Ok(Lit::Null),
                         Lit::I64 { v } => Ok(Lit::I64 { v: v.signum() }),
-                        Lit::U64 { v } => Ok(Lit::I64 { v: if *v == 0 { 0 } else { 1 } }),
+                        Lit::U64 { v } => Ok(Lit::I64 {
+                            v: if *v == 0 { 0 } else { 1 },
+                        }),
                         _ => {
                             let Some(f) = lit_to_f64(&value) else {
                                 return Ok(Lit::Null);
                             };
                             Ok(Lit::I64 {
-                                v: if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 },
+                                v: if f > 0.0 {
+                                    1
+                                } else if f < 0.0 {
+                                    -1
+                                } else {
+                                    0
+                                },
                             })
                         }
                     }
@@ -9984,7 +10273,9 @@ fn eval_expr(
                         return Ok(Lit::Null);
                     };
                     let factor = 10f64.powi(decimals as i32);
-                    Ok(Lit::F64 { v: (value * factor).trunc() / factor })
+                    Ok(Lit::F64 {
+                        v: (value * factor).trunc() / factor,
+                    })
                 }
                 "log" | "ln" => {
                     if fargs.len() != 1 {
@@ -10062,16 +10353,22 @@ fn eval_expr(
                     let nanos = now.as_nanos();
                     let secs = now.as_secs();
                     let bytes: [u8; 16] = [
-                        (nanos >> 56) as u8, (nanos >> 48) as u8,
-                        (nanos >> 40) as u8, (nanos >> 32) as u8,
-                        (nanos >> 24) as u8, (nanos >> 16) as u8,
+                        (nanos >> 56) as u8,
+                        (nanos >> 48) as u8,
+                        (nanos >> 40) as u8,
+                        (nanos >> 32) as u8,
+                        (nanos >> 24) as u8,
+                        (nanos >> 16) as u8,
                         ((nanos >> 8) as u8 & 0x0f) | 0x40,
                         (nanos as u8),
                         ((secs >> 8) as u8 & 0x3f) | 0x80,
                         secs as u8,
-                        (secs >> 16) as u8, (secs >> 24) as u8,
-                        (secs >> 32) as u8, (secs >> 40) as u8,
-                        (secs >> 48) as u8, (secs >> 56) as u8,
+                        (secs >> 16) as u8,
+                        (secs >> 24) as u8,
+                        (secs >> 32) as u8,
+                        (secs >> 40) as u8,
+                        (secs >> 48) as u8,
+                        (secs >> 56) as u8,
                     ];
                     let uuid = format!(
                         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -10082,12 +10379,8 @@ fn eval_expr(
                     );
                     Ok(Lit::Str { v: uuid })
                 }
-                "sleep" => {
-                    Ok(Lit::I64 { v: 0 })
-                }
-                "benchmark" => {
-                    Ok(Lit::I64 { v: 0 })
-                }
+                "sleep" => Ok(Lit::I64 { v: 0 }),
+                "benchmark" => Ok(Lit::I64 { v: 0 }),
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
                         anyhow::bail!("{name} requires 2 args");
@@ -10194,12 +10487,10 @@ fn eval_expr(
                     let Some(cand_str) = lit_to_string_for_like(&candidate) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
-                    else {
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(cand_val) = serde_json::from_str::<serde_json::Value>(&cand_str)
-                    else {
+                    let Ok(cand_val) = serde_json::from_str::<serde_json::Value>(&cand_str) else {
                         return Ok(Lit::Null);
                     };
                     if let Some(path_expr) = fargs.get(2) {
@@ -10224,8 +10515,7 @@ fn eval_expr(
                     let Some(doc_str) = lit_to_string_for_like(&doc) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
-                    else {
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
                         return Ok(Lit::Null);
                     };
                     if let Some(path_expr) = fargs.get(1) {
@@ -10296,8 +10586,7 @@ fn eval_expr(
                     let Some(doc_str) = lit_to_string_for_like(&doc) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
-                    else {
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
                         return Ok(Lit::Null);
                     };
                     for pair in fargs[1..].chunks(2) {
@@ -10321,8 +10610,7 @@ fn eval_expr(
                     let Some(doc_str) = lit_to_string_for_like(&doc) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
-                    else {
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
                         return Ok(Lit::Null);
                     };
                     if let Some(path_expr) = fargs.get(1) {
@@ -10355,8 +10643,7 @@ fn eval_expr(
                     let Some(first_str) = lit_to_string_for_like(&first) else {
                         return Ok(Lit::Null);
                     };
-                    let Ok(mut result) =
-                        serde_json::from_str::<serde_json::Value>(&first_str)
+                    let Ok(mut result) = serde_json::from_str::<serde_json::Value>(&first_str)
                     else {
                         return Ok(Lit::Null);
                     };
@@ -10441,7 +10728,9 @@ fn eval_expr(
                     let b = (n >> 16) & 0xFF;
                     let c = (n >> 8) & 0xFF;
                     let d = n & 0xFF;
-                    Ok(Lit::Str { v: format!("{a}.{b}.{c}.{d}") })
+                    Ok(Lit::Str {
+                        v: format!("{a}.{b}.{c}.{d}"),
+                    })
                 }
                 "bin" => {
                     if fargs.len() != 1 {
@@ -10454,7 +10743,9 @@ fn eval_expr(
                             let Some(n) = lit_to_i64(&value) else {
                                 return Ok(Lit::Null);
                             };
-                            Ok(Lit::Str { v: format!("{:b}", n as u64) })
+                            Ok(Lit::Str {
+                                v: format!("{:b}", n as u64),
+                            })
                         }
                     }
                 }
@@ -10469,7 +10760,9 @@ fn eval_expr(
                             let Some(n) = lit_to_i64(&value) else {
                                 return Ok(Lit::Null);
                             };
-                            Ok(Lit::Str { v: format!("{:o}", n as u64) })
+                            Ok(Lit::Str {
+                                v: format!("{:o}", n as u64),
+                            })
                         }
                     }
                 }
@@ -10483,7 +10776,8 @@ fn eval_expr(
                     let Some(n_str) = lit_to_string_for_like(&n_lit) else {
                         return Ok(Lit::Null);
                     };
-                    let (Some(from_b), Some(to_b)) = (lit_to_i64(&from_base), lit_to_i64(&to_base)) else {
+                    let (Some(from_b), Some(to_b)) = (lit_to_i64(&from_base), lit_to_i64(&to_base))
+                    else {
                         return Ok(Lit::Null);
                     };
                     let from_b_abs = from_b.unsigned_abs() as u32;
@@ -10499,7 +10793,9 @@ fn eval_expr(
                     };
                     let converted = mysql_u64_to_base_string(val, to_b_abs);
                     if negative && to_b < 0 {
-                        Ok(Lit::Str { v: format!("-{converted}") })
+                        Ok(Lit::Str {
+                            v: format!("-{converted}"),
+                        })
                     } else {
                         Ok(Lit::Str { v: converted })
                     }
@@ -10512,7 +10808,9 @@ fn eval_expr(
                     let Some(s) = lit_to_string_for_like(&value) else {
                         return Ok(Lit::Null);
                     };
-                    Ok(Lit::U64 { v: u64::from(crc32_hash(s.as_bytes())) })
+                    Ok(Lit::U64 {
+                        v: u64::from(crc32_hash(s.as_bytes())),
+                    })
                 }
                 "md5" => {
                     if fargs.len() != 1 {
@@ -10523,7 +10821,9 @@ fn eval_expr(
                         return Ok(Lit::Null);
                     };
                     let digest = Md5::digest(s.as_bytes());
-                    Ok(Lit::Str { v: hex_encode(&digest) })
+                    Ok(Lit::Str {
+                        v: hex_encode(&digest),
+                    })
                 }
                 "sha1" | "sha" => {
                     if fargs.len() != 1 {
@@ -10534,7 +10834,9 @@ fn eval_expr(
                         return Ok(Lit::Null);
                     };
                     let digest = Sha1::digest(s.as_bytes());
-                    Ok(Lit::Str { v: hex_encode(&digest) })
+                    Ok(Lit::Str {
+                        v: hex_encode(&digest),
+                    })
                 }
                 "sha2" => {
                     if fargs.len() != 2 {
@@ -10631,10 +10933,7 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
 // ── JSON helpers ──────────────────────────────────────────────
 
 /// Simple JSONPath extractor supporting `$`, `.key`, and `[n]`.
-fn mysql_json_path_extract(
-    doc: &serde_json::Value,
-    path: &str,
-) -> Option<serde_json::Value> {
+fn mysql_json_path_extract(doc: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let path = path.trim();
     if !path.starts_with('$') {
         return None;
@@ -10680,11 +10979,7 @@ fn mysql_json_path_extract(
 }
 
 /// Set a value at a JSONPath location (supports `$.key` and `$[n]`).
-fn mysql_json_path_set(
-    doc: &mut serde_json::Value,
-    path: &str,
-    value: serde_json::Value,
-) {
+fn mysql_json_path_set(doc: &mut serde_json::Value, path: &str, value: serde_json::Value) {
     let path = path.trim();
     if !path.starts_with('$') {
         return;
@@ -10825,10 +11120,7 @@ fn mysql_json_contains(target: &serde_json::Value, candidate: &serde_json::Value
 }
 
 /// MySQL JSON_MERGE_PRESERVE: merge two JSON values.
-fn mysql_json_merge_preserve(
-    a: serde_json::Value,
-    b: serde_json::Value,
-) -> serde_json::Value {
+fn mysql_json_merge_preserve(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     match (a, b) {
         (serde_json::Value::Object(mut ma), serde_json::Value::Object(mb)) => {
             for (k, vb) in mb {
@@ -11622,7 +11914,11 @@ fn mysql_str_to_date(input: &str, format: &str) -> Option<Lit> {
             }
             'y' => {
                 let (v, adv) = parse_digits(input, pos, 2)?;
-                year = Some(if v >= 70 { 1900 + v as i32 } else { 2000 + v as i32 });
+                year = Some(if v >= 70 {
+                    1900 + v as i32
+                } else {
+                    2000 + v as i32
+                });
                 pos += adv;
             }
             'm' | 'c' => {
@@ -11711,14 +12007,22 @@ fn parse_digits(input: &str, pos: usize, max_digits: usize) -> Option<(u64, usiz
 
 /// ISO week number for a date (Monday-based, ISO 8601).
 fn mysql_iso_week(date: MySqlDateParts) -> u8 {
-    let jan4 = MySqlDateParts { year: date.year, month: 1, day: 4 };
+    let jan4 = MySqlDateParts {
+        year: date.year,
+        month: 1,
+        day: 4,
+    };
     let jan4_dow = (mysql_days_from_civil(jan4) + 3).rem_euclid(7); // 0=Mon
     let iso_year_start = mysql_days_from_civil(jan4) - jan4_dow;
     let current_day = mysql_days_from_civil(date);
     let diff = current_day - iso_year_start;
     if diff < 0 {
         // Belongs to last week of previous year
-        let prev_jan4 = MySqlDateParts { year: date.year - 1, month: 1, day: 4 };
+        let prev_jan4 = MySqlDateParts {
+            year: date.year - 1,
+            month: 1,
+            day: 4,
+        };
         let prev_jan4_dow = (mysql_days_from_civil(prev_jan4) + 3).rem_euclid(7);
         let prev_iso_start = mysql_days_from_civil(prev_jan4) - prev_jan4_dow;
         return ((current_day - prev_iso_start) / 7 + 1) as u8;
@@ -11726,7 +12030,11 @@ fn mysql_iso_week(date: MySqlDateParts) -> u8 {
     let week = (diff / 7 + 1) as u8;
     if week > 52 {
         // Check if it belongs to week 1 of next year
-        let next_jan4 = MySqlDateParts { year: date.year + 1, month: 1, day: 4 };
+        let next_jan4 = MySqlDateParts {
+            year: date.year + 1,
+            month: 1,
+            day: 4,
+        };
         let next_jan4_dow = (mysql_days_from_civil(next_jan4) + 3).rem_euclid(7);
         let next_iso_start = mysql_days_from_civil(next_jan4) - next_jan4_dow;
         if current_day >= next_iso_start {
@@ -11740,7 +12048,11 @@ fn mysql_iso_week(date: MySqlDateParts) -> u8 {
 fn mysql_convert_tz(value: &Lit, from_tz: &str, to_tz: &str) -> Option<Lit> {
     let (date, time) = mysql_parse_date_time_lit_parts(value)?;
     let date = date?;
-    let time = time.unwrap_or(MySqlTimeParts { hour: 0, minute: 0, second: 0 });
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
     let from_offset = mysql_parse_tz_offset(from_tz)?;
     let to_offset = mysql_parse_tz_offset(to_tz)?;
     let delta = to_offset - from_offset;
@@ -11813,7 +12125,11 @@ fn mysql_datetime_add_seconds(value: &Lit, secs: i64) -> Option<Lit> {
     let (date, time) = mysql_parse_date_time_lit_parts(value)?;
     let date = date?;
     let had_time = time.is_some();
-    let time = time.unwrap_or(MySqlTimeParts { hour: 0, minute: 0, second: 0 });
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
     let base = mysql_days_from_civil(date) * 86_400
         + i64::from(time.hour) * 3_600
         + i64::from(time.minute) * 60
@@ -11821,9 +12137,13 @@ fn mysql_datetime_add_seconds(value: &Lit, secs: i64) -> Option<Lit> {
         + secs;
     let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base);
     Some(if had_time {
-        Lit::Datetime { iso: mysql_format_datetime_parts(new_date, new_time) }
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(new_date, new_time),
+        }
     } else {
-        Lit::Datetime { iso: mysql_format_datetime_parts(new_date, new_time) }
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(new_date, new_time),
+        }
     })
 }
 
@@ -12426,9 +12746,15 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Cryptographic-quality PRNG for differential privacy noise generation.
+///
+/// Uses a keyed construction: each output is `value_id(key || counter)`, then
+/// the first 8 bytes are taken as a u64. This provides statistical quality far
+/// superior to an LCG while remaining deterministic for reproducibility.
 #[derive(Debug, Clone)]
 struct DpRng {
-    state: u64,
+    key: [u8; 16],
+    counter: u64,
 }
 
 impl DpRng {
@@ -12438,12 +12764,21 @@ impl DpRng {
         } else {
             seed
         };
-        Self { state: seed }
+        // Derive a 128-bit key from the seed via value_id.
+        let id = value_id(&seed.to_le_bytes());
+        Self {
+            key: id,
+            counter: 0,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        self.state
+        let mut buf = [0u8; 24];
+        buf[..16].copy_from_slice(&self.key);
+        buf[16..].copy_from_slice(&self.counter.to_le_bytes());
+        let id = value_id(&buf);
+        self.counter = self.counter.wrapping_add(1);
+        u64::from_le_bytes(id[..8].try_into().unwrap())
     }
 
     fn next_f64(&mut self) -> f64 {
@@ -12511,13 +12846,112 @@ fn dp_refresh_budget(budget: &mut DpBudget, now_ms: u64) {
     if now_ms.saturating_sub(budget.refreshed_at_ms) >= window {
         budget.consumed_epsilon = 0.0;
         budget.consumed_delta = 0.0;
+        budget.rdp_alphas.clear();
+        budget.query_count = 0;
         budget.refreshed_at_ms = now_ms;
     }
+}
+
+/// Default RDP alpha orders for composition tracking.
+const RDP_ALPHA_ORDERS: &[f64] = &[2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0];
+
+/// Compute the Rényi DP cost of a single Gaussian mechanism query at order α.
+/// For Gaussian with σ = sensitivity * sqrt(2 ln(1.25/δ)) / ε:
+///   RDP(α) = α * sensitivity² / (2 * σ²)
+fn rdp_gaussian_cost(alpha: f64, sensitivity: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 || alpha <= 1.0 {
+        return f64::INFINITY;
+    }
+    alpha * sensitivity * sensitivity / (2.0 * sigma * sigma)
+}
+
+/// Compute the Rényi DP cost of a single Laplace mechanism query at order α.
+/// RDP(α) = (1/(α-1)) * ln( α/(2α-1) * exp((α-1)/b) + (α-1)/(2α-1) * exp(-α/b) )
+/// where b = sensitivity / ε (the scale parameter).
+fn rdp_laplace_cost(alpha: f64, sensitivity: f64, epsilon: f64) -> f64 {
+    if epsilon <= 0.0 || alpha <= 1.0 || sensitivity <= 0.0 {
+        return f64::INFINITY;
+    }
+    let b = sensitivity / epsilon;
+    let a = alpha;
+    let t1 = a / (2.0 * a - 1.0) * ((a - 1.0) / b).exp();
+    let t2 = (a - 1.0) / (2.0 * a - 1.0) * (-a / b).exp();
+    (t1 + t2).ln() / (a - 1.0)
+}
+
+/// Convert RDP guarantee at order α to (ε,δ)-DP: ε = rdp_eps - ln(δ)/(α-1).
+fn rdp_to_eps_delta(alpha: f64, rdp_eps: f64, delta: f64) -> f64 {
+    if alpha <= 1.0 || delta <= 0.0 {
+        return f64::INFINITY;
+    }
+    rdp_eps - delta.ln() / (alpha - 1.0)
+}
+
+/// Update RDP composition tracker and return the tightest (ε,δ)-DP bound.
+fn dp_rdp_compose(
+    budget: &mut DpBudget,
+    mechanism: &str,
+    sensitivity: f64,
+    epsilon: f64,
+    delta: f64,
+) -> f64 {
+    if budget.rdp_alphas.is_empty() {
+        budget.rdp_alphas = RDP_ALPHA_ORDERS.iter().map(|&a| (a, 0.0)).collect();
+    }
+
+    for entry in budget.rdp_alphas.iter_mut() {
+        let (alpha, accumulated) = entry;
+        let cost = match mechanism {
+            "gaussian" => {
+                let sigma = if epsilon > 0.0 && delta > 0.0 {
+                    sensitivity * (2.0 * (1.25 / delta).ln()).sqrt() / epsilon
+                } else {
+                    0.0
+                };
+                rdp_gaussian_cost(*alpha, sensitivity, sigma)
+            }
+            _ => rdp_laplace_cost(*alpha, sensitivity, epsilon),
+        };
+        *accumulated += cost;
+    }
+    budget.query_count += 1;
+
+    // Find the tightest bound across all alpha orders.
+    let target_delta = if budget.total_delta > 0.0 {
+        budget.total_delta
+    } else {
+        1e-5
+    };
+    budget
+        .rdp_alphas
+        .iter()
+        .map(|(alpha, rdp_eps)| rdp_to_eps_delta(*alpha, *rdp_eps, target_delta))
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn dp_budget_summary(budget: &DpBudget) -> serde_json::Value {
     let remaining_epsilon = (budget.total_epsilon - budget.consumed_epsilon).max(0.0);
     let remaining_delta = (budget.total_delta - budget.consumed_delta).max(0.0);
+    // Compute tightest RDP-based epsilon bound.
+    let target_delta = if budget.total_delta > 0.0 {
+        budget.total_delta
+    } else {
+        1e-5
+    };
+    let rdp_epsilon = if budget.rdp_alphas.is_empty() {
+        None
+    } else {
+        let best = budget
+            .rdp_alphas
+            .iter()
+            .map(|(alpha, rdp_eps)| rdp_to_eps_delta(*alpha, *rdp_eps, target_delta))
+            .fold(f64::INFINITY, f64::min);
+        if best.is_finite() {
+            Some(best)
+        } else {
+            None
+        }
+    };
     serde_json::json!({
         "principal": budget.principal,
         "total_epsilon": budget.total_epsilon,
@@ -12527,7 +12961,9 @@ fn dp_budget_summary(budget: &DpBudget) -> serde_json::Value {
         "remaining_epsilon": remaining_epsilon,
         "remaining_delta": remaining_delta,
         "refresh_window_ms": budget.refresh_window_ms,
-        "refreshed_at_ms": budget.refreshed_at_ms
+        "refreshed_at_ms": budget.refreshed_at_ms,
+        "rdp_composed_epsilon": rdp_epsilon,
+        "query_count": budget.query_count
     })
 }
 
@@ -12951,6 +13387,78 @@ fn forensic_record_hash(
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
     let id = value_id(&bytes);
     hex16(&id)
+}
+
+/// Compute a Merkle tree root over a sequence of forensic records.
+/// The tree is constructed as a binary hash tree over the record hashes.
+/// This provides O(log n) proof of inclusion for any record in the chain.
+fn forensic_merkle_root(records: &[ForensicRecord]) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
+    // Iteratively combine pairs until we reach a single root.
+    while hashes.len() > 1 {
+        let mut next = Vec::new();
+        let mut i = 0;
+        while i < hashes.len() {
+            if i + 1 < hashes.len() {
+                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
+                let id = value_id(combined.as_bytes());
+                next.push(hex16(&id));
+                i += 2;
+            } else {
+                // Odd element: promote unchanged.
+                next.push(hashes[i].clone());
+                i += 1;
+            }
+        }
+        hashes = next;
+    }
+    hashes.into_iter().next()
+}
+
+/// Generate a Merkle inclusion proof for a specific record index.
+/// Returns the sibling hashes needed to reconstruct the root.
+fn forensic_merkle_proof(records: &[ForensicRecord], target_idx: usize) -> Vec<(String, bool)> {
+    if records.is_empty() || target_idx >= records.len() {
+        return Vec::new();
+    }
+    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
+    let mut proof = Vec::new();
+    let mut idx = target_idx;
+
+    while hashes.len() > 1 {
+        let mut next = Vec::new();
+        let mut i = 0;
+        let mut new_idx = 0;
+        while i < hashes.len() {
+            if i + 1 < hashes.len() {
+                if i == idx {
+                    // Target is left child; sibling is right.
+                    proof.push((hashes[i + 1].clone(), true));
+                    new_idx = next.len();
+                } else if i + 1 == idx {
+                    // Target is right child; sibling is left.
+                    proof.push((hashes[i].clone(), false));
+                    new_idx = next.len();
+                }
+                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
+                let id = value_id(combined.as_bytes());
+                next.push(hex16(&id));
+                i += 2;
+            } else {
+                if i == idx {
+                    new_idx = next.len();
+                }
+                next.push(hashes[i].clone());
+                i += 1;
+            }
+        }
+        hashes = next;
+        idx = new_idx;
+    }
+    proof
 }
 
 // -----------------------------
@@ -13673,19 +14181,67 @@ fn rows_to_objects(cols: &[ColumnMeta], rows: &[Vec<Lit>]) -> anyhow::Result<ser
 // -----------------------------
 
 const CAUSALITY_FORMAT_V1: &str = "etag_chain_v1";
+const CAUSALITY_FORMAT_V2: &str = "vector_clock_v2";
 
 fn build_causality_token(deps: &[CausalityDependency]) -> CausalityToken {
     CausalityToken {
-        format: CAUSALITY_FORMAT_V1.to_string(),
+        format: CAUSALITY_FORMAT_V2.to_string(),
         deps: deps.to_vec(),
     }
+}
+
+/// Merge two causality tokens, taking the component-wise maximum.
+/// This implements vector clock merge semantics: merged[t] = max(a[t], b[t]).
+fn merge_causality_tokens(a: &CausalityToken, b: &CausalityToken) -> CausalityToken {
+    let mut merged: BTreeMap<String, CausalityDependency> = BTreeMap::new();
+    for dep in a.deps.iter().chain(b.deps.iter()) {
+        let key = dep.table.clone();
+        let entry = merged.entry(key).or_insert_with(|| dep.clone());
+        // Take component-wise max.
+        if let (Some(cur_v), Some(new_v)) = (entry.v, dep.v) {
+            entry.v = Some(cur_v.max(new_v));
+        } else if dep.v.is_some() {
+            entry.v = dep.v;
+        }
+        if let (Some(cur_seq), Some(new_seq)) = (entry.change_seq, dep.change_seq) {
+            entry.change_seq = Some(cur_seq.max(new_seq));
+        } else if dep.change_seq.is_some() {
+            entry.change_seq = dep.change_seq;
+        }
+    }
+    CausalityToken {
+        format: CAUSALITY_FORMAT_V2.to_string(),
+        deps: merged.into_values().collect(),
+    }
+}
+
+/// Check if token `a` causally dominates token `b` (a >= b in all components).
+fn causality_dominates(a: &CausalityToken, b: &CausalityToken) -> bool {
+    for dep_b in &b.deps {
+        let dep_a = a.deps.iter().find(|d| d.table == dep_b.table);
+        let Some(dep_a) = dep_a else {
+            return false;
+        };
+        if let (Some(va), Some(vb)) = (dep_a.v, dep_b.v) {
+            if va < vb {
+                return false;
+            }
+        }
+        if let (Some(sa), Some(sb)) = (dep_a.change_seq, dep_b.change_seq) {
+            if sa < sb {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn ensure_min_causality(
     min: &CausalityToken,
     current: &[CausalityDependency],
 ) -> anyhow::Result<()> {
-    if min.format != CAUSALITY_FORMAT_V1 {
+    // Support both V1 and V2 formats.
+    if min.format != CAUSALITY_FORMAT_V1 && min.format != CAUSALITY_FORMAT_V2 {
         anyhow::bail!("invalid_request: unsupported causality format");
     }
 
@@ -14769,6 +15325,379 @@ fn vector_score(metric: VectorMetric, a: &[f32], b: &[f32]) -> anyhow::Result<f6
     }
 }
 
+// ---------------------------------------------------
+// HNSW (Hierarchical Navigable Small World) graph index
+// ---------------------------------------------------
+
+/// Key for identifying a vector index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HnswIndexKey {
+    table: TableKey,
+    column: String,
+}
+
+/// A single node in the HNSW graph.
+#[derive(Debug, Clone)]
+struct HnswNode {
+    /// Index into the table's row array.
+    row_idx: usize,
+    /// Neighbors per layer. Layer 0 has M_max0 neighbors, others M_max.
+    neighbors: Vec<Vec<usize>>,
+}
+
+/// HNSW graph index for approximate nearest neighbor search.
+#[derive(Debug)]
+struct HnswIndex {
+    nodes: Vec<HnswNode>,
+    /// Entry point node index (top layer).
+    entry_point: Option<usize>,
+    /// Maximum layer in the graph.
+    max_layer: usize,
+    /// Maximum neighbors per layer (M parameter).
+    m: usize,
+    /// Maximum neighbors at layer 0.
+    m_max0: usize,
+    /// ef_construction: beam width during insert.
+    ef_construction: usize,
+    /// Dimensionality of vectors.
+    dims: u32,
+    /// Metric used for distance computation.
+    metric: VectorMetric,
+    /// ml = 1/ln(M) for layer assignment.
+    ml: f64,
+    /// Total vectors indexed.
+    count: usize,
+}
+
+impl HnswIndex {
+    fn new(dims: u32, metric: VectorMetric) -> Self {
+        let m = 16;
+        let m_max0 = 32;
+        Self {
+            nodes: Vec::new(),
+            entry_point: None,
+            max_layer: 0,
+            m,
+            m_max0,
+            ef_construction: 64,
+            dims,
+            metric,
+            ml: 1.0 / (m as f64).ln(),
+            count: 0,
+        }
+    }
+
+    /// Assign a random layer for a new node using the ml parameter.
+    fn random_layer(&self, seed: u64) -> usize {
+        let id = value_id(&seed.to_le_bytes());
+        let u = u64::from_le_bytes(id[..8].try_into().unwrap()) as f64 / u64::MAX as f64;
+        let u = u.max(1e-12);
+        ((-u.ln() * self.ml).floor() as usize).min(32)
+    }
+
+    /// Insert a vector into the HNSW index.
+    fn insert(
+        &mut self,
+        row_idx: usize,
+        vector: &[f32],
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) {
+        let node_idx = self.nodes.len();
+        let seed = (row_idx as u64)
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(self.count as u64);
+        let level = self.random_layer(seed);
+
+        let mut node = HnswNode {
+            row_idx,
+            neighbors: vec![Vec::new(); level + 1],
+        };
+
+        if self.entry_point.is_none() {
+            self.entry_point = Some(node_idx);
+            self.max_layer = level;
+            self.nodes.push(node);
+            self.count += 1;
+            return;
+        }
+
+        let ep = self.entry_point.unwrap();
+        let mut current = ep;
+
+        // Greedy descent from top layer to level+1.
+        for l in (level + 1..=self.max_layer).rev() {
+            current = self.greedy_closest(current, vector, l, all_vectors);
+        }
+
+        // Insert at layers level..=0 with ef_construction beam search.
+        let target_level = level.min(self.max_layer);
+        for l in (0..=target_level).rev() {
+            let neighbors =
+                self.search_layer(current, vector, self.ef_construction, l, all_vectors);
+            let max_conn = if l == 0 { self.m_max0 } else { self.m };
+            let selected: Vec<usize> = neighbors
+                .iter()
+                .take(max_conn)
+                .map(|&(idx, _)| idx)
+                .collect();
+
+            node.neighbors[l] = selected.clone();
+
+            // Add bidirectional edges.
+            for &neighbor_idx in &selected {
+                if neighbor_idx < self.nodes.len() {
+                    let neighbor = &mut self.nodes[neighbor_idx];
+                    if l < neighbor.neighbors.len() {
+                        neighbor.neighbors[l].push(node_idx);
+                        // Prune if over limit.
+                        if neighbor.neighbors[l].len() > max_conn {
+                            self.prune_neighbors(neighbor_idx, l, max_conn, all_vectors);
+                        }
+                    }
+                }
+            }
+
+            if !neighbors.is_empty() {
+                current = neighbors[0].0;
+            }
+        }
+
+        self.nodes.push(node);
+        self.count += 1;
+
+        if level > self.max_layer {
+            self.max_layer = level;
+            self.entry_point = Some(node_idx);
+        }
+    }
+
+    /// Greedy search for the single closest node at a given layer.
+    fn greedy_closest(
+        &self,
+        start: usize,
+        query: &[f32],
+        layer: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> usize {
+        let mut current = start;
+        let mut best_dist = self.distance(current, query, all_vectors);
+        loop {
+            let mut improved = false;
+            let neighbors = if layer < self.nodes[current].neighbors.len() {
+                &self.nodes[current].neighbors[layer]
+            } else {
+                return current;
+            };
+            for &n in neighbors {
+                if n >= self.nodes.len() {
+                    continue;
+                }
+                let d = self.distance(n, query, all_vectors);
+                if d < best_dist {
+                    best_dist = d;
+                    current = n;
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        current
+    }
+
+    /// Beam search at a given layer, returning up to ef nearest neighbors.
+    fn search_layer(
+        &self,
+        entry: usize,
+        query: &[f32],
+        ef: usize,
+        layer: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> Vec<(usize, f64)> {
+        let mut visited = HashSet::new();
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        let mut results: Vec<(usize, f64)> = Vec::new();
+
+        let d = self.distance(entry, query, all_vectors);
+        candidates.push((entry, d));
+        results.push((entry, d));
+        visited.insert(entry);
+
+        while let Some(pos) = candidates
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                a.1 .1
+                    .partial_cmp(&b.1 .1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+        {
+            let (c_idx, c_dist) = candidates.remove(pos);
+
+            let worst_result = results
+                .iter()
+                .map(|r| r.1)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if c_dist > worst_result && results.len() >= ef {
+                break;
+            }
+
+            let neighbors = if layer < self.nodes[c_idx].neighbors.len() {
+                &self.nodes[c_idx].neighbors[layer]
+            } else {
+                continue;
+            };
+
+            for &n in neighbors {
+                if n >= self.nodes.len() || visited.contains(&n) {
+                    continue;
+                }
+                visited.insert(n);
+                let d = self.distance(n, query, all_vectors);
+                let worst = results
+                    .iter()
+                    .map(|r| r.1)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if d < worst || results.len() < ef {
+                    candidates.push((n, d));
+                    results.push((n, d));
+                    results
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    if results.len() > ef {
+                        results.truncate(ef);
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Search the HNSW graph for k approximate nearest neighbors.
+    fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> Vec<(usize, f64)> {
+        let Some(ep) = self.entry_point else {
+            return Vec::new();
+        };
+
+        let mut current = ep;
+        for l in (1..=self.max_layer).rev() {
+            current = self.greedy_closest(current, query, l, all_vectors);
+        }
+
+        let mut results = self.search_layer(current, query, ef_search.max(k), 0, all_vectors);
+        results.truncate(k);
+        results
+    }
+
+    /// Compute distance (lower = closer) from a node to a query.
+    fn distance(
+        &self,
+        node_idx: usize,
+        query: &[f32],
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> f64 {
+        let row_idx = self.nodes[node_idx].row_idx;
+        let Some(vec) = all_vectors(row_idx) else {
+            return f64::INFINITY;
+        };
+        // Convert similarity scores to distances (HNSW needs distance, not similarity).
+        match self.metric {
+            VectorMetric::Cosine => {
+                let score = cosine_similarity(&vec, query);
+                1.0 - score
+            }
+            VectorMetric::Dot => {
+                let score = dot_product(&vec, query);
+                -score // negate so lower = more similar
+            }
+            VectorMetric::L2 => l2_distance(&vec, query),
+        }
+    }
+
+    fn prune_neighbors(
+        &mut self,
+        node_idx: usize,
+        layer: usize,
+        max_conn: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) {
+        if node_idx >= self.nodes.len() {
+            return;
+        }
+        let node_row = self.nodes[node_idx].row_idx;
+        let Some(node_vec) = all_vectors(node_row) else {
+            return;
+        };
+        let neighbors = &self.nodes[node_idx].neighbors[layer];
+        let mut scored: Vec<(usize, f64)> = neighbors
+            .iter()
+            .filter_map(|&n| {
+                if n >= self.nodes.len() {
+                    return None;
+                }
+                let d = {
+                    let Some(v) = all_vectors(self.nodes[n].row_idx) else {
+                        return None;
+                    };
+                    match self.metric {
+                        VectorMetric::Cosine => 1.0 - cosine_similarity(&v, &node_vec),
+                        VectorMetric::Dot => -dot_product(&v, &node_vec),
+                        VectorMetric::L2 => l2_distance(&v, &node_vec),
+                    }
+                };
+                Some((n, d))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(max_conn);
+        self.nodes[node_idx].neighbors[layer] = scored.into_iter().map(|(n, _)| n).collect();
+    }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let xf = *x as f64;
+        let yf = *y as f64;
+        dot += xf * yf;
+        na += xf * xf;
+        nb += yf * yf;
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+fn dot_product(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
+}
+
+fn l2_distance(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = (*x as f64) - (*y as f64);
+            d * d
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
 #[derive(Debug)]
 struct SqlAutoparamExtract {
     normalized_sql: String,
@@ -15304,7 +16233,13 @@ fn token_op(token: Option<&SqlToken>) -> Option<&str> {
         }) => Some(op.as_str()),
         Some(SqlToken {
             kind: SqlTokenKind::Keyword(kw),
-        }) if matches!(kw.as_str(), "in" | "like" | "ilike" | "regexp" | "rlike" | "between") => Some(kw.as_str()),
+        }) if matches!(
+            kw.as_str(),
+            "in" | "like" | "ilike" | "regexp" | "rlike" | "between"
+        ) =>
+        {
+            Some(kw.as_str())
+        }
         _ => None,
     }
 }
@@ -26607,5 +27542,348 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    // ===============================================
+    // Research feature tests
+    // ===============================================
+
+    #[test]
+    fn r04_dp_rng_deterministic_and_uniform() {
+        // Verify the new hash-based PRNG is deterministic and well-distributed.
+        let mut rng1 = DpRng::new(42);
+        let mut rng2 = DpRng::new(42);
+        for _ in 0..100 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+
+        // Check that next_f64 is in [0, 1).
+        let mut rng = DpRng::new(12345);
+        for _ in 0..1000 {
+            let v = rng.next_f64();
+            assert!(v >= 0.0 && v < 1.0, "next_f64 out of range: {v}");
+        }
+
+        // Verify different seeds produce different sequences.
+        let mut r1 = DpRng::new(1);
+        let mut r2 = DpRng::new(2);
+        let v1 = r1.next_u64();
+        let v2 = r2.next_u64();
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn r04_rdp_composition_tracking() -> anyhow::Result<()> {
+        let dir = temp_dir("rdp_composition");
+        let mut engine = Engine::open(&dir)?;
+        seed_events_table(&mut engine, "a", "b")?;
+
+        // Set up DP budget.
+        engine.dp_budget_set(DpBudgetSetParams {
+            principal: "alice".into(),
+            total_epsilon: 10.0,
+            total_delta: 1e-5,
+            refresh_window_ms: None,
+        })?;
+
+        // Run a DP aggregate.
+        let result = engine.dp_aggregate(DpAggregateParams {
+            table: BaseTableRef {
+                db: "app".into(),
+                table: "events".into(),
+                r#as: None,
+            },
+            aggregates: vec![DpAggregateSpec {
+                op: "count".into(),
+                column: None,
+                r#as: Some("n".into()),
+                bounds: None,
+                percentile: None,
+            }],
+            epsilon: 1.0,
+            delta: Some(1e-6),
+            mechanism: Some("laplace".into()),
+            principal: Some("alice".into()),
+            group_by: Vec::new(),
+            r#where: None,
+            seed: Some(42),
+        })?;
+        assert!(!result.rows.is_empty());
+
+        // Check that the budget summary now includes RDP info.
+        let budget_obj = engine.dp_budgets.get("alice").unwrap();
+        let info = dp_budget_summary(budget_obj);
+        assert!(info.get("rdp_composed_epsilon").is_some());
+        assert_eq!(
+            info.get("query_count")
+                .and_then(|v: &serde_json::Value| v.as_u64()),
+            Some(1)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn r10_hnsw_index_basic() {
+        // Test HNSW index construction and search.
+        let mut hnsw = HnswIndex::new(3, VectorMetric::Cosine);
+        let vectors: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![0.7, 0.7, 0.0],
+            vec![0.0, 0.7, 0.7],
+        ];
+        let lookup: HashMap<usize, Vec<f32>> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, v.clone()))
+            .collect();
+        let all_vectors = |row_idx: usize| -> Option<Vec<f32>> { lookup.get(&row_idx).cloned() };
+
+        for (i, v) in vectors.iter().enumerate() {
+            hnsw.insert(i, v, &all_vectors);
+        }
+
+        assert_eq!(hnsw.count, 5);
+        assert!(hnsw.entry_point.is_some());
+
+        // Search for nearest to [1.0, 0.0, 0.0] — should find itself as #1.
+        let results = hnsw.search(&[1.0, 0.0, 0.0], 3, 32, &all_vectors);
+        assert!(!results.is_empty());
+        // The first result should be node 0 (exact match, distance ~0).
+        assert_eq!(results[0].0, 0);
+    }
+
+    #[test]
+    fn r08_view_dependency_cascade() -> anyhow::Result<()> {
+        let dir = temp_dir("view_dep_cascade");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".into(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".into(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".into()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".into(),
+                table: "users".into(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::U64 { v: 100 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::U64 { v: 200 })]),
+            ],
+            None,
+        )?;
+
+        // Create a view.
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![
+                    Expr::Col {
+                        table: None,
+                        col: "id".into(),
+                    },
+                    Expr::Col {
+                        table: None,
+                        col: "score".into(),
+                    },
+                ],
+                None,
+            ),
+            if_not_exists: None,
+        })?;
+
+        // Verify view is not stale initially.
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["stale"].as_bool(), Some(false));
+
+        // Insert a row into the base table — view should become stale.
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".into(),
+                table: "users".into(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                ("score", Lit::U64 { v: 300 }),
+            ])],
+            None,
+        )?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["stale"].as_bool(), Some(true));
+
+        // Test explain deps includes info.
+        let deps = engine.view_explain_deps(ViewExplainDepsParams {
+            view: BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            },
+        })?;
+        assert!(!deps.deps.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn r13_vector_clock_causality() {
+        // Test vector clock merge and dominance.
+        let token_a = CausalityToken {
+            format: CAUSALITY_FORMAT_V2.to_string(),
+            deps: vec![
+                CausalityDependency {
+                    table: "t1".into(),
+                    v: Some(5),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+                CausalityDependency {
+                    table: "t2".into(),
+                    v: Some(3),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+            ],
+        };
+        let token_b = CausalityToken {
+            format: CAUSALITY_FORMAT_V2.to_string(),
+            deps: vec![
+                CausalityDependency {
+                    table: "t1".into(),
+                    v: Some(3),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+                CausalityDependency {
+                    table: "t2".into(),
+                    v: Some(7),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+            ],
+        };
+
+        let merged = merge_causality_tokens(&token_a, &token_b);
+        assert_eq!(merged.format, CAUSALITY_FORMAT_V2);
+        // Merged should have max(5,3)=5 for t1 and max(3,7)=7 for t2.
+        let t1 = merged.deps.iter().find(|d| d.table == "t1").unwrap();
+        let t2 = merged.deps.iter().find(|d| d.table == "t2").unwrap();
+        assert_eq!(t1.v, Some(5));
+        assert_eq!(t2.v, Some(7));
+
+        // a does not dominate b (a.t2=3 < b.t2=7), b does not dominate a.
+        assert!(!causality_dominates(&token_a, &token_b));
+        assert!(!causality_dominates(&token_b, &token_a));
+
+        // Merged dominates both.
+        assert!(causality_dominates(&merged, &token_a));
+        assert!(causality_dominates(&merged, &token_b));
+    }
+
+    #[test]
+    fn r06_forensic_merkle_root_and_proof() {
+        // Build a small forensic chain and verify Merkle root.
+        let mut prev = "genesis".to_string();
+        let mut records = Vec::new();
+        for i in 0..8 {
+            let hash = forensic_record_hash(&prev, i, 1000 + i, "app", "events", "insert", None, i);
+            records.push(ForensicRecord {
+                id: i,
+                ts_ms: 1000 + i,
+                db: "app".into(),
+                table: "events".into(),
+                op: "insert".into(),
+                pk: None,
+                change_seq: i,
+                prev_hash: prev.clone(),
+                hash: hash.clone(),
+            });
+            prev = hash;
+        }
+
+        // Merkle root should be deterministic.
+        let root1 = forensic_merkle_root(&records);
+        let root2 = forensic_merkle_root(&records);
+        assert!(root1.is_some());
+        assert_eq!(root1, root2);
+
+        // Merkle proof for record 3.
+        let proof = forensic_merkle_proof(&records, 3);
+        assert!(!proof.is_empty(), "proof should have siblings");
+
+        // Modifying a record should change the Merkle root.
+        let mut tampered = records.clone();
+        tampered[3].hash = "tampered".to_string();
+        let root_tampered = forensic_merkle_root(&tampered);
+        assert_ne!(root1, root_tampered);
+    }
+
+    #[test]
+    fn r04_dp_laplace_noise_has_correct_scale() {
+        let mut rng = DpRng::new(42);
+        let b = 1.0; // scale = sensitivity / epsilon = 1.0/1.0
+                     // Laplace(0, b) has variance 2b^2 = 2.0
+        let expected_var = 2.0 * b * b;
+        let n = 10000;
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for _ in 0..n {
+            let noise = dp_laplace_noise(&mut rng, b);
+            sum += noise;
+            sum_sq += noise * noise;
+        }
+        let mean = sum / n as f64;
+        let var = sum_sq / n as f64 - mean * mean;
+        assert!((mean).abs() < 0.1, "mean should be near 0, got {mean}");
+        assert!(
+            (var - expected_var).abs() < 1.0,
+            "variance should be near {expected_var}, got {var}"
+        );
     }
 }

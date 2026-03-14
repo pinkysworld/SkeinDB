@@ -1,6 +1,7 @@
 # SkeinDB True Status Matrix
 
 Last updated: 2026-03-14
+Latest changes: R03/R04/R06/R08/R10/R13 research hardening; PostgreSQL compat phase planned.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -11,7 +12,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **48 done / 70 open** (118 total; T037/T038 remain open but have significant progress notes)
+- `docs/PROJECT_BACKLOG.md`: **48 done / 89 open** (137 total; T037/T038 remain open but have significant progress notes; T400–T418 are new PostgreSQL compat phase)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -45,6 +46,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 21 Compaction scheduler | Partial | Policy scaffolding/docs exist; full constrained scheduler/evaluation remains open. |
 | Phase 22 Autoparam + plan cache | Partial | SQL normalization/classification prototype exists (`ai.autoparam.*`), full session/plan-cache integration remains open. |
 | Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table` + `cdc.poll` are implemented; query subscriptions/streaming/ack remain open. |
+| Phase 25 PostgreSQL compat | Planned | PG v3 wire protocol on port 5432, SCRAM-SHA-256 auth, PG SQL dialect translation, pg_catalog system tables, extended query protocol (Parse/Bind/Execute), PG type OIDs, RETURNING, dollar-quoting, deep dialect parity for psql/pgAdmin/Django/Rails/SQLAlchemy. Tasks T400–T418 in PROJECT_BACKLOG. |
 
 ## 3) Research tracks (R01-R20)
 
@@ -52,17 +54,17 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 |---|---|---|
 | R01 Learned indexes | Prototype implemented | ValueStore learned index scaffolding + tests (`skeindb-core/valuestore`). |
 | R02 Adaptive row/column | Prototype implemented | Snapshot surfaces and hybrid execution scaffolds. |
-| R03 Delta topology | Prototype implemented | Delta-chain policy/skip/compaction paths. |
-| R04 Differential privacy | Implemented (prototype) | `dp.*` endpoints + budget/audit behaviors. |
+| R03 Delta topology | Hardened | Delta-chain policy/skip/compaction paths + `topology_analysis()` with depth stats (avg/max/p50/p99), fanout, hot-chain detection, savings ratio. |
+| R04 Differential privacy | Hardened | `dp.*` endpoints + budget/audit; crypto-quality hash-based PRNG (`DpRng`); Rényi DP composition tracking (`rdp_alphas`, `query_count`); `rdp_gaussian_cost()`, `rdp_laplace_cost()`, `rdp_to_eps_delta()`. |
 | R05 Oblivious execution | Prototype implemented | `oblivious.policy.*`, `oblivious.explain`. |
-| R06 Forensic WAL queries | Prototype implemented | `forensic.query`, `forensic.verify`, `forensic.export`. |
+| R06 Forensic WAL queries | Hardened | `forensic.query`, `forensic.verify`, `forensic.export`; Merkle tree root (`forensic_merkle_root()`), inclusion proofs (`forensic_merkle_proof()`), tamper detection. |
 | R07 Client-side merge funcs | Prototype implemented | `merge.*`, `merge.wasm.*`, conflict handling paths. |
-| R08 Incremental views | Prototype implemented | `view.create/drop/refresh/status/explain_deps`. |
+| R08 Incremental views | Hardened | `view.create/drop/refresh/status/explain_deps`; BFS-based cascading invalidation through view-on-view deps; `view_dependency_graph()` with `ViewDepEdge` structs; transitive dep traversal in `view_explain_deps`. |
 | R09 QUIC-native protocol | Implemented (prototype) | QUIC transport + integration tests (`tests/quic_rpc.rs`). |
-| R10 Vector embeddings | Prototype implemented | `vector.insert/search/index.status`. |
+| R10 Vector embeddings | Hardened | `vector.insert/search/index.status`; HNSW graph index (M=16, M_max0=32, ef_construction=64) with insert/search/prune; automatic index rebuild on insert; cosine/dot/L2 metrics; falls back to brute-force when filter is active. |
 | R11 LLM/autoparam | Prototype implemented | `ai.autoparam.classify/analyze`. |
 | R12 NL -> SkeinQL | Prototype implemented | `ai.nl.translate/explain/execute`. |
-| R13 Causal ETag consistency | Prototype implemented | ETag/min-causality controls in query paths. |
+| R13 Causal ETag consistency | Hardened | ETag/min-causality controls; V2 vector-clock format (`CAUSALITY_FORMAT_V2`); `merge_causality_tokens()` (component-wise max); `causality_dominates()` (partial order); `ensure_min_causality()` accepts V1+V2. |
 | R14 Replay bundles | Prototype implemented | Replay/time-travel docs + prototype surfaces. |
 | R15 Schema evolution | Prototype implemented | `schema.propose_change/merge_status/apply_merge`. |
 | R16 Auto index synthesis | Prototype implemented | `advisor.index_synthesize/apply_index/history`. |
