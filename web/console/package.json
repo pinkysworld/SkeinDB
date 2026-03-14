@@ -2,6 +2,7 @@
   "name": "skeindb-console",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "node ./src/dev-server.js",

@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-02-24
+Last updated: 2026-03-12
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -42,7 +42,7 @@ The repo is intentionally written so you can read it in two ways:
    - `RESEARCH_AGENDA.md` (20-track status matrix + priorities)
    - `TRUE_STATUS_MATRIX.md` (runtime reality sync: implemented vs prototype vs planned)
    - `research_agenda/` (prioritized research directions)
-   - `papers/SkeinDB_IJRCOM_Submission.md` (submission-ready manuscript draft)
+   - `site/index.html` (generated docs site with architecture and paper summary)
 
 ## Contributing docs
 

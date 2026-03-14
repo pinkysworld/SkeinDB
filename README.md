@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-02-25
+Last updated: 2026-03-12
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -15,6 +15,8 @@ The repository is written so you can:
 > Implementation note
 > The current execution engine is a small in-memory/JSON-backed prototype meant to make the APIs usable today.
 > The paper-aligned ValueID/MVCC/LSM engine is represented as specs + backlog tasks and can be incrementally implemented.
+
+![SkeinDB architecture](docs/figures/architecture.png)
 
 ---
 
@@ -35,6 +37,13 @@ The repository is written so you can:
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
 - **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, and expert panels for cluster/settings management.
 - **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
+
+---
+
+## Requirements
+
+- Rust toolchain (stable) for the server, tests, and CLI.
+- Node.js is only needed if you want to rebuild or serve the web assets under `web/`.
 
 ---
 
@@ -66,6 +75,17 @@ See `docs/GETTING_STARTED.md` for a fuller walkthrough.
 
 ---
 
+## Key artifacts
+
+- `./target/release/skeindb`: release build artifact produced by `cargo build --release`
+- `docs/figures/architecture.png`: current architecture diagram used in docs
+- `docs/site/index.html`: generated static docs landing page
+- `site/index.html`: generated project landing page
+- `tests/compat/corpus.sql`: MySQL compatibility regression corpus
+- `samples/sample.sql`: minimal SQL sample file
+
+---
+
 ## Docs
 
 Start here:
@@ -77,6 +97,8 @@ Frequently used:
 - `docs/ETAG_VALIDATORS.md`
 - `docs/TRAFFIC_REDUCTION.md`
 - `docs/MYSQL_COMPAT.md`
+- `docs/SKEINADMIN.md`
+- `docs/GETTING_STARTED.md`
 
 ---
 
@@ -86,12 +108,29 @@ Frequently used:
 crates/
   skeindb/          # server + prototype execution engine
   skeindb-core/     # stable primitives (ValueIDs, hashes, canonicalization)
+  skeindb-ir/       # intermediate representation types shared across layers
   skeindb-skeinql/  # SkeinQL types + JSON-RPC method schemas
 web/
+  console/          # minimal embedded SQL console sources
   skeinadmin/       # embedded management UI (admin + console routes)
 openapi/
   skeinql.yaml      # minimal API sketch
 docs/               # specs, research notes, and operator docs
+samples/            # example SQL inputs
+tests/compat/       # MySQL compatibility corpus and regression inputs
+site/               # generated public landing page artifact
+```
+
+---
+
+## Verification
+
+Run the standard repo checks from the workspace root:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
 ```
 
 ---
@@ -116,4 +155,4 @@ Recent documentation updates (2026-02-24):
 
 ## License
 
-TBD (choose MIT/Apache-2.0 later).
+SkeinDB is licensed under the Apache License 2.0. See `LICENSE`.

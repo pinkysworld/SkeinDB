@@ -864,20 +864,31 @@ impl QuicClient {
         endpoint.set_default_client_config(client_config);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let started_at = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let attempt_timeout = Duration::from_millis(750);
 
         loop {
             match endpoint.connect(addr, "localhost") {
-                Ok(connecting) => match connecting.await {
-                    Ok(connection) => {
+                Ok(connecting) => match tokio::time::timeout(attempt_timeout, connecting).await {
+                    Ok(Ok(connection)) => {
                         return Ok(Self {
                             endpoint,
                             connection,
                         });
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         if Instant::now() >= deadline {
                             return Err(err.into());
+                        }
+                    }
+                    Err(_) => {
+                        if Instant::now() >= deadline {
+                            return Err(anyhow!(
+                                "timed out waiting for QUIC server on {} after {:?}",
+                                addr,
+                                started_at.elapsed()
+                            ));
                         }
                     }
                 },
