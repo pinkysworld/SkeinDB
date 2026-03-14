@@ -13,6 +13,7 @@ const STATE = {
   isConsole: false,
   connected: false,
   browseOffset: 0,
+  sqlHistory: [],
   schemaBuilderRows: [],
   dataFormColumns: [],
   easyTableBuilderRows: [],
@@ -186,7 +187,15 @@ function setConnStatus(kind, message, detail) {
   [$('connStatus'), $('connBadge')].filter(Boolean).forEach(p => {
     p.classList.remove('ok', 'warn', 'error');
     if (kind) p.classList.add(kind);
-    p.textContent = message || 'Disconnected';
+    const dot = p.querySelector('.conn-dot');
+    if (dot) {
+      dot.classList.remove('ok', 'warn', 'error');
+      if (kind) dot.classList.add(kind);
+      dot.nextSibling && dot.nextSibling.nodeType === 3 ? dot.nextSibling.textContent = message || 'Disconnected' : p.childNodes.forEach(n => { if (n.nodeType === 3) n.textContent = ''; });
+    }
+    const textNode = Array.from(p.childNodes).find(n => n.nodeType === 3);
+    if (textNode) textNode.textContent = message || 'Disconnected';
+    else if (!dot) p.textContent = message || 'Disconnected';
   });
   const s = $('connSummary');
   if (s) s.textContent = detail || message || 'Disconnected';
@@ -361,6 +370,22 @@ function readDbTable(dbId, tableId) {
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+function showToast(message, type = 'info', duration = 3000) {
+  const container = $('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = 'toast-msg ' + type;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = 'toastOut .3s ease forwards';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
 }
 
 // ---------------------------------------------------------------------------
@@ -557,11 +582,13 @@ async function connect() {
     await ping(); await loadVersion(); await loadCapabilities(); await loadTransport(); await loadStats();
     await clusterReadStatus(); await loadDbTree(); updateContext();
     if ($('statDatabases')) $('statDatabases').textContent = Object.keys(STATE.dbTree).length;
-  } catch {}
+    showToast('Connected to ' + getBaseUrl(), 'success');
+  } catch { showToast('Connection failed', 'error'); }
 }
 
 function disconnect() {
   setConnStatus('warn', 'Disconnected', 'Disconnected.');
+  showToast('Disconnected', 'info');
   STATE.methods = []; STATE.dbTree = {};
   setSelectedDb(''); setSelectedTable('');
   renderDbTree({}, '');
@@ -2162,12 +2189,14 @@ function setSqlText(v) { if ($('sqlText')) { $('sqlText').value = v; $('sqlText'
 
 async function runSql(explain) {
   const sql = $('sqlText') ? $('sqlText').value.trim() : ''; if (!sql) return;
+  addSqlHistory(sql);
   const res = await call('sql.exec', cleanParams({sql, explain:!!explain, default_db:resolveDefaultDb()}), 'sqlOut');
   if (!res || !res.json || !res.json.ok || !res.json.result) return;
   const r = res.json.result;
   const tbl = extractSqlTable(r); if (tbl) renderTable('sqlTable', tbl.columns, tbl.rows); else renderTable('sqlTable',[],[]);
   if (r.statement === 'use' && r.default_db) { setSelectedDb(r.default_db); updateContext(); }
   if (r.statement === 'create_database' || r.statement === 'create_table') await loadDbTree();
+  showToast('SQL executed', 'success', 2000);
 }
 
 async function runSkeinQuery() {
@@ -2894,6 +2923,195 @@ function applyMode() {
 }
 
 // ---------------------------------------------------------------------------
+// Dark mode
+// ---------------------------------------------------------------------------
+function initDarkMode() {
+  const saved = localStorage.getItem('skeinadmin.theme');
+  if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+    document.documentElement.classList.add('dark');
+  }
+  updateThemeToggle();
+}
+
+function toggleDarkMode() {
+  document.documentElement.classList.toggle('dark');
+  const isDark = document.documentElement.classList.contains('dark');
+  localStorage.setItem('skeinadmin.theme', isDark ? 'dark' : 'light');
+  updateThemeToggle();
+}
+
+function updateThemeToggle() {
+  const btn = $('themeToggle');
+  if (!btn) return;
+  const isDark = document.documentElement.classList.contains('dark');
+  btn.innerHTML = '<span class="theme-toggle-icon">' + (isDark ? '☀️' : '🌙') + '</span> ' + (isDark ? 'Light mode' : 'Dark mode');
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible sidebar groups
+// ---------------------------------------------------------------------------
+function initCollapsibleGroups() {
+  document.querySelectorAll('.nav-group-title').forEach(title => {
+    const savedState = localStorage.getItem('skeinadmin.navgroup.' + title.textContent.trim());
+    if (savedState === 'collapsed') title.classList.add('collapsed');
+    title.addEventListener('click', () => {
+      title.classList.toggle('collapsed');
+      localStorage.setItem('skeinadmin.navgroup.' + title.textContent.trim(), title.classList.contains('collapsed') ? 'collapsed' : 'expanded');
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Command palette
+// ---------------------------------------------------------------------------
+const CMD_ITEMS = [];
+
+function initCommandPalette() {
+  // Build command list from panels
+  Object.entries(PANEL_META).forEach(([panel, meta]) => {
+    CMD_ITEMS.push({ label: meta.title, hint: meta.subtitle, action: () => setActivePanel(panel, true) });
+  });
+  // Add common actions
+  CMD_ITEMS.push({ label: 'Connect to server', hint: 'Establish RPC connection', action: connect });
+  CMD_ITEMS.push({ label: 'Disconnect', hint: 'Close connection', action: disconnect });
+  CMD_ITEMS.push({ label: 'Run SQL', hint: 'Execute current SQL query', action: () => runSql(false) });
+  CMD_ITEMS.push({ label: 'Reload database tree', hint: 'Refresh databases & tables', action: loadDbTree });
+  CMD_ITEMS.push({ label: 'Toggle dark mode', hint: 'Switch light/dark theme', action: toggleDarkMode });
+  CMD_ITEMS.push({ label: 'Refresh stats', hint: 'Reload server statistics', action: loadStats });
+  CMD_ITEMS.push({ label: 'New database', hint: 'Create a new database', action: quickCreateDb });
+  CMD_ITEMS.push({ label: 'New table', hint: 'Create a new table', action: quickCreateTable });
+  CMD_ITEMS.push({ label: 'Insert row', hint: 'Insert a new row', action: quickInsertRow });
+  CMD_ITEMS.push({ label: 'Browse table', hint: 'View table data', action: quickBrowseData });
+  // Add RPC templates
+  RPC_TEMPLATES.forEach(tpl => {
+    CMD_ITEMS.push({ label: 'RPC: ' + tpl.label, hint: 'Send ' + tpl.method, action: () => {
+      setActivePanel('rpc', true);
+      if ($('rpcMethod')) $('rpcMethod').value = tpl.method;
+      if ($('rpcParams')) $('rpcParams').value = JSON.stringify(tpl.params, null, 2);
+    }});
+  });
+}
+
+let cmdSelectedIndex = 0;
+
+function openCommandPalette() {
+  const overlay = $('cmdPalette');
+  if (!overlay) return;
+  overlay.classList.add('open');
+  const input = $('cmdInput');
+  if (input) { input.value = ''; input.focus(); }
+  cmdSelectedIndex = 0;
+  renderCommandResults('');
+}
+
+function closeCommandPalette() {
+  const overlay = $('cmdPalette');
+  if (overlay) overlay.classList.remove('open');
+}
+
+function renderCommandResults(filter) {
+  const container = $('cmdResults');
+  if (!container) return;
+  container.innerHTML = '';
+  const lf = filter.toLowerCase();
+  const matches = CMD_ITEMS.filter(item => !lf || item.label.toLowerCase().includes(lf) || (item.hint && item.hint.toLowerCase().includes(lf)));
+  const shown = matches.slice(0, 12);
+  cmdSelectedIndex = Math.min(cmdSelectedIndex, shown.length - 1);
+  if (cmdSelectedIndex < 0) cmdSelectedIndex = 0;
+  shown.forEach((item, i) => {
+    const div = document.createElement('div');
+    div.className = 'cmd-palette-item' + (i === cmdSelectedIndex ? ' selected' : '');
+    div.innerHTML = '<span class="cmd-item-label">' + escapeHtml(item.label) + '</span>' + (item.hint ? '<span class="cmd-item-hint">' + escapeHtml(item.hint) + '</span>' : '');
+    div.addEventListener('click', () => { closeCommandPalette(); item.action(); });
+    container.appendChild(div);
+  });
+  if (!shown.length) {
+    container.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:12px">No matching commands.</div>';
+  }
+}
+
+function executeSelectedCommand(filter) {
+  const lf = (filter || '').toLowerCase();
+  const matches = CMD_ITEMS.filter(item => !lf || item.label.toLowerCase().includes(lf) || (item.hint && item.hint.toLowerCase().includes(lf)));
+  if (matches[cmdSelectedIndex]) {
+    closeCommandPalette();
+    matches[cmdSelectedIndex].action();
+  }
+}
+
+function initCommandPaletteEvents() {
+  const input = $('cmdInput');
+  if (input) {
+    input.addEventListener('input', () => { cmdSelectedIndex = 0; renderCommandResults(input.value); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); closeCommandPalette(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); cmdSelectedIndex++; renderCommandResults(input.value); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cmdSelectedIndex = Math.max(0, cmdSelectedIndex - 1); renderCommandResults(input.value); }
+      else if (e.key === 'Enter') { e.preventDefault(); executeSelectedCommand(input.value); }
+    });
+  }
+  const overlay = $('cmdPalette');
+  if (overlay) overlay.addEventListener('click', (e) => { if (e.target === overlay) closeCommandPalette(); });
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+function initKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+K = Command palette
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      openCommandPalette();
+    }
+    // Cmd/Ctrl+Enter = Run SQL (when in SQL workspace)
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      const sqlEl = $('sqlText');
+      if (sqlEl && document.activeElement === sqlEl) {
+        e.preventDefault();
+        runSql(false);
+      }
+    }
+    // Escape = close command palette
+    if (e.key === 'Escape') {
+      closeCommandPalette();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SQL history
+// ---------------------------------------------------------------------------
+function addSqlHistory(sql) {
+  if (!sql || !sql.trim()) return;
+  STATE.sqlHistory = STATE.sqlHistory.filter(s => s !== sql);
+  STATE.sqlHistory.unshift(sql);
+  if (STATE.sqlHistory.length > 20) STATE.sqlHistory.pop();
+  try { localStorage.setItem('skeinadmin.sqlHistory', JSON.stringify(STATE.sqlHistory)); } catch {}
+  renderSqlHistory();
+}
+
+function loadSqlHistory() {
+  try { STATE.sqlHistory = JSON.parse(localStorage.getItem('skeinadmin.sqlHistory') || '[]'); } catch { STATE.sqlHistory = []; }
+  renderSqlHistory();
+}
+
+function renderSqlHistory() {
+  const container = $('sqlHistory');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!STATE.sqlHistory.length) { container.textContent = 'No queries yet.'; return; }
+  STATE.sqlHistory.forEach(sql => {
+    const item = document.createElement('div');
+    item.className = 'sql-history-item';
+    item.textContent = sql;
+    item.title = sql;
+    item.addEventListener('click', () => { if ($('sqlText')) $('sqlText').value = sql; });
+    container.appendChild(item);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // SQL Templates
 // ---------------------------------------------------------------------------
 function sqlTemplateSelect() {
@@ -2960,6 +3178,7 @@ wire('btnEngineSave', engineSaveConfig);
 wire('btnEngineReset', engineResetDefaults);
 
 // Easy viewer
+wire('themeToggle', toggleDarkMode);
 wire('btnEasyReloadTree', async () => { await loadDbTree(); easyRefreshTargetsFromTree(); });
 wire('easyBtnNewDb', easyNewDbPrompt);
 wire('easyBtnInsertFromBrowse', () => { easySetSubTab('insert'); easyRenderInsertForm(); });
@@ -3147,11 +3366,17 @@ if ($('token')) $('token').addEventListener('change', () => { persistInputs(); s
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+initDarkMode();
 loadInputs();
 populateTemplateSelect();
 initNav();
 applyMode();
 refreshProfiles();
+initCollapsibleGroups();
+initCommandPalette();
+initCommandPaletteEvents();
+initKeyboardShortcuts();
+loadSqlHistory();
 renderResearchDashboard();
 renderFeatureCenterGrid();
 renderResearchSettings();
