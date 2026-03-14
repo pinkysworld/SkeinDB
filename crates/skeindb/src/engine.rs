@@ -23,7 +23,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use md5::Md5;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
 use skeindb_core::{encode_varu, value_id, ValueKind};
@@ -8438,6 +8441,29 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
                     | "vector.cosine"
                     | "vector.dot"
                     | "vector.l2"
+                    | "json_extract"
+                    | "json_unquote"
+                    | "json_object"
+                    | "json_array"
+                    | "json_contains"
+                    | "json_length"
+                    | "json_type"
+                    | "json_valid"
+                    | "json_set"
+                    | "json_keys"
+                    | "json_merge_preserve"
+                    | "field"
+                    | "elt"
+                    | "inet_aton"
+                    | "inet_ntoa"
+                    | "bin"
+                    | "oct"
+                    | "conv"
+                    | "crc32"
+                    | "md5"
+                    | "sha1"
+                    | "sha"
+                    | "sha2"
             );
             if !allowed {
                 anyhow::bail!("invalid_request: unsupported function in wasm plan");
@@ -8644,10 +8670,40 @@ fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Ve
                 }
             }
         }
-        _ => {
-            anyhow::bail!(
-                "only INNER, LEFT, RIGHT, and CROSS joins are implemented in this prototype"
-            )
+        JoinType::Full => {
+            let right_nulls = null_row_ctx_for_ref(engine, &join.right)?;
+            let left_nulls = null_row_ctx_for_ref(engine, &join.left)?;
+            let mut right_matched = vec![false; right.len()];
+            for a in left.iter() {
+                let mut matched = false;
+                for (bi, b) in right.iter().enumerate() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                            matched = true;
+                            right_matched[bi] = true;
+                        }
+                    } else {
+                        out.push(merged);
+                        matched = true;
+                        right_matched[bi] = true;
+                    }
+                }
+                if !matched {
+                    let mut merged = a.clone();
+                    merged.extend(right_nulls.clone());
+                    out.push(merged);
+                }
+            }
+            for (bi, b) in right.iter().enumerate() {
+                if !right_matched[bi] {
+                    let mut merged = left_nulls.clone();
+                    merged.extend(b.clone());
+                    out.push(merged);
+                }
+            }
         }
     }
 
@@ -8893,6 +8949,44 @@ fn eval_expr(
                     Ok(Lit::Bool {
                         v: like_pattern_matches(&subject, &pattern, op == "ilike"),
                     })
+                }
+                "regexp" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like lhs"))?;
+                    let pattern_str = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like rhs"))?;
+                    let re = regex::Regex::new(&pattern_str)
+                        .map_err(|e| anyhow::anyhow!("invalid regexp pattern: {e}"))?;
+                    Ok(Lit::Bool {
+                        v: re.is_match(&subject),
+                    })
+                }
+                "null_safe_eq" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("null_safe_eq requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("null_safe_eq requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    let result = match (&va, &vb) {
+                        (Lit::Null, Lit::Null) => true,
+                        (Lit::Null, _) | (_, Lit::Null) => false,
+                        _ => cmp_lit(&va, &vb)? == std::cmp::Ordering::Equal,
+                    };
+                    Ok(Lit::Bool { v: result })
                 }
                 "is_null" => {
                     let aa = a
@@ -10018,6 +10112,451 @@ fn eval_expr(
                     let score = vector_score(metric, a_vec, b_vec)?;
                     Ok(Lit::F64 { v: score })
                 }
+                // ── JSON functions ──────────────────────────────────
+                "json_extract" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_extract requires at least 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let path_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(path) = lit_to_string_for_like(&path_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    match mysql_json_path_extract(&parsed, &path) {
+                        Some(serde_json::Value::Null) => Ok(Lit::Null),
+                        Some(v) => Ok(Lit::Str {
+                            v: serde_json::to_string(&v).unwrap_or_default(),
+                        }),
+                        None => Ok(Lit::Null),
+                    }
+                }
+                "json_unquote" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_unquote requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    // If it parses as a JSON string, return the inner value
+                    if let Ok(serde_json::Value::String(inner)) =
+                        serde_json::from_str::<serde_json::Value>(&s)
+                    {
+                        return Ok(Lit::Str { v: inner });
+                    }
+                    // Otherwise return as-is
+                    Ok(Lit::Str { v: s })
+                }
+                "json_object" => {
+                    if fargs.len() % 2 != 0 {
+                        anyhow::bail!("json_object requires an even number of args");
+                    }
+                    let mut map = serde_json::Map::new();
+                    for pair in fargs.chunks(2) {
+                        let key = eval_expr(&pair[0], row, ctx, args)?;
+                        let val = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(key) = lit_to_string_for_like(&key) else {
+                            anyhow::bail!("json_object key must be a string");
+                        };
+                        map.insert(key, mysql_lit_to_json_value(&val));
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Object(map))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_array" => {
+                    let mut arr = Vec::with_capacity(fargs.len());
+                    for arg in fargs {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        arr.push(mysql_lit_to_json_value(&val));
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Array(arr))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_contains" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("json_contains requires 2 or 3 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let candidate = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(cand_str) = lit_to_string_for_like(&candidate) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(cand_val) = serde_json::from_str::<serde_json::Value>(&cand_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(2) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    Ok(Lit::U64 {
+                        v: u64::from(mysql_json_contains(&parsed, &cand_val)),
+                    })
+                }
+                "json_length" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("json_length requires 1 or 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(1) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    let len = match &parsed {
+                        serde_json::Value::Array(a) => a.len(),
+                        serde_json::Value::Object(m) => m.len(),
+                        _ => 1,
+                    };
+                    Ok(Lit::U64 { v: len as u64 })
+                }
+                "json_type" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_type requires 1 arg");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    let t = match &parsed {
+                        serde_json::Value::Null => "NULL",
+                        serde_json::Value::Bool(_) => "BOOLEAN",
+                        serde_json::Value::Number(n) => {
+                            if n.is_f64() {
+                                "DOUBLE"
+                            } else {
+                                "INTEGER"
+                            }
+                        }
+                        serde_json::Value::String(_) => "STRING",
+                        serde_json::Value::Array(_) => "ARRAY",
+                        serde_json::Value::Object(_) => "OBJECT",
+                    };
+                    Ok(Lit::Str { v: t.to_string() })
+                }
+                "json_valid" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_valid requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(val, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::U64 { v: 0 });
+                    };
+                    let valid = serde_json::from_str::<serde_json::Value>(&s).is_ok();
+                    Ok(Lit::U64 {
+                        v: u64::from(valid),
+                    })
+                }
+                "json_set" => {
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_set requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        let jval = mysql_lit_to_json_value(&val_lit);
+                        mysql_json_path_set(&mut parsed, &path, jval);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_keys" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("json_keys requires 1 or 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(1) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    let serde_json::Value::Object(map) = &parsed else {
+                        return Ok(Lit::Null);
+                    };
+                    let keys: Vec<serde_json::Value> = map
+                        .keys()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect();
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Array(keys))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_merge_preserve" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_merge_preserve requires at least 2 args");
+                    }
+                    let first = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(first_str) = lit_to_string_for_like(&first) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut result) =
+                        serde_json::from_str::<serde_json::Value>(&first_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    for arg in &fargs[1..] {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        let Some(s) = lit_to_string_for_like(&val) else {
+                            return Ok(Lit::Null);
+                        };
+                        let Ok(other) = serde_json::from_str::<serde_json::Value>(&s) else {
+                            return Ok(Lit::Null);
+                        };
+                        result = mysql_json_merge_preserve(result, other);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&result).unwrap_or_default(),
+                    })
+                }
+                "field" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("field requires at least 2 args");
+                    }
+                    let needle = eval_expr(&fargs[0], row, ctx, args)?;
+                    let needle_s = lit_to_string_for_like(&needle);
+                    for (i, arg) in fargs[1..].iter().enumerate() {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        let val_s = lit_to_string_for_like(&val);
+                        if needle_s == val_s {
+                            return Ok(Lit::U64 { v: (i + 1) as u64 });
+                        }
+                    }
+                    Ok(Lit::U64 { v: 0 })
+                }
+                "elt" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("elt requires at least 2 args");
+                    }
+                    let idx = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(idx) = lit_to_i64(&idx) else {
+                        return Ok(Lit::Null);
+                    };
+                    if idx < 1 || idx as usize > fargs.len() - 1 {
+                        return Ok(Lit::Null);
+                    }
+                    eval_expr(&fargs[idx as usize], row, ctx, args)
+                }
+                "inet_aton" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("inet_aton requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let parts: Vec<&str> = s.split('.').collect();
+                    if parts.len() != 4 {
+                        return Ok(Lit::Null);
+                    }
+                    let mut result: u64 = 0;
+                    for part in &parts {
+                        let Ok(octet) = part.parse::<u64>() else {
+                            return Ok(Lit::Null);
+                        };
+                        if octet > 255 {
+                            return Ok(Lit::Null);
+                        }
+                        result = result * 256 + octet;
+                    }
+                    Ok(Lit::U64 { v: result })
+                }
+                "inet_ntoa" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("inet_ntoa requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_u64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if n > 0xFFFF_FFFF {
+                        return Ok(Lit::Null);
+                    }
+                    let a = (n >> 24) & 0xFF;
+                    let b = (n >> 16) & 0xFF;
+                    let c = (n >> 8) & 0xFF;
+                    let d = n & 0xFF;
+                    Ok(Lit::Str { v: format!("{a}.{b}.{c}.{d}") })
+                }
+                "bin" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("bin requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        _ => {
+                            let Some(n) = lit_to_i64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::Str { v: format!("{:b}", n as u64) })
+                        }
+                    }
+                }
+                "oct" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("oct requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        _ => {
+                            let Some(n) = lit_to_i64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::Str { v: format!("{:o}", n as u64) })
+                        }
+                    }
+                }
+                "conv" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("conv requires 3 args");
+                    }
+                    let n_lit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from_base = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to_base = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(n_str) = lit_to_string_for_like(&n_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let (Some(from_b), Some(to_b)) = (lit_to_i64(&from_base), lit_to_i64(&to_base)) else {
+                        return Ok(Lit::Null);
+                    };
+                    let from_b_abs = from_b.unsigned_abs() as u32;
+                    let to_b_abs = to_b.unsigned_abs() as u32;
+                    if !(2..=36).contains(&from_b_abs) || !(2..=36).contains(&to_b_abs) {
+                        return Ok(Lit::Null);
+                    }
+                    let n_str = n_str.trim();
+                    let negative = n_str.starts_with('-');
+                    let digits = if negative { &n_str[1..] } else { n_str };
+                    let Ok(val) = u64::from_str_radix(digits, from_b_abs) else {
+                        return Ok(Lit::Null);
+                    };
+                    let converted = mysql_u64_to_base_string(val, to_b_abs);
+                    if negative && to_b < 0 {
+                        Ok(Lit::Str { v: format!("-{converted}") })
+                    } else {
+                        Ok(Lit::Str { v: converted })
+                    }
+                }
+                "crc32" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("crc32 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 { v: u64::from(crc32_hash(s.as_bytes())) })
+                }
+                "md5" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("md5 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let digest = Md5::digest(s.as_bytes());
+                    Ok(Lit::Str { v: hex_encode(&digest) })
+                }
+                "sha1" | "sha" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let digest = Sha1::digest(s.as_bytes());
+                    Ok(Lit::Str { v: hex_encode(&digest) })
+                }
+                "sha2" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("sha2 requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(hash_len) = lit_to_i64(&len_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let hex = match hash_len {
+                        224 => hex_encode(&Sha224::digest(s.as_bytes())),
+                        256 | 0 => hex_encode(&Sha256::digest(s.as_bytes())),
+                        384 => hex_encode(&Sha384::digest(s.as_bytes())),
+                        512 => hex_encode(&Sha512::digest(s.as_bytes())),
+                        _ => return Ok(Lit::Null),
+                    };
+                    Ok(Lit::Str { v: hex })
+                }
                 _ => anyhow::bail!("unsupported function: {name}"),
             }
         }
@@ -10089,6 +10628,234 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
     }
 }
 
+// ── JSON helpers ──────────────────────────────────────────────
+
+/// Simple JSONPath extractor supporting `$`, `.key`, and `[n]`.
+fn mysql_json_path_extract(
+    doc: &serde_json::Value,
+    path: &str,
+) -> Option<serde_json::Value> {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return None;
+    }
+    let rest = &path[1..];
+    let mut current = doc.clone();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next(); // consume '.'
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                if key.is_empty() {
+                    return None;
+                }
+                current = current.get(&key)?.clone();
+            }
+            Some('[') => {
+                chars.next(); // consume '['
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                let idx: usize = idx_str.parse().ok()?;
+                current = current.get(idx)?.clone();
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Set a value at a JSONPath location (supports `$.key` and `$[n]`).
+fn mysql_json_path_set(
+    doc: &mut serde_json::Value,
+    path: &str,
+    value: serde_json::Value,
+) {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return;
+    }
+    let rest = &path[1..];
+    if rest.is_empty() {
+        *doc = value;
+        return;
+    }
+
+    // Parse path segments
+    let mut segments: Vec<JsonPathSeg> = Vec::new();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next();
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                segments.push(JsonPathSeg::Key(key));
+            }
+            Some('[') => {
+                chars.next();
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    segments.push(JsonPathSeg::Index(idx));
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut current = doc;
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i + 1 == segments.len();
+        match seg {
+            JsonPathSeg::Key(key) => {
+                if is_last {
+                    if let serde_json::Value::Object(map) = current {
+                        map.insert(key.clone(), value);
+                    }
+                    return;
+                }
+                if !current.is_object() {
+                    return;
+                }
+                let obj = current.as_object_mut().unwrap();
+                if !obj.contains_key(key) {
+                    // Create intermediate object
+                    obj.insert(key.clone(), serde_json::Value::Object(Default::default()));
+                }
+                current = obj.get_mut(key).unwrap();
+            }
+            JsonPathSeg::Index(idx) => {
+                if is_last {
+                    if let serde_json::Value::Array(arr) = current {
+                        if *idx < arr.len() {
+                            arr[*idx] = value;
+                        }
+                    }
+                    return;
+                }
+                if !current.is_array() {
+                    return;
+                }
+                let arr = current.as_array_mut().unwrap();
+                if *idx >= arr.len() {
+                    return;
+                }
+                current = &mut arr[*idx];
+            }
+        }
+    }
+}
+
+enum JsonPathSeg {
+    Key(String),
+    Index(usize),
+}
+
+/// Convert a Lit to a serde_json::Value for building JSON results.
+fn mysql_lit_to_json_value(lit: &Lit) -> serde_json::Value {
+    match lit {
+        Lit::Null => serde_json::Value::Null,
+        Lit::Bool { v } => serde_json::Value::Bool(*v),
+        Lit::I64 { v } => serde_json::json!(*v),
+        Lit::U64 { v } => serde_json::json!(*v),
+        Lit::F64 { v } => serde_json::json!(*v),
+        Lit::Str { v } => {
+            // If it looks like valid JSON, embed it directly so
+            // json_object("k", json_object(...)) nests properly.
+            if let Ok(jv) = serde_json::from_str::<serde_json::Value>(v) {
+                jv
+            } else {
+                serde_json::Value::String(v.clone())
+            }
+        }
+        _ => {
+            let s = lit_to_string_for_like(lit).unwrap_or_default();
+            serde_json::Value::String(s)
+        }
+    }
+}
+
+/// MySQL JSON_CONTAINS semantics: check if `target` contains `candidate`.
+fn mysql_json_contains(target: &serde_json::Value, candidate: &serde_json::Value) -> bool {
+    match (target, candidate) {
+        (serde_json::Value::Array(arr), _) => {
+            // Array contains candidate if any element contains it,
+            // or if candidate is an array and all its elements are contained.
+            if let serde_json::Value::Array(cand_arr) = candidate {
+                cand_arr
+                    .iter()
+                    .all(|c| arr.iter().any(|a| mysql_json_contains(a, c)))
+            } else {
+                arr.iter().any(|a| mysql_json_contains(a, candidate))
+            }
+        }
+        (serde_json::Value::Object(tmap), serde_json::Value::Object(cmap)) => cmap
+            .iter()
+            .all(|(k, cv)| tmap.get(k).is_some_and(|tv| mysql_json_contains(tv, cv))),
+        _ => target == candidate,
+    }
+}
+
+/// MySQL JSON_MERGE_PRESERVE: merge two JSON values.
+fn mysql_json_merge_preserve(
+    a: serde_json::Value,
+    b: serde_json::Value,
+) -> serde_json::Value {
+    match (a, b) {
+        (serde_json::Value::Object(mut ma), serde_json::Value::Object(mb)) => {
+            for (k, vb) in mb {
+                let merged = match ma.remove(&k) {
+                    Some(va) => mysql_json_merge_preserve(va, vb),
+                    None => vb,
+                };
+                ma.insert(k, merged);
+            }
+            serde_json::Value::Object(ma)
+        }
+        (serde_json::Value::Array(mut aa), serde_json::Value::Array(ab)) => {
+            aa.extend(ab);
+            serde_json::Value::Array(aa)
+        }
+        (serde_json::Value::Array(mut aa), b) => {
+            aa.push(b);
+            serde_json::Value::Array(aa)
+        }
+        (a, serde_json::Value::Array(mut ab)) => {
+            ab.insert(0, a);
+            serde_json::Value::Array(ab)
+        }
+        (a, b) => serde_json::Value::Array(vec![a, b]),
+    }
+}
+
 fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
     match lit {
         Lit::Null => None,
@@ -10116,6 +10883,66 @@ fn lit_to_i64(lit: &Lit) -> Option<i64> {
         Lit::Str { v } => v.parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn lit_to_u64(lit: &Lit) -> Option<u64> {
+    match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
+        Lit::I64 { v } => u64::try_from(*v).ok(),
+        Lit::U64 { v } => Some(*v),
+        Lit::F64 { v } => {
+            if *v >= 0.0 {
+                Some(*v as u64)
+            } else {
+                None
+            }
+        }
+        Lit::Dec { v } | Lit::Str { v } => v.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn crc32_hash(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for i in 0..256u32 {
+            let mut crc = i;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = 0xEDB8_8320 ^ (crc >> 1);
+                } else {
+                    crc >>= 1;
+                }
+            }
+            t[i as usize] = crc;
+        }
+        t
+    });
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+fn mysql_u64_to_base_string(mut val: u64, base: u32) -> String {
+    if val == 0 {
+        return "0".to_string();
+    }
+    let digits = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let base = base as u64;
+    let mut buf = Vec::new();
+    while val > 0 {
+        buf.push(digits[(val % base) as usize]);
+        val /= base;
+    }
+    buf.reverse();
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 fn mysql_lit_is_integral_like(lit: &Lit) -> bool {
@@ -14209,6 +15036,8 @@ fn sql_is_keyword(word: &str) -> bool {
             | "not"
             | "like"
             | "ilike"
+            | "regexp"
+            | "rlike"
             | "between"
             | "is"
             | "group"
@@ -14475,7 +15304,7 @@ fn token_op(token: Option<&SqlToken>) -> Option<&str> {
         }) => Some(op.as_str()),
         Some(SqlToken {
             kind: SqlTokenKind::Keyword(kw),
-        }) if matches!(kw.as_str(), "in" | "like" | "ilike" | "between") => Some(kw.as_str()),
+        }) if matches!(kw.as_str(), "in" | "like" | "ilike" | "regexp" | "rlike" | "between") => Some(kw.as_str()),
         _ => None,
     }
 }
@@ -14884,6 +15713,8 @@ fn render_expr_summary(expr: &Expr) -> String {
             "gte" => binary_expr_summary(">=", a, b),
             "like" => binary_expr_summary("like", a, b),
             "ilike" => binary_expr_summary("ilike", a, b),
+            "regexp" => binary_expr_summary("regexp", a, b),
+            "null_safe_eq" => binary_expr_summary("<=>", a, b),
             "in" => {
                 let left = a
                     .as_ref()

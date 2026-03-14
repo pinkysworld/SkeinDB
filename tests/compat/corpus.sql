@@ -945,3 +945,90 @@ SHOW PROCEDURE STATUS;
 SHOW STATUS LIKE 'Threads_connected';
 SHOW ENGINES;
 SHOW GRANTS;
+
+-- ============================================================
+-- Derived tables (FROM subqueries)
+-- ============================================================
+SELECT t.post_title FROM (SELECT ID, post_title FROM wp_posts WHERE post_status = 'publish') AS t WHERE t.ID > 0;
+
+-- ============================================================
+-- CTEs (WITH ... AS)
+-- ============================================================
+WITH published AS (SELECT ID, post_title FROM wp_posts WHERE post_status = 'publish') SELECT * FROM published;
+
+-- ============================================================
+-- REGEXP / RLIKE
+-- ============================================================
+SELECT * FROM wp_posts WHERE post_title REGEXP '^Hello';
+SELECT * FROM wp_posts WHERE post_title RLIKE 'World$';
+SELECT * FROM wp_options WHERE option_name NOT REGEXP '^site';
+
+-- ============================================================
+-- NULL-safe equality <=>
+-- ============================================================
+SELECT * FROM wp_options WHERE option_name <=> 'siteurl';
+SELECT * FROM wp_options WHERE option_name <=> NULL;
+
+-- ============================================================
+-- NATURAL JOIN
+-- ============================================================
+SELECT * FROM wp_posts NATURAL JOIN wp_users;
+
+-- ============================================================
+-- FULL OUTER JOIN (syntax acceptance)
+-- ============================================================
+SELECT * FROM wp_posts AS p FULL OUTER JOIN wp_users AS u ON p.post_author = u.ID;
+
+-- ============================================================
+-- JSON functions
+-- ============================================================
+SELECT JSON_OBJECT('key', 'value', 'num', 42);
+SELECT JSON_ARRAY(1, 2, 'three');
+SELECT JSON_EXTRACT('{"a":1,"b":{"c":2}}', '$.b.c');
+SELECT JSON_UNQUOTE('"hello"');
+SELECT JSON_LENGTH('[1,2,3]');
+SELECT JSON_TYPE('{"a":1}');
+SELECT JSON_TYPE('"hello"');
+SELECT JSON_TYPE('42');
+SELECT JSON_TYPE('null');
+SELECT JSON_VALID('{"a":1}');
+SELECT JSON_VALID('not json');
+SELECT JSON_CONTAINS('[1,2,3]', '2');
+SELECT JSON_KEYS('{"a":1,"b":2}');
+SELECT JSON_SET('{"a":1}', '$.b', 2);
+SELECT JSON_MERGE_PRESERVE('[1,2]', '[3,4]');
+
+-- ============================================================
+-- Multi-table DELETE (syntax acceptance)
+-- ============================================================
+DELETE p FROM wp_posts AS p JOIN wp_users AS u ON p.post_author = u.ID WHERE u.user_login = 'nonexistent';
+
+-- ============================================================
+-- Multi-table UPDATE (syntax acceptance)
+-- ============================================================
+UPDATE wp_posts AS p JOIN wp_users AS u ON p.post_author = u.ID SET p.post_status = 'updated' WHERE u.user_login = 'nonexistent';
+
+-- ============================================================
+-- Additional MySQL scalar functions
+-- ============================================================
+SELECT IFNULL(NULL, 'default');
+SELECT IFNULL('value', 'default');
+SELECT NULLIF(1, 1);
+SELECT NULLIF(1, 2);
+SELECT COALESCE(NULL, NULL, 'found');
+SELECT IF(1, 'yes', 'no');
+SELECT IF(0, 'yes', 'no');
+SELECT GREATEST(1, 3, 2);
+SELECT LEAST(1, 3, 2);
+SELECT FIELD('b', 'a', 'b', 'c');
+SELECT ELT(2, 'a', 'b', 'c');
+SELECT FIND_IN_SET('b', 'a,b,c');
+SELECT INET_ATON('192.168.1.1');
+SELECT INET_NTOA(3232235777);
+SELECT BIN(10);
+SELECT OCT(10);
+SELECT CONV(255, 10, 16);
+SELECT CRC32('hello');
+SELECT MD5('hello');
+SELECT SHA1('hello');
+SELECT SHA2('hello', 256);

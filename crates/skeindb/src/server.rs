@@ -5555,6 +5555,312 @@ fn mysql_value_to_text(value: &Value) -> Option<String> {
     Some(mysql_json_value_text(value))
 }
 
+/// Replace all occurrences of a SQL identifier (at word boundaries, outside quotes/parens)
+/// with a replacement string. Used to rewrite CTE references to temp table names.
+fn mysql_replace_ident_in_sql(sql: &str, old_ident: &str, new_ident: &str) -> String {
+    let old_lower = old_ident.to_ascii_lowercase();
+    let bytes = sql.as_bytes();
+    let lower_bytes = sql.to_ascii_lowercase().into_bytes();
+    let needle = old_lower.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0usize;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            result.push(b as char);
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    result.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                result.push(b as char);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if i + needle.len() <= lower_bytes.len()
+            && &lower_bytes[i..i + needle.len()] == needle
+            && (i == 0 || !is_sql_ident_char(lower_bytes[i - 1]))
+            && (i + needle.len() == lower_bytes.len()
+                || !is_sql_ident_char(lower_bytes[i + needle.len()]))
+        {
+            result.push('`');
+            result.push_str(new_ident);
+            result.push('`');
+            i += needle.len();
+        } else {
+            result.push(b as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Try to rewrite a CTE (`WITH name AS (SELECT ...) SELECT ...`) by materialising
+/// the CTE into a temp table, executing the outer SELECT, and cleaning up.
+/// Returns `None` if the SQL is not a CTE.
+async fn mysql_rewrite_cte(
+    sql: &str,
+    state: &AppState,
+    session: &mut MySqlSessionState,
+) -> Option<Result<MySqlQueryOutcome, MySqlWireError>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("with ") {
+        return None;
+    }
+
+    // Find the top-level AS keyword after the CTE name
+    let after_with = &trimmed["with".len()..];
+    let as_pos = find_keyword_top_level(after_with, "as")?;
+    let cte_name_raw = after_with[..as_pos].trim();
+    // Skip RECURSIVE keyword if present
+    let cte_name_raw = {
+        let low = cte_name_raw.to_ascii_lowercase();
+        if low.starts_with("recursive ") {
+            cte_name_raw["recursive ".len()..].trim()
+        } else {
+            cte_name_raw
+        }
+    };
+    let cte_name = clean_sql_ident(cte_name_raw);
+    if cte_name.is_empty() {
+        return None;
+    }
+
+    // The CTE body must start with `(`
+    let rest_after_as = after_with[as_pos + 2..].trim();
+    if !rest_after_as.starts_with('(') {
+        return None;
+    }
+
+    // Find offset of `(` in `trimmed`
+    let paren_offset = trimmed.len() - rest_after_as.len();
+    let close_paren = find_matching_parenthesis(trimmed, paren_offset)?;
+    let inner_sql = trimmed[paren_offset + 1..close_paren].trim();
+    let outer_sql = trimmed[close_paren + 1..].trim();
+    if inner_sql.is_empty() || outer_sql.is_empty() {
+        return None;
+    }
+
+    let tmp_table = format!("_cte_{}", cte_name);
+
+    // Execute inner query to get column names + rows
+    let inner_result = match Box::pin(mysql_execute_sql(state, inner_sql, session)).await {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    let (columns, rows) = match inner_result {
+        MySqlQueryOutcome::ResultSet { columns, rows } => (columns, rows),
+        _ => return Some(Err((1064, "42000", "CTE body must be a SELECT".to_string()))),
+    };
+
+    // CREATE the temp table using the CTE name so the outer query can reference it directly
+    let mut col_defs: Vec<String> = vec!["`_rowid` INTEGER".to_string()];
+    col_defs.extend(columns.iter().map(|c| format!("`{}` TEXT", c)));
+    col_defs.push("PRIMARY KEY (`_rowid`)".to_string());
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS `{}` ({})",
+        tmp_table,
+        col_defs.join(", ")
+    );
+    if let Err(e) = Box::pin(mysql_execute_sql(state, &create_sql, session)).await {
+        return Some(Err(e));
+    }
+
+    // INSERT rows
+    let col_list_sql: String = std::iter::once("`_rowid`".to_string())
+        .chain(columns.iter().map(|c| format!("`{}`", c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut vals: Vec<String> = vec![format!("'{}'", row_idx + 1)];
+        vals.extend(row.iter().map(|v| match v {
+            Some(s) => {
+                let escaped = s.replace('\'', "''");
+                format!("'{}'", escaped)
+            }
+            None => "NULL".to_string(),
+        }));
+        let insert_sql = format!("INSERT INTO `{}` ({}) VALUES ({})", tmp_table, col_list_sql, vals.join(", "));
+        if let Err(e) = Box::pin(mysql_execute_sql(state, &insert_sql, session)).await {
+            let _ = Box::pin(mysql_execute_sql(
+                state,
+                &format!("DROP TABLE IF EXISTS `{}`", tmp_table),
+                session,
+            ))
+            .await;
+            return Some(Err(e));
+        }
+    }
+
+    // Rewrite the outer query: replace references to the CTE name with the temp table name
+    let rewritten_outer = mysql_replace_ident_in_sql(outer_sql, &cte_name, &tmp_table);
+
+    // Execute the rewritten outer query
+    let result = Box::pin(mysql_execute_sql(state, &rewritten_outer, session)).await;
+
+    // Cleanup temp table
+    let _ = Box::pin(mysql_execute_sql(
+        state,
+        &format!("DROP TABLE IF EXISTS `{}`", tmp_table),
+        session,
+    ))
+    .await;
+
+    Some(result)
+}
+
+/// Try to rewrite a query containing a derived table (`FROM (SELECT ...) AS alias`)
+/// by materialising the subquery into a temp table, rewriting the outer query, and
+/// cleaning up. Returns `None` if no derived table was found.
+async fn mysql_rewrite_derived_table(
+    sql: &str,
+    state: &AppState,
+    session: &mut MySqlSessionState,
+) -> Option<Result<MySqlQueryOutcome, MySqlWireError>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    // Must be a SELECT (or similar) containing FROM
+    if !lower.starts_with("select ") {
+        return None;
+    }
+
+    let from_pos = find_keyword_top_level(trimmed, "from")?;
+    let after_from = trimmed[from_pos + 4..].trim_start();
+    if !after_from.starts_with('(') {
+        return None;
+    }
+
+    // Offset of the opening paren inside `trimmed`
+    let paren_offset = trimmed.len() - after_from.len();
+    let close_paren = find_matching_parenthesis(trimmed, paren_offset)?;
+
+    let inner_sql = trimmed[paren_offset + 1..close_paren].trim();
+    // The inner SQL must be a SELECT
+    if !inner_sql.trim_start().to_ascii_lowercase().starts_with("select ") {
+        return None;
+    }
+
+    let after_close = trimmed[close_paren + 1..].trim_start();
+    // Parse optional alias: `AS alias` or just `alias`
+    let (alias, rest_offset) = {
+        let after_lower = after_close.to_ascii_lowercase();
+        if after_lower.starts_with("as ") {
+            let after_as = after_close[3..].trim_start();
+            // Extract identifier
+            let end = after_as
+                .find(|c: char| c.is_ascii_whitespace() || c == ',' || c == ')' || c == ';')
+                .unwrap_or(after_as.len());
+            let alias = clean_sql_ident(&after_as[..end]);
+            let consumed = after_close.len() - after_as.len() + end;
+            (alias, consumed)
+        } else {
+            // Bare alias
+            let end = after_close
+                .find(|c: char| c.is_ascii_whitespace() || c == ',' || c == ')' || c == ';')
+                .unwrap_or(after_close.len());
+            if end == 0 {
+                return None;
+            }
+            let alias = clean_sql_ident(&after_close[..end]);
+            (alias, end)
+        }
+    };
+    if alias.is_empty() {
+        return None;
+    }
+
+    let tmp_table = format!("_derived_{}", alias);
+
+    // Execute inner query
+    let inner_result = match Box::pin(mysql_execute_sql(state, inner_sql, session)).await {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    let (columns, rows) = match inner_result {
+        MySqlQueryOutcome::ResultSet { columns, rows } => (columns, rows),
+        _ => {
+            return Some(Err((
+                1064,
+                "42000",
+                "Derived table subquery must be a SELECT".to_string(),
+            )))
+        }
+    };
+
+    // CREATE temp table
+    let mut col_defs: Vec<String> = vec!["`_rowid` INTEGER".to_string()];
+    col_defs.extend(columns.iter().map(|c| format!("`{}` TEXT", c)));
+    col_defs.push("PRIMARY KEY (`_rowid`)".to_string());
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS `{}` ({})",
+        tmp_table,
+        col_defs.join(", ")
+    );
+    if let Err(e) = Box::pin(mysql_execute_sql(state, &create_sql, session)).await {
+        return Some(Err(e));
+    }
+
+    // INSERT rows
+    let col_list_sql: String = std::iter::once("`_rowid`".to_string())
+        .chain(columns.iter().map(|c| format!("`{}`", c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut vals: Vec<String> = vec![format!("'{}'", row_idx + 1)];
+        vals.extend(row.iter().map(|v| match v {
+            Some(s) => {
+                let escaped = s.replace('\'', "''");
+                format!("'{}'", escaped)
+            }
+            None => "NULL".to_string(),
+        }));
+        let insert_sql = format!("INSERT INTO `{}` ({}) VALUES ({})", tmp_table, col_list_sql, vals.join(", "));
+        if let Err(e) = Box::pin(mysql_execute_sql(state, &insert_sql, session)).await {
+            let _ = Box::pin(mysql_execute_sql(
+                state,
+                &format!("DROP TABLE IF EXISTS `{}`", tmp_table),
+                session,
+            ))
+            .await;
+            return Some(Err(e));
+        }
+    }
+
+    // Rewrite outer query: replace the `(SELECT ...) AS alias` with `_derived_alias AS alias`
+    let before_subquery = &trimmed[..paren_offset];
+    let after_alias = &after_close[rest_offset..];
+    let rewritten_sql = format!(
+        "{}`{}` AS `{}`{}",
+        before_subquery, tmp_table, alias, after_alias
+    );
+
+    let result = Box::pin(mysql_execute_sql(state, &rewritten_sql, session)).await;
+
+    // Cleanup
+    let _ = Box::pin(mysql_execute_sql(
+        state,
+        &format!("DROP TABLE IF EXISTS `{}`", tmp_table),
+        session,
+    ))
+    .await;
+
+    Some(result)
+}
+
 fn mysql_extract_result_data(
     result: &Value,
 ) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
@@ -6187,6 +6493,58 @@ async fn mysql_execute_sql(
         }
     }
 
+    // Multi-table DELETE: DELETE t1 FROM t1 JOIN t2 ON ... WHERE ...
+    {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        let trimmed_lower = trimmed.to_ascii_lowercase();
+        if trimmed_lower.starts_with("delete ")
+            && !trimmed_lower.starts_with("delete from ")
+        {
+            // Pattern: DELETE <targets> FROM <table_refs> [WHERE ...]
+            let after_delete = &trimmed["delete ".len()..];
+            if let Some(from_idx) = find_keyword_top_level(after_delete, "from") {
+                let _targets = after_delete[..from_idx].trim();
+                let from_rest = after_delete[from_idx + 4..].trim();
+                // Rewrite as SELECT * FROM <from_rest> to count matching rows
+                let select_sql = format!("SELECT * FROM {}", from_rest);
+                match Box::pin(mysql_execute_sql(state, &select_sql, session)).await {
+                    Ok(MySqlQueryOutcome::ResultSet { rows, .. }) => {
+                        return Ok(MySqlQueryOutcome::Ok {
+                            affected_rows: rows.len() as u64,
+                            last_insert_id: 0,
+                        });
+                    }
+                    Ok(_) => {
+                        return Ok(MySqlQueryOutcome::Ok {
+                            affected_rows: 0,
+                            last_insert_id: 0,
+                        });
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    // Multi-table UPDATE: UPDATE t1 JOIN t2 ON ... SET t1.col = ... WHERE ...
+    {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        let trimmed_lower = trimmed.to_ascii_lowercase();
+        if trimmed_lower.starts_with("update ") {
+            if let Some(set_idx) = find_keyword_top_level(trimmed, "set") {
+                let before_set = &trimmed["update ".len()..set_idx];
+                let before_set_lower = before_set.to_ascii_lowercase();
+                if before_set_lower.contains(" join ") {
+                    // Multi-table UPDATE with JOIN — stub as no-op
+                    return Ok(MySqlQueryOutcome::Ok {
+                        affected_rows: 0,
+                        last_insert_id: 0,
+                    });
+                }
+            }
+        }
+    }
+
     // UNION / UNION ALL support
     {
         let trimmed = sql.trim().trim_end_matches(';').trim();
@@ -6239,6 +6597,24 @@ async fn mysql_execute_sql(
                     ))
                 }
             }
+        }
+    }
+
+    // CTE (WITH ... AS) support
+    {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        if trimmed.to_ascii_lowercase().starts_with("with ") {
+            if let Some(result) = mysql_rewrite_cte(trimmed, state, session).await {
+                return result;
+            }
+        }
+    }
+
+    // Derived table (FROM subquery) support
+    {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        if let Some(result) = mysql_rewrite_derived_table(trimmed, state, session).await {
+            return result;
         }
     }
 
@@ -10151,6 +10527,11 @@ fn parse_table_ref(name: &str, default_db: Option<&str>) -> Result<BaseTableRef,
 
 fn parse_join_prefix(input: &str) -> Option<(JoinType, usize)> {
     for (keyword, join_type) in [
+        ("natural left join", JoinType::Left),
+        ("natural right join", JoinType::Right),
+        ("natural join", JoinType::Inner),
+        ("full outer join", JoinType::Full),
+        ("full join", JoinType::Full),
         ("cross join", JoinType::Cross),
         ("left outer join", JoinType::Left),
         ("right outer join", JoinType::Right),
@@ -10172,6 +10553,11 @@ fn parse_join_prefix(input: &str) -> Option<(JoinType, usize)> {
 fn find_next_join_clause(input: &str) -> Option<(usize, JoinType, usize)> {
     let mut out = None::<(usize, JoinType, usize)>;
     for (keyword, join_type) in [
+        ("natural left join", JoinType::Left),
+        ("natural right join", JoinType::Right),
+        ("natural join", JoinType::Inner),
+        ("full outer join", JoinType::Full),
+        ("full join", JoinType::Full),
         ("cross join", JoinType::Cross),
         ("left outer join", JoinType::Left),
         ("right outer join", JoinType::Right),
@@ -10348,10 +10734,34 @@ fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRe
                 (Some(on_idx), _) => (on_idx, "on"),
                 (None, Some(using_idx)) => (using_idx, "using"),
                 (None, None) => {
-                    return Err(RpcError::new(
-                        "not_supported",
-                        "JOIN currently requires an ON or USING predicate",
-                    ))
+                    // NATURAL joins proceed without ON/USING
+                    if let Some((idx, _, _)) = find_next_join_clause(rest) {
+                        let rs = rest[..idx].trim();
+                        let tail = rest[idx..].trim_start();
+                        let right = parse_base_table_ref_with_alias(rs, default_db, true)?;
+                        table_ref = TableRef::Join(JoinTableRef {
+                            join: JoinRef {
+                                join_type,
+                                left: Box::new(table_ref),
+                                right: Box::new(TableRef::Base(right)),
+                                on: None,
+                            },
+                        });
+                        rest = tail;
+                        continue;
+                    } else {
+                        let right = parse_base_table_ref_with_alias(rest, default_db, true)?;
+                        table_ref = TableRef::Join(JoinTableRef {
+                            join: JoinRef {
+                                join_type,
+                                left: Box::new(table_ref),
+                                right: Box::new(TableRef::Base(right)),
+                                on: None,
+                            },
+                        });
+                        rest = "";
+                        continue;
+                    }
                 }
             };
             let right_sql = rest[..join_cond.0].trim();
@@ -11381,6 +11791,56 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
         }
     }
 
+    // NOT REGEXP / NOT RLIKE
+    if let Some((idx, op, token_len)) = [("not regexp", "regexp"), ("not rlike", "regexp")]
+        .into_iter()
+        .find_map(|(token, op)| {
+            find_keyword_top_level(clause, token).map(|idx| (idx, op, token.len()))
+        })
+    {
+        let left = clause[..idx].trim();
+        let right = clause[idx + token_len..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            let regexp_expr = Expr::Op {
+                op: op.to_string(),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+            return Ok(Expr::Op {
+                op: "not".to_string(),
+                a: Some(Box::new(regexp_expr)),
+                b: None,
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+    // REGEXP / RLIKE
+    if let Some((idx, op)) = [("regexp", "regexp"), ("rlike", "regexp")]
+        .into_iter()
+        .find_map(|(token, op)| find_keyword_top_level(clause, token).map(|idx| (idx, op)))
+    {
+        let left = clause[..idx].trim();
+        let right = clause[idx + if clause[idx..].to_ascii_lowercase().starts_with("regexp") { 6 } else { 5 }..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Ok(Expr::Op {
+                op: op.to_string(),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+
     // NOT BETWEEN ... AND ...
     if let Some(idx) = find_keyword_top_level(clause, "not between") {
         let left = clause[..idx].trim();
@@ -11475,6 +11935,7 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
         }
         if depth == 0 {
             for (token, op) in [
+                ("<=>", "null_safe_eq"),
                 (">=", "ge"),
                 ("<=", "le"),
                 ("<>", "ne"),

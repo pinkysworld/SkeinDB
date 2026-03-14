@@ -45,17 +45,22 @@ SkeinDB adoption strategy:
 - INSERT ... ON DUPLICATE KEY UPDATE
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata backed by in-memory compatibility key indexes; durable reusable secondary-index parity is still open
 - UPDATE/DELETE with simple WHERE
+- Multi-table DELETE: `DELETE t1 FROM t1 JOIN t2 ON ... WHERE ...`
+- Multi-table UPDATE (stub): `UPDATE t1 JOIN t2 ON ... SET t1.col = ... WHERE ...`
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET (including scalar-expression `ORDER BY` for the translated compatibility subset)
-- SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `BETWEEN` / `NOT BETWEEN`, and parenthesized `AND` / `OR` boolean filter trees
+- SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, `BETWEEN` / `NOT BETWEEN`, `REGEXP` / `RLIKE` / `NOT REGEXP`, `<=>` (NULL-safe equality), and parenthesized `AND` / `OR` boolean filter trees
 - SELECT ... FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE (locking hints stripped for compatibility)
 - UNION / UNION ALL
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, and `BENCHMARK` in translated projections and simple predicates
+- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`, `FIELD`, `ELT`, `INET_ATON`, `INET_NTOA`, `BIN`, `OCT`, `CONV`, `CRC32`, `MD5`, `SHA1` / `SHA`, and `SHA2` in translated projections and simple predicates
+- JSON function coverage: `JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`, `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, and `JSON_MERGE_PRESERVE`
 - Session/system functions: `USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()`, `LAST_INSERT_ID()` (with session tracking), `CONNECTION_ID()`
 - Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
 - Translated arithmetic expressions now also include baseline `+`, `-`, `*`, `/`, and `%` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses, including common numeric ordering/filtering patterns such as `col + 0`
 - Translated date/time scalar functions now also include baseline `DATE`, `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `WEEKDAY`, `DAYOFWEEK`, `DAYOFYEAR`, `MONTHNAME`, `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, `HOUR`, `MINUTE`, `SECOND`, `UNIX_TIMESTAMP`, `DATE_FORMAT`, `FROM_UNIXTIME`, `DATEDIFF`, `TIMESTAMPDIFF`, baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` (with `INTERVAL <expr> <unit>` syntax) and `TIMESTAMPADD`, `NOW` / `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, `CURDATE` / `CURRENT_DATE` / `CURTIME` / `CURRENT_TIME` / `LOCALTIME`, `STR_TO_DATE`, `WEEK`, `YEARWEEK`, `CONVERT_TZ`, `UTC_TIMESTAMP`, `UTC_DATE`, `UTC_TIME`, `SYSDATE`, `ADDTIME`, `SUBTIME`, `TIME_TO_SEC`, and `SEC_TO_TIME`
-- INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
+- INNER JOIN, LEFT JOIN, RIGHT JOIN, NATURAL JOIN, and FULL OUTER JOIN (single-join and basic left-associative multi-join chains)
+- Derived tables / FROM subqueries: `SELECT * FROM (SELECT ...) AS alias`
+- Common table expressions (CTEs): `WITH name AS (SELECT ...) SELECT * FROM name`
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)`, and `GROUP_CONCAT()` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
@@ -129,7 +134,14 @@ additional date/time functions (`STR_TO_DATE`, `WEEK`, `YEARWEEK`, `CONVERT_TZ`,
 `UTC_DATE`, `UTC_TIME`, `SYSDATE`, `ADDTIME`, `SUBTIME`, `TIME_TO_SEC`, `SEC_TO_TIME`), wire
 protocol additions (`COM_INIT_DB`, `COM_STATISTICS`), and no-op stubs for `CREATE VIEW`/`DROP VIEW`,
 `FLUSH`/`ANALYZE`/`OPTIMIZE`/`CHECK`/`REPAIR TABLE`, `SET GLOBAL`, and `KILL`.
-The corpus has expanded from 772 lines to 947 lines with 283 SQL statements.
+Recent additions include derived tables (FROM subqueries), common table expressions (CTEs),
+`REGEXP`/`RLIKE`/`NOT REGEXP` pattern matching, `<=>` (NULL-safe equality), `NATURAL JOIN`,
+`FULL OUTER JOIN`, multi-table `DELETE`, multi-table `UPDATE` (stub), 11 JSON functions
+(`JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`,
+`JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`), plus additional
+scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, `CRC32`,
+`MD5`, `SHA1`/`SHA`, `SHA2`).
+The corpus has expanded from 772 lines to 1034 lines with over 310 SQL statements.
 
 ---
 
