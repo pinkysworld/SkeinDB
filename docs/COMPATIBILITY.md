@@ -1,11 +1,12 @@
-# SkeinDB Compatibility (MySQL / SQL)
+# SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: Draft v0.1
-Last updated: 2026-03-08
+Status: Draft v0.2
+Last updated: 2026-03-12
 
 SkeinDB adoption strategy:
-- Speak MySQL wire protocol so existing apps work unchanged.
-- Translate MySQL SQL into SkeinIR.
+- Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
+- Speak PostgreSQL wire protocol (port 5432, planned) so existing PG apps work unchanged.
+- Translate MySQL / PostgreSQL SQL into SkeinIR.
 - Provide SkeinQL native API + console for proprietary features.
 
 ---
@@ -171,3 +172,34 @@ in ways that do not require new SQL grammar:
 
 Notes:
 - These are intentionally namespaced under `skein.*` and are disabled by default in strict compatibility mode.
+
+---
+
+## 6) PostgreSQL compatibility (planned)
+
+SkeinDB will add a PostgreSQL v3 wire protocol listener on a separate port (default 5432).
+
+### Target scope
+- **Wire protocol:** PostgreSQL v3 frontend/backend message flow
+- **Authentication:** SCRAM-SHA-256 + trust mode
+- **SQL dialect extensions:** `RETURNING`, dollar-quoting (`$$...$$`), `::` type casts, `ILIKE`, array literals, `ON CONFLICT DO UPDATE/NOTHING`
+- **System catalogs:** `pg_catalog.pg_type`, `pg_catalog.pg_class`, `pg_catalog.pg_namespace`, `pg_catalog.pg_attribute`
+- **Extended query protocol:** Parse/Bind/Describe/Execute/Sync cycle
+- **Type OID mapping:** INT4, INT8, TEXT, FLOAT8, BOOL, TIMESTAMP, JSONB, BYTEA, UUID
+- **Error codes:** PostgreSQL SQLSTATE error format
+- **Compatibility targets:** psql, pgAdmin, DBeaver, Django, Rails, SQLAlchemy
+
+### Architecture
+Both MySQL and PostgreSQL frontends parse SQL into the shared `SqlPlan` / SkeinQL IR layer, so the execution engine is fully protocol-agnostic.
+
+```
+MySQL (3306) ──┐
+PG    (5432) ──┤──→ SqlPlan / SkeinQL IR ──→ Engine
+HTTP  (8080) ──┘
+```
+
+### Configuration
+- `--pg <port>` CLI flag (0 = disabled)
+- `pg_port` in `skeindb-config.json`
+
+See `docs/PG_COMPAT.md` for the full specification.

@@ -4,7 +4,7 @@ Last updated: 2026-03-12
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
-1) **Adoption:** drop-in **MySQL compatibility** so existing applications can connect with minimal change.
+1) **Adoption:** drop-in **MySQL compatibility** (and planned **PostgreSQL compatibility**) so existing applications can connect with minimal change.
 2) **Research extensibility:** a clean, web-native control plane (**SkeinQL**) and a set of novel primitives (ETag-driven cache coherency, query-scoped patches, delta-chained MVCC, hash-chained WAL, sandboxed Wasm extensions) intended to make systems research easier to prototype and evaluate.
 
 The repository is written so you can:
@@ -24,6 +24,7 @@ The repository is written so you can:
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
 - **MySQL adoption layer:** MySQL protocol surface + migration/telemetry tooling.
+- **PostgreSQL adoption layer (planned):** PostgreSQL v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, :: casts, pg_catalog.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
@@ -31,6 +32,7 @@ The repository is written so you can:
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
 - **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
 - **Security extensions:** hash-chained WAL for tamper evidence.
+- **6 hardened research tracks:** R03 (delta topology analysis), R04 (differential privacy with RDP composition), R06 (forensic Merkle proofs), R08 (incremental view maintenance with cascading invalidation), R10 (HNSW vector search), R13 (causal vector-clock ETags).
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
@@ -59,6 +61,12 @@ cargo build --release
 
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
+```
+
+With PostgreSQL listener (planned):
+
+```bash
+./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --pg 5432
 ```
 
 Optional storage mode:
@@ -97,6 +105,7 @@ Frequently used:
 - `docs/ETAG_VALIDATORS.md`
 - `docs/TRAFFIC_REDUCTION.md`
 - `docs/MYSQL_COMPAT.md`
+- `docs/PG_COMPAT.md`
 - `docs/SKEINADMIN.md`
 - `docs/GETTING_STARTED.md`
 

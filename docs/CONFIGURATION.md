@@ -22,6 +22,7 @@ OPTIONS:
   --storage-mode     Table row persistence mode: json | segment | hybrid (default hybrid)
   --http <port>      HTTP port (SkeinQL + admin console)
   --mysql <port>     MySQL protocol port (compatibility surface)
+  --pg <port>        PostgreSQL protocol port (planned, default 5432; 0 = disabled)
   --bind <ip>        Bind address (default 127.0.0.1)
 ```
 
@@ -31,6 +32,12 @@ Run on ports 8080/3306:
 
 ```bash
 ./skeindb serve --data ./data --http 8080 --mysql 3306
+```
+
+Run with MySQL + PostgreSQL:
+
+```bash
+./skeindb serve --data ./data --http 8080 --mysql 3306 --pg 5432
 ```
 
 Run with JSON-only row files:
@@ -81,8 +88,31 @@ Current coverage:
 - connection handshake
 - `mysql_native_password` auth exchange
 - `COM_QUERY` SQL translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE`)
+- `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` (prepared statements)
+- 310+ translated SQL statements
 
 `COM_QUERY` and broader SQL compatibility are still tracked in the project backlog.
+
+---
+
+## PostgreSQL listener (planned)
+
+When `--pg` is non-zero, SkeinDB will start a PostgreSQL v3 wire protocol listener.
+Planned coverage:
+- PostgreSQL v3 frontend/backend message flow
+- SCRAM-SHA-256 + trust authentication
+- SQL dialect extensions (RETURNING, dollar-quoting, :: casts, ILIKE, arrays, ON CONFLICT)
+- pg_catalog system tables
+- Extended query protocol (Parse/Bind/Describe/Execute/Sync)
+
+Configuration in `skeindb-config.json`:
+```json
+{
+  "pg_port": 5432
+}
+```
+
+See `docs/PG_COMPAT.md` for the full specification.
 
 ---
 

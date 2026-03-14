@@ -6,12 +6,19 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
-## Reality sync (2026-02-28)
+## Reality sync (2026-03-12)
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- Checklist below: remains open for hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync does not promote any research checklist items; it only reconfirms that runtime prototype coverage and checklist status still intentionally differ.
+- **6 tracks are now hardened** with real algorithms and dedicated tests:
+  - **R03** — Delta topology analysis (hot-chain detection, topology reports)
+  - **R04** — Differential privacy (Laplace noise, RDP composition, budget tracking)
+  - **R06** — Forensic Merkle proofs (SHA-256 hash chains, inclusion verification)
+  - **R08** — Incremental view maintenance (dependency graphs, cascading invalidation)
+  - **R10** — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
+  - **R13** — Causal vector-clock ETags (V2 clocks, dependency tracking, stale detection)
+- Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
+- This sync promotes R03/R04/R06/R08/R10/R13 to hardened status; other tracks remain at prototype level.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
