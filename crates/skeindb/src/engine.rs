@@ -1738,6 +1738,61 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_rename_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<()> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        if old_name.is_empty() || new_name.is_empty() {
+            anyhow::bail!("invalid_request: index names must not be empty");
+        }
+
+        let renamed = {
+            let (schema, _) = self.get_table_mut(table)?;
+            let defs = mysql_compat_index_defs(schema);
+            let Some(existing) = defs
+                .iter()
+                .find(|def| def.name.eq_ignore_ascii_case(old_name))
+                .cloned()
+            else {
+                anyhow::bail!("not_found: index not found: {old_name}");
+            };
+
+            if defs.iter().any(|def| {
+                !def.name.eq_ignore_ascii_case(&existing.name)
+                    && def.name.eq_ignore_ascii_case(new_name)
+            }) {
+                anyhow::bail!("conflict: index already exists: {new_name}");
+            }
+
+            if existing.name == new_name {
+                false
+            } else {
+                rename_mysql_compat_index_name(schema, &existing.name, new_name);
+                bump_table_version(schema);
+                true
+            }
+        };
+
+        if !renamed {
+            return Ok(());
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn data_get(&self, table: &BaseTableRef, pk: Vec<Lit>) -> anyhow::Result<DataGetResult> {
         let (_schema, tdata) = self.get_table(table)?;
 
@@ -10557,6 +10612,46 @@ fn rename_mysql_compat_index_columns(schema: &mut TableSchema, old_name: &str, n
                 .unwrap_or(false)
             {
                 *column = serde_json::Value::String(new_name.to_string());
+            }
+        }
+    }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
+fn rename_mysql_compat_index_name(schema: &mut TableSchema, old_name: &str, new_name: &str) {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    for entry in indexes.iter_mut() {
+        if entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|name| name.eq_ignore_ascii_case(old_name))
+            .unwrap_or(false)
+        {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(new_name.to_string()),
+                );
             }
         }
     }
@@ -19938,6 +20033,62 @@ mod tests {
             )
             .expect_err("expected renamed unique index conflict");
         assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_index_updates_schema_metadata() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_rename_index");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "email_unique",
+                    "columns": ["email"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.schema_rename_mysql_compat_index(&table, "email_unique", "email_uq")?;
+
+        let desc = engine.describe_table("app", "users")?;
+        let indexes = desc
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(indexes
+            .iter()
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("email_uq")));
+        assert!(!indexes
+            .iter()
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("email_unique")));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

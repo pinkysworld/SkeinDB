@@ -7675,6 +7675,11 @@ enum SqlPlan {
         columns: Vec<String>,
         unique: bool,
     },
+    AlterTableRenameIndex {
+        table: BaseTableRef,
+        old_name: String,
+        new_name: String,
+    },
     DropIndex {
         table: BaseTableRef,
         index_name: String,
@@ -9383,6 +9388,36 @@ fn parse_alter_table_drop_index_clause(clause: &str) -> Result<Option<String>, R
     Ok(Some(index_name))
 }
 
+fn parse_alter_table_rename_index_clause(
+    clause: &str,
+) -> Result<Option<(String, String)>, RpcError> {
+    let tokens: Vec<&str> = clause.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME clause must not be empty",
+        ));
+    }
+    if !(tokens[0].eq_ignore_ascii_case("key") || tokens[0].eq_ignore_ascii_case("index")) {
+        return Ok(None);
+    }
+    if tokens.len() != 4 || !tokens[2].eq_ignore_ascii_case("to") {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME INDEX/KEY requires old_name TO new_name",
+        ));
+    }
+    let old_name = clean_sql_ident(tokens[1]);
+    let new_name = clean_sql_ident(tokens[3]);
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME INDEX/KEY requires non-empty old and new names",
+        ));
+    }
+    Ok(Some((old_name, new_name)))
+}
+
 fn parse_alter_table_column_spec(
     clause: &str,
     name_idx: usize,
@@ -9427,7 +9462,7 @@ fn parse_alter_table_column_spec(
 fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcError> {
     let tail = sql[11..].trim();
     let mut action_match = None::<(usize, &'static str)>;
-    for action in ["add", "drop", "modify", "change"] {
+    for action in ["add", "drop", "modify", "change", "rename"] {
         if let Some(idx) = find_keyword_top_level(tail, action) {
             match action_match {
                 Some((best_idx, _)) if best_idx <= idx => {}
@@ -9438,7 +9473,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let Some((action_idx, action)) = action_match else {
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / ADD [UNIQUE] KEY / DROP [KEY|INDEX]",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / ADD [UNIQUE] KEY / RENAME [KEY|INDEX] / DROP [KEY|INDEX]",
         ));
     };
 
@@ -9455,6 +9490,20 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
         return Err(RpcError::new(
             "not_supported",
             "ALTER TABLE DROP currently supports only DROP [KEY|INDEX]",
+        ));
+    }
+
+    if action.eq_ignore_ascii_case("rename") {
+        if let Some((old_name, new_name)) = parse_alter_table_rename_index_clause(clause)? {
+            return Ok(SqlPlan::AlterTableRenameIndex {
+                table,
+                old_name,
+                new_name,
+            });
+        }
+        return Err(RpcError::new(
+            "not_supported",
+            "ALTER TABLE RENAME currently supports only RENAME [KEY|INDEX] old TO new",
         ));
     }
 
@@ -9854,7 +9903,8 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::AlterTableAddColumn { .. }
         | SqlPlan::AlterTableModifyColumn { .. }
         | SqlPlan::AlterTableChangeColumn { .. }
-        | SqlPlan::AlterTableAddIndex { .. } => "alter_table",
+        | SqlPlan::AlterTableAddIndex { .. }
+        | SqlPlan::AlterTableRenameIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
         SqlPlan::DropTable { .. } => "drop_table",
         SqlPlan::Insert { mode, .. } => match mode {
@@ -9891,6 +9941,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
         | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
+        | Ok(SqlPlan::AlterTableRenameIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
         | Ok(SqlPlan::DropTable { table, .. })
         | Ok(SqlPlan::Insert { table, .. })
@@ -10608,6 +10659,18 @@ async fn sql_exec_alter_table_add_index(
     Ok(())
 }
 
+async fn sql_exec_alter_table_rename_index(
+    state: &AppState,
+    table: BaseTableRef,
+    old_name: String,
+    new_name: String,
+) -> Result<(), RpcError> {
+    let mut eng = state.engine.write().await;
+    eng.schema_rename_mysql_compat_index(&table, &old_name, &new_name)
+        .map_err(to_rpc_error)?;
+    Ok(())
+}
+
 async fn sql_exec_drop_index(
     state: &AppState,
     table: BaseTableRef,
@@ -11019,6 +11082,27 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "index": index_name,
                 "columns": columns,
                 "unique": unique
+            }))
+        }
+        SqlPlan::AlterTableRenameIndex {
+            table,
+            old_name,
+            new_name,
+        } => {
+            sql_exec_alter_table_rename_index(
+                state,
+                table.clone(),
+                old_name.clone(),
+                new_name.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "rename_index",
+                "old_index": old_name,
+                "index": new_name
             }))
         }
         SqlPlan::DropIndex {
@@ -14506,6 +14590,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_alter_table_rename_index_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.users RENAME INDEX user_login_unique TO user_login_uq",
+            Some("app"),
+        )
+        .expect("parse alter table rename index");
+        let SqlPlan::AlterTableRenameIndex {
+            table,
+            old_name,
+            new_name,
+        } = plan
+        else {
+            panic!("expected alter table rename index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(old_name, "user_login_unique");
+        assert_eq!(new_name, "user_login_uq");
+
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.users RENAME KEY user_login_uq TO user_login_idx",
+            Some("app"),
+        )
+        .expect("parse alter table rename key");
+        let SqlPlan::AlterTableRenameIndex { new_name, .. } = plan else {
+            panic!("expected alter table rename index plan");
+        };
+        assert_eq!(new_name, "user_login_idx");
+    }
+
+    #[test]
     fn parse_create_unique_index_roundtrip() {
         let plan = parse_sql_plan(
             "CREATE UNIQUE INDEX user_login_uq ON app.users (user_login)",
@@ -15679,11 +15794,46 @@ mod tests {
             Some("conflict")
         );
 
+        let rename_user_name_index = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "ALTER TABLE wp_users RENAME INDEX user_name_unique TO user_name_uq",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(rename_user_name_index.ok);
+
+        let users_desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "wp",
+                "table": "wp_users"
+            }),
+        )
+        .await;
+        assert!(users_desc.ok);
+        let user_indexes = users_desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(user_indexes
+            .iter()
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("user_name_uq")));
+        assert!(!user_indexes
+            .iter()
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("user_name_unique")));
+
         let drop_user_name_index = call_rpc(
             &state,
             "sql.exec",
             json!({
-                "sql": "DROP INDEX user_name_unique ON wp_users",
+                "sql": "DROP INDEX user_name_uq ON wp_users",
                 "default_db": "wp"
             }),
         )
@@ -15709,7 +15859,7 @@ mod tests {
             .unwrap_or_default();
         assert!(!user_indexes
             .iter()
-            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("user_name_unique")));
+            .any(|idx| idx.get("name").and_then(|v| v.as_str()) == Some("user_name_uq")));
 
         let duplicate_after_drop = call_rpc(
             &state,

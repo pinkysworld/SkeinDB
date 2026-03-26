@@ -33,7 +33,7 @@ SkeinDB adoption strategy:
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
 - ALTER TABLE `ADD COLUMN` (including MySQL-style `DEFAULT` and compatibility handling for `AFTER` / `FIRST` position clauses)
-- ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
+- ALTER TABLE `ADD KEY` / `ADD UNIQUE KEY` / `RENAME INDEX` (compatibility metadata updates reflected in `SHOW INDEX` / `SHOW CREATE TABLE`)
 - DROP TABLE
 
 ### DML

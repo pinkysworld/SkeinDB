@@ -1239,17 +1239,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         1 => {
                             assert!(
                                 rows.iter()
-                                    .any(|row| row[2].as_deref() == Some("user_login_unique"))
+                                    .any(|row| row[2].as_deref() == Some("user_login_uq"))
                             );
                             assert!(rows.iter().any(|row| {
-                                row[2].as_deref() == Some("user_login_unique")
+                                row[2].as_deref() == Some("user_login_uq")
                                     && row[1].as_deref() == Some("0")
                             }));
                         }
                         2 => {
                             assert!(!rows
                                 .iter()
-                                .any(|row| row[2].as_deref() == Some("user_login_unique")));
+                                .any(|row| row[2].as_deref() == Some("user_login_uq")));
                         }
                         _ => panic!("unexpected wp_users show index count"),
                     }

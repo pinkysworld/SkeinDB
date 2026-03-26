@@ -167,6 +167,9 @@ VALUES
 
 CREATE UNIQUE INDEX user_login_unique ON wp_users (user_login);
 
+ALTER TABLE wp_users
+  RENAME INDEX user_login_unique TO user_login_uq;
+
 SHOW INDEX FROM wp_users;
 
 INSERT IGNORE INTO wp_users (id, user_login)
@@ -175,7 +178,7 @@ VALUES (5, 'ada');
 SELECT COUNT(*) AS user_count
   FROM wp_users;
 
-ALTER TABLE wp_users DROP INDEX user_login_unique;
+ALTER TABLE wp_users DROP INDEX user_login_uq;
 
 SHOW INDEX FROM wp_users;
 
