@@ -221,6 +221,28 @@ SELECT p.ID, u.user_login, ux.user_login
  WHERE p.ID = 1
  ORDER BY p.ID ASC;
 
+SELECT *
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID = 1;
+
+SELECT p.*, u.user_login
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.ID = 1;
+
+SELECT SQL_CALC_FOUND_ROWS *
+  FROM wp_posts AS p
+  LEFT JOIN wp_users AS u
+    ON p.post_author = u.id
+ WHERE p.post_status = 'publish'
+ ORDER BY p.ID ASC
+ LIMIT 0, 2;
+
+SELECT FOUND_ROWS();
+
 SELECT ID
   FROM wp_posts
  WHERE post_title = NULL

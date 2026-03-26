@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / SQL)
 
 Status: Draft v0.1
-Last updated: 2026-03-05
+Last updated: 2026-03-26
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
@@ -45,6 +45,7 @@ SkeinDB adoption strategy:
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
+- Wildcard `SELECT *` and qualified wildcard projections like `table.*` now work across that supported join subset, including mixed projections such as `p.*, u.name` and `SQL_CALC_FOUND_ROWS` flows
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
@@ -54,7 +55,7 @@ SkeinDB adoption strategy:
 - COM_QUERY over the current SQL-translation subset
 - Basic `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE`
 - `COM_STMT_SEND_LONG_DATA` + `COM_STMT_RESET` + baseline `COM_STMT_FETCH`
-- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *` and simple join projections), and prepared result rows are returned in the binary row protocol
+- Simple prepared `SELECT`s now return prepare-time result column definitions (including single-table `SELECT *`, join wildcard projections, and simple join projections), and prepared result rows are returned in the binary row protocol
 - Read-only prepared cursor execution now works for result sets; broader prepare metadata parity for more complex queries and stricter driver behavior is still open
 
 ### SHOW / metadata
@@ -81,8 +82,8 @@ Add queries there first, then implement.
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
-pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
-and parenthesized `AND` / `OR` filter queries.
+pagination/count, wildcard and qualified-wildcard join projections, grouped aggregate compatibility,
+projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`, and parenthesized `AND` / `OR` filter queries.
 
 ---
 

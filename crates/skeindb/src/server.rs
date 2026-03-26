@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
 };
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sysinfo::{Pid, System};
 
@@ -3502,9 +3502,68 @@ fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
     base.r#as.as_deref().unwrap_or(&base.table)
 }
 
+fn mysql_stmt_table_match_rank(base: &BaseTableRef, table_name: &str) -> u8 {
+    if table_name.eq_ignore_ascii_case(mysql_stmt_base_table_alias(base)) {
+        return 3;
+    }
+    let qualified_table = format!("{}.{}", base.db, base.table);
+    if table_name.eq_ignore_ascii_case(&qualified_table) {
+        return 2;
+    }
+    if table_name.eq_ignore_ascii_case(&base.table) {
+        return 1;
+    }
+    0
+}
+
 fn mysql_stmt_table_matches_name(base: &BaseTableRef, table_name: &str) -> bool {
-    table_name.eq_ignore_ascii_case(&base.table)
-        || table_name.eq_ignore_ascii_case(mysql_stmt_base_table_alias(base))
+    mysql_stmt_table_match_rank(base, table_name) != 0
+}
+
+fn mysql_information_schema_table_desc(base: &BaseTableRef) -> Option<Value> {
+    if !base.db.eq_ignore_ascii_case("information_schema") {
+        return None;
+    }
+    let columns = if base.table.eq_ignore_ascii_case("tables") {
+        vec![
+            json!({"name": "TABLE_CATALOG", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_SCHEMA", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_NAME", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_TYPE", "type": {"kind": "string"}}),
+            json!({"name": "ENGINE", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_ROWS", "type": {"kind": "u64"}}),
+        ]
+    } else if base.table.eq_ignore_ascii_case("columns") {
+        vec![
+            json!({"name": "TABLE_CATALOG", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_SCHEMA", "type": {"kind": "string"}}),
+            json!({"name": "TABLE_NAME", "type": {"kind": "string"}}),
+            json!({"name": "COLUMN_NAME", "type": {"kind": "string"}}),
+            json!({"name": "ORDINAL_POSITION", "type": {"kind": "u64"}}),
+            json!({"name": "IS_NULLABLE", "type": {"kind": "string"}}),
+            json!({"name": "DATA_TYPE", "type": {"kind": "string"}}),
+            json!({"name": "COLUMN_KEY", "type": {"kind": "string"}}),
+        ]
+    } else {
+        return None;
+    };
+    Some(json!({ "columns": columns }))
+}
+
+fn mysql_describe_base_table_for_projection(
+    eng: &Engine,
+    base: &BaseTableRef,
+) -> Result<MySqlStmtPrepareTableDesc, RpcError> {
+    let desc = if let Some(desc) = mysql_information_schema_table_desc(base) {
+        desc
+    } else {
+        eng.describe_table(&base.db, &base.table)
+            .map_err(to_rpc_error)?
+    };
+    Ok(MySqlStmtPrepareTableDesc {
+        base: base.clone(),
+        desc,
+    })
 }
 
 fn mysql_stmt_collect_base_tables(table_ref: &TableRef, out: &mut Vec<BaseTableRef>) {
@@ -3516,6 +3575,166 @@ fn mysql_stmt_collect_base_tables(table_ref: &TableRef, out: &mut Vec<BaseTableR
         }
         TableRef::Subquery(_) => {}
     }
+}
+
+fn mysql_collect_base_table_descs(
+    eng: &Engine,
+    table_ref: &TableRef,
+) -> Result<Vec<MySqlStmtPrepareTableDesc>, RpcError> {
+    let mut base_tables = Vec::new();
+    mysql_stmt_collect_base_tables(table_ref, &mut base_tables);
+    let mut out = Vec::with_capacity(base_tables.len());
+    for base in base_tables {
+        out.push(mysql_describe_base_table_for_projection(eng, &base)?);
+    }
+    Ok(out)
+}
+
+fn mysql_collect_base_table_descs_best_effort(
+    eng: &Engine,
+    table_ref: &TableRef,
+) -> Vec<MySqlStmtPrepareTableDesc> {
+    let mut base_tables = Vec::new();
+    mysql_stmt_collect_base_tables(table_ref, &mut base_tables);
+    base_tables
+        .into_iter()
+        .filter_map(|base| mysql_describe_base_table_for_projection(eng, &base).ok())
+        .collect()
+}
+
+fn mysql_stmt_wildcard_columns(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> Vec<MySqlStmtPrepareColumn> {
+    let mut wildcard = Vec::new();
+    for table_desc in table_descs {
+        if let Some(cols) = table_desc.desc.get("columns").and_then(|v| v.as_array()) {
+            for column in cols {
+                let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                wildcard.push(MySqlStmtPrepareColumn {
+                    name: name.to_string(),
+                    column_type: mysql_stmt_column_type_from_desc_column(column),
+                });
+            }
+        }
+    }
+    wildcard
+}
+
+fn mysql_expand_table_projection_from_descs(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+    force_qualify: bool,
+) -> Result<Vec<SelectItem>, RpcError> {
+    let qualify = force_qualify || table_descs.len() > 1;
+    let mut projection = Vec::new();
+    for table_desc in table_descs {
+        let table_name = qualify.then(|| mysql_stmt_base_table_alias(&table_desc.base).to_string());
+        if let Some(cols) = table_desc.desc.get("columns").and_then(|v| v.as_array()) {
+            for column in cols {
+                let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                projection.push(SelectItem {
+                    expr: Expr::Col {
+                        col: name.to_string(),
+                        table: table_name.clone(),
+                    },
+                    r#as: qualify.then(|| name.to_string()),
+                });
+            }
+        }
+    }
+    if projection.is_empty() {
+        return Err(RpcError::new("invalid_request", "table has no columns"));
+    }
+    Ok(projection)
+}
+
+fn mysql_expand_wildcard_projection_from_descs(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> Result<Vec<SelectItem>, RpcError> {
+    mysql_expand_table_projection_from_descs(table_descs, false)
+}
+
+fn mysql_select_item_qualified_wildcard_table(item: &SelectItem) -> Option<&str> {
+    match &item.expr {
+        Expr::Col {
+            col,
+            table: Some(table),
+        } if col == "*" => Some(table.as_str()),
+        _ => None,
+    }
+}
+
+fn mysql_projection_contains_qualified_wildcard(projection: &[SelectItem]) -> bool {
+    projection
+        .iter()
+        .any(|item| mysql_select_item_qualified_wildcard_table(item).is_some())
+}
+
+fn mysql_expand_qualified_wildcard_projection_from_descs(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+    table_name: &str,
+) -> Result<Vec<SelectItem>, RpcError> {
+    let best_rank = table_descs
+        .iter()
+        .map(|table_desc| mysql_stmt_table_match_rank(&table_desc.base, table_name))
+        .max()
+        .unwrap_or(0);
+    if best_rank == 0 {
+        return Err(RpcError::new(
+            "not_supported",
+            format!(
+                "unknown table '{}' in qualified wildcard projection",
+                table_name
+            ),
+        ));
+    }
+
+    let matched = table_descs
+        .iter()
+        .filter(|table_desc| mysql_stmt_table_match_rank(&table_desc.base, table_name) == best_rank)
+        .cloned()
+        .collect::<Vec<_>>();
+    if matched.len() != 1 {
+        return Err(RpcError::new(
+            "not_supported",
+            format!(
+                "qualified wildcard projection '{}' is ambiguous",
+                table_name
+            ),
+        ));
+    }
+    mysql_expand_table_projection_from_descs(&matched, true)
+}
+
+fn mysql_expand_projection_from_descs(
+    projection: &[SelectItem],
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> Result<Vec<SelectItem>, RpcError> {
+    if projection.is_empty() {
+        return mysql_expand_wildcard_projection_from_descs(table_descs);
+    }
+
+    let mut expanded = Vec::new();
+    for item in projection {
+        if let Some(table_name) = mysql_select_item_qualified_wildcard_table(item) {
+            if item.r#as.is_some() {
+                return Err(RpcError::new(
+                    "not_supported",
+                    "aliasing qualified wildcard projection is not supported",
+                ));
+            }
+            expanded.extend(mysql_expand_qualified_wildcard_projection_from_descs(
+                table_descs,
+                table_name,
+            )?);
+        } else {
+            expanded.push(item.clone());
+        }
+    }
+    Ok(expanded)
 }
 
 fn mysql_stmt_desc_column_type(desc: &Value, col: &str) -> Option<MySqlStmtColumnType> {
@@ -3562,20 +3781,7 @@ fn mysql_stmt_prepare_columns_from_select(
     table_descs: &[MySqlStmtPrepareTableDesc],
 ) -> Vec<MySqlStmtPrepareColumn> {
     if from.is_some() && projection.is_empty() {
-        let mut wildcard = Vec::new();
-        for table_desc in table_descs {
-            if let Some(cols) = table_desc.desc.get("columns").and_then(|v| v.as_array()) {
-                for column in cols {
-                    let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    wildcard.push(MySqlStmtPrepareColumn {
-                        name: name.to_string(),
-                        column_type: mysql_stmt_column_type_from_desc_column(column),
-                    });
-                }
-            }
-        }
+        let wildcard = mysql_stmt_wildcard_columns(table_descs);
         if !wildcard.is_empty() {
             return wildcard;
         }
@@ -3616,7 +3822,9 @@ async fn mysql_stmt_prepare_columns(
     }
 
     let Ok(SqlPlan::Select {
-        from, projection, ..
+        from,
+        mut projection,
+        ..
     }) = parse_sql_plan(sql, default_db)
     else {
         return Vec::new();
@@ -3624,20 +3832,21 @@ async fn mysql_stmt_prepare_columns(
 
     let table_descs = match from.as_ref() {
         Some(from_ref) => {
-            let mut base_tables = Vec::new();
-            mysql_stmt_collect_base_tables(from_ref, &mut base_tables);
             let eng = state.engine.read().await;
-            base_tables
-                .into_iter()
-                .filter_map(|base| {
-                    eng.describe_table(&base.db, &base.table)
-                        .ok()
-                        .map(|desc| MySqlStmtPrepareTableDesc { base, desc })
-                })
-                .collect()
+            mysql_collect_base_table_descs_best_effort(&eng, from_ref)
         }
         None => Vec::new(),
     };
+
+    if from.is_some()
+        && (projection.is_empty() || mysql_projection_contains_qualified_wildcard(&projection))
+    {
+        match mysql_expand_projection_from_descs(&projection, &table_descs) {
+            Ok(expanded) => projection = expanded,
+            Err(_) => return Vec::new(),
+        }
+    }
+
     mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs)
 }
 
@@ -8404,12 +8613,13 @@ fn parse_select_projection_item(raw: &str) -> Result<SelectItem, RpcError> {
             "not_supported",
             "wildcard projection is resolved separately",
         ));
-    } else if expr_raw.ends_with(".*") {
-        return Err(RpcError::new(
-            "not_supported",
-            "qualified wildcard projection is not supported yet",
-        ));
     } else if let Ok(expr) = parse_sql_scalar_expr(expr_raw) {
+        if alias.is_some() && matches!(&expr, Expr::Col { col, table: Some(_)} if col == "*") {
+            return Err(RpcError::new(
+                "not_supported",
+                "aliasing qualified wildcard projection is not supported",
+            ));
+        }
         expr
     } else {
         return Err(RpcError::new(
@@ -8491,7 +8701,7 @@ fn ensure_group_by_projection_dedup_compatible(
     group_sql: &str,
     projection: &[SelectItem],
 ) -> Result<(), RpcError> {
-    if projection.is_empty() {
+    if projection.is_empty() || mysql_projection_contains_qualified_wildcard(projection) {
         return Err(RpcError::new(
             "not_supported",
             "GROUP BY with wildcard projection is not supported in compatibility mode",
@@ -10447,6 +10657,10 @@ async fn mysql_select_total_rows_without_limit(
     let from = from.expect("checked above");
 
     let eng = state.engine.read().await;
+    if projection.is_empty() || mysql_projection_contains_qualified_wildcard(&projection) {
+        let table_descs = mysql_collect_base_table_descs(&eng, &from)?;
+        projection = mysql_expand_projection_from_descs(&projection, &table_descs)?;
+    }
     let no_limit = None;
     if let TableRef::Base(table) = &from {
         if let Some(result) = information_schema_select_result(
@@ -10459,39 +10673,6 @@ async fn mysql_select_total_rows_without_limit(
         )? {
             return rows_json_result_len(&result);
         }
-    }
-
-    if projection.is_empty() {
-        let TableRef::Base(table) = &from else {
-            return Err(RpcError::new(
-                "not_supported",
-                "SQL_CALC_FOUND_ROWS with wildcard joins is not supported yet",
-            ));
-        };
-        let desc = eng
-            .describe_table(&table.db, &table.table)
-            .map_err(to_rpc_error)?;
-        let names: Vec<String> = desc
-            .get("columns")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
-            .map(|s| s.to_string())
-            .collect();
-        if names.is_empty() {
-            return Err(RpcError::new("invalid_request", "table has no columns"));
-        }
-        projection = names
-            .into_iter()
-            .map(|name| SelectItem {
-                expr: Expr::Col {
-                    col: name,
-                    table: None,
-                },
-                r#as: None,
-            })
-            .collect();
     }
 
     let query = Query {
@@ -10582,6 +10763,10 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
 
             let eng = state.engine.read().await;
             let from = from.expect("checked Some above");
+            if projection.is_empty() || mysql_projection_contains_qualified_wildcard(&projection) {
+                let table_descs = mysql_collect_base_table_descs(&eng, &from)?;
+                projection = mysql_expand_projection_from_descs(&projection, &table_descs)?;
+            }
             if let TableRef::Base(table) = &from {
                 if let Some(result) = information_schema_select_result(
                     &eng,
@@ -10596,39 +10781,6 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                         "read_only": true,
                         "result": result
                     }));
-                }
-            }
-            if projection.is_empty() {
-                if let TableRef::Base(table) = &from {
-                    let desc = eng
-                        .describe_table(&table.db, &table.table)
-                        .map_err(to_rpc_error)?;
-                    let names: Vec<String> = desc
-                        .get("columns")
-                        .and_then(|v| v.as_array())
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
-                        .map(|s| s.to_string())
-                        .collect();
-                    if names.is_empty() {
-                        return Err(RpcError::new("invalid_request", "table has no columns"));
-                    }
-                    projection = names
-                        .into_iter()
-                        .map(|name| SelectItem {
-                            expr: Expr::Col {
-                                col: name,
-                                table: None,
-                            },
-                            r#as: None,
-                        })
-                        .collect();
-                } else {
-                    return Err(RpcError::new(
-                        "not_supported",
-                        "wildcard projection over joins is not supported yet",
-                    ));
                 }
             }
             let query = Query {
@@ -13703,6 +13855,41 @@ mod tests {
         let SqlPlan::Select {
             from, projection, ..
         } = parse_sql_plan(
+            "SELECT p.*, u.name FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse qualified join wildcard")
+        else {
+            panic!("expected SELECT plan");
+        };
+        let expanded_projection = mysql_expand_projection_from_descs(&projection, &table_descs)
+            .expect("expand qualified wildcard projection");
+        let qualified_join_projection = mysql_stmt_prepare_columns_from_select(
+            from.as_ref(),
+            &expanded_projection,
+            &table_descs,
+        );
+        assert_eq!(
+            qualified_join_projection,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "user_id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let SqlPlan::Select {
+            from, projection, ..
+        } = parse_sql_plan(
             "SELECT * FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
             Some("app"),
         )
@@ -13732,6 +13919,155 @@ mod tests {
                     column_type: MySqlStmtColumnType::VarString,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn mysql_expand_wildcard_projection_supports_join_aliases() {
+        let table_descs = vec![
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "posts".to_string(),
+                    r#as: Some("p".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "user_id", "type": {"kind": "u64"}}
+                    ]
+                }),
+            },
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: Some("u".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "name", "type": {"kind": "string"}}
+                    ]
+                }),
+            },
+        ];
+
+        let projection = mysql_expand_wildcard_projection_from_descs(&table_descs)
+            .expect("expand wildcard projection");
+        assert_eq!(projection.len(), 4);
+        assert_eq!(
+            projection[0],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("id".to_string()),
+            }
+        );
+        assert_eq!(
+            projection[1],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "user_id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("user_id".to_string()),
+            }
+        );
+        assert_eq!(
+            projection[2],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("u".to_string()),
+                },
+                r#as: Some("id".to_string()),
+            }
+        );
+        assert_eq!(
+            projection[3],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "name".to_string(),
+                    table: Some("u".to_string()),
+                },
+                r#as: Some("name".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn mysql_expand_projection_supports_qualified_wildcards() {
+        let table_descs = vec![
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "posts".to_string(),
+                    r#as: Some("p".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "user_id", "type": {"kind": "u64"}}
+                    ]
+                }),
+            },
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: Some("u".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "name", "type": {"kind": "string"}}
+                    ]
+                }),
+            },
+        ];
+        let SqlPlan::Select { projection, .. } = parse_sql_plan(
+            "SELECT p.*, u.name FROM app.posts AS p LEFT JOIN app.users AS u ON p.user_id = u.id",
+            Some("app"),
+        )
+        .expect("parse qualified wildcard") else {
+            panic!("expected SELECT plan");
+        };
+
+        let projection = mysql_expand_projection_from_descs(&projection, &table_descs)
+            .expect("expand qualified wildcard");
+        assert_eq!(projection.len(), 3);
+        assert_eq!(
+            projection[0],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("id".to_string()),
+            }
+        );
+        assert_eq!(
+            projection[1],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "user_id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("user_id".to_string()),
+            }
+        );
+        assert_eq!(
+            projection[2],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "name".to_string(),
+                    table: Some("u".to_string()),
+                },
+                r#as: None,
+            }
         );
     }
 
@@ -15581,6 +15917,101 @@ mod tests {
         assert_eq!(right_join_rows[0][1]["t"].as_str(), Some("null"));
         assert_eq!(right_join_rows[1][0]["v"].as_i64(), Some(4));
         assert_eq!(right_join_rows[1][1]["t"].as_str(), Some("null"));
+
+        let wildcard_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT * FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id = 10",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(wildcard_join.ok);
+        let wildcard_result = wildcard_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .cloned()
+            .unwrap_or_default();
+        let wildcard_columns = wildcard_result
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            wildcard_columns
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                "id",
+                "post_author",
+                "post_status",
+                "post_title",
+                "id",
+                "status",
+                "name"
+            ]
+        );
+        let wildcard_rows = wildcard_result
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(wildcard_rows.len(), 1);
+        assert_eq!(wildcard_rows[0][0]["v"].as_i64(), Some(10));
+        assert_eq!(wildcard_rows[0][1]["v"].as_i64(), Some(1));
+        assert_eq!(wildcard_rows[0][2]["v"].as_str(), Some("publish"));
+        assert_eq!(wildcard_rows[0][3]["v"].as_str(), Some("untitled"));
+        assert_eq!(wildcard_rows[0][4]["v"].as_i64(), Some(1));
+        assert_eq!(wildcard_rows[0][5]["v"].as_str(), Some("active"));
+        assert_eq!(wildcard_rows[0][6]["v"].as_str(), Some("Ada"));
+
+        let qualified_wildcard_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT p.*, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id = 10",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(qualified_wildcard_join.ok);
+        let qualified_wildcard_result = qualified_wildcard_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .cloned()
+            .unwrap_or_default();
+        let qualified_wildcard_columns = qualified_wildcard_result
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            qualified_wildcard_columns
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["id", "post_author", "post_status", "post_title", "u.name"]
+        );
+        let qualified_wildcard_rows = qualified_wildcard_result
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(qualified_wildcard_rows.len(), 1);
+        assert_eq!(qualified_wildcard_rows[0][0]["v"].as_i64(), Some(10));
+        assert_eq!(qualified_wildcard_rows[0][1]["v"].as_i64(), Some(1));
+        assert_eq!(qualified_wildcard_rows[0][2]["v"].as_str(), Some("publish"));
+        assert_eq!(
+            qualified_wildcard_rows[0][3]["v"].as_str(),
+            Some("untitled")
+        );
+        assert_eq!(qualified_wildcard_rows[0][4]["v"].as_str(), Some("Ada"));
 
         let altered = call_rpc(
             &state,
