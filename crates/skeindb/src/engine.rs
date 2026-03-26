@@ -15756,6 +15756,7 @@ mod tests {
                         r#as: Some("parent".to_string()),
                     })),
                     on: Some(join_on),
+                    using_columns: None,
                 },
             })]),
             r#where: None,
@@ -16395,6 +16396,7 @@ mod tests {
                                     table: Some("c".to_string()),
                                 },
                             )),
+                            using_columns: None,
                         },
                     })]),
                     r#where: Some(eq_expr(
@@ -16898,6 +16900,7 @@ mod tests {
                                 r#as: Some("parent".to_string()),
                             })),
                             on: Some(join_on),
+                            using_columns: None,
                         },
                     })]),
                     r#where: None,
@@ -16997,6 +17000,7 @@ mod tests {
                                 r#as: Some("parent".to_string()),
                             })),
                             on: Some(join_on),
+                            using_columns: None,
                         },
                     })]),
                     r#where: None,
@@ -17749,6 +17753,7 @@ mod tests {
                                     table: Some("u".to_string()),
                                 },
                             )),
+                            using_columns: None,
                         },
                     })]),
                     r#where: Some(Expr::Op {
@@ -18073,6 +18078,7 @@ mod tests {
                                     table: Some("u".to_string()),
                                 },
                             )),
+                            using_columns: None,
                         },
                     })]),
                     r#where: Some(Expr::Op {

@@ -800,6 +800,59 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         ]]
     );
 
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_user_profiles").await?;
+    let (_seq, ok_drop_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_profiles)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_user_profiles (id BIGINT UNSIGNED NOT NULL, nickname VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_profiles)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_user_profiles (id, nickname) VALUES (7, 'nora-admin'), (8, 'grace-admin')",
+    )
+    .await?;
+    let (_seq, ok_insert_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_profiles)?.0, 2);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT * FROM wp_users AS u INNER JOIN wp_user_profiles AS p USING (id) WHERE u.id = ?",
+    )
+    .await?;
+    let using_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(using_stmt.param_count, 1);
+    assert_eq!(
+        using_stmt.column_defs,
+        vec![
+            ("id".to_string(), 0x08),
+            ("name".to_string(), 0xfd),
+            ("nickname".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        using_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let using_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        using_rows,
+        vec![vec![
+            Some("7".to_string()),
+            Some("Nora".to_string()),
+            Some("nora-admin".to_string()),
+        ]]
+    );
+
+    send_com_stmt_close(&mut stream, using_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, qualified_join_wildcard_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, join_wildcard_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, join_stmt.statement_id).await?;
@@ -1441,6 +1494,18 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][0].as_deref(), Some("1"));
                         assert_eq!(rows[0][1].as_deref(), Some("ada"));
                         assert_eq!(rows[0][2].as_deref(), Some("ada"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select * from wp_users as u inner join wp_user_profiles as p using (id) where u.id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                        assert_eq!(rows[0][2].as_deref(), Some("ada-admin"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

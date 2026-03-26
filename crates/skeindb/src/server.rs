@@ -475,6 +475,7 @@ struct MySqlStmtPrepareColumn {
 struct MySqlStmtPrepareTableDesc {
     base: BaseTableRef,
     desc: Value,
+    hidden_columns: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3760,6 +3761,19 @@ fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
     base.r#as.as_deref().unwrap_or(&base.table)
 }
 
+fn mysql_stmt_hidden_column_name(raw: &str) -> String {
+    clean_sql_ident(raw)
+}
+
+fn mysql_stmt_table_desc_hides_column(
+    table_desc: &MySqlStmtPrepareTableDesc,
+    column: &str,
+) -> bool {
+    table_desc
+        .hidden_columns
+        .contains(&mysql_stmt_hidden_column_name(column))
+}
+
 fn mysql_stmt_table_match_rank(base: &BaseTableRef, table_name: &str) -> u8 {
     if table_name.eq_ignore_ascii_case(mysql_stmt_base_table_alias(base)) {
         return 3;
@@ -3811,6 +3825,7 @@ fn mysql_information_schema_table_desc(base: &BaseTableRef) -> Option<Value> {
 fn mysql_describe_base_table_for_projection(
     eng: &Engine,
     base: &BaseTableRef,
+    hidden_columns: HashSet<String>,
 ) -> Result<MySqlStmtPrepareTableDesc, RpcError> {
     let desc = if let Some(desc) = mysql_information_schema_table_desc(base) {
         desc
@@ -3821,15 +3836,29 @@ fn mysql_describe_base_table_for_projection(
     Ok(MySqlStmtPrepareTableDesc {
         base: base.clone(),
         desc,
+        hidden_columns,
     })
 }
 
-fn mysql_stmt_collect_base_tables(table_ref: &TableRef, out: &mut Vec<BaseTableRef>) {
+fn mysql_stmt_collect_base_tables(
+    table_ref: &TableRef,
+    inherited_hidden_columns: &HashSet<String>,
+    out: &mut Vec<(BaseTableRef, HashSet<String>)>,
+) {
     match table_ref {
-        TableRef::Base(base) => out.push(base.clone()),
+        TableRef::Base(base) => out.push((base.clone(), inherited_hidden_columns.clone())),
         TableRef::Join(join) => {
-            mysql_stmt_collect_base_tables(join.join.left.as_ref(), out);
-            mysql_stmt_collect_base_tables(join.join.right.as_ref(), out);
+            mysql_stmt_collect_base_tables(join.join.left.as_ref(), inherited_hidden_columns, out);
+            let mut right_hidden_columns = inherited_hidden_columns.clone();
+            if let Some(using_columns) = join.join.using_columns.as_ref() {
+                right_hidden_columns.extend(
+                    using_columns
+                        .iter()
+                        .map(|column| mysql_stmt_hidden_column_name(column))
+                        .filter(|column| !column.is_empty()),
+                );
+            }
+            mysql_stmt_collect_base_tables(join.join.right.as_ref(), &right_hidden_columns, out);
         }
         TableRef::Subquery(_) => {}
     }
@@ -3840,10 +3869,14 @@ fn mysql_collect_base_table_descs(
     table_ref: &TableRef,
 ) -> Result<Vec<MySqlStmtPrepareTableDesc>, RpcError> {
     let mut base_tables = Vec::new();
-    mysql_stmt_collect_base_tables(table_ref, &mut base_tables);
+    mysql_stmt_collect_base_tables(table_ref, &HashSet::new(), &mut base_tables);
     let mut out = Vec::with_capacity(base_tables.len());
-    for base in base_tables {
-        out.push(mysql_describe_base_table_for_projection(eng, &base)?);
+    for (base, hidden_columns) in base_tables {
+        out.push(mysql_describe_base_table_for_projection(
+            eng,
+            &base,
+            hidden_columns,
+        )?);
     }
     Ok(out)
 }
@@ -3853,15 +3886,18 @@ fn mysql_collect_base_table_descs_best_effort(
     table_ref: &TableRef,
 ) -> Vec<MySqlStmtPrepareTableDesc> {
     let mut base_tables = Vec::new();
-    mysql_stmt_collect_base_tables(table_ref, &mut base_tables);
+    mysql_stmt_collect_base_tables(table_ref, &HashSet::new(), &mut base_tables);
     base_tables
         .into_iter()
-        .filter_map(|base| mysql_describe_base_table_for_projection(eng, &base).ok())
+        .filter_map(|(base, hidden_columns)| {
+            mysql_describe_base_table_for_projection(eng, &base, hidden_columns).ok()
+        })
         .collect()
 }
 
 fn mysql_stmt_wildcard_columns(
     table_descs: &[MySqlStmtPrepareTableDesc],
+    respect_hidden_columns: bool,
 ) -> Vec<MySqlStmtPrepareColumn> {
     let mut wildcard = Vec::new();
     for table_desc in table_descs {
@@ -3870,6 +3906,9 @@ fn mysql_stmt_wildcard_columns(
                 let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                if respect_hidden_columns && mysql_stmt_table_desc_hides_column(table_desc, name) {
+                    continue;
+                }
                 wildcard.push(MySqlStmtPrepareColumn {
                     name: name.to_string(),
                     column_type: mysql_stmt_column_type_from_desc_column(column),
@@ -3883,6 +3922,7 @@ fn mysql_stmt_wildcard_columns(
 fn mysql_expand_table_projection_from_descs(
     table_descs: &[MySqlStmtPrepareTableDesc],
     force_qualify: bool,
+    respect_hidden_columns: bool,
 ) -> Result<Vec<SelectItem>, RpcError> {
     let qualify = force_qualify || table_descs.len() > 1;
     let mut projection = Vec::new();
@@ -3893,6 +3933,9 @@ fn mysql_expand_table_projection_from_descs(
                 let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                if respect_hidden_columns && mysql_stmt_table_desc_hides_column(table_desc, name) {
+                    continue;
+                }
                 projection.push(SelectItem {
                     expr: Expr::Col {
                         col: name.to_string(),
@@ -3912,7 +3955,7 @@ fn mysql_expand_table_projection_from_descs(
 fn mysql_expand_wildcard_projection_from_descs(
     table_descs: &[MySqlStmtPrepareTableDesc],
 ) -> Result<Vec<SelectItem>, RpcError> {
-    mysql_expand_table_projection_from_descs(table_descs, false)
+    mysql_expand_table_projection_from_descs(table_descs, false, true)
 }
 
 fn mysql_select_item_qualified_wildcard_table(item: &SelectItem) -> Option<&str> {
@@ -3964,7 +4007,7 @@ fn mysql_expand_qualified_wildcard_projection_from_descs(
             ),
         ));
     }
-    mysql_expand_table_projection_from_descs(&matched, true)
+    mysql_expand_table_projection_from_descs(&matched, true, false)
 }
 
 fn mysql_expand_projection_from_descs(
@@ -4039,7 +4082,7 @@ fn mysql_stmt_prepare_columns_from_select(
     table_descs: &[MySqlStmtPrepareTableDesc],
 ) -> Vec<MySqlStmtPrepareColumn> {
     if from.is_some() && projection.is_empty() {
-        let wildcard = mysql_stmt_wildcard_columns(table_descs);
+        let wildcard = mysql_stmt_wildcard_columns(table_descs, true);
         if !wildcard.is_empty() {
             return wildcard;
         }
@@ -4062,6 +4105,128 @@ fn mysql_stmt_prepare_columns_from_select(
             }
         })
         .collect()
+}
+
+fn mysql_stmt_resolve_using_column_table_alias(
+    eng: &Engine,
+    table_ref: &TableRef,
+    column: &str,
+) -> Result<String, RpcError> {
+    let normalized_column = clean_sql_ident(column);
+    if normalized_column.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "JOIN USING requires a column name",
+        ));
+    }
+    let matches = mysql_collect_base_table_descs(eng, table_ref)?
+        .into_iter()
+        .filter(|table_desc| {
+            !mysql_stmt_table_desc_hides_column(table_desc, &normalized_column)
+                && mysql_stmt_desc_column_type(&table_desc.desc, &normalized_column).is_some()
+        })
+        .map(|table_desc| mysql_stmt_base_table_alias(&table_desc.base).to_string())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [table_name] => Ok(table_name.clone()),
+        [] => Err(RpcError::new(
+            "not_supported",
+            format!(
+                "JOIN USING column '{}' is not available on that join side",
+                column
+            ),
+        )),
+        _ => Err(RpcError::new(
+            "not_supported",
+            format!(
+                "JOIN USING column '{}' is ambiguous on that join side",
+                column
+            ),
+        )),
+    }
+}
+
+fn mysql_build_using_join_expr(
+    eng: &Engine,
+    left: &TableRef,
+    right: &TableRef,
+    using_columns: &[String],
+) -> Result<Expr, RpcError> {
+    let mut predicates = Vec::new();
+    let mut seen = HashSet::new();
+    for raw_column in using_columns {
+        let column = clean_sql_ident(raw_column);
+        if column.is_empty() || !seen.insert(column.clone()) {
+            continue;
+        }
+        let left_table = mysql_stmt_resolve_using_column_table_alias(eng, left, &column)?;
+        let right_table = mysql_stmt_resolve_using_column_table_alias(eng, right, &column)?;
+        predicates.push(Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: column.clone(),
+                table: Some(left_table),
+            })),
+            b: Some(Box::new(Expr::Col {
+                col: column,
+                table: Some(right_table),
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        });
+    }
+
+    let mut predicates = predicates.into_iter();
+    let Some(mut expr) = predicates.next() else {
+        return Err(RpcError::new(
+            "invalid_request",
+            "JOIN USING requires at least one column",
+        ));
+    };
+    for rhs in predicates {
+        expr = Expr::Op {
+            op: "and".to_string(),
+            a: Some(Box::new(expr)),
+            b: Some(Box::new(rhs)),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+    }
+    Ok(expr)
+}
+
+fn mysql_rewrite_using_table_ref(eng: &Engine, table_ref: &TableRef) -> Result<TableRef, RpcError> {
+    match table_ref {
+        TableRef::Base(base) => Ok(TableRef::Base(base.clone())),
+        TableRef::Subquery(subquery) => Ok(TableRef::Subquery(subquery.clone())),
+        TableRef::Join(join) => {
+            let left = mysql_rewrite_using_table_ref(eng, join.join.left.as_ref())?;
+            let right = mysql_rewrite_using_table_ref(eng, join.join.right.as_ref())?;
+            let on = if let Some(using_columns) = join.join.using_columns.as_ref() {
+                Some(mysql_build_using_join_expr(
+                    eng,
+                    &left,
+                    &right,
+                    using_columns,
+                )?)
+            } else {
+                join.join.on.clone()
+            };
+            Ok(TableRef::Join(JoinTableRef {
+                join: JoinRef {
+                    join_type: join.join.join_type.clone(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    on,
+                    using_columns: join.join.using_columns.clone(),
+                },
+            }))
+        }
+    }
 }
 
 fn mysql_stmt_column_type_for_compat_aggregate(
@@ -8711,6 +8876,42 @@ fn find_next_join_clause(input: &str) -> Option<(usize, JoinType, usize)> {
     out
 }
 
+fn parse_join_using_columns(input: &str) -> Result<Vec<String>, RpcError> {
+    let input = input.trim();
+    if !input.starts_with('(') || !input.ends_with(')') {
+        return Err(RpcError::new(
+            "invalid_request",
+            "JOIN USING requires a parenthesized column list",
+        ));
+    }
+    let inner = input[1..input.len() - 1].trim();
+    if inner.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "JOIN USING requires at least one column",
+        ));
+    }
+
+    let mut columns = Vec::new();
+    for raw in split_csv_top_level(inner) {
+        let column = clean_sql_ident(&raw);
+        if column.is_empty() || column == "*" || column.contains('.') {
+            return Err(RpcError::new(
+                "not_supported",
+                format!("unsupported JOIN USING column '{}'", raw.trim()),
+            ));
+        }
+        columns.push(column);
+    }
+    if columns.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "JOIN USING requires at least one column",
+        ));
+    }
+    Ok(columns)
+}
+
 fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRef, RpcError> {
     let input = input.trim();
     let Some((first_join_idx, _, _)) = find_next_join_clause(input) else {
@@ -8731,26 +8932,40 @@ fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRe
             ));
         };
         rest = rest[prefix_len..].trim_start();
-        let on_idx = find_keyword_top_level(rest, "on").ok_or_else(|| {
-            RpcError::new("not_supported", "JOIN currently requires an ON predicate")
-        })?;
-        let right_sql = rest[..on_idx].trim();
+        let clause = [("on", 2usize), ("using", 5usize)]
+            .into_iter()
+            .filter_map(|(keyword, len)| {
+                find_keyword_top_level(rest, keyword).map(|idx| (idx, keyword, len))
+            })
+            .min_by_key(|(idx, _, _)| *idx)
+            .ok_or_else(|| {
+                RpcError::new(
+                    "not_supported",
+                    "JOIN currently requires an ON or USING clause",
+                )
+            })?;
+        let right_sql = rest[..clause.0].trim();
         if right_sql.is_empty() {
             return Err(RpcError::new("invalid_request", "JOIN missing right table"));
         }
-        rest = rest[on_idx + 2..].trim_start();
-        let (on_sql, tail_after_on) = if let Some((idx, _, _)) = find_next_join_clause(rest) {
-            (rest[..idx].trim(), rest[idx..].trim_start())
-        } else {
-            (rest.trim(), "")
-        };
-        if on_sql.is_empty() {
+        rest = rest[clause.0 + clause.2..].trim_start();
+        let (predicate_sql, tail_after_predicate) =
+            if let Some((idx, _, _)) = find_next_join_clause(rest) {
+                (rest[..idx].trim(), rest[idx..].trim_start())
+            } else {
+                (rest.trim(), "")
+            };
+        if predicate_sql.is_empty() {
             return Err(RpcError::new(
                 "invalid_request",
-                "JOIN missing ON predicate",
+                format!("JOIN missing {} clause", clause.1.to_ascii_uppercase()),
             ));
         }
-        let on = parse_where_expr(on_sql)?;
+        let (on, using_columns) = if clause.1.eq_ignore_ascii_case("on") {
+            (parse_where_expr(predicate_sql)?, None)
+        } else {
+            (None, Some(parse_join_using_columns(predicate_sql)?))
+        };
         table_ref = TableRef::Join(JoinTableRef {
             join: JoinRef {
                 join_type,
@@ -8759,9 +8974,10 @@ fn parse_from_table_ref(input: &str, default_db: Option<&str>) -> Result<TableRe
                     right_sql, default_db, true,
                 )?)),
                 on,
+                using_columns,
             },
         });
-        rest = tail_after_on;
+        rest = tail_after_predicate;
     }
     Ok(table_ref)
 }
@@ -11416,6 +11632,7 @@ async fn mysql_select_total_rows_without_limit(
         let table_descs = mysql_collect_base_table_descs(&eng, &from)?;
         projection = mysql_expand_projection_from_descs(&projection, &table_descs)?;
     }
+    let from = mysql_rewrite_using_table_ref(&eng, &from)?;
     let no_limit = None;
     if let TableRef::Base(table) = &from {
         if let Some(result) = information_schema_select_result(
@@ -11529,6 +11746,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 let table_descs = mysql_collect_base_table_descs(&eng, &from)?;
                 projection = mysql_expand_projection_from_descs(&projection, &table_descs)?;
             }
+            let from = mysql_rewrite_using_table_ref(&eng, &from)?;
             if let TableRef::Base(table) = &from {
                 if let Some(result) = information_schema_select_result(
                     &eng,
@@ -14565,6 +14783,7 @@ mod tests {
             Some(TableRef::Base(base)) => vec![MySqlStmtPrepareTableDesc {
                 base: base.clone(),
                 desc: desc.clone(),
+                hidden_columns: HashSet::new(),
             }],
             _ => Vec::new(),
         };
@@ -14594,6 +14813,7 @@ mod tests {
             Some(TableRef::Base(base)) => vec![MySqlStmtPrepareTableDesc {
                 base: base.clone(),
                 desc: desc.clone(),
+                hidden_columns: HashSet::new(),
             }],
             _ => Vec::new(),
         };
@@ -14643,6 +14863,7 @@ mod tests {
                     r#as: Some("p".to_string()),
                 },
                 desc: posts_desc,
+                hidden_columns: HashSet::new(),
             },
             MySqlStmtPrepareTableDesc {
                 base: BaseTableRef {
@@ -14651,6 +14872,7 @@ mod tests {
                     r#as: Some("u".to_string()),
                 },
                 desc: users_desc,
+                hidden_columns: HashSet::new(),
             },
         ];
         let join_projection =
@@ -14754,6 +14976,7 @@ mod tests {
                         {"name": "user_id", "type": {"kind": "u64"}}
                     ]
                 }),
+                hidden_columns: HashSet::new(),
             },
             MySqlStmtPrepareTableDesc {
                 base: BaseTableRef {
@@ -14767,6 +14990,7 @@ mod tests {
                         {"name": "name", "type": {"kind": "string"}}
                     ]
                 }),
+                hidden_columns: HashSet::new(),
             },
         ];
 
@@ -14830,6 +15054,7 @@ mod tests {
                         {"name": "user_id", "type": {"kind": "u64"}}
                     ]
                 }),
+                hidden_columns: HashSet::new(),
             },
             MySqlStmtPrepareTableDesc {
                 base: BaseTableRef {
@@ -14843,6 +15068,7 @@ mod tests {
                         {"name": "name", "type": {"kind": "string"}}
                     ]
                 }),
+                hidden_columns: HashSet::new(),
             },
         ];
         let SqlPlan::Select { projection, .. } = parse_sql_plan(
@@ -14884,6 +15110,83 @@ mod tests {
                     table: Some("u".to_string()),
                 },
                 r#as: None,
+            }
+        );
+    }
+
+    #[test]
+    fn mysql_expand_wildcard_projection_hides_right_using_columns() {
+        let table_descs = vec![
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: Some("u".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "name", "type": {"kind": "string"}}
+                    ]
+                }),
+                hidden_columns: HashSet::new(),
+            },
+            MySqlStmtPrepareTableDesc {
+                base: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "profiles".to_string(),
+                    r#as: Some("p".to_string()),
+                },
+                desc: json!({
+                    "columns": [
+                        {"name": "id", "type": {"kind": "u64"}},
+                        {"name": "nickname", "type": {"kind": "string"}}
+                    ]
+                }),
+                hidden_columns: ["id".to_string()].into_iter().collect(),
+            },
+        ];
+
+        let wildcard = mysql_stmt_wildcard_columns(&table_descs, true);
+        assert_eq!(
+            wildcard,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "name".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "nickname".to_string(),
+                    column_type: MySqlStmtColumnType::VarString,
+                },
+            ]
+        );
+
+        let qualified = mysql_expand_qualified_wildcard_projection_from_descs(&table_descs, "p")
+            .expect("expand qualified wildcard");
+        assert_eq!(qualified.len(), 2);
+        assert_eq!(
+            qualified[0],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("id".to_string()),
+            }
+        );
+        assert_eq!(
+            qualified[1],
+            SelectItem {
+                expr: Expr::Col {
+                    col: "nickname".to_string(),
+                    table: Some("p".to_string()),
+                },
+                r#as: Some("nickname".to_string()),
             }
         );
     }
@@ -15201,6 +15504,28 @@ mod tests {
             panic!("expected inner right table");
         };
         assert_eq!(inner_right.table, "users");
+    }
+
+    #[test]
+    fn parse_select_plan_supports_join_using_clause() {
+        let plan = parse_sql_plan(
+            "SELECT * FROM app.users AS u INNER JOIN app.profiles AS p USING (id)",
+            Some("app"),
+        )
+        .expect("parse select plan");
+        let SqlPlan::Select { from, .. } = plan else {
+            panic!("expected select plan");
+        };
+        let Some(TableRef::Join(join)) = from else {
+            panic!("expected join");
+        };
+        assert_eq!(join.join.join_type, JoinType::Inner);
+        assert!(join.join.on.is_none());
+        assert_eq!(join.join.using_columns, Some(vec!["id".to_string()]));
+        let TableRef::Base(right) = join.join.right.as_ref() else {
+            panic!("expected right table");
+        };
+        assert_eq!(right.r#as.as_deref(), Some("p"));
     }
 
     #[test]
@@ -17206,6 +17531,97 @@ mod tests {
         assert_eq!(wildcard_rows[0][4]["v"].as_i64(), Some(1));
         assert_eq!(wildcard_rows[0][5]["v"].as_str(), Some("active"));
         assert_eq!(wildcard_rows[0][6]["v"].as_str(), Some("Ada"));
+
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE wp_profiles (id BIGINT UNSIGNED NOT NULL, nickname VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+        assert!(call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO wp_profiles (id, nickname) VALUES (1, 'ada-admin'), (2, 'grace-admin')",
+                "default_db": "wp"
+            }),
+        )
+        .await
+        .ok);
+
+        let using_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT * FROM wp_users AS u INNER JOIN wp_profiles AS p USING (id) WHERE u.id = 1",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(using_join.ok);
+        let using_result = using_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .cloned()
+            .unwrap_or_default();
+        let using_columns = using_result
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            using_columns
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["id", "status", "name", "nickname"]
+        );
+        let using_rows = using_result
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(using_rows.len(), 1);
+        assert_eq!(using_rows[0][0]["v"].as_i64(), Some(1));
+        assert_eq!(using_rows[0][1]["v"].as_str(), Some("active"));
+        assert_eq!(using_rows[0][2]["v"].as_str(), Some("Ada"));
+        assert_eq!(using_rows[0][3]["v"].as_str(), Some("ada-admin"));
+
+        let qualified_using_join = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT p.* FROM wp_users AS u INNER JOIN wp_profiles AS p USING (id) WHERE u.id = 1",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(qualified_using_join.ok);
+        let qualified_using_result = qualified_using_join
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .cloned()
+            .unwrap_or_default();
+        let qualified_using_columns = qualified_using_result
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            qualified_using_columns
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["id", "nickname"]
+        );
 
         let qualified_wildcard_join = call_rpc(
             &state,

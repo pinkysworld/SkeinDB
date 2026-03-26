@@ -44,6 +44,7 @@ USE skein_test;
 DROP TABLE IF EXISTS wp_options;
 DROP TABLE IF EXISTS wp_posts;
 DROP TABLE IF EXISTS wp_users;
+DROP TABLE IF EXISTS wp_user_profiles;
 
 CREATE TABLE wp_options (
   option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -165,6 +166,17 @@ VALUES
   (2, 'grace'),
   (4, 'margaret');
 
+CREATE TABLE wp_user_profiles (
+  id BIGINT UNSIGNED NOT NULL,
+  nickname VARCHAR(64) NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+
+INSERT INTO wp_user_profiles (id, nickname)
+VALUES
+  (1, 'ada-admin'),
+  (2, 'grace-admin');
+
 CREATE UNIQUE INDEX user_login_unique ON wp_users (user_login);
 
 ALTER TABLE wp_users
@@ -223,6 +235,12 @@ SELECT p.ID, u.user_login, ux.user_login
     ON ux.id = u.id
  WHERE p.ID = 1
  ORDER BY p.ID ASC;
+
+SELECT *
+  FROM wp_users AS u
+  INNER JOIN wp_user_profiles AS p
+    USING (id)
+ WHERE u.id = 1;
 
 SELECT *
   FROM wp_posts AS p

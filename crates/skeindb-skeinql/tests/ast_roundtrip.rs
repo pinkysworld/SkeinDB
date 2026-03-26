@@ -88,6 +88,7 @@ fn query_roundtrip_join() {
                             lo: None,
                             hi: None,
                         }),
+                        using_columns: None,
                     },
                 })]),
                 r#where: None,

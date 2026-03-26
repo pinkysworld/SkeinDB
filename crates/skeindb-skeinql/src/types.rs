@@ -449,6 +449,9 @@ pub struct JoinRef {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<Expr>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using_columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
