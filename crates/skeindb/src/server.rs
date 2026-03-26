@@ -1667,6 +1667,33 @@ fn mysql_desc_column_default(desc: &Value, name: &str) -> Option<Lit> {
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
+fn mysql_desc_column_info(desc: &Value, name: &str) -> Option<SchemaColumnInfo> {
+    let column = desc
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .find(|column| {
+            column
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|column_name| column_name.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        })?;
+    Some(SchemaColumnInfo {
+        name: column.get("name").and_then(|v| v.as_str())?.to_string(),
+        r#type: serde_json::from_value(column.get("type")?.clone()).ok()?,
+        nullable: column
+            .get("nullable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        auto_increment: column
+            .get("auto_increment")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
 fn mysql_default_cell_value(lit: &Lit) -> Option<String> {
     match lit {
         Lit::Null => None,
@@ -8182,6 +8209,11 @@ enum SqlPlan {
         column: SchemaColumnInfo,
         default: Option<Lit>,
     },
+    AlterTableRenameColumn {
+        table: BaseTableRef,
+        old_name: String,
+        new_name: String,
+    },
     AlterTableAddIndex {
         table: BaseTableRef,
         index_name: String,
@@ -10304,6 +10336,36 @@ fn parse_alter_table_rename_index_clause(
     Ok(Some((old_name, new_name)))
 }
 
+fn parse_alter_table_rename_column_clause(
+    clause: &str,
+) -> Result<Option<(String, String)>, RpcError> {
+    let tokens: Vec<&str> = clause.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME clause must not be empty",
+        ));
+    }
+    if !tokens[0].eq_ignore_ascii_case("column") {
+        return Ok(None);
+    }
+    if tokens.len() != 4 || !tokens[2].eq_ignore_ascii_case("to") {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME COLUMN requires old_name TO new_name",
+        ));
+    }
+    let old_name = clean_sql_ident(tokens[1]);
+    let new_name = clean_sql_ident(tokens[3]);
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "ALTER TABLE RENAME COLUMN requires non-empty old and new names",
+        ));
+    }
+    Ok(Some((old_name, new_name)))
+}
+
 fn parse_alter_table_column_spec(
     clause: &str,
     name_idx: usize,
@@ -10372,7 +10434,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     let Some((action_idx, action)) = action_match else {
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / ADD [UNIQUE] KEY / RENAME [KEY|INDEX] / DROP [KEY|INDEX]",
+            "ALTER TABLE currently supports ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN / RENAME COLUMN / ADD [UNIQUE] KEY / RENAME [KEY|INDEX] / DROP [KEY|INDEX]",
         ));
     };
 
@@ -10393,6 +10455,13 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
     }
 
     if action.eq_ignore_ascii_case("rename") {
+        if let Some((old_name, new_name)) = parse_alter_table_rename_column_clause(clause)? {
+            return Ok(SqlPlan::AlterTableRenameColumn {
+                table,
+                old_name,
+                new_name,
+            });
+        }
         if let Some((old_name, new_name)) = parse_alter_table_rename_index_clause(clause)? {
             return Ok(SqlPlan::AlterTableRenameIndex {
                 table,
@@ -10402,7 +10471,7 @@ fn parse_alter_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan
         }
         return Err(RpcError::new(
             "not_supported",
-            "ALTER TABLE RENAME currently supports only RENAME [KEY|INDEX] old TO new",
+            "ALTER TABLE RENAME currently supports RENAME COLUMN old TO new and RENAME [KEY|INDEX] old TO new",
         ));
     }
 
@@ -10804,6 +10873,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::AlterTableAddColumn { .. }
         | SqlPlan::AlterTableModifyColumn { .. }
         | SqlPlan::AlterTableChangeColumn { .. }
+        | SqlPlan::AlterTableRenameColumn { .. }
         | SqlPlan::AlterTableAddIndex { .. }
         | SqlPlan::AlterTableRenameIndex { .. } => "alter_table",
         SqlPlan::DropIndex { .. } => "drop_index",
@@ -10848,6 +10918,7 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
         | Ok(SqlPlan::AlterTableModifyColumn { table, .. })
         | Ok(SqlPlan::AlterTableChangeColumn { table, .. })
+        | Ok(SqlPlan::AlterTableRenameColumn { table, .. })
         | Ok(SqlPlan::AlterTableAddIndex { table, .. })
         | Ok(SqlPlan::AlterTableRenameIndex { table, .. })
         | Ok(SqlPlan::DropIndex { table, .. })
@@ -11554,6 +11625,24 @@ async fn sql_exec_alter_table_modify_column(
     Ok(())
 }
 
+async fn sql_exec_alter_table_rename_column(
+    state: &AppState,
+    table: BaseTableRef,
+    old_name: String,
+    new_name: String,
+) -> Result<(), RpcError> {
+    let desc = {
+        let eng = state.engine.read().await;
+        eng.describe_table(&table.db, &table.table)
+            .map_err(to_rpc_error)?
+    };
+    let mut column = mysql_desc_column_info(&desc, &old_name)
+        .ok_or_else(|| RpcError::new("not_found", format!("column not found: {}", old_name)))?;
+    column.name = new_name;
+    let default = mysql_desc_column_default(&desc, &old_name);
+    sql_exec_alter_table_modify_column(state, table, old_name, column, default).await
+}
+
 async fn sql_exec_alter_table_add_index(
     state: &AppState,
     table: BaseTableRef,
@@ -12009,6 +12098,27 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "operation": "change_column",
                 "old_column": old_name,
                 "column": column.name
+            }))
+        }
+        SqlPlan::AlterTableRenameColumn {
+            table,
+            old_name,
+            new_name,
+        } => {
+            sql_exec_alter_table_rename_column(
+                state,
+                table.clone(),
+                old_name.clone(),
+                new_name.clone(),
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "statement": "alter_table",
+                "ok": true,
+                "table": table,
+                "operation": "rename_column",
+                "old_column": old_name,
+                "column": new_name
             }))
         }
         SqlPlan::AlterTableAddIndex {
@@ -15689,6 +15799,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_alter_table_rename_column_roundtrip() {
+        let plan = parse_sql_plan(
+            "ALTER TABLE app.users RENAME COLUMN user_login TO login_name",
+            Some("app"),
+        )
+        .expect("parse alter table rename column");
+        let SqlPlan::AlterTableRenameColumn {
+            table,
+            old_name,
+            new_name,
+        } = plan
+        else {
+            panic!("expected alter table rename column plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(old_name, "user_login");
+        assert_eq!(new_name, "login_name");
+    }
+
+    #[test]
     fn parse_create_unique_index_roundtrip() {
         let plan = parse_sql_plan(
             "CREATE UNIQUE INDEX user_login_uq ON app.users (user_login)",
@@ -17622,6 +17753,65 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["id", "nickname"]
         );
+
+        assert!(
+            call_rpc(
+                &state,
+                "sql.exec",
+                json!({
+                    "sql": "ALTER TABLE wp_profiles RENAME COLUMN nickname TO display_name",
+                    "default_db": "wp"
+                }),
+            )
+            .await
+            .ok
+        );
+
+        let renamed_profile = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT display_name FROM wp_profiles WHERE id = 1",
+                "default_db": "wp"
+            }),
+        )
+        .await;
+        assert!(renamed_profile.ok);
+        let renamed_profile_rows = renamed_profile
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(renamed_profile_rows.len(), 1);
+        assert_eq!(renamed_profile_rows[0][0]["v"].as_str(), Some("ada-admin"));
+
+        let renamed_profile_desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "wp",
+                "table": "wp_profiles"
+            }),
+        )
+        .await;
+        assert!(renamed_profile_desc.ok);
+        let renamed_profile_columns = renamed_profile_desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("columns"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(renamed_profile_columns.iter().any(|row| {
+            row.get("name").and_then(|value| value.as_str()) == Some("display_name")
+        }));
+        assert!(!renamed_profile_columns
+            .iter()
+            .any(|row| { row.get("name").and_then(|value| value.as_str()) == Some("nickname") }));
 
         let qualified_wildcard_join = call_rpc(
             &state,

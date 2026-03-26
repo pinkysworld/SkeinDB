@@ -242,6 +242,13 @@ SELECT *
     USING (id)
  WHERE u.id = 1;
 
+ALTER TABLE wp_user_profiles
+  RENAME COLUMN nickname TO display_name;
+
+SELECT display_name
+  FROM wp_user_profiles
+ WHERE id = 1;
+
 SELECT *
   FROM wp_posts AS p
   LEFT JOIN wp_users AS u

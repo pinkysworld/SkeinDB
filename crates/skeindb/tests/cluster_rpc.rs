@@ -852,6 +852,39 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         ]]
     );
 
+    send_com_query(
+        &mut stream,
+        "ALTER TABLE wp_user_profiles RENAME COLUMN nickname TO display_name",
+    )
+    .await?;
+    let (_seq, ok_rename_column) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_rename_column)?.0, 0);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT display_name FROM wp_user_profiles WHERE id = ?",
+    )
+    .await?;
+    let renamed_column_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(renamed_column_stmt.param_count, 1);
+    assert_eq!(
+        renamed_column_stmt.column_defs,
+        vec![("display_name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        renamed_column_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let renamed_column_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        renamed_column_rows,
+        vec![vec![Some("nora-admin".to_string())]]
+    );
+
+    send_com_stmt_close(&mut stream, renamed_column_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, using_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, qualified_join_wildcard_stmt.statement_id).await?;
     send_com_stmt_close(&mut stream, join_wildcard_stmt.statement_id).await?;
@@ -1510,6 +1543,13 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select display_name from wp_user_profiles where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("ada-admin"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select id from wp_posts where post_title = null order by id asc" => match response {
                 MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
                 other => panic!("expected result set, got {:?}", other),
