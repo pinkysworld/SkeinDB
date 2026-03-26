@@ -300,6 +300,14 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
 
+    send_com_init_db(&mut stream, "skein_test").await?;
+    let (_seq, ok_init_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_init_db)?.0, 0);
+
+    send_com_query(&mut stream, "SELECT DATABASE()").await?;
+    let database_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(database_rows, vec![vec![Some("skein_test".to_string())]]);
+
     send_com_query(&mut stream, "USE skein_test").await?;
     let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
@@ -437,6 +445,27 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
         Some("https://example.shuffle")
     );
     assert_eq!(shuffled_rows[0][1].as_deref(), Some("no"));
+
+    let (raw_theme_payload, sql_theme_payload) = build_wordpress_theme_pattern_payload(80);
+    let theme_upsert = format!(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('_site_transient_wp_theme_files_patterns-demo', '{}', 'off') ON DUPLICATE KEY UPDATE option_name = VALUES(option_name), option_value = VALUES(option_value), autoload = VALUES(autoload)",
+        sql_theme_payload
+    );
+    send_com_query(&mut stream, &theme_upsert).await?;
+    let (_seq, ok_theme_upsert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_theme_upsert)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value FROM wp_options WHERE option_name = '_site_transient_wp_theme_files_patterns-demo'",
+    )
+    .await?;
+    let theme_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(theme_rows.len(), 1);
+    assert_eq!(
+        theme_rows[0][0].as_deref(),
+        Some(raw_theme_payload.as_str())
+    );
 
     send_com_query(
         &mut stream,
@@ -2196,6 +2225,13 @@ async fn send_com_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<()>
     write_mysql_packet(stream, 0, &payload).await
 }
 
+async fn send_com_init_db(stream: &mut TcpStream, database: &str) -> anyhow::Result<()> {
+    let mut payload = Vec::with_capacity(database.len() + 1);
+    payload.push(0x02);
+    payload.extend_from_slice(database.as_bytes());
+    write_mysql_packet(stream, 0, &payload).await
+}
+
 async fn read_mysql_text_result_rows(
     stream: &mut TcpStream,
 ) -> anyhow::Result<Vec<Vec<Option<String>>>> {
@@ -2268,6 +2304,21 @@ async fn read_mysql_response(stream: &mut TcpStream) -> anyhow::Result<MysqlResp
     }
     let rows = read_mysql_text_result_rows_after_first_packet(stream, first_payload).await?;
     Ok(MysqlResponse::Rows(rows))
+}
+
+fn build_wordpress_theme_pattern_payload(entry_count: usize) -> (String, String) {
+    let mut raw = format!("a:1:{{s:8:\"patterns\";a:{}:{{", entry_count);
+    for i in 0..entry_count {
+        raw.push_str(&format!(
+            "s:14:\"pattern-{i:03}.php\";a:4:{{s:5:\"title\";s:22:\"Pattern {i:03} speaker's\";s:4:\"slug\";s:31:\"twentytwentyfive/pattern-{i:03}\";s:11:\"description\";s:17:\"Payload block {i:03}\";s:10:\"categories\";a:1:{{i:0;s:6:\"banner\";}}}}"
+        ));
+    }
+    raw.push_str("}}");
+    let sql_escaped = raw
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('"', "\\\"");
+    (raw, sql_escaped)
 }
 
 #[derive(Debug)]

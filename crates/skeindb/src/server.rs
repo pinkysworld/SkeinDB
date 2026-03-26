@@ -531,6 +531,18 @@ impl MySqlSessionState {
     }
 }
 
+async fn mysql_select_database(state: &AppState, database: &str) -> Result<String, MySqlWireError> {
+    let requested = clean_sql_ident(database);
+    if requested.is_empty() {
+        return Err((1049, "42000", "unknown database".to_string()));
+    }
+    let eng = state.engine.read().await;
+    eng.list_databases()
+        .into_iter()
+        .find(|db| db.eq_ignore_ascii_case(&requested))
+        .ok_or_else(|| (1049, "42000", format!("unknown database '{}'", requested)))
+}
+
 fn mysql_seed(conn_id: u32) -> [u8; 20] {
     let mut seed = [0u8; 20];
     let mut x = now_unix_ms_u64()
@@ -639,6 +651,51 @@ fn parse_lenenc_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Result<&'a [
     Ok(bytes)
 }
 
+fn mysql_quoted_scan_skip(bytes: &[u8], idx: usize, quote: u8) -> Option<usize> {
+    if idx >= bytes.len() || quote == 0 {
+        return None;
+    }
+    if quote != b'`' && bytes[idx] == b'\\' && idx + 1 < bytes.len() {
+        return Some(2);
+    }
+    if bytes[idx] == quote && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
+        return Some(2);
+    }
+    None
+}
+
+fn mysql_unescape_string_literal(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && chars.peek().copied() == Some('\'') {
+            out.push('\'');
+            chars.next();
+            continue;
+        }
+        if ch == '\\' {
+            match chars.next() {
+                Some('0') => out.push('\0'),
+                Some('b') => out.push('\u{0008}'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('Z') => out.push('\u{001A}'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('%') => out.push('%'),
+                Some('_') => out.push('_'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn mysql_count_placeholders(sql: &str) -> u16 {
     let bytes = sql.as_bytes();
     let mut quote = 0u8;
@@ -647,11 +704,11 @@ fn mysql_count_placeholders(sql: &str) -> u16 {
     while i < bytes.len() {
         let b = bytes[i];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                i += skip;
+                continue;
+            }
             if b == quote {
-                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
                 quote = 0;
             }
             i += 1;
@@ -929,13 +986,15 @@ fn mysql_substitute_stmt_sql(sql: &str, params: &[Lit]) -> Result<String, String
     while i < bytes.len() {
         let b = bytes[i];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                for offset in 0..skip {
+                    out.push(bytes[i + offset] as char);
+                }
+                i += skip;
+                continue;
+            }
             out.push(b as char);
             if b == quote {
-                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    out.push('\'');
-                    i += 2;
-                    continue;
-                }
                 quote = 0;
             }
             i += 1;
@@ -1050,24 +1109,30 @@ fn find_ascii_ci_outside_quotes(haystack: &[u8], needle: &[u8]) -> Option<usize>
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    let mut in_string = false;
+    let mut quote = 0u8;
     let mut i = 0usize;
     while i + needle.len() <= haystack.len() {
         let ch = haystack[i];
-        if ch == b'\'' {
-            if in_string && i + 1 < haystack.len() && haystack[i + 1] == b'\'' {
-                i += 2;
+        if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(haystack, i, quote) {
+                i += skip;
                 continue;
             }
-            in_string = !in_string;
+            if ch == quote {
+                quote = 0;
+            }
             i += 1;
             continue;
         }
-        if !in_string
-            && haystack[i..i + needle.len()]
-                .iter()
-                .zip(needle.iter())
-                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        if matches!(ch, b'\'' | b'"' | b'`') {
+            quote = ch;
+            i += 1;
+            continue;
+        }
+        if haystack[i..i + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
         {
             return Some(i);
         }
@@ -1079,20 +1144,33 @@ fn find_ascii_ci_outside_quotes(haystack: &[u8], needle: &[u8]) -> Option<usize>
 fn split_select_expressions(input: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut in_string = false;
+    let mut quote = None::<char>;
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\'' {
+        if let Some(active_quote) = quote {
             cur.push(ch);
-            if in_string && chars.peek().copied() == Some('\'') {
-                cur.push('\'');
+            if active_quote != '`' && ch == '\\' {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+                continue;
+            }
+            if chars.peek().copied() == Some(active_quote) && ch == active_quote {
+                cur.push(active_quote);
                 chars.next();
                 continue;
             }
-            in_string = !in_string;
+            if ch == active_quote {
+                quote = None;
+            }
             continue;
         }
-        if ch == ',' && !in_string {
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            cur.push(ch);
+            continue;
+        }
+        if ch == ',' {
             let item = cur.trim();
             if item.is_empty() {
                 return None;
@@ -1103,7 +1181,7 @@ fn split_select_expressions(input: &str) -> Option<Vec<String>> {
         }
         cur.push(ch);
     }
-    if in_string {
+    if quote.is_some() {
         return None;
     }
     let tail = cur.trim();
@@ -1118,17 +1196,7 @@ fn parse_sql_string_literal(input: &str) -> Option<String> {
     if input.len() < 2 || !input.starts_with('\'') || !input.ends_with('\'') {
         return None;
     }
-    let mut out = String::new();
-    let mut chars = input[1..input.len() - 1].chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\'' && chars.peek().copied() == Some('\'') {
-            out.push('\'');
-            chars.next();
-        } else {
-            out.push(ch);
-        }
-    }
-    Some(out)
+    Some(mysql_unescape_string_literal(&input[1..input.len() - 1]))
 }
 
 fn mysql_normalize_session_var_name(raw: &str) -> String {
@@ -5208,6 +5276,24 @@ async fn handle_mysql_connection(
             0x01 => {
                 return Ok(());
             }
+            0x02 => {
+                let database = String::from_utf8_lossy(&command_payload[1..]).to_string();
+                match mysql_select_database(&state, &database).await {
+                    Ok(database) => {
+                        session.default_db = Some(database);
+                        mysql_write_packet(
+                            &mut stream,
+                            cmd_seq.wrapping_add(1),
+                            &mysql_ok_packet(),
+                        )
+                        .await?;
+                    }
+                    Err((code, state_code, message)) => {
+                        let packet = mysql_err_packet(code, state_code, &message);
+                        mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &packet).await?;
+                    }
+                }
+            }
             0x0e => {
                 mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), &mysql_ok_packet())
                     .await?;
@@ -8659,11 +8745,11 @@ fn find_keyword_top_level(haystack: &str, keyword: &str) -> Option<usize> {
     while i < bytes.len() {
         let b = bytes[i];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                i += skip;
+                continue;
+            }
             if b == quote {
-                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
                 quote = 0;
             }
             i += 1;
@@ -8710,11 +8796,11 @@ fn split_csv_top_level(input: &str) -> Vec<String> {
     while i < bytes.len() {
         let b = bytes[i];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                i += skip;
+                continue;
+            }
             if b == quote {
-                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
                 quote = 0;
             }
             i += 1;
@@ -8776,15 +8862,18 @@ fn trim_wrapping_parentheses(input: &str) -> &str {
         let mut depth = 0u32;
         let mut quote = 0u8;
         let mut wraps = true;
-        for (idx, b) in bytes.iter().enumerate() {
-            let b = *b;
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            let b = bytes[idx];
             if quote != 0 {
+                if let Some(skip) = mysql_quoted_scan_skip(bytes, idx, quote) {
+                    idx += skip;
+                    continue;
+                }
                 if b == quote {
-                    if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
-                        continue;
-                    }
                     quote = 0;
                 }
+                idx += 1;
                 continue;
             }
             match b {
@@ -8803,6 +8892,7 @@ fn trim_wrapping_parentheses(input: &str) -> &str {
                 }
                 _ => {}
             }
+            idx += 1;
         }
         if !wraps || depth != 0 {
             break;
@@ -9067,7 +9157,7 @@ fn parse_sql_lit(raw: &str) -> Result<Lit, RpcError> {
     if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
         let inner = &s[1..s.len() - 1];
         return Ok(Lit::Str {
-            v: inner.replace("''", "'"),
+            v: mysql_unescape_string_literal(inner),
         });
     }
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
@@ -9097,11 +9187,11 @@ fn parse_sql_leading_lit(raw: &str) -> Result<Lit, RpcError> {
         let quote = bytes[0];
         let mut idx = 1usize;
         while idx < bytes.len() {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, idx, quote) {
+                idx += skip;
+                continue;
+            }
             if bytes[idx] == quote {
-                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
-                    idx += 2;
-                    continue;
-                }
                 return parse_sql_lit(&s[..=idx]);
             }
             idx += 1;
@@ -9273,11 +9363,11 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
     while i < bytes.len() {
         let b = bytes[i];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                i += skip;
+                continue;
+            }
             if b == quote {
-                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                    continue;
-                }
                 quote = 0;
             }
             i += 1;
@@ -9935,11 +10025,7 @@ fn parse_create_table_index_def(definition: &str) -> Result<Option<Value>, RpcEr
         ));
     };
     let name_raw = rest[..open_idx].trim();
-    let columns = split_csv_top_level(&rest[open_idx + 1..close_idx])
-        .into_iter()
-        .map(|col| clean_sql_ident(&col))
-        .filter(|col| !col.is_empty())
-        .collect::<Vec<_>>();
+    let columns = parse_index_column_list(&rest[open_idx + 1..close_idx])?;
     if columns.is_empty() {
         return Err(RpcError::new(
             "invalid_request",
@@ -10199,15 +10285,18 @@ fn find_matching_parenthesis(input: &str, open_idx: usize) -> Option<usize> {
     }
     let mut depth = 0u32;
     let mut quote = 0u8;
-    for (idx, b) in bytes.iter().enumerate().skip(open_idx) {
-        let b = *b;
+    let mut idx = open_idx;
+    while idx < bytes.len() {
+        let b = bytes[idx];
         if quote != 0 {
+            if let Some(skip) = mysql_quoted_scan_skip(bytes, idx, quote) {
+                idx += skip;
+                continue;
+            }
             if b == quote {
-                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
-                    continue;
-                }
                 quote = 0;
             }
+            idx += 1;
             continue;
         }
         match b {
@@ -10224,6 +10313,7 @@ fn find_matching_parenthesis(input: &str, open_idx: usize) -> Option<usize> {
             }
             _ => {}
         }
+        idx += 1;
     }
     None
 }
@@ -10660,11 +10750,11 @@ fn parse_insert_plan(
         while i < bytes.len() {
             let b = bytes[i];
             if quote != 0 {
+                if let Some(skip) = mysql_quoted_scan_skip(bytes, i, quote) {
+                    i += skip;
+                    continue;
+                }
                 if b == quote {
-                    if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        i += 2;
-                        continue;
-                    }
                     quote = 0;
                 }
                 i += 1;
@@ -10691,8 +10781,24 @@ fn parse_insert_plan(
         }
         tuples.push(values_sql[start..i].to_string());
         i += 1;
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
-            i += 1;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_whitespace() || bytes[i] == b',' {
+                i += 1;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                if i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i = bytes.len();
+                }
+                continue;
+            }
+            break;
         }
     }
     let mut rows = Vec::new();
@@ -15927,6 +16033,159 @@ mod tests {
             indexes[0].get("unique").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn parse_create_table_strips_mysql_index_prefix_lengths() {
+        let plan = parse_sql_plan(
+            "CREATE TABLE app.postmeta (meta_id BIGINT NOT NULL AUTO_INCREMENT, meta_key VARCHAR(255), post_id BIGINT NOT NULL, PRIMARY KEY (meta_id), KEY meta_key (meta_key(191)), KEY post_id_meta_key (post_id, meta_key(32)))",
+            Some("app"),
+        )
+        .expect("parse create table with mysql index prefix lengths");
+        let SqlPlan::CreateTable { compat_mysql, .. } = plan else {
+            panic!("expected create table plan");
+        };
+        let indexes = compat_mysql
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("meta_key")
+        );
+        assert_eq!(
+            indexes[0]
+                .get("columns")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("meta_key")]
+        );
+        assert_eq!(
+            indexes[1].get("name").and_then(|v| v.as_str()),
+            Some("post_id_meta_key")
+        );
+        assert_eq!(
+            indexes[1]
+                .get("columns")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("post_id"), json!("meta_key")]
+        );
+    }
+
+    fn build_wordpress_theme_pattern_payload(entry_count: usize) -> (String, String) {
+        let mut raw = format!("a:1:{{s:8:\"patterns\";a:{}:{{", entry_count);
+        for i in 0..entry_count {
+            raw.push_str(&format!(
+                "s:14:\"pattern-{i:03}.php\";a:4:{{s:5:\"title\";s:22:\"Pattern {i:03} speaker's\";s:4:\"slug\";s:31:\"twentytwentyfive/pattern-{i:03}\";s:11:\"description\";s:17:\"Payload block {i:03}\";s:10:\"categories\";a:1:{{i:0;s:6:\"banner\";}}}}"
+            ));
+        }
+        raw.push_str("}}");
+        let sql_escaped = raw
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('"', "\\\"");
+        (raw, sql_escaped)
+    }
+
+    #[test]
+    fn parse_insert_supports_mysql_backslash_escaped_apostrophes() {
+        let plan = parse_sql_plan(
+            "INSERT INTO wp_posts (post_content, post_title) VALUES ('It\\'s different from a blog post because I\\'m testing it.', 'Sample Page')",
+            Some("wordpress"),
+        )
+        .expect("parse insert with mysql backslash-escaped apostrophes");
+        let SqlPlan::Insert { table, rows, .. } = plan else {
+            panic!("expected insert plan");
+        };
+        assert_eq!(table.db, "wordpress");
+        assert_eq!(table.table, "wp_posts");
+        assert_eq!(rows.len(), 1);
+        match rows[0].get("post_content") {
+            Some(Lit::Str { v }) => {
+                assert_eq!(v, "It's different from a blog post because I'm testing it.")
+            }
+            other => panic!("unexpected post_content literal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_upsert_supports_wordpress_serialized_payloads() {
+        let plan = parse_sql_plan(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`, `autoload`) VALUES ('_site_transient_demo', 'a:2:{s:7:\\\"version\\\";s:3:\\\"1.4\\\";s:8:\\\"patterns\\\";a:1:{s:8:\\\"text.php\\\";a:1:{s:5:\\\"title\\\";s:5:\\\"Hello\\\";}}}', 'off') ON DUPLICATE KEY UPDATE `option_name` = VALUES(`option_name`), `option_value` = VALUES(`option_value`), `autoload` = VALUES(`autoload`)",
+            Some("wordpress"),
+        )
+        .expect("parse insert upsert with wordpress serialized payload");
+        let SqlPlan::Insert {
+            table,
+            rows,
+            on_duplicate,
+            ..
+        } = plan
+        else {
+            panic!("expected insert plan");
+        };
+        assert_eq!(table.db, "wordpress");
+        assert_eq!(table.table, "wp_options");
+        assert_eq!(rows.len(), 1);
+        match rows[0].get("option_value") {
+            Some(Lit::Str { v }) => assert_eq!(
+                v,
+                "a:2:{s:7:\"version\";s:3:\"1.4\";s:8:\"patterns\";a:1:{s:8:\"text.php\";a:1:{s:5:\"title\";s:5:\"Hello\";}}}"
+            ),
+            other => panic!("unexpected option_value literal: {other:?}"),
+        }
+        assert_eq!(on_duplicate.as_ref().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn parse_insert_supports_large_wordpress_theme_pattern_payloads() {
+        let (raw_payload, sql_payload) = build_wordpress_theme_pattern_payload(80);
+        let sql = format!(
+            "INSERT INTO `wp_options` (`option_name`, `option_value`, `autoload`) VALUES ('_site_transient_wp_theme_files_patterns-demo', '{}', 'off') ON DUPLICATE KEY UPDATE `option_name` = VALUES(`option_name`), `option_value` = VALUES(`option_value`), `autoload` = VALUES(`autoload`)",
+            sql_payload
+        );
+        let plan = parse_sql_plan(&sql, Some("wordpress"))
+            .expect("parse insert with large wordpress theme payload");
+        let SqlPlan::Insert {
+            table,
+            rows,
+            on_duplicate,
+            ..
+        } = plan
+        else {
+            panic!("expected insert plan");
+        };
+        assert_eq!(table.db, "wordpress");
+        assert_eq!(table.table, "wp_options");
+        assert_eq!(rows.len(), 1);
+        match rows[0].get("option_value") {
+            Some(Lit::Str { v }) => assert_eq!(v, &raw_payload),
+            other => panic!("unexpected option_value literal: {other:?}"),
+        }
+        assert_eq!(on_duplicate.as_ref().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn parse_insert_supports_trailing_block_comment_after_values() {
+        let plan = parse_sql_plan(
+            "INSERT IGNORE INTO `wp_options` (`option_name`, `option_value`, `autoload`) VALUES ('auto_updater.lock', '1774553722', 'off') /* LOCK */",
+            Some("wordpress"),
+        )
+        .expect("parse insert with trailing block comment");
+        let SqlPlan::Insert { rows, .. } = plan else {
+            panic!("expected insert plan");
+        };
+        assert_eq!(rows.len(), 1);
+        match rows[0].get("option_name") {
+            Some(Lit::Str { v }) => assert_eq!(v, "auto_updater.lock"),
+            other => panic!("unexpected option_name literal: {other:?}"),
+        }
     }
 
     #[test]

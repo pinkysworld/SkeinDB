@@ -58,6 +58,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries, including basic aggregate `HAVING` filters plus compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling
   - compatibility rewrite for WordPress-style non-aggregate `GROUP BY` de-dup queries when grouped columns map to the full projected column set (including `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()` flows)
   - wildcard `SELECT *` and qualified wildcard projections such as `table.*` over the current join subset, including mixed projections like `p.*, u.name`, baseline `JOIN ... USING (...)` coalescing for unqualified `*`, and `SQL_CALC_FOUND_ROWS` pagination/count flows
+  - large WordPress-style serialized `LONGTEXT` payloads over both `COM_QUERY` and `sql.exec`, including backslash-escaped string literals plus `INSERT ... ON DUPLICATE KEY UPDATE` flows used by theme-pattern and transient caches
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, plus compatibility-level `ALTER TABLE ... RENAME COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
   - `KEY` / `UNIQUE KEY` metadata from MySQL DDL (including `ALTER TABLE ... ADD [UNIQUE] KEY` and `ALTER TABLE ... RENAME [KEY|INDEX]`), surfaced through `SHOW INDEX` / `SHOW CREATE TABLE`
   - `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL` / `IS NOT NULL`, and parenthesized `AND` / `OR` predicate trees for common WordPress query shapes, with `NULL` values now treated as SQL-style unknowns in comparison / `IN` / `LIKE` predicates
@@ -67,6 +68,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SET autocommit` (including qualified/session forms), `BEGIN`, `COMMIT`, and `ROLLBACK` for the corpus' insert/rollback flow
   - compatibility no-op handling for `LOCK TABLES` / `UNLOCK TABLES`
 - `crates/skeindb/tests/cluster_rpc.rs` now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented.
+- A fresh local WordPress smoke test now completes install, login, and `/wp-admin/` dashboard load against SkeinDB's MySQL listener. Known follow-on gaps still surfaced by that smoke test include `REGEXP` filters in cleanup queries, multi-table `DELETE ... FROM ...` transient cleanup, `information_schema` `IN (...)` filters used by update checks, and taxonomy-related row-shape warnings.
 - The primary working interface in the scaffold is **SkeinQL JSON-RPC over HTTP**.
 - The SQL story is split:
   - **SkeinQL** includes a full query/expression layer intended to cover common SQL patterns.
