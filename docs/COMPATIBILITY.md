@@ -1,4 +1,4 @@
-# SkeinDB Compatibility (MySQL / SQL)
+# SkeinDB Compatibility (MySQL / SQL / Postgres)
 
 Status: Draft v0.1
 Last updated: 2026-03-26
@@ -6,6 +6,7 @@ Last updated: 2026-03-26
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol so existing apps work unchanged.
 - Translate MySQL SQL into SkeinIR.
+- Expose bounded Postgres-style SQL shims through `sql.exec` for browser/admin adoption paths.
 - Provide SkeinQL native API + console for proprietary features.
 
 ---
@@ -21,14 +22,21 @@ SkeinDB adoption strategy:
 ### compat=skein-native
 - Best performance + extra features.
 
+### compat=postgres-adapter
+- Postgres-style SQL rewrites over `sql.exec` for admin/HTTP tooling, without a Postgres wire listener.
+
 ---
 
 ## 2) v0.1 SQL surface (current baseline)
 
 ### DDL
 - CREATE DATABASE / DROP DATABASE / USE
+- Postgres-style `CREATE SCHEMA` / `DROP SCHEMA` rewrite to SkeinDB namespaces through `sql.exec`
 - CREATE TABLE (column defs, PK, `AUTO_INCREMENT`, column `DEFAULT`)
+- `SERIAL` / `BIGSERIAL` / `SMALLSERIAL` map to auto-incrementing integer columns
+- Inline column `PRIMARY KEY` / `UNIQUE` declarations are now recognized in `CREATE TABLE`
 - CREATE INDEX / CREATE UNIQUE INDEX
+- `CREATE INDEX IF NOT EXISTS`
 - DROP INDEX
 - `UNIQUE KEY` / `KEY` clauses are preserved in compatibility metadata and surfaced through MySQL-style metadata queries
 - `UNIQUE KEY` semantics are enforced for inserts/updates, but the current implementation is scan-based rather than backed by a true secondary index structure
@@ -42,6 +50,7 @@ SkeinDB adoption strategy:
 - `INSERT IGNORE` still keeps a small leading-column fast path, but `REPLACE` and `ON DUPLICATE KEY UPDATE` now resolve duplicate-key behavior through declared PK / `UNIQUE KEY` metadata; the implementation remains scan-based rather than backed by a true secondary index structure
 - UPDATE/DELETE with simple WHERE
 - SELECT with WHERE / ORDER BY / LIMIT / OFFSET
+- Postgres-style literal session helpers through `sql.exec`: `current_schema()`, `current_database()`, `version()`, and selected `current_setting(...)` values
 - SELECT supports `DISTINCT`, `IN (...)` / `NOT IN (...)`, `LIKE` / `NOT LIKE`, `IS NULL`, `IS NOT NULL`, and parenthesized `AND` / `OR` boolean filter trees
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
@@ -71,6 +80,11 @@ SkeinDB adoption strategy:
 ### INFORMATION_SCHEMA
 - `tables`, `columns`
 - richer compatibility views such as `statistics`, `engines`, and `user_privileges` remain backlog work
+
+### Postgres-oriented `sql.exec` mode
+- No PostgreSQL wire listener is shipped yet.
+- SkeinAdmin and other HTTP/RPC clients can opt into `dialect: "postgres"` on `sql.exec`.
+- That mode currently rewrites `CREATE/DROP SCHEMA`, `SET/SHOW search_path`, and common session literal helpers onto the existing engine/namespace model.
 
 ---
 

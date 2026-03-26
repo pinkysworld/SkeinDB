@@ -257,6 +257,7 @@
           <div class="topbar-actions">
             <div class="field inline" style="min-width:160px;margin-bottom:0"><label>Base URL</label><input id="baseUrl" placeholder="http://localhost:8080" /></div>
             <div class="field inline" style="min-width:100px;margin-bottom:0"><label>Token</label><input id="token" type="password" placeholder="Bearer token" /></div>
+            <div class="field inline" style="min-width:140px;margin-bottom:0"><label>SQL Dialect</label><select id="sqlDialect"><option value="native">Native</option><option value="mysql">MySQL</option><option value="postgres">Postgres</option></select></div>
             <div class="actions" style="margin-bottom:0">
               <button id="btnConnect" class="primary">Connect</button>
               <button id="btnDisconnect" class="ghost">Disconnect</button>
@@ -285,6 +286,7 @@
           <div class="context-item"><span class="context-label">Server</span><span class="context-value" id="contextServer">--</span></div>
           <div class="context-item"><span class="context-label">Database</span><span class="context-value" id="contextDb">--</span></div>
           <div class="context-item"><span class="context-label">Table</span><span class="context-value" id="contextTable">--</span></div>
+          <div class="context-item"><span class="context-label">SQL Mode</span><span class="context-value" id="contextSqlMode">Native</span></div>
           <div class="context-hint" id="contextHint">Connect and pick a database to begin.</div>
         </div>
 
@@ -526,6 +528,7 @@
         <!-- WORKSPACE --><section class="panel" data-panel="workspace">
           <div class="panel-grid">
             <div class="card wide"><h2>SQL Workspace</h2>
+              <div class="callout" id="sqlDialectHint">Native mode uses SkeinDB's direct SQL surface over the HTTP API.</div>
               <div class="field"><label>SQL</label><textarea id="sqlText" rows="4" placeholder="SELECT * FROM demo.users LIMIT 10;"></textarea></div>
               <div class="actions"><button id="btnSqlTplSelect" class="sm">SELECT *</button><button id="btnSqlTplShowDb" class="sm">SHOW DB</button><button id="btnSqlTplShowTables" class="sm">SHOW TABLES</button><button id="btnSqlTplUseDb" class="sm">USE DB</button><button id="btnSqlTplInsert" class="sm">INSERT</button><button id="btnSqlTplCreateDb" class="sm">CREATE DB</button><button id="btnSqlTplCreateTable" class="sm">CREATE TABLE</button></div>
               <div class="actions"><button id="btnSqlExec" class="primary">Run SQL</button><button id="btnSqlExplain" class="ghost">Explain</button></div>

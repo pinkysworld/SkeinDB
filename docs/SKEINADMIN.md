@@ -18,6 +18,7 @@ Recent UI updates:
 - **Overview dashboard** now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage & deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC & compaction (versions, delta chains, L0 files, stall rate), query & cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
 - **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
+- Profiles and the SQL workspace now track a per-connection SQL dialect mode (`native`, `mysql`, `postgres`) so browser-side tooling can drive `sql.exec` compatibility shims intentionally.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.
 - `/admin` now includes a **phpMyAdmin-inspired Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
 - Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
@@ -103,6 +104,7 @@ This mode is useful for:
 A profile stores:
 - `name`
 - `base_url` (e.g. `https://db1.example.com:8080`)
+- SQL dialect / compatibility mode (`native`, `mysql`, `postgres`)
 - auth method
 - optional: "cluster alias" for grouping nodes
 
@@ -144,6 +146,7 @@ Security note:
 - Saved queries
 - Results grid
 - EXPLAIN plan viewer
+- Dialect-aware templates/hints so Postgres-mode workflows can issue `CREATE SCHEMA`, `SET search_path`, and session helper queries over HTTP `sql.exec`
 
 ### 4.4 Schema Browser
 - Databases

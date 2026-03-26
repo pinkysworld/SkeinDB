@@ -36,6 +36,7 @@ Phase 0 verification checklist:
 - [x] T020: Catalog schema + TableDef
 - [x] T021: information_schema.tables + columns
 - [x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
+- [x] T023: Dialect-aware `sql.exec` compatibility shims for Postgres-style adoption (`CREATE/DROP SCHEMA`, `SET/SHOW search_path`, `current_schema()` / `current_database()` / `version()` literal helpers, `SERIAL` / `BIGSERIAL`, inline `PRIMARY KEY` / `UNIQUE`, and `CREATE INDEX IF NOT EXISTS`)
 
 ## Phase 3 — MySQL protocol
 - Status: baseline protocol + corpus-oriented SQL compatibility are implemented in runtime/tests; remaining items below are parity and driver-hardening follow-ups.
@@ -103,6 +104,7 @@ Phase 0 verification checklist:
 - [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
 - [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations
 - [x] T126: SkeinAdmin Engine Config panel — checkbox toggles for dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC
+- [x] T127: SkeinAdmin SQL workspace/profiles are dialect-aware (`native` / `mysql` / `postgres`) and adapt templates + hints for Postgres-mode `sql.exec`
 
 ## Phase 13 - Observability and server load statistics
 - [x] T130: stats.snapshot and basic counters in server

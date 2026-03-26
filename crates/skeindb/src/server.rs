@@ -77,6 +77,9 @@ const ADMIN_MAIN_JS: &str = include_str!(concat!(
 ));
 const MYSQL_PROTOCOL_VERSION: u8 = 0x0a;
 const MYSQL_SERVER_VERSION: &str = "8.0.0-skeindb";
+const POSTGRES_SERVER_VERSION: &str = "16.0-skeindb";
+const POSTGRES_VERSION_BANNER: &str = "PostgreSQL 16.0 (SkeinDB compatibility layer)";
+const POSTGRES_SERVER_VERSION_NUM: &str = "160000";
 const MYSQL_AUTH_PLUGIN: &str = "mysql_native_password";
 const MYSQL_STATUS_AUTOCOMMIT: u16 = 0x0002;
 const MYSQL_STATUS_CURSOR_EXISTS: u16 = 0x0040;
@@ -2565,6 +2568,7 @@ async fn mysql_try_simple_aggregate_query_outcome(
     };
     let params = SqlExecParams {
         sql: query.source_sql,
+        dialect: SqlDialect::Native,
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
@@ -2637,6 +2641,7 @@ async fn mysql_try_grouped_aggregate_query_outcome(
     };
     let params = SqlExecParams {
         sql: query.source_sql,
+        dialect: SqlDialect::Native,
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
@@ -2904,6 +2909,7 @@ async fn mysql_rollback_transaction(state: &AppState, undo_sql: &[String]) -> Re
     for sql in undo_sql.iter().rev() {
         let params = SqlExecParams {
             sql: sql.clone(),
+            dialect: SqlDialect::Native,
             explain: false,
             default_db: None,
             result_format: Some(ResultFormat::RowsJson),
@@ -3075,6 +3081,7 @@ async fn mysql_try_select_subquery_compat_outcome(
             state,
             SqlExecParams {
                 sql: subquery_sql,
+                dialect: SqlDialect::Native,
                 explain: false,
                 default_db: default_db.map(|db| db.to_string()),
                 result_format: Some(ResultFormat::RowsJson),
@@ -3103,6 +3110,7 @@ async fn mysql_try_select_subquery_compat_outcome(
             state,
             SqlExecParams {
                 sql: rewritten_sql,
+                dialect: SqlDialect::Native,
                 explain: false,
                 default_db: default_db.map(|db| db.to_string()),
                 result_format: Some(ResultFormat::RowsJson),
@@ -3117,6 +3125,7 @@ async fn mysql_try_select_subquery_compat_outcome(
             state,
             SqlExecParams {
                 sql: subquery_sql,
+                dialect: SqlDialect::Native,
                 explain: false,
                 default_db: default_db.map(|db| db.to_string()),
                 result_format: Some(ResultFormat::RowsJson),
@@ -3137,6 +3146,7 @@ async fn mysql_try_select_subquery_compat_outcome(
             state,
             SqlExecParams {
                 sql: rewritten_sql,
+                dialect: SqlDialect::Native,
                 explain: false,
                 default_db: default_db.map(|db| db.to_string()),
                 result_format: Some(ResultFormat::RowsJson),
@@ -4614,6 +4624,7 @@ async fn mysql_execute_sql(
 
     let params = SqlExecParams {
         sql: exec_sql.clone(),
+        dialect: SqlDialect::Native,
         explain: false,
         default_db: session.default_db.clone(),
         result_format: Some(ResultFormat::RowsJson),
@@ -7873,9 +7884,20 @@ fn now_unix_ms_u64() -> u64 {
     now_unix_ms() as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum SqlDialect {
+    #[default]
+    Native,
+    Mysql,
+    Postgres,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct SqlExecParams {
     sql: String,
+    #[serde(default)]
+    dialect: SqlDialect,
     #[serde(default)]
     explain: bool,
     #[serde(default)]
@@ -7903,6 +7925,7 @@ enum SqlVerb {
     ShowColumns,
     Use,
     CreateDatabase,
+    DropDatabase,
     CreateTable,
     CreateIndex,
     AlterTable,
@@ -7959,6 +7982,10 @@ enum SqlPlan {
         db: String,
         if_not_exists: bool,
     },
+    DropDatabase {
+        db: String,
+        if_exists: bool,
+    },
     CreateTable {
         table: BaseTableRef,
         columns: Vec<SchemaColumnInfo>,
@@ -7971,6 +7998,7 @@ enum SqlPlan {
         index_name: String,
         columns: Vec<String>,
         unique: bool,
+        if_not_exists: bool,
     },
     AlterTableAddColumn {
         table: BaseTableRef,
@@ -8094,14 +8122,16 @@ fn sql_exec_is_read_only(params: Option<&Value>) -> bool {
         .get("sql")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    matches!(
-        sql_detect_verb(sql),
-        SqlVerb::Select
-            | SqlVerb::ShowDatabases
-            | SqlVerb::ShowTables
-            | SqlVerb::ShowColumns
-            | SqlVerb::Use
-    )
+    let default_db = params.get("default_db").and_then(|v| v.as_str());
+    let dialect = params
+        .get("dialect")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<SqlDialect>(v).ok())
+        .unwrap_or_default();
+    let sql = rewrite_sql_for_dialect(sql, dialect, default_db);
+    parse_sql_plan(&sql, default_db)
+        .map(|plan| sql_plan_read_only(&plan))
+        .unwrap_or(false)
 }
 
 fn sql_detect_verb(sql: &str) -> SqlVerb {
@@ -8119,6 +8149,8 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::Use
     } else if lower.starts_with("create database ") {
         SqlVerb::CreateDatabase
+    } else if lower.starts_with("drop database ") {
+        SqlVerb::DropDatabase
     } else if lower.starts_with("create unique index ") || lower.starts_with("create index ") {
         SqlVerb::CreateIndex
     } else if lower.starts_with("create table ") {
@@ -8151,6 +8183,266 @@ fn clean_sql_ident(raw: &str) -> String {
         .trim_matches('\'')
         .trim()
         .to_string()
+}
+
+fn sql_quote_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn postgres_default_schema(default_db: Option<&str>) -> String {
+    default_db
+        .map(clean_sql_ident)
+        .filter(|db| !db.is_empty())
+        .unwrap_or_else(|| "public".to_string())
+}
+
+fn postgres_default_database(default_db: Option<&str>) -> String {
+    default_db
+        .map(clean_sql_ident)
+        .filter(|db| !db.is_empty())
+        .unwrap_or_else(|| "skeindb".to_string())
+}
+
+fn postgres_parse_search_path_target_list(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for part in split_csv_top_level(trimmed) {
+        let schema = parse_sql_string_literal(&part).unwrap_or_else(|| clean_sql_ident(&part));
+        if schema.is_empty() {
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("$user") {
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("default") {
+            return Some("public".to_string());
+        }
+        return Some(schema);
+    }
+    Some("public".to_string())
+}
+
+fn postgres_parse_set_search_path(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let mut tail = if lower.starts_with("set session ") {
+        &trimmed["set session ".len()..]
+    } else if lower.starts_with("set local ") {
+        &trimmed["set local ".len()..]
+    } else if lower.starts_with("set ") {
+        &trimmed["set ".len()..]
+    } else {
+        return None;
+    };
+    if !tail
+        .get(..11)
+        .map(|prefix| prefix.eq_ignore_ascii_case("search_path"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    tail = tail[11..].trim_start();
+    let lower_tail = tail.to_ascii_lowercase();
+    tail = if lower_tail.starts_with("to ") {
+        tail[2..].trim_start()
+    } else if let Some(stripped) = tail.strip_prefix('=') {
+        stripped.trim_start()
+    } else {
+        return None;
+    };
+    postgres_parse_search_path_target_list(tail)
+}
+
+fn postgres_parse_current_setting_name(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    let lower = expr.to_ascii_lowercase();
+    if !lower.starts_with("current_setting(") || !expr.ends_with(')') {
+        return None;
+    }
+    parse_sql_string_literal(&expr["current_setting(".len()..expr.len() - 1])
+}
+
+fn postgres_literal_select_value(expr: &str, default_db: Option<&str>) -> Option<String> {
+    let expr = expr.trim();
+    if expr.eq_ignore_ascii_case("current_schema()") {
+        return Some(postgres_default_schema(default_db));
+    }
+    if expr.eq_ignore_ascii_case("current_database()") {
+        return Some(postgres_default_database(default_db));
+    }
+    if expr.eq_ignore_ascii_case("version()") {
+        return Some(POSTGRES_VERSION_BANNER.to_string());
+    }
+    let setting = postgres_parse_current_setting_name(expr)?;
+    match setting.to_ascii_lowercase().as_str() {
+        "search_path" => Some(postgres_default_schema(default_db)),
+        "server_version" => Some(POSTGRES_SERVER_VERSION.to_string()),
+        "server_version_num" => Some(POSTGRES_SERVER_VERSION_NUM.to_string()),
+        "application_name" => Some("skeindb".to_string()),
+        _ => None,
+    }
+}
+
+fn postgres_default_select_alias(expr: &str) -> Option<&'static str> {
+    let expr = expr.trim();
+    if expr.eq_ignore_ascii_case("current_schema()") {
+        return Some("current_schema");
+    }
+    if expr.eq_ignore_ascii_case("current_database()") {
+        return Some("current_database");
+    }
+    if expr.eq_ignore_ascii_case("version()") {
+        return Some("version");
+    }
+    if postgres_parse_current_setting_name(expr).is_some() {
+        return Some("current_setting");
+    }
+    None
+}
+
+fn postgres_rewrite_literal_select_query(sql: &str, default_db: Option<&str>) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.get(..6)?.eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim_start();
+    if find_keyword_top_level(rest, "from").is_some() {
+        return None;
+    }
+    let next_idx = ["limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(rest, keyword))
+        .min()
+        .unwrap_or(rest.len());
+    let projection_sql = rest[..next_idx].trim();
+    if projection_sql.is_empty() {
+        return None;
+    }
+    let suffix = rest[next_idx..].trim();
+    let mut rewrote_any = false;
+    let mut rewritten_projection = Vec::new();
+    for part in split_csv_top_level(projection_sql) {
+        let mut expr_raw = part.trim();
+        let mut alias = None::<String>;
+        if let Some(idx) = find_keyword_top_level(expr_raw, "as") {
+            let left = expr_raw[..idx].trim();
+            let right = expr_raw[idx + 2..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                expr_raw = left;
+                alias = Some(clean_sql_ident(right));
+            }
+        }
+        if let Some(value) = postgres_literal_select_value(expr_raw, default_db) {
+            rewrote_any = true;
+            let alias = alias
+                .filter(|name| !name.is_empty())
+                .or_else(|| postgres_default_select_alias(expr_raw).map(str::to_string))
+                .unwrap_or_else(|| "expr".to_string());
+            rewritten_projection.push(format!("{} AS {}", sql_quote_string_literal(&value), alias));
+        } else {
+            if expr_raw.contains('(') {
+                return None;
+            }
+            rewritten_projection.push(part.trim().to_string());
+        }
+    }
+    if !rewrote_any {
+        return None;
+    }
+    let mut rewritten = format!("SELECT {}", rewritten_projection.join(", "));
+    if !suffix.is_empty() {
+        rewritten.push(' ');
+        rewritten.push_str(suffix);
+    }
+    Some(rewritten)
+}
+
+fn postgres_rewrite_create_schema(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("create schema ") {
+        return None;
+    }
+    let mut tail = trimmed["create schema ".len()..].trim_start();
+    let mut if_not_exists = false;
+    if tail
+        .get(..14)
+        .map(|prefix| prefix.eq_ignore_ascii_case("if not exists "))
+        .unwrap_or(false)
+    {
+        if_not_exists = true;
+        tail = tail[14..].trim_start();
+    }
+    let schema = clean_sql_ident(tail.split_whitespace().next().unwrap_or_default());
+    if schema.is_empty() {
+        return None;
+    }
+    Some(if if_not_exists {
+        format!("CREATE DATABASE IF NOT EXISTS {}", schema)
+    } else {
+        format!("CREATE DATABASE {}", schema)
+    })
+}
+
+fn postgres_rewrite_drop_schema(sql: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("drop schema ") {
+        return None;
+    }
+    let mut tail = trimmed["drop schema ".len()..].trim_start();
+    let mut if_exists = false;
+    if tail
+        .get(..10)
+        .map(|prefix| prefix.eq_ignore_ascii_case("if exists "))
+        .unwrap_or(false)
+    {
+        if_exists = true;
+        tail = tail[10..].trim_start();
+    }
+    let schema = clean_sql_ident(tail.split_whitespace().next().unwrap_or_default());
+    if schema.is_empty() {
+        return None;
+    }
+    Some(if if_exists {
+        format!("DROP DATABASE IF EXISTS {}", schema)
+    } else {
+        format!("DROP DATABASE {}", schema)
+    })
+}
+
+fn rewrite_sql_for_dialect(sql: &str, dialect: SqlDialect, default_db: Option<&str>) -> String {
+    if dialect != SqlDialect::Postgres {
+        return sql.to_string();
+    }
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if trimmed.eq_ignore_ascii_case("show search_path") {
+        return format!(
+            "SELECT {} AS search_path",
+            sql_quote_string_literal(&postgres_default_schema(default_db))
+        );
+    }
+    if trimmed.eq_ignore_ascii_case("show server_version") {
+        return format!(
+            "SELECT {} AS server_version",
+            sql_quote_string_literal(POSTGRES_SERVER_VERSION)
+        );
+    }
+    if let Some(schema) = postgres_parse_set_search_path(trimmed) {
+        return format!("USE \"{}\"", schema.replace('"', "\"\""));
+    }
+    if let Some(rewritten) = postgres_rewrite_literal_select_query(trimmed, default_db) {
+        return rewritten;
+    }
+    if let Some(rewritten) = postgres_rewrite_create_schema(trimmed) {
+        return rewritten;
+    }
+    if let Some(rewritten) = postgres_rewrite_drop_schema(trimmed) {
+        return rewritten;
+    }
+    sql.to_string()
 }
 
 fn is_sql_ident_char(b: u8) -> bool {
@@ -9285,6 +9577,23 @@ fn parse_create_database_plan(sql: &str) -> Result<SqlPlan, RpcError> {
     Ok(SqlPlan::CreateDatabase { db, if_not_exists })
 }
 
+fn parse_drop_database_plan(sql: &str) -> Result<SqlPlan, RpcError> {
+    let mut tail = sql[13..].trim();
+    let mut if_exists = false;
+    if tail.to_ascii_lowercase().starts_with("if exists ") {
+        if_exists = true;
+        tail = tail[10..].trim();
+    }
+    let db = clean_sql_ident(tail);
+    if db.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "DROP DATABASE requires a name",
+        ));
+    }
+    Ok(SqlPlan::DropDatabase { db, if_exists })
+}
+
 fn sql_type_to_desc(token: &str, unsigned: bool) -> TypeDesc {
     let base = token
         .split('(')
@@ -9297,7 +9606,8 @@ fn sql_type_to_desc(token: &str, unsigned: bool) -> TypeDesc {
         .and_then(|(_, rhs)| rhs.split_once(')'))
         .and_then(|(inner, _)| inner.trim().parse::<u64>().ok());
     let kind = match base.as_str() {
-        "bigint" | "int" | "integer" | "smallint" | "tinyint" => {
+        "bigint" | "bigserial" | "int" | "integer" | "serial" | "smallint" | "smallserial"
+        | "tinyint" => {
             if unsigned {
                 "u64"
             } else {
@@ -9468,9 +9778,22 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         }
         let name = clean_sql_ident(toks[0]);
         let type_tok = toks[1];
+        let serial_like = matches!(
+            type_tok
+                .split('(')
+                .next()
+                .unwrap_or(type_tok)
+                .to_ascii_lowercase()
+                .as_str(),
+            "smallserial" | "serial" | "bigserial"
+        );
         let unsigned = toks.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
-        let nullable = !p_lower.contains("not null");
-        let auto_increment = p_lower.contains("auto_increment");
+        let nullable = if serial_like {
+            false
+        } else {
+            !p_lower.contains("not null")
+        };
+        let auto_increment = p_lower.contains("auto_increment") || serial_like;
         let default = parse_column_default_clause(p)?;
         columns.push(SchemaColumnInfo {
             name: name.clone(),
@@ -9478,8 +9801,25 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
             nullable,
             auto_increment,
         });
+        if p_lower.contains("primary key") && !primary_key.contains(&name) {
+            primary_key.push(name.clone());
+        }
+        if p_lower.contains("unique") && !p_lower.contains("primary key") {
+            mysql_indexes.push(serde_json::json!({
+                "name": name,
+                "columns": [columns.last().map(|col| col.name.clone()).unwrap_or_default()],
+                "unique": true,
+            }));
+        }
         if let Some(default) = default {
-            mysql_defaults.insert(name, serde_json::to_value(default).unwrap_or(Value::Null));
+            let col_name = columns
+                .last()
+                .map(|col| col.name.clone())
+                .unwrap_or_default();
+            mysql_defaults.insert(
+                col_name,
+                serde_json::to_value(default).unwrap_or(Value::Null),
+            );
         }
     }
     if columns.is_empty() {
@@ -9555,6 +9895,15 @@ fn parse_create_index_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         ));
     }
     tail = tail[6..].trim_start();
+    let mut if_not_exists = false;
+    if tail
+        .get(..14)
+        .map(|prefix| prefix.eq_ignore_ascii_case("if not exists "))
+        .unwrap_or(false)
+    {
+        if_not_exists = true;
+        tail = tail[14..].trim_start();
+    }
 
     let on_idx = find_keyword_top_level(tail, "on").ok_or_else(|| {
         RpcError::new(
@@ -9591,6 +9940,7 @@ fn parse_create_index_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         index_name,
         columns,
         unique,
+        if_not_exists,
     })
 }
 
@@ -9760,9 +10110,22 @@ fn parse_alter_table_column_spec(
     }
     let type_tok = parts[type_idx];
     let clause_lower = clause.to_ascii_lowercase();
+    let serial_like = matches!(
+        type_tok
+            .split('(')
+            .next()
+            .unwrap_or(type_tok)
+            .to_ascii_lowercase()
+            .as_str(),
+        "smallserial" | "serial" | "bigserial"
+    );
     let unsigned = parts.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
-    let nullable = !clause_lower.contains("not null");
-    let auto_increment = clause_lower.contains("auto_increment");
+    let nullable = if serial_like {
+        false
+    } else {
+        !clause_lower.contains("not null")
+    };
+    let auto_increment = clause_lower.contains("auto_increment") || serial_like;
     let default = find_keyword_top_level(clause, "default")
         .map(|idx| clause[idx + 7..].trim())
         .filter(|raw| !raw.is_empty())
@@ -10193,6 +10556,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         }
         SqlVerb::Use => parse_use_plan(normalized),
         SqlVerb::CreateDatabase => parse_create_database_plan(normalized),
+        SqlVerb::DropDatabase => parse_drop_database_plan(normalized),
         SqlVerb::CreateIndex => parse_create_index_plan(normalized, default_db),
         SqlVerb::CreateTable => parse_create_table_plan(normalized, default_db),
         SqlVerb::AlterTable => parse_alter_table_plan(normalized, default_db),
@@ -10205,7 +10569,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
         SqlVerb::Unsupported => Err(RpcError::new(
             "not_supported",
-            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/CREATE INDEX/ALTER TABLE/DROP INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
+            "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/DROP DATABASE/CREATE TABLE/CREATE INDEX/ALTER TABLE/DROP INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
         )),
     }
 }
@@ -10218,6 +10582,7 @@ fn sql_plan_name(plan: &SqlPlan) -> &'static str {
         SqlPlan::ShowColumns { .. } => "show_columns",
         SqlPlan::UseDb { .. } => "use",
         SqlPlan::CreateDatabase { .. } => "create_database",
+        SqlPlan::DropDatabase { .. } => "drop_database",
         SqlPlan::CreateIndex { .. } => "create_index",
         SqlPlan::CreateTable { .. } => "create_table",
         SqlPlan::AlterTableAddColumn { .. }
@@ -10253,8 +10618,15 @@ fn sql_exec_write_target(params: &Value) -> (Option<String>, Option<String>) {
     };
     let sql = obj.get("sql").and_then(|v| v.as_str()).unwrap_or_default();
     let default_db = obj.get("default_db").and_then(|v| v.as_str());
-    match parse_sql_plan(sql, default_db) {
+    let dialect = obj
+        .get("dialect")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<SqlDialect>(v).ok())
+        .unwrap_or_default();
+    let sql = rewrite_sql_for_dialect(sql, dialect, default_db);
+    match parse_sql_plan(&sql, default_db) {
         Ok(SqlPlan::CreateDatabase { db, .. }) => (Some(db), None),
+        Ok(SqlPlan::DropDatabase { db, .. }) => (Some(db), None),
         Ok(SqlPlan::CreateIndex { table, .. })
         | Ok(SqlPlan::CreateTable { table, .. })
         | Ok(SqlPlan::AlterTableAddColumn { table, .. })
@@ -11094,13 +11466,20 @@ async fn mysql_select_total_rows_without_limit(
 }
 
 async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
-    let plan = parse_sql_plan(&params.sql, params.default_db.as_deref())?;
+    let effective_sql =
+        rewrite_sql_for_dialect(&params.sql, params.dialect, params.default_db.as_deref());
+    let plan = parse_sql_plan(&effective_sql, params.default_db.as_deref())?;
     if params.explain {
-        return Ok(serde_json::json!({
+        let mut explain = serde_json::json!({
             "statement": sql_plan_name(&plan),
             "read_only": sql_plan_read_only(&plan),
-            "plan": sql_plan_name(&plan)
-        }));
+            "plan": sql_plan_name(&plan),
+            "dialect": params.dialect
+        });
+        if effective_sql.trim() != params.sql.trim() {
+            explain["rewritten_sql"] = Value::String(effective_sql);
+        }
+        return Ok(explain);
     }
     match plan {
         SqlPlan::Select {
@@ -11265,6 +11644,16 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "if_not_exists": if_not_exists
             }))
         }
+        SqlPlan::DropDatabase { db, if_exists } => {
+            let mut eng = state.engine.write().await;
+            eng.drop_database(&db, if_exists).map_err(to_rpc_error)?;
+            Ok(serde_json::json!({
+                "statement": "drop_database",
+                "ok": true,
+                "db": db,
+                "if_exists": if_exists
+            }))
+        }
         SqlPlan::CreateTable {
             table,
             columns,
@@ -11303,7 +11692,30 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             index_name,
             columns,
             unique,
+            if_not_exists,
         } => {
+            if if_not_exists {
+                let eng = state.engine.read().await;
+                let desc = eng
+                    .describe_table(&table.db, &table.table)
+                    .map_err(to_rpc_error)?;
+                let exists = mysql_desc_indexes(&desc)
+                    .into_iter()
+                    .any(|(name, _, _)| name.eq_ignore_ascii_case(&index_name));
+                drop(eng);
+                if exists {
+                    return Ok(serde_json::json!({
+                        "statement": "create_index",
+                        "ok": true,
+                        "table": table,
+                        "index": index_name,
+                        "columns": columns,
+                        "unique": unique,
+                        "if_not_exists": true,
+                        "skipped": true
+                    }));
+                }
+            }
             sql_exec_alter_table_add_index(
                 state,
                 table.clone(),
@@ -11318,7 +11730,8 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                 "table": table,
                 "index": index_name,
                 "columns": columns,
-                "unique": unique
+                "unique": unique,
+                "if_not_exists": if_not_exists
             }))
         }
         SqlPlan::AlterTableAddColumn {
@@ -14962,6 +15375,7 @@ mod tests {
             index_name,
             columns,
             unique,
+            if_not_exists,
         } = plan
         else {
             panic!("expected create index plan");
@@ -14971,6 +15385,132 @@ mod tests {
         assert_eq!(index_name, "user_login_uq");
         assert_eq!(columns, vec!["user_login".to_string()]);
         assert!(unique);
+        assert!(!if_not_exists);
+    }
+
+    #[test]
+    fn parse_create_index_if_not_exists_roundtrip() {
+        let plan = parse_sql_plan(
+            "CREATE INDEX IF NOT EXISTS users_name_idx ON app.users (name)",
+            Some("app"),
+        )
+        .expect("parse create index if not exists");
+        let SqlPlan::CreateIndex {
+            table,
+            index_name,
+            columns,
+            unique,
+            if_not_exists,
+        } = plan
+        else {
+            panic!("expected create index plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(index_name, "users_name_idx");
+        assert_eq!(columns, vec!["name".to_string()]);
+        assert!(!unique);
+        assert!(if_not_exists);
+    }
+
+    #[test]
+    fn parse_drop_database_roundtrip() {
+        let plan =
+            parse_sql_plan("DROP DATABASE IF EXISTS app", None).expect("parse drop database");
+        let SqlPlan::DropDatabase { db, if_exists } = plan else {
+            panic!("expected drop database plan");
+        };
+        assert_eq!(db, "app");
+        assert!(if_exists);
+    }
+
+    #[test]
+    fn parse_create_table_supports_serial_and_inline_keys() {
+        let plan = parse_sql_plan(
+            "CREATE TABLE app.users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT)",
+            Some("app"),
+        )
+        .expect("parse create table with serial");
+        let SqlPlan::CreateTable {
+            table,
+            columns,
+            primary_key,
+            compat_mysql,
+            ..
+        } = plan
+        else {
+            panic!("expected create table plan");
+        };
+        assert_eq!(table.db, "app");
+        assert_eq!(table.table, "users");
+        assert_eq!(primary_key, vec!["id".to_string()]);
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].r#type.kind, "i64");
+        assert!(columns[0].auto_increment);
+        assert!(!columns[0].nullable);
+        let indexes = compat_mysql
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("email")
+        );
+        assert_eq!(
+            indexes[0]
+                .get("columns")
+                .and_then(|v| v.as_array())
+                .and_then(|cols| cols.first())
+                .and_then(|v| v.as_str()),
+            Some("email")
+        );
+        assert_eq!(
+            indexes[0].get("unique").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn postgres_dialect_rewrite_supports_schema_search_path_and_literals() {
+        assert_eq!(
+            rewrite_sql_for_dialect(
+                "CREATE SCHEMA IF NOT EXISTS blog",
+                SqlDialect::Postgres,
+                None
+            ),
+            "CREATE DATABASE IF NOT EXISTS blog"
+        );
+        assert_eq!(
+            rewrite_sql_for_dialect(
+                "DROP SCHEMA IF EXISTS blog CASCADE",
+                SqlDialect::Postgres,
+                None
+            ),
+            "DROP DATABASE IF EXISTS blog"
+        );
+        assert_eq!(
+            rewrite_sql_for_dialect(
+                "SET search_path TO blog, public",
+                SqlDialect::Postgres,
+                None
+            ),
+            "USE \"blog\""
+        );
+        assert_eq!(
+            rewrite_sql_for_dialect("SHOW search_path", SqlDialect::Postgres, Some("blog")),
+            "SELECT 'blog' AS search_path"
+        );
+        assert_eq!(
+            rewrite_sql_for_dialect(
+                "SELECT current_schema() AS schema_name, current_database(), current_setting('server_version_num') AS ver",
+                SqlDialect::Postgres,
+                Some("blog")
+            ),
+            "SELECT 'blog' AS schema_name, 'blog' AS current_database, '160000' AS ver"
+        );
     }
 
     #[test]
@@ -15426,6 +15966,224 @@ mod tests {
                 .and_then(|v| v.get("read_only"))
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_supports_postgres_dialect_schema_and_session_helpers() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_postgres_compat");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let create_schema = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE SCHEMA IF NOT EXISTS blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(create_schema.ok);
+        assert_eq!(
+            create_schema
+                .result
+                .as_ref()
+                .and_then(|v| v.get("statement"))
+                .and_then(|v| v.as_str()),
+            Some("create_database")
+        );
+
+        let set_search_path = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SET search_path TO blog, public",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(set_search_path.ok);
+        assert_eq!(
+            set_search_path
+                .result
+                .as_ref()
+                .and_then(|v| v.get("default_db"))
+                .and_then(|v| v.as_str()),
+            Some("blog")
+        );
+
+        let create_table = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE TABLE users (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT)",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(create_table.ok);
+
+        let desc = call_rpc(
+            &state,
+            "schema.describe_table",
+            json!({
+                "db": "blog",
+                "table": "users"
+            }),
+        )
+        .await;
+        assert!(desc.ok);
+        let columns = desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("columns"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(columns[0].get("name").and_then(|v| v.as_str()), Some("id"));
+        assert_eq!(
+            columns[0].get("auto_increment").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let indexes = desc
+            .result
+            .as_ref()
+            .and_then(|v| v.get("indexes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("email")
+        );
+
+        let insert = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "INSERT INTO users (email, name) VALUES ('ada@example.com', 'Ada')",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(insert.ok);
+        assert_eq!(
+            insert
+                .result
+                .as_ref()
+                .and_then(|v| v.get("write"))
+                .and_then(|v| v.get("last_insert_id"))
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        let show_search_path = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SHOW search_path",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(show_search_path.ok);
+        let search_rows = show_search_path
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(search_rows.len(), 1);
+        assert_eq!(search_rows[0][0]["v"].as_str(), Some("blog"));
+
+        let session_query = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "SELECT current_schema() AS schema_name, current_database(), version() AS version_text",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(session_query.ok);
+        let session_rows = session_query
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(session_rows.len(), 1);
+        assert_eq!(session_rows[0][0]["v"].as_str(), Some("blog"));
+        assert_eq!(session_rows[0][1]["v"].as_str(), Some("blog"));
+        assert_eq!(
+            session_rows[0][2]["v"].as_str(),
+            Some(POSTGRES_VERSION_BANNER)
+        );
+
+        let create_index = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE INDEX IF NOT EXISTS users_name_idx ON users (name)",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(create_index.ok);
+
+        let create_index_again = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "CREATE INDEX IF NOT EXISTS users_name_idx ON users (name)",
+                "default_db": "blog",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(create_index_again.ok);
+        assert_eq!(
+            create_index_again
+                .result
+                .as_ref()
+                .and_then(|v| v.get("skipped"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let drop_schema = call_rpc(
+            &state,
+            "sql.exec",
+            json!({
+                "sql": "DROP SCHEMA IF EXISTS blog CASCADE",
+                "dialect": "postgres"
+            }),
+        )
+        .await;
+        assert!(drop_schema.ok);
+        assert_eq!(
+            drop_schema
+                .result
+                .as_ref()
+                .and_then(|v| v.get("statement"))
+                .and_then(|v| v.as_str()),
+            Some("drop_database")
         );
 
         std::fs::remove_dir_all(&dir).ok();

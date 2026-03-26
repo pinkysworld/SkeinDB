@@ -9,6 +9,7 @@ const STATE = {
   methods: [],
   selectedDb: '',
   selectedTable: '',
+  sqlDialect: 'native',
   dbTree: {},
   isConsole: false,
   connected: false,
@@ -32,6 +33,39 @@ const STATE = {
   easyGridInsertDraft: {},
   easyGridCheckedRows: {},
   easySubTab: 'browse'
+};
+
+const SQL_DIALECT_META = {
+  native: {
+    label: 'Native',
+    placeholder: 'SELECT * FROM demo.users LIMIT 10;',
+    hint: "Native mode uses SkeinDB's direct SQL surface over the HTTP API.",
+    showDbLabel: 'SHOW DB',
+    showTablesLabel: 'SHOW TABLES',
+    useDbLabel: 'USE DB',
+    createDbLabel: 'CREATE DB',
+    createTableLabel: 'CREATE TABLE'
+  },
+  mysql: {
+    label: 'MySQL',
+    placeholder: 'SELECT SQL_CALC_FOUND_ROWS * FROM demo.users LIMIT 10;',
+    hint: 'MySQL mode routes SQL through the compatibility translator behind sql.exec.',
+    showDbLabel: 'SHOW DB',
+    showTablesLabel: 'SHOW TABLES',
+    useDbLabel: 'USE DB',
+    createDbLabel: 'CREATE DB',
+    createTableLabel: 'CREATE TABLE'
+  },
+  postgres: {
+    label: 'Postgres',
+    placeholder: 'SELECT current_schema() AS schema_name, current_database(), version();',
+    hint: 'Postgres mode rewrites CREATE SCHEMA, search_path, current_schema(), current_database(), version(), SERIAL/BIGSERIAL, and CREATE INDEX IF NOT EXISTS through sql.exec.',
+    showDbLabel: 'CURRENT DB',
+    showTablesLabel: 'LIST TABLES',
+    useDbLabel: 'SET PATH',
+    createDbLabel: 'CREATE SCHEMA',
+    createTableLabel: 'CREATE TABLE'
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -169,6 +203,13 @@ let easyBuilderNextId = 1;
 function $(id) { return document.getElementById(id); }
 function getBaseUrl() { const v = $('baseUrl'); const raw = v ? v.value.trim() : ''; return raw || DEFAULT_BASE_URL; }
 function getToken() { const v = $('token'); return v ? v.value.trim() : ''; }
+function getSqlDialect() {
+  const v = $('sqlDialect');
+  const raw = v ? v.value.trim() : (STATE.sqlDialect || 'native');
+  return SQL_DIALECT_META[raw] ? raw : 'native';
+}
+function getSqlDialectMeta() { return SQL_DIALECT_META[getSqlDialect()] || SQL_DIALECT_META.native; }
+function sqlStringLiteral(value) { return "'" + String(value || '').replace(/'/g, "''") + "'"; }
 
 async function rpc(baseUrl, token, method, params) {
   const url = baseUrl.replace(/\/$/, '') + '/api/v1/rpc';
@@ -226,6 +267,7 @@ function updateContext() {
   const srv = $('contextServer'); if (srv) srv.textContent = getBaseUrl() || '--';
   const db = $('contextDb'); if (db) db.textContent = STATE.selectedDb || '--';
   const tbl = $('contextTable'); if (tbl) tbl.textContent = STATE.selectedTable || '--';
+  const mode = $('contextSqlMode'); if (mode) mode.textContent = getSqlDialectMeta().label;
   const h = $('contextHint');
   if (h) h.textContent = !STATE.selectedDb ? 'Select a database from the left tree.' : !STATE.selectedTable ? 'Select a table to browse.' : 'Ready.';
 }
@@ -234,15 +276,22 @@ function persistInputs() {
   const b = $('baseUrl'), t = $('token');
   if (b) localStorage.setItem('skeinadmin.baseUrl', b.value);
   if (t) localStorage.setItem('skeinadmin.token', t.value);
+  localStorage.setItem('skeinadmin.sqlDialect', getSqlDialect());
+  STATE.sqlDialect = getSqlDialect();
+  refreshSqlDialectUi();
   updateContext();
 }
 
 function loadInputs() {
-  const b = $('baseUrl'), t = $('token');
+  const b = $('baseUrl'), t = $('token'), d = $('sqlDialect');
   const sb = localStorage.getItem('skeinadmin.baseUrl');
   const st = localStorage.getItem('skeinadmin.token');
+  const sd = localStorage.getItem('skeinadmin.sqlDialect');
   if (b) b.value = sb || window.location.origin || DEFAULT_BASE_URL;
   if (t && st) t.value = st;
+  if (d) d.value = SQL_DIALECT_META[sd] ? sd : 'native';
+  STATE.sqlDialect = getSqlDialect();
+  refreshSqlDialectUi();
   updateContext();
 }
 
@@ -620,7 +669,7 @@ function refreshProfiles(sel) {
 
 function saveProfile() {
   const n = $('profileName') ? $('profileName').value.trim() : ''; if (!n) return;
-  const p = getProfiles(); p[n] = { baseUrl: getBaseUrl(), token: getToken() }; saveProfiles(p); refreshProfiles(n);
+  const p = getProfiles(); p[n] = { baseUrl: getBaseUrl(), token: getToken(), sqlDialect: getSqlDialect() }; saveProfiles(p); refreshProfiles(n);
 }
 
 function deleteProfile() {
@@ -632,6 +681,7 @@ function loadProfile(n) {
   const p = getProfiles()[n]; if (!p) return;
   if ($('baseUrl')) $('baseUrl').value = p.baseUrl || '';
   if ($('token')) $('token').value = p.token || '';
+  if ($('sqlDialect')) $('sqlDialect').value = SQL_DIALECT_META[p.sqlDialect] ? p.sqlDialect : 'native';
   persistInputs(); setConnStatus('warn', 'Disconnected', 'Profile loaded.');
 }
 
@@ -2160,9 +2210,24 @@ async function easyDropDbOp() {
 // ---------------------------------------------------------------------------
 function setSqlText(v) { if ($('sqlText')) { $('sqlText').value = v; $('sqlText').focus(); } }
 
+function refreshSqlDialectUi() {
+  STATE.sqlDialect = getSqlDialect();
+  const meta = getSqlDialectMeta();
+  const sqlText = $('sqlText');
+  if (sqlText) sqlText.placeholder = meta.placeholder;
+  const hint = $('sqlDialectHint');
+  if (hint) hint.textContent = meta.hint;
+  const showDb = $('btnSqlTplShowDb'); if (showDb) showDb.textContent = meta.showDbLabel;
+  const showTables = $('btnSqlTplShowTables'); if (showTables) showTables.textContent = meta.showTablesLabel;
+  const useDb = $('btnSqlTplUseDb'); if (useDb) useDb.textContent = meta.useDbLabel;
+  const createDb = $('btnSqlTplCreateDb'); if (createDb) createDb.textContent = meta.createDbLabel;
+  const createTable = $('btnSqlTplCreateTable'); if (createTable) createTable.textContent = meta.createTableLabel;
+  updateContext();
+}
+
 async function runSql(explain) {
   const sql = $('sqlText') ? $('sqlText').value.trim() : ''; if (!sql) return;
-  const res = await call('sql.exec', cleanParams({sql, explain:!!explain, default_db:resolveDefaultDb()}), 'sqlOut');
+  const res = await call('sql.exec', cleanParams({sql, dialect:getSqlDialect(), explain:!!explain, default_db:resolveDefaultDb()}), 'sqlOut');
   if (!res || !res.json || !res.json.ok || !res.json.result) return;
   const r = res.json.result;
   const tbl = extractSqlTable(r); if (tbl) renderTable('sqlTable', tbl.columns, tbl.rows); else renderTable('sqlTable',[],[]);
@@ -2899,7 +2964,47 @@ function applyMode() {
 function sqlTemplateSelect() {
   if (STATE.selectedDb && STATE.selectedTable) setSqlText('SELECT * FROM '+STATE.selectedDb+'.'+STATE.selectedTable+' LIMIT 50;');
   else if (STATE.selectedDb) setSqlText('SELECT * FROM '+STATE.selectedDb+'.table_name LIMIT 50;');
+  else if (getSqlDialect() === 'postgres') setSqlText('SELECT current_schema() AS schema_name, current_database(), version();');
   else setSqlText('SELECT 1 AS healthcheck;');
+}
+
+function sqlTemplateShowDatabase() {
+  if (getSqlDialect() === 'postgres') setSqlText('SELECT current_database();');
+  else setSqlText('SHOW DATABASES;');
+}
+
+function sqlTemplateShowTables() {
+  const db = resolveDefaultDb() || 'demo';
+  if (getSqlDialect() === 'postgres') setSqlText('SELECT table_name FROM information_schema.tables WHERE table_schema = ' + sqlStringLiteral(db) + ' ORDER BY table_name;');
+  else setSqlText('SHOW TABLES FROM ' + db + ';');
+}
+
+function sqlTemplateUseDatabase() {
+  const db = resolveDefaultDb();
+  if (!db) return;
+  if (getSqlDialect() === 'postgres') setSqlText('SET search_path TO ' + db + ';');
+  else setSqlText('USE ' + db + ';');
+}
+
+function sqlTemplateInsert() {
+  const tableRef = STATE.selectedDb && STATE.selectedTable
+    ? STATE.selectedDb + '.' + STATE.selectedTable
+    : STATE.selectedDb
+      ? STATE.selectedDb + '.users'
+      : 'demo.users';
+  if (getSqlDialect() === 'postgres') setSqlText("INSERT INTO " + tableRef + " (email, name) VALUES ('ada@example.com', 'Ada');");
+  else setSqlText("INSERT INTO " + tableRef + " (id, name) VALUES (1, 'Ada');");
+}
+
+function sqlTemplateCreateDatabase() {
+  if (getSqlDialect() === 'postgres') setSqlText('CREATE SCHEMA demo;');
+  else setSqlText('CREATE DATABASE demo;');
+}
+
+function sqlTemplateCreateTable() {
+  const tableRef = STATE.selectedDb ? STATE.selectedDb + '.users' : 'demo.users';
+  if (getSqlDialect() === 'postgres') setSqlText('CREATE TABLE ' + tableRef + ' (id SERIAL PRIMARY KEY, email TEXT UNIQUE, name TEXT);');
+  else setSqlText('CREATE TABLE ' + tableRef + ' (id BIGINT PRIMARY KEY, name VARCHAR(255));');
 }
 
 function quickCreateDb() {
@@ -2997,12 +3102,12 @@ if ($('profileSelect')) $('profileSelect').addEventListener('change', e => loadP
 wire('btnSqlExec', () => runSql(false));
 wire('btnSqlExplain', () => runSql(true));
 wire('btnSqlTplSelect', sqlTemplateSelect);
-wire('btnSqlTplShowDb', () => setSqlText('SHOW DATABASES;'));
-wire('btnSqlTplShowTables', () => { const db = resolveDefaultDb(); setSqlText('SHOW TABLES FROM '+(db||'demo')+';'); });
-wire('btnSqlTplUseDb', () => { const db = resolveDefaultDb(); if (db) setSqlText('USE '+db+';'); });
-wire('btnSqlTplInsert', () => setSqlText("INSERT INTO demo.users (id, name) VALUES (1, 'Ada');"));
-wire('btnSqlTplCreateDb', () => setSqlText('CREATE DATABASE demo;'));
-wire('btnSqlTplCreateTable', () => setSqlText("CREATE TABLE demo.users (id BIGINT PRIMARY KEY, name VARCHAR(255));"));
+wire('btnSqlTplShowDb', sqlTemplateShowDatabase);
+wire('btnSqlTplShowTables', sqlTemplateShowTables);
+wire('btnSqlTplUseDb', sqlTemplateUseDatabase);
+wire('btnSqlTplInsert', sqlTemplateInsert);
+wire('btnSqlTplCreateDb', sqlTemplateCreateDatabase);
+wire('btnSqlTplCreateTable', sqlTemplateCreateTable);
 wire('btnSkeinRun', runSkeinQuery);
 
 // Schema
@@ -3143,6 +3248,7 @@ if ($('dbSearch')) $('dbSearch').addEventListener('input', e => renderDbTree(STA
 // Inputs persistence
 if ($('baseUrl')) $('baseUrl').addEventListener('change', () => { persistInputs(); setConnStatus('warn','Disconnected','Server changed.'); });
 if ($('token')) $('token').addEventListener('change', () => { persistInputs(); setConnStatus('warn','Disconnected','Token changed.'); });
+if ($('sqlDialect')) $('sqlDialect').addEventListener('change', () => { persistInputs(); setConnStatus('warn','Disconnected','SQL dialect changed.'); });
 
 // ---------------------------------------------------------------------------
 // Init

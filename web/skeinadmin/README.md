@@ -6,6 +6,7 @@ Design goals:
 - Static deployable SPA (hostable behind IIS/Apache/Nginx)
 - Connects to SkeinDB via **SkeinQL HTTP API** (`POST /api/v1/rpc`)
 - Supports multiple servers and clusters via connection profiles
+- Persists SQL dialect mode per profile/workspace (`native`, `mysql`, `postgres`) for `sql.exec`
 
 Implemented navigation areas:
 - **Easy Viewer** (familiar DB/table/row management)
@@ -16,6 +17,7 @@ Implemented navigation areas:
   - Condition-based search, column-builder create-table, CSV/SQL export
   - Operations: truncate table, drop table, drop database with confirmation
 - **Schema** / **Data** / **SQL Workspace**
+- **Dialect-aware SQL Workspace** (native + MySQL/Postgres compatibility modes over HTTP `sql.exec`)
 - **Comprehensive Dashboard** (runtime, storage/dedup stats with bar chart, MVCC/compaction, query/cache metrics, auto-refresh)
 - **Engine Config** (toggle dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC via checkboxes)
 - **Admin lifecycle controls** (connect/disconnect + graceful `system.shutdown`)
