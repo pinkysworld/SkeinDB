@@ -1975,13 +1975,23 @@ struct MySqlCompatGroupedAggregateOrder {
 }
 
 #[derive(Debug, Clone)]
+struct MySqlCompatSimpleAggregateQuery {
+    alias: String,
+    aggregate_op: MySqlCompatAggregateOp,
+    source_sql: String,
+    having: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
 struct MySqlCompatGroupedAggregateQuery {
+    group_column: String,
     group_alias: String,
     aggregate_alias: String,
     aggregate_op: MySqlCompatAggregateOp,
     source_sql: String,
     order_by: Vec<MySqlCompatGroupedAggregateOrder>,
     limit: Option<LimitClause>,
+    having: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -2106,18 +2116,29 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
         return None;
     }
     group_tail = group_tail[group_key_end..].trim();
-    if group_tail
-        .get(..7)
-        .map(|chunk| chunk.eq_ignore_ascii_case("having "))
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
+    let mut having_sql = None::<String>;
     let mut order_sql = None::<String>;
     let mut limit_sql = None::<String>;
     let mut offset_sql = None::<String>;
     while !group_tail.is_empty() {
+        if group_tail.to_ascii_lowercase().starts_with("having ") {
+            if having_sql.is_some() {
+                return None;
+            }
+            let tail = group_tail[6..].trim_start();
+            let next = ["order by", "limit", "offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            let candidate = tail[..next].trim();
+            if candidate.is_empty() {
+                return None;
+            }
+            having_sql = Some(candidate.to_string());
+            group_tail = tail[next..].trim();
+            continue;
+        }
         if group_tail.to_ascii_lowercase().starts_with("order by ") {
             let tail = group_tail[8..].trim_start();
             let next = ["limit", "offset"]
@@ -2213,6 +2234,12 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
         }
     }
 
+    let having = if let Some(having_sql) = having_sql {
+        parse_where_expr(&having_sql).ok()?
+    } else {
+        None
+    };
+
     let mut order_by = Vec::new();
     if let Some(order_sql) = order_sql {
         let parsed = parse_order_by(&order_sql).ok()?;
@@ -2237,9 +2264,7 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
             } else {
                 None
             };
-            let Some(target) = target else {
-                return None;
-            };
+            let target = target?;
             order_by.push(MySqlCompatGroupedAggregateOrder {
                 target,
                 desc: matches!(item.dir, Some(OrderDir::Desc)),
@@ -2258,12 +2283,14 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
     );
 
     Some(MySqlCompatGroupedAggregateQuery {
+        group_column: group_col,
         group_alias,
         aggregate_alias,
         aggregate_op,
         source_sql,
         order_by,
         limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref()).ok()?,
+        having,
     })
 }
 
@@ -2296,9 +2323,177 @@ fn mysql_numeric_text_ordering(
     }
 }
 
-fn mysql_parse_simple_aggregate_query(
-    sql: &str,
-) -> Option<(String, String, MySqlCompatAggregateOp)> {
+fn mysql_text_result_value_to_lit(value: Option<&str>) -> Lit {
+    match value {
+        None => Lit::Null,
+        Some(raw) => {
+            if let Ok(v) = raw.parse::<i64>() {
+                Lit::I64 { v }
+            } else if let Ok(v) = raw.parse::<f64>() {
+                Lit::F64 { v }
+            } else {
+                Lit::Str { v: raw.to_string() }
+            }
+        }
+    }
+}
+
+fn mysql_lit_to_string(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Null => None,
+        Lit::Str { v } => Some(v.clone()),
+        Lit::I64 { v } => Some(v.to_string()),
+        Lit::U64 { v } => Some(v.to_string()),
+        Lit::F64 { v } => Some(v.to_string()),
+        Lit::Bool { v } => Some(if *v { "1".to_string() } else { "0".to_string() }),
+        _ => None,
+    }
+}
+
+fn mysql_eval_row_expr_value(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<Lit, RpcError> {
+    match expr {
+        Expr::Col { col, .. } => Ok(row_get_lit(row, col).unwrap_or(Lit::Null)),
+        Expr::Lit { lit } => Ok(lit.clone()),
+        _ => Err(RpcError::new(
+            "not_supported",
+            "aggregate HAVING compatibility supports only column/literal comparisons",
+        )),
+    }
+}
+
+fn mysql_eval_row_predicate_expr(
+    expr: &Expr,
+    row: &BTreeMap<String, Lit>,
+) -> Result<bool, RpcError> {
+    match expr {
+        Expr::Op {
+            op,
+            a,
+            b,
+            args: _,
+            list,
+            lo: _,
+            hi: _,
+        } => match op.as_str() {
+            "and" => {
+                let left = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let right = b.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                Ok(mysql_eval_row_predicate_expr(left, row)?
+                    && mysql_eval_row_predicate_expr(right, row)?)
+            }
+            "or" => {
+                let left = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let right = b.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                Ok(mysql_eval_row_predicate_expr(left, row)?
+                    || mysql_eval_row_predicate_expr(right, row)?)
+            }
+            "not" => {
+                let inner = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                Ok(!mysql_eval_row_predicate_expr(inner, row)?)
+            }
+            "is_null" => {
+                let inner = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                Ok(matches!(mysql_eval_row_expr_value(inner, row)?, Lit::Null))
+            }
+            "in" => {
+                let left_expr = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let left = mysql_eval_row_expr_value(left_expr, row)?;
+                if matches!(left, Lit::Null) {
+                    return Ok(false);
+                }
+                for candidate_expr in list.as_deref().unwrap_or_default() {
+                    if lit_eq(&left, &mysql_eval_row_expr_value(candidate_expr, row)?) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            "like" | "ilike" => {
+                let left_expr = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let right_expr = b.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let left = mysql_lit_to_string(&mysql_eval_row_expr_value(left_expr, row)?);
+                let right = mysql_lit_to_string(&mysql_eval_row_expr_value(right_expr, row)?);
+                let Some(left) = left else {
+                    return Ok(false);
+                };
+                let Some(pattern) = right else {
+                    return Ok(false);
+                };
+                if op == "ilike" {
+                    Ok(mysql_like_matches(
+                        &left.to_ascii_lowercase(),
+                        &pattern.to_ascii_lowercase(),
+                    ))
+                } else {
+                    Ok(mysql_like_matches(&left, &pattern))
+                }
+            }
+            "eq" | "ne" | "gt" | "ge" | "lt" | "le" => {
+                let left_expr = a.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let right_expr = b.as_deref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed HAVING expression")
+                })?;
+                let left = mysql_eval_row_expr_value(left_expr, row)?;
+                let right = mysql_eval_row_expr_value(right_expr, row)?;
+                let ord = lit_cmp(&left, &right);
+                Ok(match op.as_str() {
+                    "eq" => lit_eq(&left, &right),
+                    "ne" => !lit_eq(&left, &right),
+                    "gt" => ord
+                        .map(|cmp| cmp == std::cmp::Ordering::Greater)
+                        .unwrap_or(false),
+                    "ge" => ord
+                        .map(|cmp| {
+                            cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal
+                        })
+                        .unwrap_or(false),
+                    "lt" => ord
+                        .map(|cmp| cmp == std::cmp::Ordering::Less)
+                        .unwrap_or(false),
+                    "le" => ord
+                        .map(|cmp| {
+                            cmp == std::cmp::Ordering::Less || cmp == std::cmp::Ordering::Equal
+                        })
+                        .unwrap_or(false),
+                    _ => false,
+                })
+            }
+            _ => Err(RpcError::new(
+                "not_supported",
+                format!("unsupported HAVING operator '{}'", op),
+            )),
+        },
+        Expr::Lit {
+            lit: Lit::Bool { v },
+        } => Ok(*v),
+        _ => Err(RpcError::new(
+            "not_supported",
+            "aggregate HAVING compatibility supports only simple predicates",
+        )),
+    }
+}
+
+fn mysql_parse_simple_aggregate_query(sql: &str) -> Option<MySqlCompatSimpleAggregateQuery> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
         return None;
@@ -2318,13 +2513,25 @@ fn mysql_parse_simple_aggregate_query(
         .map(clean_sql_ident)
         .filter(|name| !name.is_empty())
         .unwrap_or(default_alias);
-    let from_tail = rest[from_idx..].trim().to_string();
-    if find_keyword_top_level(&from_tail, "group by").is_some()
-        || find_keyword_top_level(&from_tail, "having").is_some()
-    {
+    let mut from_tail = rest[from_idx..].trim().to_string();
+    if find_keyword_top_level(&from_tail, "group by").is_some() {
         return None;
     }
-    let mut from_tail = from_tail;
+    let mut having_sql = None::<String>;
+    if let Some(having_idx) = find_keyword_top_level(&from_tail, "having") {
+        let tail = from_tail[having_idx + "having".len()..].trim_start();
+        let next = ["order by", "limit", "offset"]
+            .iter()
+            .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+            .min()
+            .unwrap_or(tail.len());
+        let candidate = tail[..next].trim();
+        if candidate.is_empty() {
+            return None;
+        }
+        having_sql = Some(candidate.to_string());
+        from_tail.truncate(having_idx);
+    }
     let truncate_at = ["order by", "limit", "offset"]
         .iter()
         .filter_map(|keyword| find_keyword_top_level(&from_tail, keyword))
@@ -2335,7 +2542,17 @@ fn mysql_parse_simple_aggregate_query(
     if from_tail.is_empty() {
         return None;
     }
-    Some((alias, format!("SELECT {select_expr} {from_tail}"), op))
+    let having = if let Some(having_sql) = having_sql {
+        parse_where_expr(&having_sql).ok()?
+    } else {
+        None
+    };
+    Some(MySqlCompatSimpleAggregateQuery {
+        alias,
+        aggregate_op: op,
+        source_sql: format!("SELECT {select_expr} {from_tail}"),
+        having,
+    })
 }
 
 async fn mysql_try_simple_aggregate_query_outcome(
@@ -2343,11 +2560,11 @@ async fn mysql_try_simple_aggregate_query_outcome(
     sql: &str,
     default_db: Option<&str>,
 ) -> Result<Option<MySqlQueryOutcome>, RpcError> {
-    let Some((alias, transformed_sql, op)) = mysql_parse_simple_aggregate_query(sql) else {
+    let Some(query) = mysql_parse_simple_aggregate_query(sql) else {
         return Ok(None);
     };
     let params = SqlExecParams {
-        sql: transformed_sql,
+        sql: query.source_sql,
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
@@ -2355,7 +2572,7 @@ async fn mysql_try_simple_aggregate_query_outcome(
     let result = sql_exec(state, params).await?;
     let (_, rows) =
         mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
-    let value = match op {
+    let value = match query.aggregate_op {
         MySqlCompatAggregateOp::CountRows => Some(rows.len().to_string()),
         MySqlCompatAggregateOp::CountNonNull => Some(
             rows.iter()
@@ -2393,9 +2610,20 @@ async fn mysql_try_simple_aggregate_query_outcome(
             }
         }
     };
+    let mut out_rows = vec![vec![value.clone()]];
+    if let Some(having) = query.having.as_ref() {
+        let mut having_row = BTreeMap::new();
+        having_row.insert(
+            query.alias.clone(),
+            mysql_text_result_value_to_lit(value.as_deref()),
+        );
+        if !mysql_eval_row_predicate_expr(having, &having_row)? {
+            out_rows.clear();
+        }
+    }
     Ok(Some(MySqlQueryOutcome::ResultSet {
-        columns: vec![alias],
-        rows: vec![vec![value]],
+        columns: vec![query.alias],
+        rows: out_rows,
     }))
 }
 
@@ -2482,6 +2710,33 @@ async fn mysql_try_grouped_aggregate_query_outcome(
         })
         .collect::<Vec<_>>();
 
+    if let Some(having) = query.having.as_ref() {
+        let mut filtered_rows = Vec::new();
+        for row in out_rows {
+            let group_value = row.first().and_then(|value| value.as_deref());
+            let aggregate_value = row.get(1).and_then(|value| value.as_deref());
+            let mut having_row = BTreeMap::new();
+            having_row.insert(
+                query.group_alias.clone(),
+                mysql_text_result_value_to_lit(group_value),
+            );
+            if !query.group_alias.eq_ignore_ascii_case(&query.group_column) {
+                having_row.insert(
+                    query.group_column.clone(),
+                    mysql_text_result_value_to_lit(group_value),
+                );
+            }
+            having_row.insert(
+                query.aggregate_alias.clone(),
+                mysql_text_result_value_to_lit(aggregate_value),
+            );
+            if mysql_eval_row_predicate_expr(having, &having_row)? {
+                filtered_rows.push(row);
+            }
+        }
+        out_rows = filtered_rows;
+    }
+
     if !query.order_by.is_empty() {
         out_rows.sort_by(|left, right| {
             for order in &query.order_by {
@@ -2495,15 +2750,8 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                         right.get(1).and_then(|value| value.as_deref()),
                     ),
                 };
-                let mut cmp = if matches!(
-                    order.target,
-                    MySqlCompatGroupedAggregateOrderTarget::Aggregate
-                ) {
-                    mysql_numeric_text_ordering(left_value, right_value)
-                        .unwrap_or_else(|| mysql_text_ordering(left_value, right_value))
-                } else {
-                    mysql_text_ordering(left_value, right_value)
-                };
+                let mut cmp = mysql_numeric_text_ordering(left_value, right_value)
+                    .unwrap_or_else(|| mysql_text_ordering(left_value, right_value));
                 if order.desc {
                     cmp = cmp.reverse();
                 }
@@ -3806,28 +4054,34 @@ fn mysql_stmt_prepare_columns_from_select(
         .collect()
 }
 
-async fn mysql_stmt_prepare_columns(
+fn mysql_stmt_column_type_for_compat_aggregate(
+    aggregate_op: MySqlCompatAggregateOp,
+    source_column_type: Option<MySqlStmtColumnType>,
+) -> MySqlStmtColumnType {
+    match aggregate_op {
+        MySqlCompatAggregateOp::CountRows | MySqlCompatAggregateOp::CountNonNull => {
+            MySqlStmtColumnType::LongLong
+        }
+        MySqlCompatAggregateOp::Sum => match source_column_type {
+            Some(MySqlStmtColumnType::LongLong) => MySqlStmtColumnType::LongLong,
+            Some(MySqlStmtColumnType::Double) => MySqlStmtColumnType::Double,
+            _ => MySqlStmtColumnType::Double,
+        },
+    }
+}
+
+async fn mysql_stmt_prepare_columns_from_plain_select(
     state: &AppState,
     sql: &str,
     default_db: Option<&str>,
-) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
-        return cols
-            .into_iter()
-            .map(|(name, lit)| MySqlStmtPrepareColumn {
-                name,
-                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
-            })
-            .collect();
-    }
-
+) -> Option<Vec<MySqlStmtPrepareColumn>> {
     let Ok(SqlPlan::Select {
         from,
         mut projection,
         ..
     }) = parse_sql_plan(sql, default_db)
     else {
-        return Vec::new();
+        return None;
     };
 
     let table_descs = match from.as_ref() {
@@ -3843,11 +4097,77 @@ async fn mysql_stmt_prepare_columns(
     {
         match mysql_expand_projection_from_descs(&projection, &table_descs) {
             Ok(expanded) => projection = expanded,
-            Err(_) => return Vec::new(),
+            Err(_) => return None,
         }
     }
 
-    mysql_stmt_prepare_columns_from_select(from.as_ref(), &projection, &table_descs)
+    Some(mysql_stmt_prepare_columns_from_select(
+        from.as_ref(),
+        &projection,
+        &table_descs,
+    ))
+}
+
+async fn mysql_stmt_prepare_columns(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Vec<MySqlStmtPrepareColumn> {
+    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
+        return cols
+            .into_iter()
+            .map(|(name, lit)| MySqlStmtPrepareColumn {
+                name,
+                column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
+            })
+            .collect();
+    }
+
+    if let Some(query) = mysql_parse_grouped_aggregate_query(sql) {
+        let source_columns =
+            mysql_stmt_prepare_columns_from_plain_select(state, &query.source_sql, default_db)
+                .await;
+        let group_column_type = source_columns
+            .as_ref()
+            .and_then(|columns| columns.first())
+            .map(|column| column.column_type)
+            .unwrap_or(MySqlStmtColumnType::VarString);
+        let aggregate_source_type = source_columns
+            .as_ref()
+            .and_then(|columns| columns.get(1))
+            .map(|column| column.column_type);
+        return vec![
+            MySqlStmtPrepareColumn {
+                name: query.group_alias,
+                column_type: group_column_type,
+            },
+            MySqlStmtPrepareColumn {
+                name: query.aggregate_alias,
+                column_type: mysql_stmt_column_type_for_compat_aggregate(
+                    query.aggregate_op,
+                    aggregate_source_type,
+                ),
+            },
+        ];
+    }
+
+    if let Some(query) = mysql_parse_simple_aggregate_query(sql) {
+        let source_column_type =
+            mysql_stmt_prepare_columns_from_plain_select(state, &query.source_sql, default_db)
+                .await
+                .and_then(|columns| columns.first().map(|column| column.column_type));
+        return vec![MySqlStmtPrepareColumn {
+            name: query.alias,
+            column_type: mysql_stmt_column_type_for_compat_aggregate(
+                query.aggregate_op,
+                source_column_type,
+            ),
+        }];
+    }
+
+    mysql_stmt_prepare_columns_from_plain_select(state, sql, default_db)
+        .await
+        .unwrap_or_default()
 }
 
 fn mysql_stmt_infer_column_types(
@@ -14327,30 +14647,38 @@ mod tests {
             "SELECT COUNT(*) AS publish_count FROM wp_posts WHERE post_status = 'publish' ORDER BY id DESC LIMIT 10",
         )
         .expect("parse aggregate query");
-        assert_eq!(parsed.0, "publish_count");
+        assert_eq!(parsed.alias, "publish_count");
         assert_eq!(
-            parsed.1,
+            parsed.source_sql,
             "SELECT * FROM wp_posts WHERE post_status = 'publish'"
         );
-        assert_eq!(parsed.2, MySqlCompatAggregateOp::CountRows);
+        assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::CountRows);
+        assert!(parsed.having.is_none());
 
         let parsed = mysql_parse_simple_aggregate_query(
             "SELECT COUNT(meta_value) FROM wp_postmeta WHERE post_id = 7",
         )
         .expect("parse count(col) query");
-        assert_eq!(parsed.0, "COUNT(meta_value)");
+        assert_eq!(parsed.alias, "COUNT(meta_value)");
         assert_eq!(
-            parsed.1,
+            parsed.source_sql,
             "SELECT meta_value FROM wp_postmeta WHERE post_id = 7"
         );
-        assert_eq!(parsed.2, MySqlCompatAggregateOp::CountNonNull);
+        assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::CountNonNull);
 
         let parsed =
             mysql_parse_simple_aggregate_query("SELECT SUM(score) AS total_score FROM wp_postmeta")
                 .expect("parse sum query");
-        assert_eq!(parsed.0, "total_score");
-        assert_eq!(parsed.1, "SELECT score FROM wp_postmeta");
-        assert_eq!(parsed.2, MySqlCompatAggregateOp::Sum);
+        assert_eq!(parsed.alias, "total_score");
+        assert_eq!(parsed.source_sql, "SELECT score FROM wp_postmeta");
+        assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::Sum);
+
+        let parsed = mysql_parse_simple_aggregate_query(
+            "SELECT COUNT(*) AS publish_count FROM wp_posts HAVING publish_count > 0",
+        )
+        .expect("parse aggregate HAVING query");
+        assert_eq!(parsed.alias, "publish_count");
+        assert!(parsed.having.is_some());
 
         assert!(mysql_parse_simple_aggregate_query("SELECT id FROM wp_posts").is_none());
         assert!(mysql_parse_simple_aggregate_query(
@@ -14362,9 +14690,10 @@ mod tests {
     #[test]
     fn mysql_parse_grouped_aggregate_query_roundtrip() {
         let parsed = mysql_parse_grouped_aggregate_query(
-            "SELECT post_status, COUNT(*) AS status_count FROM wp_posts WHERE post_author > 0 GROUP BY post_status ORDER BY status_count DESC, post_status ASC LIMIT 0, 2",
+            "SELECT post_status, COUNT(*) AS status_count FROM wp_posts WHERE post_author > 0 GROUP BY post_status HAVING status_count > 1 ORDER BY status_count DESC, post_status ASC LIMIT 0, 2",
         )
         .expect("parse grouped aggregate query");
+        assert_eq!(parsed.group_column, "post_status");
         assert_eq!(parsed.group_alias, "post_status");
         assert_eq!(parsed.aggregate_alias, "status_count");
         assert_eq!(
@@ -14372,6 +14701,7 @@ mod tests {
             "SELECT post_status FROM wp_posts WHERE post_author > 0"
         );
         assert_eq!(parsed.aggregate_op, MySqlCompatAggregateOp::CountRows);
+        assert!(parsed.having.is_some());
         assert_eq!(parsed.order_by.len(), 2);
         assert_eq!(
             parsed.order_by[0].target,

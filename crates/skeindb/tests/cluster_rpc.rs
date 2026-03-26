@@ -645,6 +645,24 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
     );
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT COUNT(*) AS user_count FROM wp_users HAVING user_count > 0",
+    )
+    .await?;
+    let aggregate_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(aggregate_stmt.param_count, 0);
+    assert_eq!(
+        aggregate_stmt.column_defs,
+        vec![("user_count".to_string(), 0x08),]
+    );
+
+    send_com_stmt_execute(&mut stream, aggregate_stmt.statement_id, &[]).await?;
+    let aggregate_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(aggregate_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_stmt_close(&mut stream, aggregate_stmt.statement_id).await?;
+
     send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_posts").await?;
     let (_seq, ok_drop_posts) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_drop_posts)?.0, 0);
@@ -664,6 +682,33 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     .await?;
     let (_seq, ok_insert_posts) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_insert_posts)?.0, 2);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT author_id, COUNT(*) AS post_count FROM wp_posts GROUP BY author_id HAVING post_count > 0 ORDER BY author_id ASC",
+    )
+    .await?;
+    let grouped_aggregate_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(grouped_aggregate_stmt.param_count, 0);
+    assert_eq!(
+        grouped_aggregate_stmt.column_defs,
+        vec![
+            ("author_id".to_string(), 0x08),
+            ("post_count".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(&mut stream, grouped_aggregate_stmt.statement_id, &[]).await?;
+    let grouped_aggregate_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_aggregate_rows,
+        vec![
+            vec![Some("7".to_string()), Some("1".to_string())],
+            vec![Some("42".to_string()), Some("1".to_string())],
+        ]
+    );
+
+    send_com_stmt_close(&mut stream, grouped_aggregate_stmt.statement_id).await?;
 
     send_com_stmt_prepare(
         &mut stream,
@@ -875,6 +920,14 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
 
     send_com_query(
         &mut stream,
+        "SELECT COUNT(sort_order) AS present_sorts FROM wp_postmeta HAVING present_sorts >= 2",
+    )
+    .await?;
+    let having_count_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(having_count_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_query(
+        &mut stream,
         "SELECT SUM(sort_order) AS total_sort FROM wp_postmeta",
     )
     .await?;
@@ -899,6 +952,20 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
         grouped_count_rows,
         vec![
             vec![None, Some("1".to_string())],
+            vec![Some("2".to_string()), Some("1".to_string())],
+            vec![Some("5".to_string()), Some("1".to_string())],
+        ]
+    );
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, COUNT(*) AS group_rows FROM wp_postmeta GROUP BY sort_order HAVING sort_order IS NOT NULL AND group_rows = 1 ORDER BY sort_order ASC",
+    )
+    .await?;
+    let grouped_having_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_having_rows,
+        vec![
             vec![Some("2".to_string()), Some("1".to_string())],
             vec![Some("5".to_string()), Some("1".to_string())],
         ]
@@ -1433,6 +1500,15 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select count(*) as publish_count from wp_posts where post_status = 'publish' having publish_count > 3" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select count(*) as user_count from wp_users" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -1448,6 +1524,16 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][1].as_deref(), Some("1"));
                         assert_eq!(rows[1][0].as_deref(), Some("publish"));
                         assert_eq!(rows[1][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, count(*) as status_count from wp_posts group by post_status having status_count > 1 order by post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[0][1].as_deref(), Some("4"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }

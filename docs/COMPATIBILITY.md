@@ -46,7 +46,7 @@ SkeinDB adoption strategy:
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
 - INNER JOIN, LEFT JOIN, and RIGHT JOIN (single-join and basic left-associative multi-join chains); FULL joins are not implemented yet
 - Wildcard `SELECT *` and qualified wildcard projections like `table.*` now work across that supported join subset, including mixed projections such as `p.*, u.name` and `SQL_CALC_FOUND_ROWS` flows
-- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, and `SUM(col)` queries (including basic aggregate `HAVING` filters plus grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 

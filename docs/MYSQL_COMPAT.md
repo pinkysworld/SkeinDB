@@ -45,7 +45,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, and `COM_STMT_CLOSE`
   - `COM_STMT_SEND_LONG_DATA`, `COM_STMT_RESET`, and baseline `COM_STMT_FETCH`
   - `?` placeholders are rebound into the same SQL-translation path as `COM_QUERY`
-  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including single-table `SELECT *`, join wildcard projections, qualified wildcard projections such as `table.*`, and simple join projections)
+  - simple prepared `SELECT`s now advertise prepare-time result column counts and MySQL-style column definitions (including single-table `SELECT *`, join wildcard projections, qualified wildcard projections such as `table.*`, aggregate compatibility queries with basic `HAVING`, and simple join projections)
   - prepared `SELECT` responses are returned over the binary row protocol
   - read-only server-side cursor execution now works for prepared result sets
   - deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, stricter cursor/driver semantics) remains follow-on work
@@ -55,7 +55,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - literal session-variable selects with MySQL-style `LIMIT` forms (`LIMIT n`, `LIMIT offset,n`, `LIMIT n OFFSET offset`) for bootstrap probes such as `SELECT @@version_comment`
   - `SHOW FULL TABLES`, `SHOW TABLE STATUS`, `SHOW [FULL] COLUMNS`, `SHOW INDEX`, `SHOW CREATE TABLE`
   - `DESCRIBE` / `SHOW KEYS`
-  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries (with compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling)
+  - aggregate result emulation for `COUNT(*)`, `COUNT(col)`, and `SUM(col)` on both single-result aggregate queries and simple single-column `GROUP BY` queries, including basic aggregate `HAVING` filters plus compatibility-level `ORDER BY` / `LIMIT` / `OFFSET` handling
   - compatibility rewrite for WordPress-style non-aggregate `GROUP BY` de-dup queries when grouped columns map to the full projected column set (including `SQL_CALC_FOUND_ROWS` / `FOUND_ROWS()` flows)
   - wildcard `SELECT *` and qualified wildcard projections such as `table.*` over the current join subset, including mixed projections like `p.*, u.name` and `SQL_CALC_FOUND_ROWS` pagination/count flows
   - MySQL-style column `DEFAULT` handling for `CREATE TABLE` / `ALTER TABLE ... ADD COLUMN`, including `SHOW FULL COLUMNS` / `SHOW CREATE TABLE` output
@@ -74,7 +74,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
 
 If you want “drop-in MySQL for real apps”, the next concrete milestones are:
 1) complete duplicate-key enforcement hardening from the current in-memory probe indexes to full durable/reusable secondary-index-backed unique-key semantics
-2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (subqueries, richer aggregates, and broader `ALTER TABLE` variants beyond `ADD COLUMN` / `ADD|DROP|RENAME [KEY|INDEX]`)
+2) broaden SQL and function compatibility with stricter parity tests beyond the bundled corpus (deeper subqueries, richer aggregate semantics beyond the current basic `HAVING` shim, and broader `ALTER TABLE` variants beyond `ADD COLUMN` / `ADD|DROP|RENAME [KEY|INDEX]`)
 3) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers
 
 ---

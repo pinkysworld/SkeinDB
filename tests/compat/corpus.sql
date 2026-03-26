@@ -255,6 +255,11 @@ SELECT COUNT(*) AS publish_count
   FROM wp_posts
  WHERE post_status = 'publish';
 
+SELECT COUNT(*) AS publish_count
+  FROM wp_posts
+ WHERE post_status = 'publish'
+ HAVING publish_count > 3;
+
 SELECT COUNT(post_author) AS author_count
   FROM wp_posts
  WHERE post_status = 'publish';
@@ -266,6 +271,12 @@ SELECT SUM(post_author) AS author_sum
 SELECT post_status, COUNT(*) AS status_count
   FROM wp_posts
  GROUP BY post_status
+ ORDER BY post_status ASC;
+
+SELECT post_status, COUNT(*) AS status_count
+  FROM wp_posts
+ GROUP BY post_status
+ HAVING status_count > 1
  ORDER BY post_status ASC;
 
 SELECT post_author, SUM(post_author) AS author_sum_by_author
