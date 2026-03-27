@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
 Status: Draft v0.2
-Last updated: 2026-03-12
+Last updated: 2026-03-27
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
@@ -64,6 +64,7 @@ SkeinDB adoption strategy:
 - Common table expressions (CTEs): `WITH name AS (SELECT ...) SELECT * FROM name`
 - GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)`, and `GROUP_CONCAT()` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
+- WordPress Site Health-style `information_schema.TABLES` storage summary queries now work, including grouped `SUM(data_length + index_length)` by `TABLE_NAME`
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 - Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` and simple scalar comparison predicates such as `col = (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; scalar-subquery comparisons currently require one projected column and at most one row, and broader correlated/nested forms still remain open
 - `EXPLAIN` with real table name extraction from inner SELECT/UPDATE/DELETE/INSERT queries
@@ -101,7 +102,7 @@ SkeinDB adoption strategy:
 - SHOW PROFILES (empty result stub)
 
 ### INFORMATION_SCHEMA
-- `tables` with real table metadata (catalog, schema, name, type, engine, rows)
+- `tables` with real table metadata (catalog, schema, name, type, engine, rows, `DATA_LENGTH`, `INDEX_LENGTH`)
 - `columns` with column metadata (ordinal position, nullable, data type, column key)
 - `schemata`
 - `statistics` with real index data from primary keys and secondary indexes
@@ -153,7 +154,7 @@ scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, 
 (`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
 `character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
 and `EXPLAIN` with real table name extraction.
-The corpus has expanded from 1034 lines to 1081 lines with over 350 SQL statements.
+The corpus has expanded from 1034 lines to 1131 lines with over 375 SQL statements.
 
 ---
 

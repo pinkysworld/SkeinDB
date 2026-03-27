@@ -89,7 +89,7 @@ Current coverage:
 - `mysql_native_password` auth exchange
 - `COM_QUERY` SQL translation subset (`SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE`)
 - `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` (prepared statements)
-- 310+ translated SQL statements
+- 370+ translated SQL statements
 
 `COM_QUERY` and broader SQL compatibility are still tracked in the project backlog.
 

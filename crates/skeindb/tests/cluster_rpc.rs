@@ -3066,6 +3066,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "USE wp",
         "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_options (id BIGINT NOT NULL, option_name VARCHAR(191) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
         "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
         "ALTER TABLE wp_posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
@@ -3073,6 +3074,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
         "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
         "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+        "INSERT INTO wp_options (id, option_name) VALUES (1, 'siteurl')",
         "INSERT INTO wp_profiles (user_id, display_name) VALUES (1, 'Ada Lovelace'), (3, 'Linus Torvalds')",
         "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
     ] {
@@ -3149,6 +3151,28 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
                     Some("Ada".to_string()),
                 ]
             );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wp' AND TABLE_NAME IN ('wp_options','wp_posts','wp_users') GROUP BY TABLE_NAME",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 3);
+            let mut table_names = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.as_deref()))
+                .collect::<Vec<_>>();
+            table_names.sort_unstable();
+            assert_eq!(table_names, vec!["wp_options", "wp_posts", "wp_users"]);
+            for row in rows {
+                assert_eq!(row.get(1).and_then(|value| value.as_deref()), Some("0"));
+                assert_eq!(row.get(2).and_then(|value| value.as_deref()), Some("0"));
+            }
         }
         other => panic!("expected result set, got {:?}", other),
     }

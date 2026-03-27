@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-03-12
+Last updated: 2026-03-27
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -23,7 +23,7 @@ The repository is written so you can:
 ## Highlights
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
-- **MySQL adoption layer:** MySQL protocol surface + migration/telemetry tooling.
+- **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility (including Site Health metadata queries), and migration/telemetry tooling.
 - **PostgreSQL adoption layer (planned):** PostgreSQL v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, :: casts, pg_catalog.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators.

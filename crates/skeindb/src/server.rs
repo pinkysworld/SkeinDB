@@ -2102,6 +2102,14 @@ struct MySqlCompatGroupedAggregateQuery {
 }
 
 #[derive(Debug, Clone)]
+struct MySqlCompatInfoSchemaTableStorageQuery {
+    table_alias: String,
+    rows_alias: String,
+    bytes_alias: String,
+    source_sql: String,
+}
+
+#[derive(Debug, Clone)]
 struct MySqlCompatGroupedAggregateState {
     row_count: u64,
     non_null_count: u64,
@@ -2297,6 +2305,179 @@ fn mysql_parse_projection_expr_alias(item: &str) -> (String, Option<String>) {
         }
     }
     (projection.to_string(), None)
+}
+
+fn mysql_parse_top_level_add_terms(raw: &str) -> Option<Vec<String>> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut start = 0usize;
+    let mut terms = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                    idx += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            idx += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b'+' if depth == 0 => {
+                let term = s[start..idx].trim();
+                if term.is_empty() {
+                    return None;
+                }
+                terms.push(term.to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    let term = s[start..].trim();
+    if term.is_empty() {
+        return None;
+    }
+    terms.push(term.to_string());
+    Some(terms)
+}
+
+fn mysql_parse_info_schema_table_storage_query(
+    sql: &str,
+    default_db: Option<&str>,
+) -> Option<MySqlCompatInfoSchemaTableStorageQuery> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.is_ascii() || trimmed.len() < 6 || !trimmed[..6].eq_ignore_ascii_case("select") {
+        return None;
+    }
+    let rest = trimmed[6..].trim();
+    let from_idx = find_keyword_top_level(rest, "from")?;
+    let projection_sql = rest[..from_idx].trim();
+    let from_tail = rest[from_idx..].trim();
+    let group_idx = find_keyword_top_level(from_tail, "group by")?;
+    let source_from_tail = from_tail[..group_idx].trim().to_string();
+    if source_from_tail.is_empty() {
+        return None;
+    }
+
+    let from_clause = source_from_tail["from".len()..].trim();
+    let next = ["where", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(from_clause, keyword))
+        .min()
+        .unwrap_or(from_clause.len());
+    let TableRef::Base(base) = parse_from_table_ref(from_clause[..next].trim(), default_db).ok()?
+    else {
+        return None;
+    };
+    if !base.db.eq_ignore_ascii_case("information_schema")
+        || !base.table.eq_ignore_ascii_case("tables")
+    {
+        return None;
+    }
+
+    let group_tail = from_tail[group_idx + "group by".len()..].trim();
+    let group_expr_end = ["having", "order by", "limit", "offset"]
+        .iter()
+        .filter_map(|keyword| find_keyword_top_level(group_tail, keyword))
+        .min()
+        .unwrap_or(group_tail.len());
+    let group_expr = group_tail[..group_expr_end].trim();
+    if group_expr.is_empty() || !group_tail[group_expr_end..].trim().is_empty() {
+        return None;
+    }
+
+    let projection_items = split_csv_top_level(projection_sql);
+    if projection_items.len() != 3 {
+        return None;
+    }
+
+    let (table_expr, table_alias_raw) = mysql_parse_projection_expr_alias(&projection_items[0]);
+    let (table_col, _) = parse_sql_column_ref(&table_expr)?;
+    if !table_col.eq_ignore_ascii_case("TABLE_NAME") {
+        return None;
+    }
+    let table_alias = table_alias_raw
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| "TABLE_NAME".to_string());
+
+    let (rows_expr, rows_alias_raw) = mysql_parse_projection_expr_alias(&projection_items[1]);
+    let (rows_col, _) = parse_sql_column_ref(&rows_expr)?;
+    if !rows_col.eq_ignore_ascii_case("TABLE_ROWS") {
+        return None;
+    }
+    let rows_alias = rows_alias_raw
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| "TABLE_ROWS".to_string());
+
+    let (bytes_expr, bytes_alias_raw) = mysql_parse_projection_expr_alias(&projection_items[2]);
+    let bytes_trimmed = bytes_expr.trim();
+    let bytes_lower = bytes_trimmed
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if !bytes_lower.starts_with("sum(") || !bytes_lower.ends_with(')') {
+        return None;
+    }
+    let bytes_inner = bytes_trimmed[4..bytes_trimmed.len() - 1].trim();
+    let terms = mysql_parse_top_level_add_terms(bytes_inner)?;
+    if terms.len() != 2 {
+        return None;
+    }
+    let mut saw_data_length = false;
+    let mut saw_index_length = false;
+    for term in terms {
+        let (col, _) = parse_sql_column_ref(&term)?;
+        if col.eq_ignore_ascii_case("DATA_LENGTH") {
+            saw_data_length = true;
+        } else if col.eq_ignore_ascii_case("INDEX_LENGTH") {
+            saw_index_length = true;
+        } else {
+            return None;
+        }
+    }
+    if !saw_data_length || !saw_index_length {
+        return None;
+    }
+    let bytes_alias = bytes_alias_raw
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| bytes_trimmed.to_string());
+
+    if let Ok(position) = group_expr.parse::<usize>() {
+        if position != 1 {
+            return None;
+        }
+    } else {
+        let (group_col, _) = parse_sql_column_ref(group_expr)?;
+        if !group_col.eq_ignore_ascii_case("TABLE_NAME")
+            && !group_col.eq_ignore_ascii_case(&table_alias)
+        {
+            return None;
+        }
+    }
+
+    Some(MySqlCompatInfoSchemaTableStorageQuery {
+        table_alias,
+        rows_alias,
+        bytes_alias,
+        source_sql: format!(
+            "SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH {source_from_tail}"
+        ),
+    })
 }
 
 fn mysql_grouped_order_matches_group_column(
@@ -3491,6 +3672,69 @@ async fn mysql_try_grouped_aggregate_query_outcome(
     }))
 }
 
+async fn mysql_try_info_schema_table_storage_query_outcome(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Result<Option<MySqlQueryOutcome>, RpcError> {
+    let Some(query) = mysql_parse_info_schema_table_storage_query(sql, default_db) else {
+        return Ok(None);
+    };
+    let result = sql_exec(
+        state,
+        SqlExecParams {
+            sql: query.source_sql,
+            explain: false,
+            default_db: default_db.map(|db| db.to_string()),
+            result_format: Some(ResultFormat::RowsJson),
+        },
+    )
+    .await?;
+    let (_, rows) =
+        mysql_extract_result_data(&result).map_err(|msg| RpcError::new("internal", msg))?;
+
+    let mut grouped_rows = Vec::<(Option<String>, Option<String>, u64)>::new();
+    let mut grouped_lookup = HashMap::<Option<String>, usize>::new();
+    for row in rows {
+        let table_name = row.first().cloned().unwrap_or(None);
+        let entry_idx = if let Some(idx) = grouped_lookup.get(&table_name).copied() {
+            idx
+        } else {
+            grouped_rows.push((table_name.clone(), None, 0));
+            let idx = grouped_rows.len().saturating_sub(1);
+            grouped_lookup.insert(table_name, idx);
+            idx
+        };
+        let entry = &mut grouped_rows[entry_idx];
+        if entry.1.is_none() {
+            entry.1 = row.get(1).cloned().unwrap_or(None);
+        }
+        let data_length = row
+            .get(2)
+            .and_then(|value| value.as_deref())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let index_length = row
+            .get(3)
+            .and_then(|value| value.as_deref())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        entry.2 = entry
+            .2
+            .saturating_add(data_length.saturating_add(index_length));
+    }
+
+    Ok(Some(MySqlQueryOutcome::ResultSet {
+        columns: vec![query.table_alias, query.rows_alias, query.bytes_alias],
+        rows: grouped_rows
+            .into_iter()
+            .map(|(table_name, table_rows, bytes)| {
+                vec![table_name, table_rows, Some(bytes.to_string())]
+            })
+            .collect(),
+    }))
+}
+
 fn mysql_render_create_table(table_name: &str, desc: &Value) -> String {
     let mut defs = Vec::new();
     let columns = desc
@@ -4558,6 +4802,12 @@ async fn mysql_try_compat_query_outcome(
                 )),
             ]],
         }));
+    }
+
+    if let Some(result) =
+        mysql_try_info_schema_table_storage_query_outcome(state, trimmed, default_db).await?
+    {
+        return Ok(Some(result));
     }
 
     if let Some(result) =
@@ -14395,7 +14645,7 @@ fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<boo
             a,
             b,
             args: _,
-            list: _,
+            list,
             lo: _,
             hi: _,
         } => {
@@ -14408,6 +14658,21 @@ fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<boo
                 })?;
                 return Ok(eval_info_schema_expr(left, row)? && eval_info_schema_expr(right, row)?);
             }
+            if op == "or" {
+                let left = a.as_ref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed WHERE expression")
+                })?;
+                let right = b.as_ref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed WHERE expression")
+                })?;
+                return Ok(eval_info_schema_expr(left, row)? || eval_info_schema_expr(right, row)?);
+            }
+            if op == "not" {
+                let inner = a.as_ref().ok_or_else(|| {
+                    RpcError::new("invalid_request", "malformed WHERE expression")
+                })?;
+                return Ok(!eval_info_schema_expr(inner, row)?);
+            }
 
             let left = match a.as_deref() {
                 Some(Expr::Col { col, .. }) => row_get_lit(row, col).unwrap_or(Lit::Null),
@@ -14419,6 +14684,26 @@ fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<boo
                     ))
                 }
             };
+            if op == "in" {
+                let values = list
+                    .as_ref()
+                    .ok_or_else(|| RpcError::new("invalid_request", "malformed IN expression"))?;
+                for expr in values {
+                    let candidate =
+                        match expr {
+                            Expr::Col { col, .. } => row_get_lit(row, col).unwrap_or(Lit::Null),
+                            Expr::Lit { lit } => lit.clone(),
+                            _ => return Err(RpcError::new(
+                                "not_supported",
+                                "information_schema WHERE supports only column/literal comparisons",
+                            )),
+                        };
+                    if lit_eq(&left, &candidate) {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
             let right = match b.as_deref() {
                 Some(Expr::Col { col, .. }) => row_get_lit(row, col).unwrap_or(Lit::Null),
                 Some(Expr::Lit { lit }) => lit.clone(),
@@ -14591,6 +14876,8 @@ fn information_schema_select_result(
                     },
                 );
                 row.insert("TABLE_ROWS".to_string(), Lit::U64 { v: 0 });
+                row.insert("DATA_LENGTH".to_string(), Lit::U64 { v: 0 });
+                row.insert("INDEX_LENGTH".to_string(), Lit::U64 { v: 0 });
                 rows.push(row);
             }
         }
@@ -14601,6 +14888,8 @@ fn information_schema_select_result(
             "TABLE_TYPE",
             "ENGINE",
             "TABLE_ROWS",
+            "DATA_LENGTH",
+            "INDEX_LENGTH",
         ]
     } else if table.table.eq_ignore_ascii_case("columns") {
         for db in eng.list_databases() {
@@ -20059,6 +20348,78 @@ mod tests {
             panic!("expected result set");
         };
         assert!(filtered_rows.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mysql_info_schema_table_storage_compat_groups_by_table_name() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_info_schema_table_storage_compat");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let outcome = mysql_try_compat_query_outcome(
+            &state,
+            "SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'app' AND TABLE_NAME IN ('posts','users') GROUP BY TABLE_NAME",
+            Some("app"),
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{:?}", err))?
+        .expect("info_schema compat outcome");
+        let MySqlQueryOutcome::ResultSet { rows, .. } = outcome else {
+            panic!("expected result set");
+        };
+        let mut actual = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.first()
+                        .and_then(|value| value.clone())
+                        .unwrap_or_default(),
+                    row.get(1)
+                        .and_then(|value| value.clone())
+                        .unwrap_or_default(),
+                    row.get(2)
+                        .and_then(|value| value.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        assert_eq!(
+            actual,
+            vec![
+                ("posts".to_string(), "0".to_string(), "0".to_string()),
+                ("users".to_string(), "0".to_string(), "0".to_string()),
+            ]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
