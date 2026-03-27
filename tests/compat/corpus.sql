@@ -104,6 +104,12 @@ SELECT column_name, data_type
  WHERE table_schema='skein_test' AND table_name='wp_posts'
  ORDER BY ordinal_position;
 
+SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes'
+  FROM information_schema.tables
+ WHERE table_schema = 'skein_test'
+   AND table_name IN ('wp_options', 'wp_posts')
+ GROUP BY TABLE_NAME;
+
 INSERT INTO wp_options (option_name, option_value, autoload)
 VALUES
   ('siteurl', 'https://example.com', 'yes'),

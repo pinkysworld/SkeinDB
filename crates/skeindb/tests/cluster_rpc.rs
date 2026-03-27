@@ -2073,6 +2073,7 @@ async fn mysql_supports_wordpress_editor_query_shapes() -> anyhow::Result<()> {
         "USE wordpress",
         "CREATE TABLE wp_posts (ID BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, post_type VARCHAR(32) NOT NULL, post_date DATETIME NOT NULL, PRIMARY KEY (ID))",
         "CREATE TABLE wp_comments (comment_ID BIGINT NOT NULL, comment_post_ID BIGINT NOT NULL, comment_approved VARCHAR(20) NOT NULL, comment_type VARCHAR(20) NOT NULL, PRIMARY KEY (comment_ID))",
+        "CREATE TABLE wp_options (option_id BIGINT NOT NULL, option_name VARCHAR(191) NOT NULL, option_value TEXT NOT NULL, PRIMARY KEY (option_id))",
         "CREATE TABLE wp_users (ID BIGINT NOT NULL, user_login VARCHAR(64) NOT NULL, PRIMARY KEY (ID))",
         "CREATE TABLE wp_usermeta (umeta_id BIGINT NOT NULL, user_id BIGINT NOT NULL, meta_key VARCHAR(255) NOT NULL, meta_value TEXT NOT NULL, PRIMARY KEY (umeta_id))",
         "CREATE TABLE wp_terms (term_id BIGINT NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (term_id))",
@@ -2100,6 +2101,37 @@ async fn mysql_supports_wordpress_editor_query_shapes() -> anyhow::Result<()> {
     .await?;
     match read_mysql_response(&mut stream).await? {
         MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) as 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wordpress' AND TABLE_NAME IN ('wp_comments','wp_options','wp_posts','wp_terms','wp_users') GROUP BY TABLE_NAME",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 5);
+            let mut table_names = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.as_deref()))
+                .collect::<Vec<_>>();
+            table_names.sort_unstable();
+            assert_eq!(
+                table_names,
+                vec![
+                    "wp_comments",
+                    "wp_options",
+                    "wp_posts",
+                    "wp_terms",
+                    "wp_users"
+                ]
+            );
+            for row in rows {
+                assert_eq!(row.get(1).and_then(|value| value.as_deref()), Some("0"));
+                assert_eq!(row.get(2).and_then(|value| value.as_deref()), Some("0"));
+            }
+        }
         other => panic!("expected result set, got {:?}", other),
     }
 
