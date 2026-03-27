@@ -259,6 +259,169 @@ async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn cdc_ack_and_close_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_ack_and_close")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let subscribe = client
+        .rpc("cdc.subscribe_table", json!({"db":"app","table":"users"}))
+        .await?;
+    assert!(subscribe.ok);
+    let subscribe_result = subscribe
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing subscribe result"))?;
+    let sub_id = subscribe_result["sub_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|v| v.get("offset"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let first_poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(first_poll.ok);
+    let first_events = first_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(first_events.len(), 1);
+    assert_eq!(first_events[0]["op"].as_str(), Some("insert"));
+    let next_offset = first_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("next_offset"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("missing next_offset"))?;
+
+    let ack = client
+        .rpc(
+            "cdc.ack",
+            json!({"sub_id": sub_id.clone(), "offset": next_offset}),
+        )
+        .await?;
+    assert!(ack.ok);
+    assert_eq!(
+        ack.result
+            .as_ref()
+            .and_then(|v| v.get("acked_offset"))
+            .and_then(|v| v.as_u64()),
+        Some(next_offset)
+    );
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let second_poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(second_poll.ok);
+    let second_events = second_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(second_events.len(), 1);
+    assert_eq!(second_events[0]["pk"][0]["v"].as_u64(), Some(2));
+
+    let close = client
+        .rpc("cdc.close", json!({"sub_id": sub_id.clone()}))
+        .await?;
+    assert!(close.ok);
+    assert_eq!(
+        close
+            .result
+            .as_ref()
+            .and_then(|v| v.get("closed"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    let after_close = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": 0, "limit": 10}),
+        )
+        .await?;
+    assert!(!after_close.ok);
+    assert_eq!(
+        after_close.error.as_ref().map(|e| e.code.as_str()),
+        Some("not_found")
+    );
+
+    let caps = client.rpc("system.capabilities", json!({})).await?;
+    assert!(caps.ok);
+    let methods = caps
+        .result
+        .as_ref()
+        .and_then(|v| v.get("methods"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(methods.iter().any(|method| method == "cdc.ack"));
+    assert!(methods.iter().any(|method| method == "cdc.close"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_mysql("mysql_handshake_roundtrip")?;

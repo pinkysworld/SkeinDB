@@ -22,13 +22,14 @@ Implemented navigation areas:
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)
 - **Settings Manager** (`settings.get` / `settings.set`, including `cluster.state.v1`)
 - **RPC Explorer** (full method-level access)
+  - includes CDC cursor helpers such as `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close`
 - **Migration Assistant** (intent + rewrite preview)
 - **NL Lab** (translate/explain/execute workflow)
 
 Roadmap areas:
 - **Index Advisor** + **Index Synthesis** (dependency-driven)
 - **Views** (incremental maintenance)
-- **CDC** subscriptions
+- **CDC** dedicated subscriptions page + lag visualization
 - **Forensics** (hash-chained WAL verification + proofs)
 - **Replay** (time travel, reproducible replays, performance replays)
 - Experimental: **Embeddings**, **NL Query**

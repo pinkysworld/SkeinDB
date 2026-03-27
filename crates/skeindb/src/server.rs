@@ -28,9 +28,9 @@ use skeindb_skeinql::{
     methods::{
         AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
         AdvisorIndexSynthesizeParams, AiAutoparamAnalyzeParams, AiAutoparamClassifyParams,
-        AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcPollParams,
-        CdcSubscribeTableParams, ClusterJoinTokenCreateParams, ClusterNodeJoinParams,
-        ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
+        AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcAckParams, CdcCloseParams,
+        CdcPollParams, CdcSubscribeTableParams, ClusterJoinTokenCreateParams,
+        ClusterNodeJoinParams, ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
         ClusterReplicaPromoteParams, ClusterShardCreateParams, ClusterShardMoveParams,
         ClusterShardRebalanceParams, DataDeleteParams, DataGetParams, DataInsertParams,
         DataUpdateParams, DpAggregateParams, DpAuditLogParams, DpBudgetGetParams,
@@ -9914,6 +9914,24 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "cdc.ack" => {
+                    let p: CdcAckParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng
+                        .cdc_ack(&mut subs, &p.sub_id, p.offset)
+                        .map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "cdc.close" => {
+                    let p: CdcCloseParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng.cdc_close(&mut subs, &p.sub_id).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
 
                 // --------------------
                 // sql.* (compatibility helpers)
@@ -16769,6 +16787,8 @@ fn system_capabilities(state: &AppState) -> Value {
         "view.explain_deps",
         "cdc.subscribe_table",
         "cdc.poll",
+        "cdc.ack",
+        "cdc.close",
     ];
     serde_json::json!({
         "mysql_compat": false,
@@ -17038,6 +17058,8 @@ mod tests {
         let js = admin_main_js();
         assert!(js.contains("system.shutdown"));
         assert!(js.contains("system.capabilities"));
+        assert!(js.contains("cdc.ack"));
+        assert!(js.contains("cdc.close"));
         assert!(js.contains("easyDoCreateTable"));
         assert!(js.contains("easyRenderDataGrid"));
         assert!(js.contains("easyDeleteCheckedRows"));
@@ -18992,6 +19014,20 @@ mod tests {
             .and_then(|v| v.as_array())
             .map(|m| m.iter().any(|method| method == "tx.begin"))
             .unwrap_or(false));
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "cdc.ack"))
+            .unwrap_or(false));
+        assert!(caps
+            .result
+            .as_ref()
+            .and_then(|v| v.get("methods"))
+            .and_then(|v| v.as_array())
+            .map(|m| m.iter().any(|method| method == "cdc.close"))
+            .unwrap_or(false));
 
         let transport = call_rpc(&state, "transport.capabilities", json!({})).await;
         assert!(transport.ok);
@@ -19027,6 +19063,151 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx.changed()).await??;
         assert!(*shutdown_rx.borrow());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cdc_ack_and_close_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_ack_and_close");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let create_db = call_rpc(&state, "schema.create_database", json!({"db":"app"})).await;
+        assert!(create_db.ok);
+
+        let create_table = call_rpc(
+            &state,
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await;
+        assert!(create_table.ok);
+
+        let subscribe = call_rpc(
+            &state,
+            "cdc.subscribe_table",
+            json!({"db":"app","table":"users"}),
+        )
+        .await;
+        assert!(subscribe.ok);
+        let sub_id = subscribe.result.as_ref().and_then(|v| v.get("sub_id"));
+        let sub_id = sub_id.and_then(|v| v.as_str()).expect("sub_id").to_string();
+        let start_offset = subscribe
+            .result
+            .as_ref()
+            .and_then(|v| v.get("offset"))
+            .and_then(|v| v.as_u64())
+            .expect("offset");
+
+        let insert_first = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await;
+        assert!(insert_first.ok);
+
+        let first_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await;
+        assert!(first_poll.ok);
+        let first_events = first_poll
+            .result
+            .as_ref()
+            .and_then(|v| v.get("events"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(first_events.len(), 1);
+        assert_eq!(first_events[0]["op"].as_str(), Some("insert"));
+        let first_next_offset = first_poll
+            .result
+            .as_ref()
+            .and_then(|v| v.get("next_offset"))
+            .and_then(|v| v.as_u64())
+            .expect("next_offset");
+
+        let ack = call_rpc(
+            &state,
+            "cdc.ack",
+            json!({"sub_id": sub_id.clone(), "offset": first_next_offset}),
+        )
+        .await;
+        assert!(ack.ok);
+        assert_eq!(
+            ack.result
+                .as_ref()
+                .and_then(|v| v.get("acked_offset"))
+                .and_then(|v| v.as_u64()),
+            Some(first_next_offset)
+        );
+
+        let insert_second = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await;
+        assert!(insert_second.ok);
+
+        let second_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await;
+        assert!(second_poll.ok);
+        let second_events = second_poll
+            .result
+            .as_ref()
+            .and_then(|v| v.get("events"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(second_events.len(), 1);
+        assert_eq!(second_events[0]["pk"][0]["v"].as_u64(), Some(2));
+
+        let close = call_rpc(&state, "cdc.close", json!({"sub_id": sub_id.clone()})).await;
+        assert!(close.ok);
+        assert_eq!(
+            close
+                .result
+                .as_ref()
+                .and_then(|v| v.get("closed"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let closed_poll = call_rpc(
+            &state,
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": 0, "limit": 10}),
+        )
+        .await;
+        assert!(!closed_poll.ok);
+        assert_eq!(
+            closed_poll.error.as_ref().map(|e| e.code.as_str()),
+            Some("not_found")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

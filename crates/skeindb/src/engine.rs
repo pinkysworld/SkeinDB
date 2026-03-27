@@ -1024,6 +1024,18 @@ pub struct CdcPollResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcAckResult {
+    pub sub_id: String,
+    pub acked_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcCloseResult {
+    pub sub_id: String,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStorageStats {
     pub wal_bytes: u64,
     pub dedup_ratio: f64,
@@ -1045,6 +1057,7 @@ pub struct Subscription {
     pub id: String,
     pub db: String,
     pub table: String,
+    pub acked_offset: u64,
 }
 
 impl Engine {
@@ -5823,6 +5836,7 @@ impl Engine {
                 id: id.clone(),
                 db: db.to_string(),
                 table: table.to_string(),
+                acked_offset: self.change_seq,
             },
         );
 
@@ -5844,9 +5858,10 @@ impl Engine {
         };
 
         let mut events = Vec::new();
-        let mut next_offset = from_offset;
+        let resume_offset = from_offset.max(sub.acked_offset);
+        let mut next_offset = resume_offset;
         for ev in self.changes.iter() {
-            if ev.seq <= from_offset {
+            if ev.seq <= resume_offset {
                 continue;
             }
             if ev.db == sub.db && ev.table == sub.table {
@@ -5861,6 +5876,36 @@ impl Engine {
         Ok(CdcPollResult {
             events,
             next_offset,
+        })
+    }
+
+    pub fn cdc_ack(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+        offset: u64,
+    ) -> anyhow::Result<CdcAckResult> {
+        let Some(sub) = subs.subs.get_mut(sub_id) else {
+            anyhow::bail!("not_found");
+        };
+        sub.acked_offset = sub.acked_offset.max(offset);
+        Ok(CdcAckResult {
+            sub_id: sub.id.clone(),
+            acked_offset: sub.acked_offset,
+        })
+    }
+
+    pub fn cdc_close(
+        &self,
+        subs: &mut Subscriptions,
+        sub_id: &str,
+    ) -> anyhow::Result<CdcCloseResult> {
+        let Some(sub) = subs.subs.remove(sub_id) else {
+            anyhow::bail!("not_found");
+        };
+        Ok(CdcCloseResult {
+            sub_id: sub.id,
+            closed: true,
         })
     }
 

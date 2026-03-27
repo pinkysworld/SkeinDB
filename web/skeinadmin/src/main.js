@@ -149,6 +149,8 @@ const RPC_TEMPLATES = [
   { label: 'autoparam.analyze', method: 'autoparam.analyze', params: { sql:'SELECT * FROM users WHERE id = 42' } },
   { label: 'cdc.subscribe_table', method: 'cdc.subscribe_table', params: { db:'demo', table:'users' } },
   { label: 'cdc.poll', method: 'cdc.poll', params: { sub_id:'sub_1', from_offset:0, limit:200 } },
+  { label: 'cdc.ack', method: 'cdc.ack', params: { sub_id:'sub_1', offset:42 } },
+  { label: 'cdc.close', method: 'cdc.close', params: { sub_id:'sub_1' } },
   { label: 'settings.get', method: 'settings.get', params: { keys:['cluster.state.v1'] } },
   { label: 'cluster.status', method: 'cluster.status', params: {} },
   { label: 'cluster.join_token.create', method: 'cluster.join_token.create', params: { ttl_ms:600000, role:'replica' } },

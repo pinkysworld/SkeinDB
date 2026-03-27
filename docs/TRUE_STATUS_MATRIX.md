@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
 Last updated: 2026-03-27
-Latest changes: WordPress Site Health `information_schema.TABLES` storage-summary compatibility on `main`; PostgreSQL compat phase planned.
+Latest changes: WordPress Site Health `information_schema.TABLES` storage-summary compatibility on `main`; CDC table subscriptions now support `cdc.ack` cursors and `cdc.close`; PostgreSQL compat phase planned.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -12,7 +12,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **48 done / 89 open** (137 total; T037/T038 remain open but have significant progress notes; T400–T418 are new PostgreSQL compat phase)
+- `docs/PROJECT_BACKLOG.md`: **49 done / 88 open** (137 total; T037/T038 remain open but have significant progress notes; T400–T418 are new PostgreSQL compat phase)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -45,7 +45,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 20 Encryption | Planned | Dedup-preserving encryption backlog remains open. |
 | Phase 21 Compaction scheduler | Partial | Policy scaffolding/docs exist; full constrained scheduler/evaluation remains open. |
 | Phase 22 Autoparam + plan cache | Partial | SQL normalization/classification prototype exists (`ai.autoparam.*`), full session/plan-cache integration remains open. |
-| Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table` + `cdc.poll` are implemented; query subscriptions/streaming/ack remain open. |
+| Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close` are implemented for table subscriptions with in-memory ack cursors; query subscriptions, streaming transports, and retention/resnapshot remain open. |
 | Phase 25 PostgreSQL compat | Planned | PG v3 wire protocol on port 5432, SCRAM-SHA-256 auth, PG SQL dialect translation, pg_catalog system tables, extended query protocol (Parse/Bind/Execute), PG type OIDs, RETURNING, dollar-quoting, deep dialect parity for psql/pgAdmin/Django/Rails/SQLAlchemy. Tasks T400–T418 in PROJECT_BACKLOG. |
 
 ## 3) Research tracks (R01-R20)

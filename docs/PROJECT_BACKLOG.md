@@ -172,7 +172,7 @@ Phase 0 verification checklist:
 
 ## Phase 23 - CDC and dependency-driven changefeeds
 - [ ] T220: WAL-to-change-event translator (table-level insert/update/delete) (docs/CDC_CHANGEFEED.md)
-- [ ] T221: cdc.subscribe_table + cdc.poll/cdc.ack endpoints
+- [x] T221: `cdc.subscribe_table` + `cdc.poll` / `cdc.ack` baseline endpoints (table subscriptions now expose a long-poll cursor with in-memory ack tracking, and `cdc.close` removes subscription handles; query subscriptions / streaming / retention hardening remain follow-on work)
 - [ ] T222: Dependency-driven query changefeeds (cdc.subscribe_query) using ETag dependency sets
 - [ ] T223: SSE/WebSocket streaming endpoint + backpressure + reconnect semantics
 - [ ] T224: Retention + resnapshot protocol when WAL horizon is exceeded
