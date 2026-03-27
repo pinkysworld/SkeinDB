@@ -22,6 +22,8 @@ quinn = "0.10"
 rustls = "0.21"
 rustls-pemfile = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1"
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 
 skeindb-core = { path = "../skeindb-core" }
 skeindb-ir = { path = "../skeindb-ir" }

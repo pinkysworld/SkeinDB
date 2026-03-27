@@ -24,6 +24,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use time::{
+    format_description::FormatItem, macros::format_description, Date, Duration as TimeDuration,
+    OffsetDateTime, PrimitiveDateTime, Time,
+};
 
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
 use skeindb_core::{encode_varu, value_id, ValueKind};
@@ -1841,6 +1845,7 @@ impl Engine {
             for mut row in rows {
                 // Fill missing cols and apply auto-increment.
                 apply_defaults_and_autoinc(schema, &mut row, &mut last_insert_id)?;
+                normalize_row_to_schema(schema, &mut row);
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
@@ -1957,6 +1962,7 @@ impl Engine {
                 for (k, v) in set.iter() {
                     new_row.insert(k.clone(), v.clone());
                 }
+                normalize_row_to_schema(schema, &mut new_row);
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
@@ -8172,10 +8178,7 @@ fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Ve
 
 fn infer_select_name(expr: &Expr) -> String {
     match expr {
-        Expr::Col { col, table } => match table {
-            Some(t) => format!("{t}.{col}"),
-            None => col.clone(),
-        },
+        Expr::Col { col, .. } => col.clone(),
         Expr::Lit { .. } => "lit".to_string(),
         Expr::Param { param } => format!("param_{param}"),
         Expr::Func { name, .. } => name.clone(),
@@ -8393,6 +8396,26 @@ fn eval_expr(
                         v: like_pattern_matches(&subject, &pattern, op == "ilike"),
                     })
                 }
+                "regexp" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like lhs"))?;
+                    let pattern = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like rhs"))?;
+                    Ok(Lit::Bool {
+                        v: regexp_pattern_matches(&subject, &pattern)?,
+                    })
+                }
                 "is_null" => {
                     let aa = a
                         .as_ref()
@@ -8433,6 +8456,132 @@ fn eval_expr(
                         }),
                         _ => Ok(Lit::Null),
                     }
+                }
+                "concat" => {
+                    let mut out = String::new();
+                    for arg in fargs.iter() {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        let Some(piece) = lit_to_string_for_like(&value) else {
+                            return Ok(Lit::Null);
+                        };
+                        out.push_str(&piece);
+                    }
+                    Ok(Lit::Str { v: out })
+                }
+                "now" => {
+                    let current = OffsetDateTime::now_utc()
+                        .replace_nanosecond(0)
+                        .map_err(|err| anyhow::anyhow!("invalid current timestamp: {err}"))?;
+                    Ok(Lit::Str {
+                        v: mysql_format_datetime_text(PrimitiveDateTime::new(
+                            current.date(),
+                            current.time(),
+                        ))?,
+                    })
+                }
+                "date_sub" | "date_add" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let source = eval_expr(&fargs[0], row, ctx, args)?;
+                    let interval = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(source, Lit::Null) || matches!(interval, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let Some(source) = lit_to_string_for_like(&source) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(interval_spec) = lit_to_string_for_like(&interval) else {
+                        return Ok(Lit::Null);
+                    };
+                    let base = mysql_parse_datetime_text(&source).ok_or_else(|| {
+                        anyhow::anyhow!("{name} requires datetime-like first arg")
+                    })?;
+                    let duration = mysql_interval_duration(&interval_spec)?;
+                    let adjusted = if name == "date_sub" {
+                        base.checked_sub(duration)
+                    } else {
+                        base.checked_add(duration)
+                    }
+                    .ok_or_else(|| anyhow::anyhow!("{name} produced out-of-range datetime"))?;
+                    Ok(Lit::Str {
+                        v: mysql_format_datetime_text(adjusted)?,
+                    })
+                }
+                "nullif" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("nullif requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(left, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(right, Lit::Null) {
+                        return Ok(left);
+                    }
+                    if cmp_lit(&left, &right)? == std::cmp::Ordering::Equal {
+                        Ok(Lit::Null)
+                    } else {
+                        Ok(left)
+                    }
+                }
+                "year" | "month" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(value, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let Some(raw) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let temporal = mysql_parse_temporal_text(&raw)
+                        .ok_or_else(|| anyhow::anyhow!("{name} requires date-like arg"))?;
+                    let out = if name == "year" {
+                        temporal.year() as i64
+                    } else {
+                        temporal.month() as i64
+                    };
+                    Ok(Lit::I64 { v: out })
+                }
+                "substring" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("substring requires 2 or 3 args");
+                    }
+                    let source = eval_expr(&fargs[0], row, ctx, args)?;
+                    let start = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(source) = lit_to_string_for_like(&source) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(start) = lit_to_i64_value(&start) else {
+                        return Ok(Lit::Null);
+                    };
+                    let chars: Vec<char> = source.chars().collect();
+                    let len = chars.len() as i64;
+                    let mut start_idx = if start > 0 {
+                        start.saturating_sub(1)
+                    } else if start < 0 {
+                        len.saturating_add(start)
+                    } else {
+                        0
+                    };
+                    start_idx = start_idx.clamp(0, len);
+                    let mut end_idx = len;
+                    if let Some(length_expr) = fargs.get(2) {
+                        let length = eval_expr(length_expr, row, ctx, args)?;
+                        let Some(length) = lit_to_i64_value(&length) else {
+                            return Ok(Lit::Null);
+                        };
+                        if length <= 0 {
+                            return Ok(Lit::Str { v: String::new() });
+                        }
+                        end_idx = (start_idx.saturating_add(length)).min(len);
+                    }
+                    Ok(Lit::Str {
+                        v: chars[start_idx as usize..end_idx as usize].iter().collect(),
+                    })
                 }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
                     if fargs.len() != 2 {
@@ -8522,6 +8671,60 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
     }
 }
 
+const MYSQL_COMPAT_DATETIME_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+const MYSQL_COMPAT_DATE_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]");
+
+fn mysql_parse_datetime_text(raw: &str) -> Option<PrimitiveDateTime> {
+    let raw = raw.trim();
+    PrimitiveDateTime::parse(raw, MYSQL_COMPAT_DATETIME_FORMAT)
+        .ok()
+        .or_else(|| {
+            OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .map(|dt| PrimitiveDateTime::new(dt.date(), dt.time()))
+        })
+}
+
+fn mysql_parse_temporal_text(raw: &str) -> Option<PrimitiveDateTime> {
+    mysql_parse_datetime_text(raw).or_else(|| {
+        Date::parse(raw.trim(), MYSQL_COMPAT_DATE_FORMAT)
+            .ok()
+            .map(|date| PrimitiveDateTime::new(date, Time::MIDNIGHT))
+    })
+}
+
+fn mysql_format_datetime_text(value: PrimitiveDateTime) -> anyhow::Result<String> {
+    value
+        .format(MYSQL_COMPAT_DATETIME_FORMAT)
+        .map_err(|err| anyhow::anyhow!("invalid datetime formatting: {err}"))
+}
+
+fn mysql_interval_duration(interval_spec: &str) -> anyhow::Result<TimeDuration> {
+    let mut parts = interval_spec.split_whitespace();
+    let magnitude = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("interval requires magnitude"))?
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("interval magnitude must be numeric"))?;
+    let unit = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("interval requires unit"))?
+        .to_ascii_uppercase();
+    if parts.next().is_some() {
+        anyhow::bail!("interval must be '<value> <unit>'");
+    }
+    match unit.as_str() {
+        "SECOND" | "SECONDS" => Ok(TimeDuration::seconds(magnitude)),
+        "MINUTE" | "MINUTES" => Ok(TimeDuration::minutes(magnitude)),
+        "HOUR" | "HOURS" => Ok(TimeDuration::hours(magnitude)),
+        "DAY" | "DAYS" => Ok(TimeDuration::days(magnitude)),
+        "WEEK" | "WEEKS" => Ok(TimeDuration::weeks(magnitude)),
+        _ => anyhow::bail!("unsupported interval unit: {unit}"),
+    }
+}
+
 fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
     match lit {
         Lit::Null => None,
@@ -8576,6 +8779,20 @@ fn like_pattern_matches(subject: &str, pattern: &str, case_insensitive: bool) ->
         pi += 1;
     }
     pi == pattern.len()
+}
+
+fn regexp_pattern_matches(subject: &str, pattern: &str) -> anyhow::Result<bool> {
+    let regex = regex::Regex::new(pattern)
+        .map_err(|err| anyhow::anyhow!("invalid_request: invalid regexp pattern: {err}"))?;
+    Ok(regex.is_match(subject))
+}
+
+fn lit_to_i64_value(lit: &Lit) -> Option<i64> {
+    match lit {
+        Lit::I64 { v } => Some(*v),
+        Lit::U64 { v } => (*v <= i64::MAX as u64).then_some(*v as i64),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -8694,7 +8911,11 @@ fn secondary_index_key(columns: &[String], include: &[String]) -> String {
 }
 
 fn secondary_index_value_key(values: &[Lit]) -> String {
-    serde_json::to_string(values).unwrap_or_default()
+    let normalized = values
+        .iter()
+        .map(normalize_numeric_key_lit)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&normalized).unwrap_or_default()
 }
 
 fn build_secondary_index(
@@ -10307,6 +10528,35 @@ fn apply_defaults_and_autoinc(
     Ok(())
 }
 
+fn normalize_row_to_schema(schema: &TableSchema, row: &mut RowObject) {
+    for column in schema.columns.iter() {
+        let Some(value) = row.get_mut(&column.name) else {
+            continue;
+        };
+        *value = normalize_lit_to_type(value, &column.r#type);
+    }
+}
+
+fn normalize_lit_to_type(lit: &Lit, desc: &TypeDesc) -> Lit {
+    let kind = desc.kind.to_ascii_lowercase();
+    match kind.as_str() {
+        "u64" => match lit {
+            Lit::I64 { v } if *v >= 0 => Lit::U64 { v: *v as u64 },
+            _ => lit.clone(),
+        },
+        "i64" => match lit {
+            Lit::U64 { v } if *v <= i64::MAX as u64 => Lit::I64 { v: *v as i64 },
+            _ => lit.clone(),
+        },
+        "f64" => match lit {
+            Lit::I64 { v } => Lit::F64 { v: *v as f64 },
+            Lit::U64 { v } => Lit::F64 { v: *v as f64 },
+            _ => lit.clone(),
+        },
+        _ => lit.clone(),
+    }
+}
+
 fn mysql_compat_column_default(schema: &TableSchema, column: &str) -> Option<Lit> {
     schema
         .compat_mysql
@@ -10381,11 +10631,22 @@ fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[Strin
             return false;
         }
         compared = true;
-        if left != right {
+        if !lit_value_eq(left, right) {
             return false;
         }
     }
     compared
+}
+
+fn lit_value_eq(left: &Lit, right: &Lit) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left, right) {
+        (Lit::I64 { v: lv }, Lit::U64 { v: rv }) => *lv >= 0 && (*lv as u64) == *rv,
+        (Lit::U64 { v: lv }, Lit::I64 { v: rv }) => *rv >= 0 && *lv == (*rv as u64),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -12312,7 +12573,15 @@ fn ensure_pk_values(schema: &TableSchema, pk: &[Lit], row: &mut RowObject) -> an
 
 fn pk_key(pk: &[Lit]) -> String {
     // Stable string key.
-    serde_json::to_string(pk).unwrap_or_default()
+    let normalized = pk.iter().map(normalize_numeric_key_lit).collect::<Vec<_>>();
+    serde_json::to_string(&normalized).unwrap_or_default()
+}
+
+fn normalize_numeric_key_lit(lit: &Lit) -> Lit {
+    match lit {
+        Lit::I64 { v } if *v >= 0 => Lit::U64 { v: *v as u64 },
+        _ => lit.clone(),
+    }
 }
 
 fn view_upsert_row(view: &mut ViewState, pk: Vec<Lit>, values: Vec<Lit>) {
@@ -15884,6 +16153,28 @@ mod tests {
         assert_eq!(decoded_rows, rows);
         assert_eq!(decoded_cols[0].r#type.kind, "u64");
         Ok(())
+    }
+
+    #[test]
+    fn projection_columns_drop_table_prefix_from_qualified_refs() {
+        let columns = projection_columns(&[
+            SelectItem {
+                expr: Expr::Col {
+                    col: "term_id".to_string(),
+                    table: Some("t".to_string()),
+                },
+                r#as: None,
+            },
+            SelectItem {
+                expr: Expr::Col {
+                    col: "object_id".to_string(),
+                    table: Some("tr".to_string()),
+                },
+                r#as: None,
+            },
+        ]);
+        assert_eq!(columns[0].name, "term_id");
+        assert_eq!(columns[1].name, "object_id");
     }
 
     #[test]
@@ -19774,6 +20065,178 @@ mod tests {
             }),
             Some(5)
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn data_insert_normalizes_unsigned_primary_keys_and_blocks_numeric_duplicates(
+    ) -> anyhow::Result<()> {
+        let dir = temp_dir("unsigned_pk_numeric_normalization");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "terms",
+            vec![
+                ColumnSchema {
+                    name: "term_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["term_id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "terms".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("term_id", Lit::I64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "uncategorized".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?.row;
+        assert_eq!(fetched.get("term_id"), Some(&Lit::U64 { v: 1 }));
+
+        let fetched = engine.data_get(&table, vec![Lit::I64 { v: 1 }])?.row;
+        assert_eq!(fetched.get("term_id"), Some(&Lit::U64 { v: 1 }));
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("term_id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "duplicate".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected numeric duplicate primary-key conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_unique_indexes_normalize_unsigned_numeric_updates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_unique_numeric_normalization");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "term_taxonomy",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "term_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "taxonomy".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "term_id_unique",
+                    "columns": ["term_id"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "term_taxonomy".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    ("term_id", Lit::U64 { v: 1 }),
+                    (
+                        "taxonomy",
+                        Lit::Str {
+                            v: "category".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    ("term_id", Lit::U64 { v: 2 }),
+                    (
+                        "taxonomy",
+                        Lit::Str {
+                            v: "post_tag".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        let mut set = RowObject::new();
+        set.insert("term_id".to_string(), Lit::I64 { v: 1 });
+        let err = engine
+            .data_update(&table, &predicate, &set, None, None, &[])
+            .expect_err("expected unique conflict");
+        assert!(err.to_string().contains("conflict"));
+
+        set.insert("term_id".to_string(), Lit::I64 { v: 3 });
+        let updated = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(updated.affected, 1);
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 2 }])?.row;
+        assert_eq!(fetched.get("term_id"), Some(&Lit::U64 { v: 3 }));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

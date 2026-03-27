@@ -2061,6 +2061,149 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
     Ok(())
 }
 
+#[tokio::test]
+async fn mysql_supports_wordpress_editor_query_shapes() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_wp_editor_shapes")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS wordpress",
+        "USE wordpress",
+        "CREATE TABLE wp_posts (ID BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, post_type VARCHAR(32) NOT NULL, post_date DATETIME NOT NULL, PRIMARY KEY (ID))",
+        "CREATE TABLE wp_comments (comment_ID BIGINT NOT NULL, comment_post_ID BIGINT NOT NULL, comment_approved VARCHAR(20) NOT NULL, comment_type VARCHAR(20) NOT NULL, PRIMARY KEY (comment_ID))",
+        "CREATE TABLE wp_users (ID BIGINT NOT NULL, user_login VARCHAR(64) NOT NULL, PRIMARY KEY (ID))",
+        "CREATE TABLE wp_usermeta (umeta_id BIGINT NOT NULL, user_id BIGINT NOT NULL, meta_key VARCHAR(255) NOT NULL, meta_value TEXT NOT NULL, PRIMARY KEY (umeta_id))",
+        "CREATE TABLE wp_terms (term_id BIGINT NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (term_id))",
+        "CREATE TABLE wp_term_taxonomy (term_taxonomy_id BIGINT NOT NULL, term_id BIGINT NOT NULL, taxonomy VARCHAR(32) NOT NULL, PRIMARY KEY (term_taxonomy_id))",
+        "CREATE TABLE wp_term_relationships (object_id BIGINT NOT NULL, term_taxonomy_id BIGINT NOT NULL, PRIMARY KEY (object_id, term_taxonomy_id))",
+        "INSERT INTO wp_posts (ID, post_status, post_type, post_date) VALUES (1, 'publish', 'wp_template', '2020-01-01 00:00:00'), (2, 'draft', 'wp_template', '2020-01-02 00:00:00'), (3, 'auto-draft', 'post', '2000-01-01 00:00:00'), (4, 'auto-draft', 'post', '2999-01-01 00:00:00')",
+        "INSERT INTO wp_comments (comment_ID, comment_post_ID, comment_approved, comment_type) VALUES (1, 1, '1', 'note'), (2, 1, 'spam', 'note'), (3, 2, '1', 'comment')",
+        "INSERT INTO wp_users (ID, user_login) VALUES (1, 'admin'), (2, 'subscriber')",
+        "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (1, 1, 'wp_capabilities', 'a:1:{s:13:\"administrator\";b:1;}'), (2, 2, 'wp_capabilities', 'a:1:{s:10:\"subscriber\";b:1;}')",
+        "INSERT INTO wp_terms (term_id, name) VALUES (7, 'Primary Category')",
+        "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy) VALUES (2, 7, 'category')",
+        "INSERT INTO wp_term_relationships (object_id, term_taxonomy_id) VALUES (1, 2)",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet for {stmt:?}, got {:?}", other),
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wordpress' AND TABLE_NAME IN ('wp_posts','wp_term_relationships') AND ENGINE = 'MyISAM'",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => assert!(rows.is_empty()),
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT COUNT(*) FROM wp_term_relationships, wp_posts WHERE wp_posts.ID = wp_term_relationships.object_id AND post_status IN ('publish') AND post_type IN ('wp_template', 'wp_template_part', 'wp_global_styles') AND term_taxonomy_id = 2",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT DISTINCT COUNT(*) FROM wp_terms AS t INNER JOIN wp_term_taxonomy AS tt ON t.term_id = tt.term_id INNER JOIN wp_term_relationships AS tr ON tr.term_taxonomy_id = tt.term_taxonomy_id WHERE tt.taxonomy IN ('category') AND tr.object_id IN (1)",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT wp_posts.* FROM wp_posts LEFT JOIN wp_term_relationships ON (wp_posts.ID = wp_term_relationships.object_id) WHERE 1=1 AND ( wp_term_relationships.term_taxonomy_id IN (2) ) AND wp_posts.post_type = 'wp_template' AND ((wp_posts.post_status = 'publish')) GROUP BY wp_posts.ID ORDER BY wp_posts.post_date DESC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("publish"));
+            assert_eq!(rows[0][2].as_deref(), Some("wp_template"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT SQL_CALC_FOUND_ROWS COUNT(*) FROM wp_comments WHERE ((comment_approved = '0' OR comment_approved = '1')) AND comment_post_ID IN (1) AND comment_type IN ('note')",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT ID FROM wp_posts WHERE post_status = 'auto-draft' AND DATE_SUB( NOW(), INTERVAL 7 DAY ) > post_date ORDER BY ID ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("3"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT DISTINCT YEAR( post_date ) AS year, MONTH( post_date ) AS month FROM wp_posts WHERE post_type = 'post' AND post_status != 'auto-draft' AND post_status != 'trash' ORDER BY post_date DESC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert!(rows.is_empty());
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT COUNT(NULLIF(`meta_value` LIKE '%\\\"administrator\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"editor\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"author\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"contributor\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"subscriber\\\"%', false)), COUNT(NULLIF(`meta_value` = 'a:0:{}', false)), COUNT(*) FROM wp_usermeta INNER JOIN wp_users ON user_id = ID WHERE meta_key = 'wp_capabilities'",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("0"));
+            assert_eq!(rows[0][2].as_deref(), Some("0"));
+            assert_eq!(rows[0][3].as_deref(), Some("0"));
+            assert_eq!(rows[0][4].as_deref(), Some("1"));
+            assert_eq!(rows[0][5].as_deref(), Some("0"));
+            assert_eq!(rows[0][6].as_deref(), Some("2"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
