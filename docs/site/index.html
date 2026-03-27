@@ -479,10 +479,10 @@
       <p>Connect with any PostgreSQL client. Planned support for PG v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, dollar-quoting, :: casts, and pg_catalog.</p>
     </div>
     <div class="feature-card">
-      <span class="status-badge status-planned">Planned</span>
+      <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">⚡</div>
       <h3>HTTP + QUIC Dual Transport</h3>
-      <p>Every RPC method works identically over HTTP/1.1, HTTP/2, and QUIC. Dedicated integration tests confirm transport-level behavioral parity.</p>
+      <p>HTTP already exposes cacheable prepared-query GETs with ETag and <code>304 Not Modified</code> validators, and QUIC RPC parity is covered by integration tests. Broader transport hardening is still ongoing.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>

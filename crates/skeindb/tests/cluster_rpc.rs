@@ -8,6 +8,9 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use serde_json::json;
+use skeindb_skeinql::types::{
+    BaseTableRef, Expr, Query, QueryBody, SelectBody, SelectItem, TableRef,
+};
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::{
@@ -16,6 +19,38 @@ use tokio::{
 };
 
 static CLUSTER_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn select_query(db: &str, table: &str, projection: &[&str]) -> Query {
+    Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection: projection
+                    .iter()
+                    .map(|col| SelectItem {
+                        expr: Expr::Col {
+                            col: (*col).to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    })
+                    .collect(),
+                from: Some(vec![TableRef::Base(BaseTableRef {
+                    db: db.to_string(),
+                    table: table.to_string(),
+                    r#as: None,
+                })]),
+                r#where: None,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    }
+}
 
 async fn cluster_test_guard() -> OwnedSemaphorePermit {
     let sem = CLUSTER_TEST_SEMAPHORE
@@ -224,6 +259,129 @@ async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
     assert_eq!(col_rows.len(), 2);
     assert_eq!(col_rows[0][0]["v"].as_str(), Some("id"));
     assert_eq!(col_rows[1][0]["v"].as_str(), Some("name"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_query_get_endpoint_honors_etag_validators() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("prepared_query_get_endpoint")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let prepare = client
+        .rpc(
+            "query.prepare",
+            json!({"query": select_query("app", "users", &["id", "name"])}),
+        )
+        .await?;
+    assert!(prepare.ok);
+    let query_id = prepare.result.expect("missing query.prepare result")["query_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let url = format!(
+        "{}/api/v1/q/{}",
+        client.base_url.trim_end_matches('/'),
+        query_id
+    );
+    let first = client.client.get(&url).send().await?;
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first_etag = first
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing etag header"))?
+        .to_string();
+    let first_body: serde_json::Value = first.json().await?;
+    let first_rows = first_body["data"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(first_rows.len(), 1);
+    assert_eq!(first_rows[0][0]["v"].as_u64(), Some(1));
+    assert_eq!(first_rows[0][1]["v"].as_str(), Some("Ada"));
+
+    let not_modified = client
+        .client
+        .get(&url)
+        .header(reqwest::header::IF_NONE_MATCH, first_etag.clone())
+        .send()
+        .await?;
+    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok()),
+        Some(first_etag.as_str())
+    );
+    assert!((not_modified.bytes().await?).is_empty());
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let refreshed = client
+        .client
+        .get(&url)
+        .header(reqwest::header::IF_NONE_MATCH, first_etag.clone())
+        .send()
+        .await?;
+    assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
+    let refreshed_etag = refreshed
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing refreshed etag"))?
+        .to_string();
+    assert_ne!(refreshed_etag, first_etag);
+    let refreshed_body: serde_json::Value = refreshed.json().await?;
+    let refreshed_rows = refreshed_body["data"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(refreshed_rows.len(), 2);
+
     Ok(())
 }
 

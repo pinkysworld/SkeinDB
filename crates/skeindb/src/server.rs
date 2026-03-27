@@ -17236,6 +17236,36 @@ mod tests {
         serde_json::from_slice(&bytes).expect("parse sql response")
     }
 
+    async fn call_prepared_get_http(
+        state: &AppState,
+        query_id: &str,
+        if_none_match: Option<&str>,
+    ) -> (StatusCode, HeaderMap, Option<Value>) {
+        let mut headers = HeaderMap::new();
+        if let Some(etag) = if_none_match {
+            headers.insert(
+                header::IF_NONE_MATCH,
+                etag.parse().expect("valid if-none-match header"),
+            );
+        }
+        let resp =
+            prepared_get_handler(Path(query_id.to_string()), State(state.clone()), headers).await;
+        let status = resp.status();
+        let response_headers = resp.headers().clone();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect prepared get body")
+            .to_bytes();
+        let body = if bytes.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_slice(&bytes).expect("parse prepared get body"))
+        };
+        (status, response_headers, body)
+    }
+
     #[tokio::test]
     async fn sql_exec_http_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("sql_exec_http_roundtrip");
@@ -19208,6 +19238,190 @@ mod tests {
             closed_poll.error.as_ref().map(|e| e.code.as_str()),
             Some("not_found")
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_get_http_roundtrip_honors_etag_and_304() -> anyhow::Result<()> {
+        let dir = temp_dir("prepared_get_http_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let users = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &users,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ada".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+        let query = select_query("app", "users", vec!["id", "name"], None);
+        let prepared = call_rpc(&state, "query.prepare", json!({"query": query})).await;
+        assert!(prepared.ok);
+        let query_id = prepared.result.expect("missing result")["query_id"]
+            .as_str()
+            .expect("query_id")
+            .to_string();
+
+        let (status, headers, body) = call_prepared_get_http(&state, &query_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let etag = headers
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("etag header")
+            .to_string();
+        let rows = body
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["v"].as_u64(), Some(1));
+
+        let (not_modified_status, not_modified_headers, not_modified_body) =
+            call_prepared_get_http(&state, &query_id, Some(&etag)).await;
+        assert_eq!(not_modified_status, StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            not_modified_headers
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok()),
+            Some(etag.as_str())
+        );
+        assert!(not_modified_body.is_none());
+
+        {
+            let mut eng = state.engine.write().await;
+            eng.data_insert(
+                &users,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Grace".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let (refreshed_status, refreshed_headers, refreshed_body) =
+            call_prepared_get_http(&state, &query_id, Some(&etag)).await;
+        assert_eq!(refreshed_status, StatusCode::OK);
+        let refreshed_etag = refreshed_headers
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .expect("refreshed etag");
+        assert_ne!(refreshed_etag, etag);
+        let refreshed_rows = refreshed_body
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(refreshed_rows.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_get_http_joiner_uses_coalesced_result() -> anyhow::Result<()> {
+        let dir = temp_dir("prepared_get_http_coalesced_joiner");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        let query = select_query("app", "ghosts", vec!["id"], None);
+        let prepared = {
+            let mut eng = state.engine.write().await;
+            eng.query_prepare(query)?
+        };
+        let query_id = prepared.id.clone();
+
+        let (inflight, is_leader) = state.coalesce.get_or_create(&query_id);
+        assert!(is_leader);
+        assert!(state
+            .coalesce
+            .inflight
+            .lock()
+            .unwrap()
+            .contains_key(&query_id));
+
+        let shared = inflight.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            *shared.result.lock().unwrap() = Some(Ok(crate::engine::QuerySelectResult {
+                etag: Some("W/\"q:joiner\"".to_string()),
+                not_modified: false,
+                data: Some(json!({
+                    "columns": [{"name":"id","type":{"kind":"u64"}}],
+                    "rows": [[{"t":"u64","v":99}]]
+                })),
+                deps: None,
+                causality: None,
+                wire: None,
+            }));
+            shared.notify.notify_waiters();
+        });
+
+        let (status, headers, body) = call_prepared_get_http(&state, &query_id, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers.get(header::ETAG).and_then(|v| v.to_str().ok()),
+            Some("W/\"q:joiner\"")
+        );
+        let rows = body
+            .as_ref()
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["v"].as_u64(), Some(99));
+
+        state.coalesce.finish(&query_id);
+        assert!(!state
+            .coalesce
+            .inflight
+            .lock()
+            .unwrap()
+            .contains_key(&query_id));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

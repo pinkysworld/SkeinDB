@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
 Last updated: 2026-03-27
-Latest changes: WordPress Site Health `information_schema.TABLES` storage-summary compatibility on `main`; CDC table subscriptions now support `cdc.ack` cursors and `cdc.close`; PostgreSQL compat phase planned.
+Latest changes: prepared-query `GET /api/v1/q/{query_id}` is now covered as a real ETag / `304` HTTP surface with GET coalescing tests; CDC table subscriptions now support `cdc.ack` cursors and `cdc.close`; PostgreSQL compat phase planned.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -12,7 +12,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **49 done / 88 open** (137 total; T037/T038 remain open but have significant progress notes; T400–T418 are new PostgreSQL compat phase)
+- `docs/PROJECT_BACKLOG.md`: **51 done / 86 open** (137 total; T037/T038 remain open but have significant progress notes; T400–T418 are new PostgreSQL compat phase)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -28,7 +28,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 3 MySQL protocol | Implemented (baseline) | Wire listener performs handshake + `mysql_native_password` auth exchange and supports `COM_QUERY` through the SQL-translation subset (`SELECT/SHOW/USE/CREATE DATABASE/DROP DATABASE/CREATE TABLE/CREATE [UNIQUE] INDEX/ALTER TABLE .../DROP INDEX/DROP TABLE/TRUNCATE TABLE/RENAME TABLE/INSERT/INSERT ... SELECT/UPDATE/DELETE`, `INSERT IGNORE`, `REPLACE`, `INSERT ... ON DUPLICATE KEY UPDATE`, multi-table `DELETE`, multi-table `UPDATE` (stub), `UNION`/`UNION ALL`, `DISTINCT`, `BETWEEN`/`NOT BETWEEN`, `REGEXP`/`RLIKE`/`NOT REGEXP`, `<=>` (NULL-safe equality), simple joins including `INNER`/`LEFT`/`RIGHT`/`CROSS JOIN`/`NATURAL JOIN`/`FULL OUTER JOIN` with multi-join chains, comma-separated `FROM` lists, `JOIN ... USING (...)`, derived tables (FROM subqueries), CTEs (`WITH...AS`), projection aliases, wildcard projections, aggregate shims for `COUNT(*)`/`COUNT(col)`/`COUNT(DISTINCT col)`/`SUM`/`MIN`/`MAX`/`AVG`/`GROUP_CONCAT()` with `HAVING`/`ORDER BY`/`LIMIT`/`OFFSET`, non-aggregate `GROUP BY` de-dup, broad scalar-function coverage including `CONCAT_WS`/`REPEAT`/`REVERSE`/`LPAD`/`RPAD`/`SPACE`/`HEX`/`UNHEX`/`FORMAT`/`SIGN`/`SQRT`/`POW`/`TRUNCATE`/`LOG`/`LN`/`LOG2`/`LOG10`/`EXP`/`PI`/`RAND`/`UUID`/`SLEEP`/`BENCHMARK`/`FIELD`/`ELT`/`INET_ATON`/`INET_NTOA`/`BIN`/`OCT`/`CONV`/`CRC32`/`MD5`/`SHA1`/`SHA`/`SHA2` plus the prior scalar baseline, JSON functions (`JSON_EXTRACT`/`JSON_UNQUOTE`/`JSON_OBJECT`/`JSON_ARRAY`/`JSON_CONTAINS`/`JSON_LENGTH`/`JSON_TYPE`/`JSON_VALID`/`JSON_SET`/`JSON_KEYS`/`JSON_MERGE_PRESERVE`), date/time functions including `STR_TO_DATE`/`WEEK`/`YEARWEEK`/`CONVERT_TZ`/`UTC_TIMESTAMP`/`UTC_DATE`/`UTC_TIME`/`SYSDATE`/`ADDTIME`/`SUBTIME`/`TIME_TO_SEC`/`SEC_TO_TIME` plus the prior date/time baseline, session functions `USER()`/`CURRENT_USER()`/`SESSION_USER()`/`SYSTEM_USER()`/`LAST_INSERT_ID()`/`CONNECTION_ID()`, `CASE`/`CAST`, arithmetic expressions, subquery rewrites, `SQL_CALC_FOUND_ROWS`/`FOUND_ROWS()`, `SELECT ... FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` locking hint stripping, `EXPLAIN` stub, `DO` statement, `CREATE VIEW`/`DROP VIEW` stubs, `SAVEPOINT`/`RELEASE SAVEPOINT`/`ROLLBACK TO SAVEPOINT` stubs, `SET GLOBAL` no-ops, `FLUSH`/`ANALYZE`/`OPTIMIZE`/`CHECK`/`REPAIR TABLE` no-ops, `KILL` no-op). Wire protocol includes `COM_INIT_DB` (0x02) and `COM_STATISTICS` (0x09). `SHOW` coverage expanded with `SHOW CREATE DATABASE`, `SHOW WARNINGS`/`ERRORS`, `SHOW PROCESSLIST`/`FULL PROCESSLIST`, `SHOW TRIGGERS`/`EVENTS`/`PROCEDURE STATUS`/`FUNCTION STATUS`, `SHOW PLUGINS`/`PROFILES`. `INFORMATION_SCHEMA` now includes `schemata` and `statistics` alongside `tables`/`columns`, with `information_schema.tables` carrying compatibility `TABLE_ROWS`/`DATA_LENGTH`/`INDEX_LENGTH` fields plus grouped storage-summary queries used by WordPress Site Health. The rest of the prior baseline (column defaults, `ALTER TABLE` variants, index enforcement, prepared-statement support, compatibility `SET`/`SHOW` forms, `LOCK TABLES`/`UNLOCK TABLES` no-ops, `NULL`-as-unknown semantics, secondary-index enforcement with `1062`/`23000` wire errors) is unchanged. `tests/compat/corpus.sql` runs end-to-end over the MySQL listener in integration tests. Corpus expanded from 772→1131 lines with over 375 SQL statements. Follow-on backlog items `T037`-`T038` track the remaining parity gaps. |
 | Phase 4 Web console | Partial | `/api/v1/sql/exec` HTTP endpoint is live and console scaffold + schema/sql workspace exist (`web/skeinadmin`). |
 | Phase 5 SkeinQL API | Implemented (baseline) | Typed SkeinQL models + `/api/v1/rpc` + `schema.*` (list/create/describe/drop) + `query.select` + `tx.begin/tx.commit/tx.rollback` are implemented. |
-| Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates + dependency-aware query paths exist. |
+| Phase 6 ETag cache coherence | Partial | `data.get` ETag / `If-Match` updates, dependency-aware query paths, and prepared-query HTTP GET execution at `/api/v1/q/{query_id}` with ETag / `If-None-Match` (`304 Not Modified`) are implemented; live change subscriptions remain open. |
 | Phase 7 Delta values | Implemented (prototype) | DELTA kind, policy/metrics, and compaction behavior are implemented in ValueStore tests. |
 | Phase 8 Wasm extensions | Partial | Wasm plan compile/run + merge wasm registry exist; full UDF surface is still open. |
 | Phase 9 Audit WAL | Partial | Forensic/audit prototype exists; full WAL v2 chain + checkpoint anchors remain open. |
@@ -38,7 +38,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 13 Observability | Partial | `stats.snapshot`, `stats.top_queries`, `stats.slow_queries`, and `/metrics` exist, including live dedup storage metrics (`dedup_ratio`, logical/unique/duplicate bytes); deeper latency histogram surfaces remain open. |
 | Phase 14 Cluster scale-out | Partial (advanced) | Node identity, fanout replication, shard metadata, and cluster RPCs are implemented. |
 | Phase 15 Perf improvements | Planned | Interned-column/late-mat/vectorized pipeline items remain backlog work. |
-| Phase 16 Query coalescing | Partial | In-flight coalescing exists (not yet complete for all planned entry points). |
+| Phase 16 Query coalescing | Partial | In-flight coalescing exists for prepared-query HTTP GETs and `query.patch`; broader fingerprint/auth scoping, metrics/limits, and wider entry-point coverage remain open. |
 | Phase 17 CAS-aware replication | Planned | Object-level pull/bloom savings protocol is still backlog work. |
 | Phase 18 Index advisor | Partial | `advisor.*` methods and prototype workflow exist; full lifecycle/reporting remains open. |
 | Phase 19 Time travel + replay | Partial | Replay/time-travel prototype surfaces/docs exist; full SQL+UI coverage remains open. |

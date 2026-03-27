@@ -66,7 +66,7 @@ Phase 0 verification checklist:
 ## Phase 6 - Cache-coherent HTTP queries (ETags)
 - [x] T060: Row ETags for data.get and If-Match support for data.update
 - [x] T061: Planner dependency sets for simple indexed queries
-- [ ] T062: query.prepare + GET /api/v1/q/{query_id} with ETag/If-None-Match
+- [x] T062: `query.prepare` + `GET /api/v1/q/{query_id}` with ETag / `If-None-Match` (prepared queries now execute over cacheable HTTP GET, return ETag headers, and honor `304 Not Modified` when the result is unchanged)
 - [ ] T063: SSE subscription to ETag changes (query.subscribe)
 
 ## Phase 7 - Delta-chained values
@@ -128,7 +128,7 @@ Phase 0 verification checklist:
 ## Phase 16 - Query coalescing (thundering herd protection)
 - [ ] T160: Query fingerprint canonicalization (SkeinIR + SkeinQL) + auth scope keying
 - [ ] T161: In-flight query map (leader/joiner) with cancellation semantics
-- [ ] T162: Enable coalescing for GET /api/v1/q/{query_id} (cacheable) + tests
+- [x] T162: Enable coalescing for `GET /api/v1/q/{query_id}` (cacheable) + tests (the prepared-query GET route now shares in-flight unconditional reads by `query_id`, and the joiner path is covered by tests; broader metrics/limits/dashboard work remains open)
 - [ ] T163: Metrics + limits + SkeinAdmin dashboard widget
 
 ## Phase 17 - CAS-aware replication bandwidth bounds (object-aware sync)

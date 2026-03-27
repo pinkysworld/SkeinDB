@@ -26,7 +26,7 @@ The repository is written so you can:
 - **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility (including Site Health metadata queries), and migration/telemetry tooling.
 - **PostgreSQL adoption layer (planned):** PostgreSQL v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, :: casts, pg_catalog.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
-- **Web-native consistency:** ETags + If-None-Match as first-class query validators.
+- **Web-native consistency:** ETags + If-None-Match as first-class query validators, including cacheable prepared-query GETs.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
 - **MVCC extensions:** delta-chained value versions.
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
