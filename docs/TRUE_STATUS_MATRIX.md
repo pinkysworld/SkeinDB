@@ -40,7 +40,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 15 Perf improvements | Planned | Interned-column/late-mat/vectorized pipeline items remain backlog work. |
 | Phase 16 Query coalescing | Partial | In-flight coalescing exists for prepared-query HTTP GETs and `query.patch`; broader fingerprint/auth scoping, metrics/limits, and wider entry-point coverage remain open. |
 | Phase 17 CAS-aware replication | Planned | Object-level pull/bloom savings protocol is still backlog work. |
-| Phase 18 Index advisor | Partial | `advisor.*` methods and prototype workflow exist; full lifecycle/reporting remains open. |
+| Phase 18 Index advisor | Partial | `advisor.index_synthesize/apply_index/history/dismiss` exist, and SkeinAdmin now renders ranked suggestions/history with observed-before and expected-after scan reports; online build progress/rollback lifecycle remains open. |
 | Phase 19 Time travel + replay | Partial | Replay/time-travel prototype surfaces/docs exist; full SQL+UI coverage remains open. |
 | Phase 20 Encryption | Planned | Dedup-preserving encryption backlog remains open. |
 | Phase 21 Compaction scheduler | Partial | Policy scaffolding/docs exist; full constrained scheduler/evaluation remains open. |
@@ -67,7 +67,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R13 Causal ETag consistency | Hardened | ETag/min-causality controls; V2 vector-clock format (`CAUSALITY_FORMAT_V2`); `merge_causality_tokens()` (component-wise max); `causality_dominates()` (partial order); `ensure_min_causality()` accepts V1+V2. |
 | R14 Replay bundles | Prototype implemented | Replay/time-travel docs + prototype surfaces. |
 | R15 Schema evolution | Prototype implemented | `schema.propose_change/merge_status/apply_merge`. |
-| R16 Auto index synthesis | Prototype implemented | `advisor.index_synthesize/apply_index/history`. |
+| R16 Auto index synthesis | Prototype implemented | `advisor.index_synthesize/apply_index/history/dismiss` plus the SkeinAdmin Index Advisor page with ranked suggestions/history and observed-before/expected-after reports. |
 | R17 Intent inference | Prototype implemented | `migration.intent_report/rewrite_preview`. |
 | R18 Perf regression replay | Prototype implemented | Replay/perf scaffolds and harness direction. |
 | R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/run` + batch ABI scaffolds. |

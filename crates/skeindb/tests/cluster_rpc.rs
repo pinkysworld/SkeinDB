@@ -417,6 +417,27 @@ async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn admin_main_js_exposes_live_index_advisor_methods() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("admin_index_advisor_js")?;
+    let body = reqwest::Client::new()
+        .get(format!("{}/admin/src/main.js", server.base_url()))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    assert!(body.contains("advisor.index_synthesize"));
+    assert!(body.contains("advisor.apply_index"));
+    assert!(body.contains("advisorReport"));
+    assert!(!body.contains("advisor.synthesize"));
+    assert!(!body.contains("call('advisor.apply'"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cdc_ack_and_close_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("cdc_ack_and_close")?;

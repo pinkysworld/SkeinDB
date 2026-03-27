@@ -862,8 +862,9 @@
         <!-- ADVISOR --><section class="panel" data-panel="advisor">
           <div class="panel-grid"><div class="card wide"><h2>Index Advisor (R16)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="advDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="advTable" /></div></div>
+            <div class="row"><div class="field"><label>Selected suggestion</label><input id="advSelection" placeholder="Run Synthesize and pick a suggestion" readonly /></div><div class="field"><label>Note</label><input id="advNote" placeholder="optional note for history" /></div></div>
             <div class="actions"><button id="btnAdvSynthesize" class="primary sm">Synthesize</button><button id="btnAdvHistory" class="sm">History</button><button id="btnAdvApply" class="secondary sm">Apply</button><button id="btnAdvDismiss" class="sm">Dismiss</button></div>
-            <div class="field"><label>Index name</label><input id="advIndexName" /></div>
+            <div id="advisorReport" class="list">Run Synthesize to see ranked index suggestions and an observed-before/expected-after report.</div>
             <pre id="advOut">Ready.</pre>
           </div></div>
         </section>

@@ -142,7 +142,7 @@ Phase 0 verification checklist:
 - [ ] T171: Candidate index generator + duplication/prefix checks
 - [x] T172: Benefit estimator (Level 0 rule-based) + SkeinQL advisor.* endpoints
 - [ ] T173: Apply suggestion (CREATE INDEX) + progress + rollback-on-failure
-- [ ] T174: SkeinAdmin "Index Advisor" page + before/after performance report
+- [x] T174: SkeinAdmin "Index Advisor" page + before/after performance report (the admin panel now calls the live `advisor.index_synthesize/apply_index/history/dismiss` endpoints, renders ranked suggestions/history, and shows observed-before plus expected-after scan reports; online build progress/rollback remain in T173)
 
 ## Phase 19 - Time travel and replay bundles
 - [ ] T180: MVCC as_of reads (planner + executor) + SkeinQL `as_of` parameter (docs/TIME_TRAVEL_REPLAY.md)
