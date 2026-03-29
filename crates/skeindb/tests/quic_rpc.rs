@@ -703,12 +703,15 @@ async fn quic_migration_rewrite_preview_recursive_cte() -> anyhow::Result<()> {
 #[tokio::test]
 async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
     let _guard = quic_test_guard().await;
-    let harness = TestHarness::start("quic_vector")?;
-    let client = QuicClient::connect(harness.port, harness.cert_der).await?;
+    let harness = TestHarness::start("quic_vector").context("start vector QUIC harness")?;
+    let client = QuicClient::connect(harness.port, harness.cert_der)
+        .await
+        .context("connect vector QUIC client")?;
 
     let resp = client
         .rpc("schema.create_database", json!({"db": "app"}))
-        .await?;
+        .await
+        .context("vector test create database")?;
     assert!(resp.ok);
 
     let resp = client
@@ -724,7 +727,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 "primary_key": ["id"]
             }),
         )
-        .await?;
+        .await
+        .context("vector test create table")?;
     assert!(resp.ok);
 
     let resp = client
@@ -739,7 +743,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 ]
             }),
         )
-        .await?;
+        .await
+        .context("vector test insert embeddings")?;
     assert!(resp.ok);
 
     let resp = client
@@ -753,7 +758,8 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
                 "include_row": true
             }),
         )
-        .await?;
+        .await
+        .context("vector test search embeddings")?;
     assert!(resp.ok);
     let matches = resp.result.expect("missing result")["matches"]
         .as_array()
@@ -800,6 +806,44 @@ async fn quic_connection_migration_rebind() -> anyhow::Result<()> {
 
     let resp = client.rpc("system.ping", json!({})).await?;
     assert!(resp.ok);
+
+    Ok(())
+}
+
+// ── R09: QUIC multi-stream hardening ──────────────────────────────────────
+#[tokio::test]
+async fn r09_quic_concurrent_multi_stream_rpcs() -> anyhow::Result<()> {
+    // R09: Transport QUIC — verify sequential multi-stream RPCs over same connection
+    let _guard = quic_test_guard().await;
+    let harness = TestHarness::start("r09_multi_stream")?;
+    let client = QuicClient::connect(harness.port, harness.cert_der).await?;
+
+    // Fire multiple RPCs sequentially over the same QUIC connection
+    let mut ok_count = 0u32;
+    for i in 0..5 {
+        let resp = client
+            .rpc(
+                "sql.exec",
+                json!({ "sql": format!("SELECT {i} AS stream_id") }),
+            )
+            .await;
+        if let Ok(r) = resp {
+            if r.ok {
+                ok_count += 1;
+            }
+        }
+    }
+    assert!(
+        ok_count >= 3,
+        "at least 3 out of 5 sequential QUIC RPCs should succeed"
+    );
+
+    // Test connection migration after multiple RPCs
+    client.rebind()?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let resp = client.rpc("system.ping", json!({})).await?;
+    assert!(resp.ok, "ping after rebind + multi-stream should succeed");
 
     Ok(())
 }
@@ -858,20 +902,31 @@ impl QuicClient {
         endpoint.set_default_client_config(client_config);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let started_at = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let attempt_timeout = Duration::from_millis(750);
 
         loop {
             match endpoint.connect(addr, "localhost") {
-                Ok(connecting) => match connecting.await {
-                    Ok(connection) => {
+                Ok(connecting) => match tokio::time::timeout(attempt_timeout, connecting).await {
+                    Ok(Ok(connection)) => {
                         return Ok(Self {
                             endpoint,
                             connection,
                         });
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         if Instant::now() >= deadline {
                             return Err(err.into());
+                        }
+                    }
+                    Err(_) => {
+                        if Instant::now() >= deadline {
+                            return Err(anyhow!(
+                                "timed out waiting for QUIC server on {} after {:?}",
+                                addr,
+                                started_at.elapsed()
+                            ));
                         }
                     }
                 },

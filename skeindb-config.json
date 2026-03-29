@@ -2,6 +2,7 @@
   "server_name": "skeindb",
   "data_dir": "./data",
   "mysql_port": 3306,
+  "pg_port": 5432,
   "http_port": 8080,
   "max_connections": 256,
   "allow_remote_console": false,

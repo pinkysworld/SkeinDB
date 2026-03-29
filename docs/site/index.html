@@ -4,11 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC</title>
-  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL compatibility, and web-native administration.">
-  <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, research, differential privacy, Wasm, QUIC">
+  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL &amp; PostgreSQL compatibility, and web-native administration.">
+  <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta property="og:title" content="SkeinDB — Single-Binary Database">
-  <meta property="og:description" content="Cell-interned MVCC · 74 RPC methods · 20 research tracks · MySQL compatible · One binary">
+  <meta property="og:description" content="Cell-interned MVCC · 74 RPC methods · 20 research tracks · MySQL &amp; PostgreSQL compatible · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -407,7 +407,7 @@
   </h1>
   <p>
     SkeinDB is a single-binary database combining cell-interned MVCC storage,
-    MySQL compatibility, 20 opt-in research features, and a full web admin —
+    MySQL &amp; PostgreSQL compatibility, 20 opt-in research features (11 hardened), and a full web admin —
     all in one Rust executable.
   </p>
   <div class="hero-actions">
@@ -444,7 +444,7 @@
     <div class="stat-label">Admin Panels</div>
   </div>
   <div class="stat">
-    <div class="stat-num">113</div>
+    <div class="stat-num">239</div>
     <div class="stat-label">Automated Tests</div>
   </div>
   <div class="stat">
@@ -467,10 +467,16 @@
       <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead.</p>
     </div>
     <div class="feature-card">
-      <span class="status-badge status-planned">Planned</span>
+      <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔌</div>
       <h3>MySQL Wire Protocol</h3>
-      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol alongside its native SkeinQL typed RPC, lowering adoption barriers for existing toolchains.</p>
+      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with 370+ translated SQL statements, window functions, user variables, prepared statements, and full COM_QUERY compatibility.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-planned">Planned</span>
+      <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
+      <h3>PostgreSQL Wire Protocol</h3>
+      <p>Connect with any PostgreSQL client. Planned support for PG v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, dollar-quoting, :: casts, and pg_catalog.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-planned">Planned</span>
@@ -487,8 +493,8 @@
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</div>
-      <h3>20 Research Tracks</h3>
-      <p>From differential privacy and learned indexes to Wasm query operators and forensic audit — each track has RPC method stubs, admin panels, and growing test coverage.</p>
+      <h3>20 Research Tracks (11 Hardened)</h3>
+      <p>From differential privacy and HNSW vector search to Merkle forensic proofs and causal ETags — 11 tracks are hardened with real algorithms and integration tests; all 20 have RPC stubs, admin panels, and test coverage.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
@@ -636,6 +642,7 @@
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">⚙️</div><div class="stat-label">Axum</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🔒</div><div class="stat-label">Quinn (QUIC)</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐬</div><div class="stat-label">MySQL Protocol</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐘</div><div class="stat-label">PostgreSQL (planned)</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">📦</div><div class="stat-label">Single Binary</div></div>
   </div>
 </section>
@@ -660,6 +667,7 @@
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">MySQL Compat</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PG_COMPAT.md" target="_blank">PostgreSQL Compat</a>
     </div>
     <div class="footer-col">
       <h4>Community</h4>

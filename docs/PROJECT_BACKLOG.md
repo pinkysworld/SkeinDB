@@ -3,7 +3,7 @@
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
 
-## Reality sync (2026-03-05)
+## Reality sync (2026-03-08)
 
 This file now reflects a stricter distinction:
 - `[x]` = implemented and exercised in runtime/tests.
@@ -38,15 +38,16 @@ Phase 0 verification checklist:
 - [x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit
 
 ## Phase 3 — MySQL protocol
-- Status: baseline protocol + corpus-oriented SQL compatibility are implemented in runtime/tests; remaining items below are parity and driver-hardening follow-ups.
+- Status: baseline protocol + WordPress-class COM_QUERY compatibility are implemented in runtime/tests; remaining items below are broader parity and driver-hardening follow-ups.
 - [x] T030: Handshake + mysql_native_password
 - [x] T031: COM_QUERY SELECT literals
 - [x] T032: SQL translator (subset)
 - [x] T033: DDL/DML subset for corpus.sql
 - [x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS
-- [ ] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics (runtime write-path now uses in-memory unique probe indexes; durable/reusable secondary-index lifecycle and full parity hardening remain)
-- [ ] T036: Broaden COM_QUERY parity for WordPress-class workloads (single-column grouped `COUNT`/`SUM` shims, projection-grouped `GROUP BY` de-dup compatibility for `SQL_CALC_FOUND_ROWS` flows, parenthesized `AND`/`OR` filters plus `NOT IN` / `NOT LIKE`, basic left-associative multi-join chains, `CREATE [UNIQUE] INDEX` / `DROP INDEX`, `ALTER TABLE ... ADD COLUMN` position-clause / `MODIFY [COLUMN]` / `CHANGE [COLUMN]` / `ADD [UNIQUE] KEY` / `DROP [KEY|INDEX]`, bootstrap/session compatibility `SET` forms including `SQL_AUTO_IS_NULL`, literal `SELECT @@...` compatibility for `LIMIT` / `OFFSET` bootstrap probes, compatibility `SHOW VARIABLES` / `SHOW STATUS` / `SHOW CHARACTER SET` / `SHOW COLLATION` values (including unfiltered, scoped, simple `WHERE ...` filters, and wildcard forms such as `character_set_%` / `collation_%`), limited single-predicate `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` rewrites, and `LOCK TABLES` / `UNLOCK TABLES` no-op handling are now covered; richer aggregates, deeper correlated/nested subqueries, and broader `ALTER TABLE` variants remain)
-- [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage)
+- [x] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics (runtime duplicate-key checks now reuse the shared secondary-index cache, including `PRIMARY KEY`-changing `UPDATE`s; MySQL duplicate-key failures now surface as `1062` / `23000` on the wire; creating a MySQL compatibility `UNIQUE INDEX` still rejects pre-existing duplicate rows; and per-table secondary-index cache metadata now persists/reloads on reopen)
+- [x] T036: Broaden COM_QUERY parity for WordPress-class workloads (the MySQL listener now covers the checked-in WordPress-style corpus and companion integration tests, including grouped/simple aggregate shims with `HAVING`, projection-grouped `GROUP BY` de-dup including wildcard projections after expansion, `SQL_CALC_FOUND_ROWS`, wildcard join projections, top-level comma joins and left-associative join chains, parenthesized boolean predicates, index DDL, bootstrap/session compatibility `SET` and `SHOW` forms, recursive/nested compatibility rewrites for the current subquery subset, and compatibility no-op `LOCK TABLES` / `UNLOCK TABLES`)
+- [ ] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage; prepare-time metadata now also covers supported scalar-expression projections including baseline arithmetic, broader scalar/date-time functions including `FIND_IN_SET` / `ISNULL`, `DATE_FORMAT` / `FROM_UNIXTIME`, `DATEDIFF` / `TIMESTAMPDIFF`, `WEEKDAY` / `DAYOFWEEK` / `DAYOFYEAR`, `MONTHNAME` / `DAYNAME`, `QUARTER`, `LAST_DAY`, `EXTRACT(<unit> FROM ...)`, and baseline interval arithmetic through `DATE_ADD` / `DATE_SUB` / `TIMESTAMPADD`, supported subquery-compat `SELECT`s whose `WHERE` clauses rewrite cleanly, including the current `IN` / `EXISTS` / simple scalar-compare subset, the current nested compatibility path, and limited negated boolean-tree wrappers when they can still rewrite cleanly, plus `CASE` / `CAST` plus simple aggregate / grouped-aggregate compatibility queries). Progress: the new scalar/date-time functions, `COM_INIT_DB`, and `COM_STATISTICS` wire commands broaden the prepared-statement surface.
+- [ ] T038: Broaden COM_QUERY beyond the current WordPress-class baseline (deeper correlated/nested subqueries beyond the current recursive `IN` / `EXISTS` / simple scalar-compare compatibility path, broader join parity beyond the current left-associative `ON` plus simple base-table `USING` subset, broader date/time/function parity beyond the current scalar/date-time baseline, and broader `ALTER TABLE` variants beyond the current `ADD/MODIFY/CHANGE/RENAME COLUMN/RENAME [KEY|INDEX]/RENAME TO/DROP COLUMN` plus index metadata surface). Progress: significant surface expansion — added `BETWEEN`/`NOT BETWEEN`, `COUNT(DISTINCT col)`, `GROUP_CONCAT()`, `INSERT ... SELECT`, `UNION`/`UNION ALL`, `TRUNCATE TABLE`, `DROP DATABASE`, `RENAME TABLE`, `EXPLAIN` stub, `DO`, `SAVEPOINT` stubs, `CREATE VIEW`/`DROP VIEW` stubs, locking hint stripping, session functions (`USER()`, `LAST_INSERT_ID()`, `CONNECTION_ID()`), `information_schema.schemata`/`statistics`, expanded `SHOW` commands (WARNINGS, ERRORS, PROCESSLIST, TRIGGERS, EVENTS, PROCEDURE STATUS, FUNCTION STATUS, PLUGINS, PROFILES, CREATE DATABASE), `SET GLOBAL`/`FLUSH`/`ANALYZE`/`OPTIMIZE`/`CHECK`/`REPAIR`/`KILL` no-ops, and 30+ additional scalar/date-time functions. Corpus expanded from 772→947 lines (283 statements). Latest batch: derived tables (FROM subqueries), CTEs (`WITH...AS`), `REGEXP`/`RLIKE`/`NOT REGEXP`, `<=>` (NULL-safe equality), `NATURAL JOIN`, `FULL OUTER JOIN` (fully executed), multi-table `DELETE`, multi-table `UPDATE` (stub), 11 JSON functions (`JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`, `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`), plus `FIELD`/`ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`/`CONV`, and hash functions (`CRC32`, `MD5`, `SHA1`/`SHA`, `SHA2`). Corpus now at 1130 lines (over 374 statements). Latest batch: multi-column `GROUP BY` with multiple group columns and aggregates, 12 new scalar functions (`SUBSTRING_INDEX`, `ASCII`, `ORD`, `CHAR`, `STRCMP`, `BIT_LENGTH`, `OCTET_LENGTH`, `REGEXP_REPLACE`, `REGEXP_SUBSTR`, `TO_BASE64`, `FROM_BASE64`), 5 new `information_schema` stub tables (`routines`, `triggers`, `views`, `processlist`, `user_privileges`). Latest batch: window functions (`ROW_NUMBER()`/`RANK()`/`DENSE_RANK()` with `OVER(PARTITION BY ... ORDER BY ...)`), `SET @var = ...`/`SELECT @var` user variables, `BIT_AND()`/`BIT_OR()`/`BIT_XOR()` bitwise aggregates, multi-table `UPDATE` (upgraded from stub to real per-row implementation), 6 new scalar functions (`DEGREES`, `RADIANS`, `PERIOD_ADD`, `PERIOD_DIFF`, `MAKEDATE`, `MAKETIME`). Corpus now at 1240+ lines (over 370 statements). Deeper parity work is still ongoing.
 
 ## Phase 4 — Web console
 - [x] T040: HTTP API `/api/v1/sql/exec`
@@ -183,6 +184,29 @@ Phase 0 verification checklist:
 - [x] T232: Docs landing (docs.html): add client-side search/filter, mobile menu, polished footer, keyword metadata on cards
 - [x] T233: Footer overhaul across all pages — structured 4-column footer with Product/Documentation/Community sections
 - [x] T234: Research tracks on public site converted to clickable links pointing to docs/site/research pages
+
+---
+
+## Phase 25 — PostgreSQL wire protocol compatibility
+- [ ] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate
+- [ ] T401: SCRAM-SHA-256 authentication (`pg_auth.rs`) — RFC 5802/7677 exchange + trust mode
+- [ ] T402: PG session state (`pg_session.rs`) — search_path, DateStyle, TimeZone, tx state (I/T/E), client_encoding, standard_conforming_strings
+- [ ] T403: PG connection handler + listener (`pg_connection.rs`) — SSL negotiation, startup, auth, ParameterStatus batch, ReadyForQuery, command loop on port 5432
+- [ ] T404: PG SQL dialect parser (`pg_parse.rs`) — double-quoted identifiers, $$dollar quoting$$, :: type casts, RETURNING, ILIKE, IS DISTINCT FROM, FETCH FIRST n ROWS ONLY, ARRAY[...], boolean literals
+- [ ] T405: PG DML extensions — INSERT/UPDATE/DELETE...RETURNING, ON CONFLICT DO NOTHING/UPDATE, basic COPY FROM STDIN / TO STDOUT
+- [ ] T406: PG DDL — SERIAL/BIGSERIAL → auto_increment, CREATE SCHEMA → database, CREATE INDEX CONCURRENTLY (accept/ignore), COMMENT ON
+- [ ] T407: PG type OID mapping + encoding (`pg_types.rs`) — bool→16, i64→20, text→25, jsonb→3802, timestamp→1114, arrays; text + binary format
+- [ ] T408: PG result encoding — RowDescription, DataRow, CommandComplete ("INSERT 0 1"), ErrorResponse with SQLSTATE codes
+- [ ] T409: PG system catalogs (`pg_catalog.rs`) — pg_database, pg_namespace, pg_class, pg_attribute, pg_type, pg_index, pg_constraint, pg_proc (stubs), pg_settings, pg_stat_activity
+- [ ] T410: PG startup query handling — SELECT version() → "PostgreSQL 16.0 (SkeinDB)", current_database(), current_schema(), SHOW server_version, Django/Rails/SQLAlchemy bootstrap queries
+- [ ] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders
+- [ ] T412: PG function mapping (`pg_functions.rs`) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, ->>/#>> operators, || concat, ~/~* regex, ARRAY operations, unnest
+- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO
+- [ ] T414: PG SQLSTATE error codes — 42P01 (undefined table), 42703 (undefined column), 23505 (unique violation), 42601 (syntax error), etc.
+- [ ] T415: PG compatibility test corpus (`tests/compat/pg_corpus.sql`) — mirror MySQL corpus structure for PG dialect
+- [ ] T416: PG unit tests — wire round-trips, SCRAM vectors, SQL parse, type encode/decode, catalog queries
+- [ ] T417: PG integration tests — psql end-to-end, psycopg2, node-postgres driver tests
+- [ ] T418: PG compatibility documentation (`docs/PG_COMPAT.md`)
 
 ---
 

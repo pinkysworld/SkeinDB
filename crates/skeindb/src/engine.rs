@@ -23,7 +23,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use md5::Md5;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
 use skeindb_core::{encode_varu, value_id, ValueKind};
@@ -124,6 +127,7 @@ const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
+const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
 const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +142,24 @@ struct RowEntryDisk {
     version: u64,
     #[serde(default)]
     deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondaryIndexCacheDisk {
+    format_version: u32,
+    row_count: u64,
+    #[serde(default)]
+    indexes: Vec<SecondaryIndexDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondaryIndexDisk {
+    built_version: u64,
+    columns: Vec<String>,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    keys: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +293,9 @@ pub struct Engine {
 
     /// Research: edge bundle coverage tracking (R14).
     edge_coverage: HashMap<TableKey, EdgeCoverage>,
+
+    /// Research: HNSW vector indexes for approximate nearest neighbor (R10).
+    hnsw_indexes: HashMap<HnswIndexKey, HnswIndex>,
 
     /// Research: schema evolution tracking (R15).
     schema_versions: HashMap<TableKey, u64>,
@@ -444,7 +469,7 @@ const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 1;
 
-const DP_BUDGET_FORMAT_VERSION: u32 = 1;
+const DP_BUDGET_FORMAT_VERSION: u32 = 2;
 const DP_AUDIT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +481,14 @@ struct DpBudget {
     consumed_delta: f64,
     refresh_window_ms: Option<u64>,
     refreshed_at_ms: u64,
+    /// Rényi DP composition tracker: accumulated RDP cost at multiple alpha orders.
+    /// Each entry is (alpha, rdp_epsilon). Conversion to (ε,δ)-DP uses:
+    ///   ε = rdp_epsilon - ln(δ)/(α-1)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rdp_alphas: Vec<(f64, f64)>,
+    /// Number of composed queries (for advanced composition theorem).
+    #[serde(default)]
+    query_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -673,6 +706,18 @@ struct ViewState {
     last_change_seq: u64,
     stale: bool,
     last_refresh_mode: String,
+}
+
+/// Edge in the view dependency graph.
+#[derive(Debug, Clone)]
+struct ViewDepEdge {
+    view_db: String,
+    view_name: String,
+    depends_on_db: String,
+    depends_on_table: String,
+    columns: Vec<String>,
+    is_view: bool,
+    stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1059,6 +1104,7 @@ impl Engine {
             merge_wasm_registry: HashMap::new(),
             views: HashMap::new(),
             edge_coverage: HashMap::new(),
+            hnsw_indexes: HashMap::new(),
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
@@ -1248,6 +1294,129 @@ impl Engine {
         self.remove_table_state(db, table)?;
         self.persist_after_schema_drop()?;
         self.cleanup_database_table_dir_if_empty(db);
+        Ok(())
+    }
+
+    pub fn rename_table(
+        &mut self,
+        source: &BaseTableRef,
+        target: &BaseTableRef,
+    ) -> anyhow::Result<()> {
+        if source.db == target.db && source.table == target.table {
+            return Ok(());
+        }
+
+        if !self.catalog.databases.contains_key(&source.db) {
+            anyhow::bail!("not_found: database not found: {}", source.db);
+        }
+        if !self.catalog.databases.contains_key(&target.db) {
+            anyhow::bail!("not_found: database not found: {}", target.db);
+        }
+        if !self
+            .catalog
+            .databases
+            .get(&source.db)
+            .map(|database| database.tables.contains_key(&source.table))
+            .unwrap_or(false)
+        {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        }
+        if self
+            .catalog
+            .databases
+            .get(&target.db)
+            .map(|database| database.tables.contains_key(&target.table))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "conflict: table already exists: {}.{}",
+                target.db,
+                target.table
+            );
+        }
+
+        let source_key = TableKey {
+            db: source.db.clone(),
+            table: source.table.clone(),
+        };
+        let target_key = TableKey {
+            db: target.db.clone(),
+            table: target.table.clone(),
+        };
+        if !self.tables.contains_key(&source_key) {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        }
+
+        let Some(mut schema) = self
+            .catalog
+            .databases
+            .get_mut(&source.db)
+            .and_then(|database| database.tables.remove(&source.table))
+        else {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        };
+        let Some(tdata) = self.tables.remove(&source_key) else {
+            anyhow::bail!("not_found: table not found: {}.{}", source.db, source.table);
+        };
+
+        bump_table_version(&mut schema);
+        self.catalog
+            .databases
+            .get_mut(&target.db)
+            .expect("target db validated above")
+            .tables
+            .insert(target.table.clone(), schema);
+        self.tables.insert(target_key.clone(), tdata);
+
+        let next_version = self.schema_version_for(&source_key).saturating_add(1);
+        self.schema_versions.remove(&source_key);
+        self.set_schema_version(&target_key, next_version);
+
+        if let Some(policy) = self.oblivious_policies.remove(&source_key) {
+            self.oblivious_policies.insert(target_key.clone(), policy);
+        }
+        if let Some(policy) = self.merge_policies.remove(&source_key) {
+            self.merge_policies.insert(target_key.clone(), policy);
+        }
+        if let Some(mut coverage) = self.edge_coverage.remove(&source_key) {
+            coverage.table = target_key.clone();
+            self.edge_coverage.insert(target_key.clone(), coverage);
+        }
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            if let Some(mut table_snaps) = snapshots.snapshots.remove(&source_key) {
+                for snapshot in table_snaps.iter_mut() {
+                    snapshot.db = target.db.clone();
+                    snapshot.table = target.table.clone();
+                }
+                snapshots.snapshots.insert(target_key.clone(), table_snaps);
+            }
+            if let Some(patterns) = snapshots.patterns.by_table.remove(&source_key) {
+                snapshots
+                    .patterns
+                    .by_table
+                    .insert(target_key.clone(), patterns);
+            }
+        }
+        if let Ok(mut advisor) = self.index_advisor.lock() {
+            if let Some(patterns) = advisor.by_table.remove(&source_key) {
+                advisor.by_table.insert(target_key.clone(), patterns);
+            }
+        }
+
+        self.cached_select.lock().unwrap().clear();
+        self.cached_patch.lock().unwrap().clear();
+
+        self.persist_catalog()?;
+        self.persist_table(&target.db, &target.table)?;
+        remove_file_if_exists(&self.table_path(&source.db, &source.table))?;
+        remove_file_if_exists(&self.table_segment_path(&source.db, &source.table))?;
+        remove_file_if_exists(&self.table_secondary_index_path(&source.db, &source.table))?;
+        self.persist_schema_versions_best_effort();
+        self.persist_oblivious_best_effort();
+        self.persist_merge_policies_best_effort();
+        self.persist_snapshots_best_effort();
+        self.persist_advisor_patterns_best_effort();
+        self.cleanup_database_table_dir_if_empty(&source.db);
         Ok(())
     }
 
@@ -1517,7 +1686,7 @@ impl Engine {
         }
 
         {
-            let (schema, _) = self.get_table_mut(table)?;
+            let (schema, tdata) = self.get_table_mut(table)?;
             let mut normalized_columns = Vec::new();
             let mut seen = HashSet::new();
             for column in columns.iter() {
@@ -1547,6 +1716,10 @@ impl Engine {
             }
             if unchanged {
                 return Ok(());
+            }
+
+            if unique {
+                mysql_compat_validate_unique_columns(tdata, &normalized_columns, &index_name)?;
             }
 
             set_mysql_compat_index(schema, &index_name, &normalized_columns, unique);
@@ -1704,6 +1877,98 @@ impl Engine {
         Ok(())
     }
 
+    pub fn schema_rename_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<()> {
+        let (mut column, default) = {
+            let (schema, _) = self.get_table(table)?;
+            let Some(existing_column) = schema
+                .columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(old_name))
+                .cloned()
+            else {
+                anyhow::bail!("not_found: column not found: {old_name}");
+            };
+            let default = mysql_compat_column_default(schema, &existing_column.name);
+            (existing_column, default)
+        };
+        column.name = new_name.trim().to_string();
+        self.schema_modify_mysql_compat_column(table, old_name, column, default)
+    }
+
+    pub fn schema_drop_mysql_compat_column(
+        &mut self,
+        table: &BaseTableRef,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        let column_name = column_name.trim();
+        if column_name.is_empty() {
+            anyhow::bail!("invalid_request: column name must not be empty");
+        }
+
+        {
+            let (schema, tdata) = self.get_table_mut(table)?;
+            let Some(col_idx) = schema
+                .columns
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(column_name))
+            else {
+                anyhow::bail!("not_found: column not found: {column_name}");
+            };
+            let existing_name = schema.columns[col_idx].name.clone();
+
+            if schema
+                .primary_key
+                .iter()
+                .any(|pk| pk.eq_ignore_ascii_case(&existing_name))
+            {
+                anyhow::bail!(
+                    "not_supported: ALTER TABLE DROP COLUMN does not yet support primary key columns"
+                );
+            }
+
+            schema.columns.remove(col_idx);
+            schema
+                .auto_inc_next
+                .retain(|name, _| !name.eq_ignore_ascii_case(&existing_name));
+            remove_mysql_compat_column_default(schema, &existing_name);
+            remove_mysql_compat_index_column(schema, &existing_name);
+
+            for entry in tdata.rows.iter_mut() {
+                entry.row.remove(&existing_name);
+            }
+
+            tdata.pk_index.clear();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let pk = extract_pk(schema, &entry.row)?;
+                let key = pk_key(&pk);
+                if tdata.pk_index.insert(key, idx).is_some() {
+                    anyhow::bail!("conflict: duplicate primary key after ALTER TABLE");
+                }
+            }
+
+            bump_table_version(schema);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
     pub fn schema_drop_mysql_compat_index(
         &mut self,
         table: &BaseTableRef,
@@ -1724,6 +1989,53 @@ impl Engine {
                 return Ok(());
             }
             anyhow::bail!("not_found: index not found: {}", index_name);
+        }
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_table(&table.db, &table.table)?;
+        self.persist_catalog()?;
+        self.persist_schema_versions_best_effort();
+        Ok(())
+    }
+
+    pub fn schema_rename_mysql_compat_index(
+        &mut self,
+        table: &BaseTableRef,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<()> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        if old_name.is_empty() || new_name.is_empty() {
+            anyhow::bail!("invalid_request: index names must not be empty");
+        }
+
+        {
+            let (schema, _) = self.get_table_mut(table)?;
+            let index_defs = mysql_compat_index_defs(schema);
+            let Some(existing_name) = index_defs
+                .iter()
+                .find(|def| def.name.eq_ignore_ascii_case(old_name))
+                .map(|def| def.name.clone())
+            else {
+                anyhow::bail!("not_found: index not found: {old_name}");
+            };
+            if index_defs.iter().any(|def| {
+                !def.name.eq_ignore_ascii_case(&existing_name)
+                    && def.name.eq_ignore_ascii_case(new_name)
+            }) {
+                anyhow::bail!("conflict: index already exists: {new_name}");
+            }
+            if rename_mysql_compat_index(schema, &existing_name, new_name) {
+                bump_table_version(schema);
+            } else {
+                return Ok(());
+            }
         }
 
         let key = TableKey {
@@ -1781,7 +2093,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
-            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
             for mut row in rows {
                 // Fill missing cols and apply auto-increment.
@@ -1789,8 +2101,8 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(&unique_indexes, tdata, &row, None).is_some() {
-                    anyhow::bail!("conflict");
+                if let Some(index_name) = mysql_compat_unique_conflict(schema, tdata, &row, None)? {
+                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
                 }
 
                 // Build PK
@@ -1803,7 +2115,10 @@ impl Engine {
                     .map(|entry| !entry.deleted)
                     .unwrap_or(false);
                 if pk_conflict {
-                    anyhow::bail!("conflict");
+                    anyhow::bail!(
+                        "conflict: {}",
+                        duplicate_key_message(primary_key_index_name(schema))
+                    );
                 }
 
                 let version = next_row_version(schema);
@@ -1814,7 +2129,7 @@ impl Engine {
                     deleted: false,
                 });
                 tdata.pk_index.insert(pk_key_s, idx);
-                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &row);
+                secondary_index_add_row(tdata, idx, &row)?;
 
                 change_pks.push(pk);
                 collect_value_store_items(&row, &mut intern_items);
@@ -1833,6 +2148,7 @@ impl Engine {
             }
 
             bump_table_version(schema);
+            set_secondary_indexes_built_version(tdata, schema.table_version)?;
         }
 
         if !intern_items.is_empty() {
@@ -1880,7 +2196,7 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
-            let mut unique_indexes = mysql_compat_unique_runtime_indexes(schema, tdata);
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
             for idx in 0..tdata.rows.len() {
                 if tdata.rows[idx].deleted {
@@ -1905,14 +2221,26 @@ impl Engine {
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");
                 }
-                if mysql_compat_unique_conflict(&unique_indexes, tdata, &new_row, Some(idx))
-                    .is_some()
-                {
-                    anyhow::bail!("conflict");
+                let current_pk_key = pk_key(&extract_pk(schema, &current_row)?);
+                if primary_key_conflict_key(schema, tdata, &new_row, Some(idx))?.is_some() {
+                    anyhow::bail!(
+                        "conflict: {}",
+                        duplicate_key_message(primary_key_index_name(schema))
+                    );
                 }
-                mysql_compat_unique_index_remove_row(&mut unique_indexes, idx, &current_row);
+                if let Some(index_name) =
+                    mysql_compat_unique_conflict(schema, tdata, &new_row, Some(idx))?
+                {
+                    anyhow::bail!("conflict: {}", duplicate_key_message(&index_name));
+                }
+                let new_pk_key = pk_key(&extract_pk(schema, &new_row)?);
+                secondary_index_remove_row(tdata, idx, &current_row)?;
                 tdata.rows[idx].row = new_row;
-                mysql_compat_unique_index_add_row(&mut unique_indexes, idx, &tdata.rows[idx].row);
+                secondary_index_add_row(tdata, idx, &tdata.rows[idx].row)?;
+                if current_pk_key != new_pk_key {
+                    tdata.pk_index.remove(&current_pk_key);
+                    tdata.pk_index.insert(new_pk_key, idx);
+                }
                 tdata.rows[idx].version = next_row_version(schema);
                 affected += 1;
 
@@ -1930,6 +2258,7 @@ impl Engine {
 
             if affected > 0 {
                 bump_table_version(schema);
+                set_secondary_indexes_built_version(tdata, schema.table_version)?;
             }
         }
 
@@ -1974,18 +2303,22 @@ impl Engine {
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
+            rebuild_secondary_indexes_if_stale(schema, tdata)?;
 
-            for entry in tdata.rows.iter_mut() {
-                if entry.deleted {
+            for idx in 0..tdata.rows.len() {
+                if tdata.rows[idx].deleted {
                     continue;
                 }
-                if !eval_predicate(predicate, &entry.row, None, args)? {
+                let row_before_delete = tdata.rows[idx].row.clone();
+                if !eval_predicate(predicate, &row_before_delete, None, args)? {
                     continue;
                 }
+                secondary_index_remove_row(tdata, idx, &row_before_delete)?;
+                let entry = &mut tdata.rows[idx];
                 entry.deleted = true;
                 entry.version = next_row_version(schema);
                 affected += 1;
-                let pk = extract_pk(schema, &entry.row).ok();
+                let pk = extract_pk(schema, &row_before_delete).ok();
                 if let Some(ref pk) = pk {
                     snapshot_pks.push(pk.clone());
                 }
@@ -1999,6 +2332,7 @@ impl Engine {
 
             if affected > 0 {
                 bump_table_version(schema);
+                set_secondary_indexes_built_version(tdata, schema.table_version)?;
             }
         }
 
@@ -3189,6 +3523,9 @@ impl Engine {
             self.persist_catalog()?;
             self.persist_table(&params.table.db, &params.table.table)?;
             self.persist_changes_best_effort();
+
+            // Rebuild HNSW index for this table+column.
+            self.rebuild_hnsw_index(&params.table, &params.column);
         }
 
         Ok(VectorInsertResult {
@@ -3229,8 +3566,85 @@ impl Engine {
             }
         }
 
-        let query_bucket = embedding_lsh_bucket(query_vec);
         let include_row = params.include_row.unwrap_or(false);
+
+        // Try HNSW index for fast approximate search (when no filter is set).
+        let hnsw_key = HnswIndexKey {
+            table: TableKey {
+                db: params.table.db.clone(),
+                table: params.table.table.clone(),
+            },
+            column: params.column.clone(),
+        };
+        if params.filter.is_none() && !use_lsh {
+            if let Some(hnsw) = self.hnsw_indexes.get(&hnsw_key) {
+                if hnsw.count > 0 && hnsw.dims == dims {
+                    let column = params.column.clone();
+                    let all_vectors = |row_idx: usize| -> Option<Vec<f32>> {
+                        let entry = tdata.rows.get(row_idx)?;
+                        if entry.deleted {
+                            return None;
+                        }
+                        let lit = entry.row.get(&column)?;
+                        let (_, v, _) = embedding_ref(lit).ok()?;
+                        Some(v.to_vec())
+                    };
+                    let ef_search = (k * 4).max(64).min(512);
+                    let results = hnsw.search(query_vec, k, ef_search, &all_vectors);
+                    let mut matches = Vec::new();
+                    for (node_idx, _distance) in results {
+                        if node_idx >= hnsw.nodes.len() {
+                            continue;
+                        }
+                        let row_idx = hnsw.nodes[node_idx].row_idx;
+                        let Some(entry) = tdata.rows.get(row_idx) else {
+                            continue;
+                        };
+                        if entry.deleted {
+                            continue;
+                        }
+                        let Some(lit) = entry.row.get(&params.column) else {
+                            continue;
+                        };
+                        let (_, row_vec, row_model) = match embedding_ref(lit) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if let Some(model) = query_model {
+                            if row_model != Some(model) {
+                                continue;
+                            }
+                        }
+                        let score = vector_score(metric, query_vec, row_vec)?;
+                        let pk = extract_pk(schema, &entry.row)?;
+                        let embedding_id = embedding_id_for_lit(lit)?;
+                        matches.push(VectorSearchMatch {
+                            pk,
+                            score,
+                            embedding_id: hex16(&embedding_id),
+                            row: if include_row {
+                                Some(entry.row.clone())
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                    matches.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| pk_key(&a.pk).cmp(&pk_key(&b.pk)))
+                    });
+                    if matches.len() > k {
+                        matches.truncate(k);
+                    }
+                    return Ok(VectorSearchResult { matches });
+                }
+            }
+        }
+
+        // Fallback: brute-force scan with optional LSH bucketing.
+        let query_bucket = embedding_lsh_bucket(query_vec);
         let mut matches = Vec::new();
         for entry in tdata.rows.iter() {
             if entry.deleted {
@@ -3288,6 +3702,64 @@ impl Engine {
         }
 
         Ok(VectorSearchResult { matches })
+    }
+
+    /// Rebuild (or build) the HNSW index for a given table+column.
+    fn rebuild_hnsw_index(&mut self, table: &BaseTableRef, column: &str) {
+        let Ok((schema, tdata)) = self.get_table(table) else {
+            return;
+        };
+        let col = schema.columns.iter().find(|c| c.name == column);
+        let Some(col) = col else { return };
+        if col.r#type.kind != "embedding" {
+            return;
+        }
+
+        // Collect all active embeddings with their row indexes.
+        let mut vectors: Vec<(usize, Vec<f32>, u32)> = Vec::new();
+        for (row_idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get(column) else {
+                continue;
+            };
+            let Ok((dims, v, _)) = embedding_ref(lit) else {
+                continue;
+            };
+            vectors.push((row_idx, v.to_vec(), dims));
+        }
+
+        if vectors.is_empty() {
+            return;
+        }
+
+        let dims = vectors[0].2;
+        let metric = VectorMetric::Cosine; // default metric for index
+        let mut hnsw = HnswIndex::new(dims, metric);
+
+        // Collect all vectors for the closure.
+        let all_vecs: Vec<(usize, Vec<f32>)> = vectors
+            .iter()
+            .map(|(idx, v, _)| (*idx, v.clone()))
+            .collect();
+        let vec_lookup: HashMap<usize, Vec<f32>> = all_vecs.into_iter().collect();
+
+        let all_vectors =
+            |row_idx: usize| -> Option<Vec<f32>> { vec_lookup.get(&row_idx).cloned() };
+
+        for (row_idx, vec, _) in vectors.iter() {
+            hnsw.insert(*row_idx, vec, &all_vectors);
+        }
+
+        let key = HnswIndexKey {
+            table: TableKey {
+                db: table.db.clone(),
+                table: table.table.clone(),
+            },
+            column: column.to_string(),
+        };
+        self.hnsw_indexes.insert(key, hnsw);
     }
 
     pub fn vector_index_status(
@@ -3584,6 +4056,8 @@ impl Engine {
             consumed_delta: 0.0,
             refresh_window_ms: params.refresh_window_ms,
             refreshed_at_ms: now_ms,
+            rdp_alphas: Vec::new(),
+            query_count: 0,
         };
 
         self.dp_budgets.insert(params.principal.clone(), budget);
@@ -3823,6 +4297,13 @@ impl Engine {
             dp_refresh_budget(budget, now_ms);
             budget.consumed_epsilon += params.epsilon;
             budget.consumed_delta += delta;
+
+            // Update Rényi DP composition tracker for tighter multi-query bounds.
+            let avg_sensitivity =
+                resolved.iter().map(|s| s.sensitivity).sum::<f64>() / resolved.len().max(1) as f64;
+            let _rdp_eps =
+                dp_rdp_compose(budget, &mechanism, avg_sensitivity, params.epsilon, delta);
+
             budget_json = Some(dp_budget_summary(budget));
 
             let aggregates = resolved.iter().map(dp_agg_label).collect();
@@ -4031,7 +4512,9 @@ impl Engine {
             "preceding_hash": preceding_hash,
             "following_hash": following_hash,
             "chain_head": chain_head,
-            "record_count": records.len()
+            "record_count": records.len(),
+            "merkle_root": forensic_merkle_root(&records),
+            "chain_merkle_root": forensic_merkle_root(&self.forensic_chain),
         });
 
         let out_records = records
@@ -4975,14 +5458,17 @@ impl Engine {
         params: ViewExplainDepsParams,
     ) -> anyhow::Result<ViewExplainDepsResult> {
         let key = TableKey {
-            db: params.view.db,
-            table: params.view.table,
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
         };
         let view = self
             .views
             .get(&key)
             .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
-        let deps = view
+
+        // Build full transitive dependency graph from this view.
+        let graph = self.view_dependency_graph();
+        let direct_deps: Vec<serde_json::Value> = view
             .deps
             .iter()
             .map(|d| {
@@ -4993,6 +5479,37 @@ impl Engine {
                 })
             })
             .collect();
+
+        // Find transitive deps (views that this view depends on transitively).
+        let mut transitive = Vec::new();
+        let mut queue: Vec<(String, String)> = view
+            .deps
+            .iter()
+            .map(|d| (d.db.clone(), d.table.clone()))
+            .collect();
+        let mut visited = HashSet::new();
+        visited.insert((params.view.db, params.view.table));
+        while let Some((db, tbl)) = queue.pop() {
+            if !visited.insert((db.clone(), tbl.clone())) {
+                continue;
+            }
+            for edge in &graph {
+                if edge.view_db == db && edge.view_name == tbl {
+                    transitive.push(serde_json::json!({
+                        "path": format!("{}.{} -> {}.{}", edge.view_db, edge.view_name, edge.depends_on_db, edge.depends_on_table),
+                        "is_view": edge.is_view,
+                        "stale": edge.stale,
+                    }));
+                    queue.push((edge.depends_on_db.clone(), edge.depends_on_table.clone()));
+                }
+            }
+        }
+
+        let mut deps = direct_deps;
+        if !transitive.is_empty() {
+            deps.push(serde_json::json!({ "transitive": transitive }));
+        }
+
         Ok(ViewExplainDepsResult { deps })
     }
 
@@ -5147,22 +5664,68 @@ impl Engine {
     }
 
     fn mark_views_stale(&mut self, db: &str, table: &str) {
+        // Cascade invalidation through view dependency graph.
+        // A view can depend on a base table or on another view.
+        let mut stale_tables: Vec<(String, String)> = vec![(db.to_string(), table.to_string())];
+        let mut visited = HashSet::new();
         let mut touched = false;
-        for view in self.views.values_mut() {
-            if view
-                .deps
+
+        while let Some((sdb, stbl)) = stale_tables.pop() {
+            let key = (sdb.clone(), stbl.clone());
+            if visited.contains(&key) {
+                continue;
+            }
+            visited.insert(key);
+
+            // Find all views that depend on (sdb, stbl).
+            let view_keys: Vec<TableKey> = self
+                .views
                 .iter()
-                .any(|dep| dep.db == db && dep.table == table)
-            {
-                if !view.stale {
-                    view.stale = true;
-                    touched = true;
+                .filter(|(_, view)| {
+                    view.deps
+                        .iter()
+                        .any(|dep| dep.db == sdb && dep.table == stbl)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            for vk in view_keys {
+                if let Some(view) = self.views.get_mut(&vk) {
+                    if !view.stale {
+                        view.stale = true;
+                        touched = true;
+                    }
+                    // This view is now stale — cascade to views that depend on it.
+                    stale_tables.push((vk.db.clone(), vk.table.clone()));
                 }
             }
         }
+
         if touched {
             self.persist_views_best_effort();
         }
+    }
+
+    /// Build the full view dependency graph for `view.explain_deps`.
+    fn view_dependency_graph(&self) -> Vec<ViewDepEdge> {
+        let mut edges = Vec::new();
+        for (key, view) in &self.views {
+            for dep in &view.deps {
+                edges.push(ViewDepEdge {
+                    view_db: key.db.clone(),
+                    view_name: key.table.clone(),
+                    depends_on_db: dep.db.clone(),
+                    depends_on_table: dep.table.clone(),
+                    columns: dep.columns.clone(),
+                    is_view: self.views.contains_key(&TableKey {
+                        db: dep.db.clone(),
+                        table: dep.table.clone(),
+                    }),
+                    stale: view.stale,
+                });
+            }
+        }
+        edges
     }
 
     fn oblivious_policy_for(&self, table: &BaseTableRef) -> ObliviousPolicy {
@@ -5489,6 +6052,7 @@ impl Engine {
 
         remove_file_if_exists(&self.table_path(db, table))?;
         remove_file_if_exists(&self.table_segment_path(db, table))?;
+        remove_file_if_exists(&self.table_secondary_index_path(db, table))?;
         Ok(())
     }
 
@@ -5504,6 +6068,13 @@ impl Engine {
             .join("tables")
             .join(db)
             .join(format!("{table}.rseg"))
+    }
+
+    fn table_secondary_index_path(&self, db: &str, table: &str) -> PathBuf {
+        self.data_dir
+            .join("tables")
+            .join(db)
+            .join(format!("{table}.sidx.json"))
     }
 
     fn load_table_rows_json_best_effort(&self, path: &Path) -> Option<Vec<RowEntry>> {
@@ -5531,6 +6102,98 @@ impl Engine {
             TableStorageMode::Segment | TableStorageMode::Dual => from_segment().or_else(from_json),
         };
         loaded.unwrap_or_default()
+    }
+
+    fn load_table_secondary_indexes_best_effort(
+        &self,
+        db: &str,
+        table: &str,
+        row_count: usize,
+    ) -> HashMap<String, SecondaryIndex> {
+        let path = self.table_secondary_index_path(db, table);
+        let Some(disk) = load_json::<SecondaryIndexCacheDisk>(&path) else {
+            return HashMap::new();
+        };
+        if disk.format_version != SECONDARY_INDEX_CACHE_FORMAT_VERSION
+            || disk.row_count != row_count as u64
+        {
+            return HashMap::new();
+        }
+
+        let mut indexes = HashMap::new();
+        for disk_index in disk.indexes {
+            let columns = dedup_in_order(&disk_index.columns);
+            if columns.is_empty() {
+                continue;
+            }
+            let mut include = dedup_in_order(&disk_index.include);
+            include.retain(|col| !columns.iter().any(|existing| existing == col));
+            if disk_index
+                .keys
+                .values()
+                .flatten()
+                .any(|idx| *idx >= row_count)
+            {
+                continue;
+            }
+            indexes.insert(
+                secondary_index_key(&columns, &include),
+                SecondaryIndex {
+                    built_version: disk_index.built_version,
+                    columns,
+                    include,
+                    keys: disk_index.keys,
+                },
+            );
+        }
+        indexes
+    }
+
+    fn persist_table_secondary_indexes(
+        &self,
+        db: &str,
+        table: &str,
+        schema: &TableSchema,
+        tdata: &TableData,
+    ) -> anyhow::Result<()> {
+        ensure_mysql_compat_secondary_indexes(schema, tdata);
+
+        let path = self.table_secondary_index_path(db, table);
+        let mut guard = tdata
+            .secondary_indexes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        for index in guard.values_mut() {
+            if index.built_version != schema.table_version {
+                *index = build_secondary_index(
+                    schema.table_version,
+                    &index.columns,
+                    &index.include,
+                    &tdata.rows,
+                );
+            }
+        }
+        if guard.is_empty() {
+            remove_file_if_exists(&path)?;
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let disk = SecondaryIndexCacheDisk {
+            format_version: SECONDARY_INDEX_CACHE_FORMAT_VERSION,
+            row_count: tdata.rows.len() as u64,
+            indexes: guard
+                .values()
+                .map(|index| SecondaryIndexDisk {
+                    built_version: index.built_version,
+                    columns: index.columns.clone(),
+                    include: index.include.clone(),
+                    keys: index.keys.clone(),
+                })
+                .collect(),
+        };
+        save_json(&path, &disk)
     }
 
     fn persist_table(&self, db: &str, table: &str) -> anyhow::Result<()> {
@@ -5577,7 +6240,9 @@ impl Engine {
                 fs::write(segment_path, bytes)?;
                 Ok(())
             }
-        }
+        }?;
+        let schema = self.get_schema(db, table)?;
+        self.persist_table_secondary_indexes(db, table, schema, tdata)
     }
 
     pub fn checkpoint_for_shutdown(&mut self) -> anyhow::Result<()> {
@@ -5613,8 +6278,11 @@ impl Engine {
         for (db, d) in self.catalog.databases.iter() {
             for (table, _) in d.tables.iter() {
                 let rows = self.load_table_rows_best_effort_for_mode(db, table);
+                let secondary_indexes =
+                    self.load_table_secondary_indexes_best_effort(db, table, rows.len());
                 let mut tdata = TableData {
                     rows,
+                    secondary_indexes: Mutex::new(secondary_indexes),
                     ..TableData::default()
                 };
                 // Build pk index.
@@ -5627,6 +6295,7 @@ impl Engine {
                             tdata.pk_index.insert(pk_key(&pk), idx);
                         }
                     }
+                    ensure_mysql_compat_secondary_indexes(schema, &tdata);
                 }
 
                 self.tables.insert(
@@ -7868,7 +8537,22 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             let op_name = op.as_str();
             let allowed = matches!(
                 op_name,
-                "and" | "or" | "not" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "in" | "between"
+                "and"
+                    | "or"
+                    | "not"
+                    | "eq"
+                    | "ne"
+                    | "lt"
+                    | "le"
+                    | "gt"
+                    | "ge"
+                    | "in"
+                    | "between"
+                    | "add"
+                    | "sub"
+                    | "mul"
+                    | "div"
+                    | "mod"
             );
             if !allowed {
                 anyhow::bail!("invalid_request: unsupported op in wasm plan");
@@ -7907,7 +8591,150 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             }
             let allowed = matches!(
                 name.as_str(),
-                "lower" | "upper" | "vector.cosine" | "vector.dot" | "vector.l2"
+                "lower"
+                    | "lcase"
+                    | "upper"
+                    | "ucase"
+                    | "length"
+                    | "char_length"
+                    | "character_length"
+                    | "trim"
+                    | "ltrim"
+                    | "rtrim"
+                    | "left"
+                    | "right"
+                    | "substring"
+                    | "substr"
+                    | "replace"
+                    | "nullif"
+                    | "if"
+                    | "locate"
+                    | "instr"
+                    | "abs"
+                    | "round"
+                    | "floor"
+                    | "ceil"
+                    | "ceiling"
+                    | "mod"
+                    | "least"
+                    | "greatest"
+                    | "coalesce"
+                    | "ifnull"
+                    | "concat"
+                    | "date"
+                    | "year"
+                    | "month"
+                    | "day"
+                    | "dayofmonth"
+                    | "weekday"
+                    | "dayofweek"
+                    | "dayofyear"
+                    | "monthname"
+                    | "dayname"
+                    | "quarter"
+                    | "last_day"
+                    | "extract"
+                    | "hour"
+                    | "minute"
+                    | "second"
+                    | "unix_timestamp"
+                    | "datediff"
+                    | "timestampdiff"
+                    | "date_add"
+                    | "date_sub"
+                    | "timestampadd"
+                    | "now"
+                    | "current_timestamp"
+                    | "localtimestamp"
+                    | "curdate"
+                    | "current_date"
+                    | "curtime"
+                    | "current_time"
+                    | "localtime"
+                    | "date_format"
+                    | "str_to_date"
+                    | "from_unixtime"
+                    | "week"
+                    | "yearweek"
+                    | "convert_tz"
+                    | "utc_timestamp"
+                    | "utc_date"
+                    | "utc_time"
+                    | "sysdate"
+                    | "addtime"
+                    | "subtime"
+                    | "time_to_sec"
+                    | "sec_to_time"
+                    | "find_in_set"
+                    | "isnull"
+                    | "concat_ws"
+                    | "repeat"
+                    | "reverse"
+                    | "lpad"
+                    | "rpad"
+                    | "space"
+                    | "hex"
+                    | "unhex"
+                    | "format"
+                    | "sign"
+                    | "sqrt"
+                    | "pow"
+                    | "power"
+                    | "truncate"
+                    | "log"
+                    | "ln"
+                    | "log2"
+                    | "log10"
+                    | "exp"
+                    | "pi"
+                    | "rand"
+                    | "uuid"
+                    | "sleep"
+                    | "benchmark"
+                    | "insert"
+                    | "make_set"
+                    | "export_set"
+                    | "quote"
+                    | "substring_index"
+                    | "ascii"
+                    | "ord"
+                    | "char"
+                    | "strcmp"
+                    | "bit_length"
+                    | "octet_length"
+                    | "regexp_replace"
+                    | "regexp_substr"
+                    | "to_base64"
+                    | "from_base64"
+                    | "vector.cosine"
+                    | "vector.dot"
+                    | "vector.l2"
+                    | "json_extract"
+                    | "json_unquote"
+                    | "json_object"
+                    | "json_array"
+                    | "json_contains"
+                    | "json_length"
+                    | "json_type"
+                    | "json_valid"
+                    | "json_set"
+                    | "json_keys"
+                    | "json_merge_preserve"
+                    | "json_remove"
+                    | "json_replace"
+                    | "json_insert"
+                    | "field"
+                    | "elt"
+                    | "inet_aton"
+                    | "inet_ntoa"
+                    | "bin"
+                    | "oct"
+                    | "conv"
+                    | "crc32"
+                    | "md5"
+                    | "sha1"
+                    | "sha"
+                    | "sha2"
             );
             if !allowed {
                 anyhow::bail!("invalid_request: unsupported function in wasm plan");
@@ -7917,8 +8744,17 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Expr::Cast { .. } => anyhow::bail!("invalid_request: wasm plans do not support cast"),
-        Expr::Case { .. } => anyhow::bail!("invalid_request: wasm plans do not support case"),
+        Expr::Cast { cast } => validate_wasm_expr(&cast.expr),
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                validate_wasm_expr(&when.r#if)?;
+                validate_wasm_expr(&when.then)?;
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                validate_wasm_expr(other)?;
+            }
+            Ok(())
+        }
         Expr::Subquery { .. } | Expr::Exists { .. } => {
             anyhow::bail!("invalid_request: wasm plans do not support subqueries")
         }
@@ -8105,10 +8941,40 @@ fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Ve
                 }
             }
         }
-        _ => {
-            anyhow::bail!(
-                "only INNER, LEFT, RIGHT, and CROSS joins are implemented in this prototype"
-            )
+        JoinType::Full => {
+            let right_nulls = null_row_ctx_for_ref(engine, &join.right)?;
+            let left_nulls = null_row_ctx_for_ref(engine, &join.left)?;
+            let mut right_matched = vec![false; right.len()];
+            for a in left.iter() {
+                let mut matched = false;
+                for (bi, b) in right.iter().enumerate() {
+                    let mut merged = a.clone();
+                    merged.extend(b.clone());
+                    if let Some(on) = join.on.as_ref() {
+                        if eval_predicate(on, &BTreeMap::new(), Some(&merged), args)? {
+                            out.push(merged);
+                            matched = true;
+                            right_matched[bi] = true;
+                        }
+                    } else {
+                        out.push(merged);
+                        matched = true;
+                        right_matched[bi] = true;
+                    }
+                }
+                if !matched {
+                    let mut merged = a.clone();
+                    merged.extend(right_nulls.clone());
+                    out.push(merged);
+                }
+            }
+            for (bi, b) in right.iter().enumerate() {
+                if !right_matched[bi] {
+                    let mut merged = left_nulls.clone();
+                    merged.extend(b.clone());
+                    out.push(merged);
+                }
+            }
         }
     }
 
@@ -8153,6 +9019,12 @@ fn eval_predicate_truth(
         Lit::Null => None,
         _ => Some(false),
     })
+}
+
+/// Evaluate a constant expression (no row context). Used for SELECT without FROM.
+pub(crate) fn eval_const_expr(expr: &Expr) -> anyhow::Result<Lit> {
+    let empty = BTreeMap::new();
+    eval_expr(expr, &empty, None, &[])
 }
 
 fn eval_expr(
@@ -8271,6 +9143,17 @@ fn eval_expr(
                     };
                     Ok(Lit::Bool { v: out })
                 }
+                "add" | "sub" | "mul" | "div" | "mod" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("{op} requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    Ok(mysql_eval_numeric_binary_op(op, &va, &vb))
+                }
                 "in" => {
                     let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("in requires a"))?;
                     let va = eval_expr(aa, row, ctx, args)?;
@@ -8338,6 +9221,44 @@ fn eval_expr(
                         v: like_pattern_matches(&subject, &pattern, op == "ilike"),
                     })
                 }
+                "regexp" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like lhs"))?;
+                    let pattern_str = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("regexp requires string-like rhs"))?;
+                    let re = regex::Regex::new(&pattern_str)
+                        .map_err(|e| anyhow::anyhow!("invalid regexp pattern: {e}"))?;
+                    Ok(Lit::Bool {
+                        v: re.is_match(&subject),
+                    })
+                }
+                "null_safe_eq" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("null_safe_eq requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("null_safe_eq requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    let result = match (&va, &vb) {
+                        (Lit::Null, Lit::Null) => true,
+                        (Lit::Null, _) | (_, Lit::Null) => false,
+                        _ => cmp_lit(&va, &vb)? == std::cmp::Ordering::Equal,
+                    };
+                    Ok(Lit::Bool { v: result })
+                }
                 "is_null" => {
                     let aa = a
                         .as_ref()
@@ -8350,33 +9271,1425 @@ fn eval_expr(
                 _ => anyhow::bail!("unsupported op: {op}"),
             }
         }
+        Expr::Cast { cast } => {
+            let value = eval_expr(&cast.expr, row, ctx, args)?;
+            mysql_cast_lit(value, &cast.to)
+        }
+        Expr::Case { case_ } => {
+            for when in case_.when.iter() {
+                let condition = eval_expr(&when.r#if, row, ctx, args)?;
+                if matches!(mysql_if_condition_truth(&condition), Some(true)) {
+                    return eval_expr(&when.then, row, ctx, args);
+                }
+            }
+            if let Some(other) = case_.r#else.as_ref() {
+                eval_expr(other, row, ctx, args)
+            } else {
+                Ok(Lit::Null)
+            }
+        }
         Expr::Func {
             name, args: fargs, ..
         } => {
             let name = name.as_str();
             match name {
-                "lower" => {
+                "lower" | "lcase" => {
                     let x = fargs
-                        .get(0)
+                        .first()
                         .ok_or_else(|| anyhow::anyhow!("lower requires arg"))?;
                     let v = eval_expr(x, row, ctx, args)?;
-                    match v {
-                        Lit::Str { v } => Ok(Lit::Str {
-                            v: v.to_lowercase(),
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.to_lowercase(),
+                    })
+                }
+                "upper" | "ucase" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("upper requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.to_uppercase(),
+                    })
+                }
+                "length" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("length requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 { v: v.len() as u64 })
+                }
+                "char_length" | "character_length" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("char_length requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: v.chars().count() as u64,
+                    })
+                }
+                "trim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("trim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim().to_string(),
+                    })
+                }
+                "ltrim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("ltrim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim_start().to_string(),
+                    })
+                }
+                "rtrim" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("rtrim requires arg"))?;
+                    let v = eval_expr(x, row, ctx, args)?;
+                    let Some(v) = lit_to_string_for_like(&v) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: v.trim_end().to_string(),
+                    })
+                }
+                "left" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("left requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: mysql_left_chars(&value, count),
+                    })
+                }
+                "right" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("right requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: mysql_right_chars(&value, count),
+                    })
+                }
+                "substring" | "substr" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("substring requires 2 or 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let position = eval_expr(&fargs[1], row, ctx, args)?;
+                    let length = if let Some(length_expr) = fargs.get(2) {
+                        Some(eval_expr(length_expr, row, ctx, args)?)
+                    } else {
+                        None
+                    };
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(position) = lit_to_i64(&position) else {
+                        return Ok(Lit::Null);
+                    };
+                    let length = length.as_ref().and_then(lit_to_i64);
+                    if fargs.len() == 3 && length.is_none() {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Str {
+                        v: mysql_substring_chars(&value, position, length),
+                    })
+                }
+                "replace" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("replace requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(from), Some(to)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_string_for_like(&from),
+                        lit_to_string_for_like(&to),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: value.replace(&from, &to),
+                    })
+                }
+                "nullif" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("nullif requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(left, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    if matches!(right, Lit::Null) {
+                        return Ok(left);
+                    }
+                    if cmp_lit(&left, &right)? == std::cmp::Ordering::Equal {
+                        Ok(Lit::Null)
+                    } else {
+                        Ok(left)
+                    }
+                }
+                "if" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("if requires 3 args");
+                    }
+                    let condition = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(mysql_if_condition_truth(&condition), Some(true)) {
+                        eval_expr(&fargs[1], row, ctx, args)
+                    } else {
+                        eval_expr(&fargs[2], row, ctx, args)
+                    }
+                }
+                "locate" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("locate requires 2 or 3 args");
+                    }
+                    let needle = eval_expr(&fargs[0], row, ctx, args)?;
+                    let haystack = eval_expr(&fargs[1], row, ctx, args)?;
+                    let start = if let Some(start_expr) = fargs.get(2) {
+                        let value = eval_expr(start_expr, row, ctx, args)?;
+                        let Some(start) = lit_to_i64(&value) else {
+                            return Ok(Lit::Null);
+                        };
+                        Some(start)
+                    } else {
+                        None
+                    };
+                    let (Some(needle), Some(haystack)) = (
+                        lit_to_string_for_like(&needle),
+                        lit_to_string_for_like(&haystack),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: mysql_locate_chars(&needle, &haystack, start),
+                    })
+                }
+                "instr" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("instr requires 2 args");
+                    }
+                    let haystack = eval_expr(&fargs[0], row, ctx, args)?;
+                    let needle = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (Some(haystack), Some(needle)) = (
+                        lit_to_string_for_like(&haystack),
+                        lit_to_string_for_like(&needle),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: mysql_locate_chars(&needle, &haystack, None),
+                    })
+                }
+                "find_in_set" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("find_in_set requires 2 args");
+                    }
+                    let needle = eval_expr(&fargs[0], row, ctx, args)?;
+                    let haystack = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (Some(needle), Some(haystack)) = (
+                        lit_to_string_for_like(&needle),
+                        lit_to_string_for_like(&haystack),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: mysql_find_in_set(&needle, &haystack),
+                    })
+                }
+                "datediff" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("datediff requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    Ok(mysql_datediff_lit(&left, &right)
+                        .map(|v| Lit::I64 { v })
+                        .unwrap_or(Lit::Null))
+                }
+                "abs" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("abs requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    match value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::I64 {
+                            v: v.saturating_abs(),
                         }),
+                        Lit::U64 { v } => Ok(Lit::U64 { v }),
+                        Lit::F64 { v } => Ok(Lit::F64 { v: v.abs() }),
+                        Lit::Str { .. } | Lit::Dec { .. } => {
+                            let Some(v) = lit_to_f64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::F64 { v: v.abs() })
+                        }
                         _ => Ok(Lit::Null),
                     }
                 }
-                "upper" => {
+                "round" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("round requires 1 or 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let decimals = if let Some(decimals_expr) = fargs.get(1) {
+                        let decimals = eval_expr(decimals_expr, row, ctx, args)?;
+                        let Some(decimals) = lit_to_i64(&decimals) else {
+                            return Ok(Lit::Null);
+                        };
+                        decimals
+                    } else {
+                        0
+                    };
+                    Ok(Lit::F64 {
+                        v: mysql_round_number(value, decimals),
+                    })
+                }
+                "floor" => {
                     let x = fargs
-                        .get(0)
-                        .ok_or_else(|| anyhow::anyhow!("upper requires arg"))?;
-                    let v = eval_expr(x, row, ctx, args)?;
-                    match v {
-                        Lit::Str { v } => Ok(Lit::Str {
-                            v: v.to_uppercase(),
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("floor requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: value.floor() as i64,
+                    })
+                }
+                "ceil" | "ceiling" => {
+                    let x = fargs
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("ceil requires arg"))?;
+                    let value = eval_expr(x, row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: value.ceil() as i64,
+                    })
+                }
+                "mod" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("mod requires 2 args");
+                    }
+                    let left = eval_expr(&fargs[0], row, ctx, args)?;
+                    let right = eval_expr(&fargs[1], row, ctx, args)?;
+                    if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    if let (Some(left), Some(right)) = (lit_to_i64(&left), lit_to_i64(&right)) {
+                        if right == 0 {
+                            return Ok(Lit::Null);
+                        }
+                        return Ok(Lit::I64 { v: left % right });
+                    }
+                    let (Some(left), Some(right)) = (lit_to_f64(&left), lit_to_f64(&right)) else {
+                        return Ok(Lit::Null);
+                    };
+                    if right == 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: left % right })
+                }
+                "least" | "greatest" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("{name} requires at least one arg");
+                    }
+                    let mut best = None::<Lit>;
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if matches!(value, Lit::Null) {
+                            return Ok(Lit::Null);
+                        }
+                        match &best {
+                            Some(current) => {
+                                let ord = cmp_lit(&value, current)?;
+                                let replace = if name == "least" {
+                                    ord == std::cmp::Ordering::Less
+                                } else {
+                                    ord == std::cmp::Ordering::Greater
+                                };
+                                if replace {
+                                    best = Some(value);
+                                }
+                            }
+                            None => best = Some(value),
+                        }
+                    }
+                    Ok(best.unwrap_or(Lit::Null))
+                }
+                "coalesce" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("coalesce requires at least one arg");
+                    }
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if !matches!(value, Lit::Null) {
+                            return Ok(value);
+                        }
+                    }
+                    Ok(Lit::Null)
+                }
+                "ifnull" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("ifnull requires 2 args");
+                    }
+                    let first = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(first, Lit::Null) {
+                        eval_expr(&fargs[1], row, ctx, args)
+                    } else {
+                        Ok(first)
+                    }
+                }
+                "concat" => {
+                    if fargs.is_empty() {
+                        anyhow::bail!("concat requires at least one arg");
+                    }
+                    let mut out = String::new();
+                    for arg in fargs {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        let Some(text) = lit_to_string_for_like(&value) else {
+                            return Ok(Lit::Null);
+                        };
+                        out.push_str(&text);
+                    }
+                    Ok(Lit::Str { v: out })
+                }
+                "isnull" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("isnull requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(Lit::U64 {
+                        v: u64::from(matches!(value, Lit::Null)),
+                    })
+                }
+                "date" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("date requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Date {
+                        iso: mysql_format_date_parts(date),
+                    })
+                }
+                "year" | "quarter" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek"
+                | "dayofyear" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_extract_datetime_unit_lit(name, &value).unwrap_or(Lit::Null))
+                }
+                "monthname" | "dayname" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let out = match name {
+                        "monthname" => MYSQL_MONTH_NAMES
+                            .get(date.month.saturating_sub(1) as usize)
+                            .copied(),
+                        _ => MYSQL_WEEKDAY_NAMES.get(mysql_weekday_index(date)).copied(),
+                    };
+                    Ok(out
+                        .map(|v| Lit::Str { v: v.to_string() })
+                        .unwrap_or(Lit::Null))
+                }
+                "extract" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("extract requires a unit plus one datetime arg");
+                    }
+                    let unit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let value = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_extract_datetime_unit_lit(&unit, &value).unwrap_or(Lit::Null))
+                }
+                "last_day" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("last_day requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_last_day_lit(&value).unwrap_or(Lit::Null))
+                }
+                "hour" | "minute" | "second" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_extract_datetime_unit_lit(name, &value).unwrap_or(Lit::Null))
+                }
+                "date_format" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("date_format requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let format = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(format) = lit_to_string_for_like(&format) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some((date, time)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_format_date_time_for_mysql(date, time, &format)
+                        .map(|v| Lit::Str { v })
+                        .unwrap_or(Lit::Null))
+                }
+                "unix_timestamp" => {
+                    if fargs.len() > 1 {
+                        anyhow::bail!("unix_timestamp requires 0 or 1 args");
+                    }
+                    if fargs.is_empty() {
+                        return Ok(Lit::I64 {
+                            v: mysql_current_unix_seconds(),
+                        });
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    Ok(mysql_unix_timestamp_from_lit(&value)
+                        .map(|v| Lit::I64 { v })
+                        .unwrap_or(Lit::Null))
+                }
+                "from_unixtime" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("from_unixtime requires 1 or 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let format = if let Some(expr) = fargs.get(1) {
+                        let format = eval_expr(expr, row, ctx, args)?;
+                        let Some(format) = lit_to_string_for_like(&format) else {
+                            return Ok(Lit::Null);
+                        };
+                        Some(format)
+                    } else {
+                        None
+                    };
+                    Ok(mysql_from_unixtime_lit(&value, format.as_deref()).unwrap_or(Lit::Null))
+                }
+                "date_add" | "date_sub" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("{name} requires a datetime, unit, and amount");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let unit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let amount = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(amount) = lit_to_i64(&amount) else {
+                        return Ok(Lit::Null);
+                    };
+                    let amount = if name == "date_sub" {
+                        amount.saturating_neg()
+                    } else {
+                        amount
+                    };
+                    Ok(mysql_datetime_add_interval_lit(&value, &unit, amount).unwrap_or(Lit::Null))
+                }
+                "timestampdiff" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("timestampdiff requires a unit plus two datetime args");
+                    }
+                    let unit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let start = eval_expr(&fargs[1], row, ctx, args)?;
+                    let end = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_timestampdiff_lit(&unit, &start, &end)
+                        .map(|v| Lit::I64 { v })
+                        .unwrap_or(Lit::Null))
+                }
+                "timestampadd" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("timestampadd requires a unit, amount, and datetime");
+                    }
+                    let unit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let amount = eval_expr(&fargs[1], row, ctx, args)?;
+                    let value = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(unit) = lit_to_string_for_like(&unit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(amount) = lit_to_i64(&amount) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_datetime_add_interval_lit(&value, &unit, amount).unwrap_or(Lit::Null))
+                }
+                "now" | "current_timestamp" | "localtimestamp" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "curdate" | "current_date" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_date_lit())
+                }
+                "curtime" | "current_time" | "localtime" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("{name} does not accept args");
+                    }
+                    Ok(mysql_current_time_lit())
+                }
+                "str_to_date" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("str_to_date requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let format = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(format) = lit_to_string_for_like(&format) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_str_to_date(&value, &format).unwrap_or(Lit::Null))
+                }
+                "week" => {
+                    if fargs.is_empty() || fargs.len() > 2 {
+                        anyhow::bail!("week requires 1 or 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: mysql_iso_week(date) as i64,
+                    })
+                }
+                "yearweek" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("yearweek requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some((Some(date), _)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let week = mysql_iso_week(date);
+                    let year = if date.month == 1 && week > 50 {
+                        date.year - 1
+                    } else if date.month == 12 && week == 1 {
+                        date.year + 1
+                    } else {
+                        date.year
+                    };
+                    Ok(Lit::I64 {
+                        v: i64::from(year) * 100 + week as i64,
+                    })
+                }
+                "convert_tz" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("convert_tz requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from_tz = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to_tz = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(from_tz) = lit_to_string_for_like(&from_tz) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(to_tz) = lit_to_string_for_like(&to_tz) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_convert_tz(&value, &from_tz, &to_tz).unwrap_or(Lit::Null))
+                }
+                "utc_timestamp" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_timestamp does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "utc_date" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_date does not accept args");
+                    }
+                    Ok(mysql_current_date_lit())
+                }
+                "utc_time" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("utc_time does not accept args");
+                    }
+                    Ok(mysql_current_time_lit())
+                }
+                "sysdate" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("sysdate does not accept args");
+                    }
+                    Ok(mysql_current_datetime_lit())
+                }
+                "addtime" | "subtime" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let interval = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(interval_str) = lit_to_string_for_like(&interval) else {
+                        return Ok(Lit::Null);
+                    };
+                    let secs = mysql_time_str_to_seconds(&interval_str).unwrap_or(0);
+                    let secs = if name == "subtime" { -secs } else { secs };
+                    Ok(mysql_datetime_add_seconds(&value, secs).unwrap_or(Lit::Null))
+                }
+                "time_to_sec" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("time_to_sec requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(text) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: mysql_time_str_to_seconds(&text).unwrap_or(0),
+                    })
+                }
+                "sec_to_time" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sec_to_time requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(secs) = lit_to_i64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(mysql_seconds_to_time_lit(secs))
+                }
+                "concat_ws" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("concat_ws requires at least 2 args");
+                    }
+                    let sep = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(sep) = lit_to_string_for_like(&sep) else {
+                        return Ok(Lit::Null);
+                    };
+                    let mut parts = Vec::new();
+                    for arg in &fargs[1..] {
+                        let value = eval_expr(arg, row, ctx, args)?;
+                        if matches!(value, Lit::Null) {
+                            continue;
+                        }
+                        if let Some(text) = lit_to_string_for_like(&value) {
+                            parts.push(text);
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: parts.join(&sep),
+                    })
+                }
+                "repeat" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("repeat requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let count = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    let count = count.max(0) as usize;
+                    Ok(Lit::Str {
+                        v: value.repeat(count),
+                    })
+                }
+                "reverse" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("reverse requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(value) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: value.chars().rev().collect(),
+                    })
+                }
+                "lpad" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("lpad requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len = eval_expr(&fargs[1], row, ctx, args)?;
+                    let pad = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(len), Some(pad)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_i64(&len),
+                        lit_to_string_for_like(&pad),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    let len = len.max(0) as usize;
+                    let char_count = value.chars().count();
+                    if char_count >= len {
+                        Ok(Lit::Str {
+                            v: value.chars().take(len).collect(),
+                        })
+                    } else if pad.is_empty() {
+                        Ok(Lit::Str { v: value })
+                    } else {
+                        let need = len - char_count;
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let prefix: String = pad_chars.iter().cycle().take(need).collect();
+                        Ok(Lit::Str {
+                            v: format!("{prefix}{value}"),
+                        })
+                    }
+                }
+                "rpad" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("rpad requires 3 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len = eval_expr(&fargs[1], row, ctx, args)?;
+                    let pad = eval_expr(&fargs[2], row, ctx, args)?;
+                    let (Some(value), Some(len), Some(pad)) = (
+                        lit_to_string_for_like(&value),
+                        lit_to_i64(&len),
+                        lit_to_string_for_like(&pad),
+                    ) else {
+                        return Ok(Lit::Null);
+                    };
+                    let len = len.max(0) as usize;
+                    let char_count = value.chars().count();
+                    if char_count >= len {
+                        Ok(Lit::Str {
+                            v: value.chars().take(len).collect(),
+                        })
+                    } else if pad.is_empty() {
+                        Ok(Lit::Str { v: value })
+                    } else {
+                        let need = len - char_count;
+                        let pad_chars: Vec<char> = pad.chars().collect();
+                        let suffix: String = pad_chars.iter().cycle().take(need).collect();
+                        Ok(Lit::Str {
+                            v: format!("{value}{suffix}"),
+                        })
+                    }
+                }
+                "space" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("space requires 1 arg");
+                    }
+                    let n = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_i64(&n) else {
+                        return Ok(Lit::Null);
+                    };
+                    let n = n.max(0) as usize;
+                    Ok(Lit::Str { v: " ".repeat(n) })
+                }
+                "hex" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("hex requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::Str {
+                            v: format!("{:X}", *v as u64),
                         }),
-                        _ => Ok(Lit::Null),
+                        Lit::U64 { v } => Ok(Lit::Str {
+                            v: format!("{v:X}"),
+                        }),
+                        Lit::F64 { v } => Ok(Lit::Str {
+                            v: format!("{:X}", *v as u64),
+                        }),
+                        _ => {
+                            let Some(s) = lit_to_string_for_like(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            if let Ok(n) = s.parse::<i64>() {
+                                Ok(Lit::Str {
+                                    v: format!("{:X}", n as u64),
+                                })
+                            } else {
+                                let hex: String = s.bytes().map(|b| format!("{b:02X}")).collect();
+                                Ok(Lit::Str { v: hex })
+                            }
+                        }
+                    }
+                }
+                "unhex" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("unhex requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if s.len() % 2 != 0 {
+                        return Ok(Lit::Null);
+                    }
+                    let mut bytes = Vec::with_capacity(s.len() / 2);
+                    let chars: Vec<u8> = s.bytes().collect();
+                    for chunk in chars.chunks(2) {
+                        let hi = match chunk[0] {
+                            b'0'..=b'9' => chunk[0] - b'0',
+                            b'a'..=b'f' => chunk[0] - b'a' + 10,
+                            b'A'..=b'F' => chunk[0] - b'A' + 10,
+                            _ => return Ok(Lit::Null),
+                        };
+                        let lo = match chunk[1] {
+                            b'0'..=b'9' => chunk[1] - b'0',
+                            b'a'..=b'f' => chunk[1] - b'a' + 10,
+                            b'A'..=b'F' => chunk[1] - b'A' + 10,
+                            _ => return Ok(Lit::Null),
+                        };
+                        bytes.push(hi << 4 | lo);
+                    }
+                    Ok(Lit::Str {
+                        v: String::from_utf8(bytes).unwrap_or_default(),
+                    })
+                }
+                "format" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("format requires 2 args");
+                    }
+                    let num = eval_expr(&fargs[0], row, ctx, args)?;
+                    let decimals = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(num) = lit_to_f64(&num) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(decimals) = lit_to_i64(&decimals) else {
+                        return Ok(Lit::Null);
+                    };
+                    let decimals = decimals.max(0) as usize;
+                    let rounded = format!("{:.prec$}", num, prec = decimals);
+                    let (int_part, frac_part) = rounded
+                        .split_once('.')
+                        .map(|(i, f)| (i.to_string(), Some(f.to_string())))
+                        .unwrap_or((rounded.clone(), None));
+                    let negative = int_part.starts_with('-');
+                    let digits: &str = if negative { &int_part[1..] } else { &int_part };
+                    let mut formatted = String::new();
+                    let len = digits.len();
+                    for (i, ch) in digits.chars().enumerate() {
+                        if i > 0 && (len - i) % 3 == 0 {
+                            formatted.push(',');
+                        }
+                        formatted.push(ch);
+                    }
+                    if negative {
+                        formatted = format!("-{formatted}");
+                    }
+                    if let Some(frac) = frac_part {
+                        formatted = format!("{formatted}.{frac}");
+                    }
+                    Ok(Lit::Str { v: formatted })
+                }
+                "sign" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sign requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        Lit::I64 { v } => Ok(Lit::I64 { v: v.signum() }),
+                        Lit::U64 { v } => Ok(Lit::I64 {
+                            v: if *v == 0 { 0 } else { 1 },
+                        }),
+                        _ => {
+                            let Some(f) = lit_to_f64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::I64 {
+                                v: if f > 0.0 {
+                                    1
+                                } else if f < 0.0 {
+                                    -1
+                                } else {
+                                    0
+                                },
+                            })
+                        }
+                    }
+                }
+                "sqrt" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("sqrt requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f < 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.sqrt() })
+                }
+                "pow" | "power" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("{name} requires 2 args");
+                    }
+                    let base = eval_expr(&fargs[0], row, ctx, args)?;
+                    let exp = eval_expr(&fargs[1], row, ctx, args)?;
+                    let (Some(base), Some(exp)) = (lit_to_f64(&base), lit_to_f64(&exp)) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: base.powf(exp) })
+                }
+                "truncate" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("truncate requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let decimals = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(value) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(decimals) = lit_to_i64(&decimals) else {
+                        return Ok(Lit::Null);
+                    };
+                    let factor = 10f64.powi(decimals as i32);
+                    Ok(Lit::F64 {
+                        v: (value * factor).trunc() / factor,
+                    })
+                }
+                "log" | "ln" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.ln() })
+                }
+                "log2" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("log2 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.log2() })
+                }
+                "log10" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("log10 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if f <= 0.0 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::F64 { v: f.log10() })
+                }
+                "exp" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("exp requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(f) = lit_to_f64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: f.exp() })
+                }
+                "pi" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("pi does not accept args");
+                    }
+                    Ok(Lit::F64 { v: PI })
+                }
+                "rand" => {
+                    if !fargs.is_empty() && fargs.len() > 1 {
+                        anyhow::bail!("rand accepts 0 or 1 args");
+                    }
+                    let nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .subsec_nanos();
+                    let pseudo = ((nanos as f64) / 1_000_000_000.0).fract();
+                    Ok(Lit::F64 { v: pseudo })
+                }
+                "uuid" => {
+                    if !fargs.is_empty() {
+                        anyhow::bail!("uuid does not accept args");
+                    }
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let nanos = now.as_nanos();
+                    let secs = now.as_secs();
+                    let bytes: [u8; 16] = [
+                        (nanos >> 56) as u8,
+                        (nanos >> 48) as u8,
+                        (nanos >> 40) as u8,
+                        (nanos >> 32) as u8,
+                        (nanos >> 24) as u8,
+                        (nanos >> 16) as u8,
+                        ((nanos >> 8) as u8 & 0x0f) | 0x40,
+                        (nanos as u8),
+                        ((secs >> 8) as u8 & 0x3f) | 0x80,
+                        secs as u8,
+                        (secs >> 16) as u8,
+                        (secs >> 24) as u8,
+                        (secs >> 32) as u8,
+                        (secs >> 40) as u8,
+                        (secs >> 48) as u8,
+                        (secs >> 56) as u8,
+                    ];
+                    let uuid = format!(
+                        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                        bytes[8], bytes[9], bytes[10], bytes[11],
+                        bytes[12], bytes[13], bytes[14], bytes[15],
+                    );
+                    Ok(Lit::Str { v: uuid })
+                }
+                "sleep" => Ok(Lit::I64 { v: 0 }),
+                "benchmark" => Ok(Lit::I64 { v: 0 }),
+                "insert" => {
+                    // MySQL INSERT(str, pos, len, newstr)
+                    if fargs.len() != 4 {
+                        anyhow::bail!("insert requires 4 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pos = eval_expr(&fargs[1], row, ctx, args)?;
+                    let len = eval_expr(&fargs[2], row, ctx, args)?;
+                    let newstr = eval_expr(&fargs[3], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pos) = lit_to_i64(&pos) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(len) = lit_to_i64(&len) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(newstr) = lit_to_string_for_like(&newstr) else {
+                        return Ok(Lit::Null);
+                    };
+                    if pos < 1 || pos as usize > s.len() {
+                        return Ok(Lit::Str { v: s });
+                    }
+                    let start = (pos - 1) as usize;
+                    let end = (start + len as usize).min(s.len());
+                    let result = format!("{}{}{}", &s[..start], newstr, &s[end..]);
+                    Ok(Lit::Str { v: result })
+                }
+                "make_set" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("make_set requires at least 2 args");
+                    }
+                    let bits = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(bits) = lit_to_i64(&bits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let bits = bits as u64;
+                    let mut parts = Vec::new();
+                    for (i, arg) in fargs[1..].iter().enumerate() {
+                        if bits & (1u64 << i) != 0 {
+                            let val = eval_expr(arg, row, ctx, args)?;
+                            if let Some(s) = lit_to_string_for_like(&val) {
+                                parts.push(s);
+                            }
+                        }
+                    }
+                    Ok(Lit::Str { v: parts.join(",") })
+                }
+                "export_set" => {
+                    if fargs.len() < 3 || fargs.len() > 5 {
+                        anyhow::bail!("export_set requires 3-5 args");
+                    }
+                    let bits = eval_expr(&fargs[0], row, ctx, args)?;
+                    let on = eval_expr(&fargs[1], row, ctx, args)?;
+                    let off = eval_expr(&fargs[2], row, ctx, args)?;
+                    let sep = if fargs.len() >= 4 {
+                        eval_expr(&fargs[3], row, ctx, args)?
+                    } else {
+                        Lit::Str { v: ",".to_string() }
+                    };
+                    let nbits = if fargs.len() >= 5 {
+                        eval_expr(&fargs[4], row, ctx, args)?
+                    } else {
+                        Lit::U64 { v: 64 }
+                    };
+                    let Some(bits) = lit_to_i64(&bits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let bits = bits as u64;
+                    let Some(on) = lit_to_string_for_like(&on) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(off) = lit_to_string_for_like(&off) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(sep) = lit_to_string_for_like(&sep) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(nbits) = lit_to_i64(&nbits) else {
+                        return Ok(Lit::Null);
+                    };
+                    let nbits = (nbits as usize).min(64);
+                    let mut parts = Vec::with_capacity(nbits);
+                    for i in 0..nbits {
+                        if bits & (1u64 << i) != 0 {
+                            parts.push(on.clone());
+                        } else {
+                            parts.push(off.clone());
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: parts.join(&sep),
+                    })
+                }
+                "quote" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("quote requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(val, Lit::Null) {
+                        return Ok(Lit::Str {
+                            v: "NULL".to_string(),
+                        });
+                    }
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
+                    Ok(Lit::Str {
+                        v: format!("'{escaped}'"),
+                    })
+                }
+                "substring_index" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("substring_index requires 3 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let delim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let count = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(delim) = lit_to_string_for_like(&delim) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(count) = lit_to_i64(&count) else {
+                        return Ok(Lit::Null);
+                    };
+                    if delim.is_empty() {
+                        return Ok(Lit::Str { v: String::new() });
+                    }
+                    let parts: Vec<&str> = s.split(&delim).collect();
+                    let result = if count >= 0 {
+                        let n = (count as usize).min(parts.len());
+                        parts[..n].join(&delim)
+                    } else {
+                        let n = ((-count) as usize).min(parts.len());
+                        parts[parts.len() - n..].join(&delim)
+                    };
+                    Ok(Lit::Str { v: result })
+                }
+                "ascii" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("ascii requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let code = s.bytes().next().map(|b| b as i64).unwrap_or(0);
+                    Ok(Lit::I64 { v: code })
+                }
+                "ord" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("ord requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let code = s.chars().next().map(|c| c as i64).unwrap_or(0);
+                    Ok(Lit::I64 { v: code })
+                }
+                "char" => {
+                    let mut result = String::new();
+                    for arg in fargs.iter() {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        if let Some(code) = lit_to_i64(&val) {
+                            if code >= 0 && code <= 0x10FFFF {
+                                if let Some(c) = char::from_u32(code as u32) {
+                                    result.push(c);
+                                }
+                            }
+                        }
+                    }
+                    Ok(Lit::Str { v: result })
+                }
+                "strcmp" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("strcmp requires 2 args");
+                    }
+                    let a = eval_expr(&fargs[0], row, ctx, args)?;
+                    let b = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(a) = lit_to_string_for_like(&a) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(b) = lit_to_string_for_like(&b) else {
+                        return Ok(Lit::Null);
+                    };
+                    let cmp = a.cmp(&b);
+                    Ok(Lit::I64 {
+                        v: match cmp {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        },
+                    })
+                }
+                "bit_length" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("bit_length requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 {
+                        v: (s.len() * 8) as i64,
+                    })
+                }
+                "octet_length" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("octet_length requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::I64 { v: s.len() as i64 })
+                }
+                "regexp_replace" => {
+                    if fargs.len() < 3 || fargs.len() > 6 {
+                        anyhow::bail!("regexp_replace requires 3-6 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pat = eval_expr(&fargs[1], row, ctx, args)?;
+                    let repl = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pat) = lit_to_string_for_like(&pat) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(repl) = lit_to_string_for_like(&repl) else {
+                        return Ok(Lit::Null);
+                    };
+                    let re = regex::Regex::new(&pat)
+                        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+                    Ok(Lit::Str {
+                        v: re.replace_all(&s, repl.as_str()).to_string(),
+                    })
+                }
+                "regexp_substr" => {
+                    if fargs.len() < 2 || fargs.len() > 5 {
+                        anyhow::bail!("regexp_substr requires 2-5 args");
+                    }
+                    let s = eval_expr(&fargs[0], row, ctx, args)?;
+                    let pat = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(pat) = lit_to_string_for_like(&pat) else {
+                        return Ok(Lit::Null);
+                    };
+                    let re = regex::Regex::new(&pat)
+                        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+                    match re.find(&s) {
+                        Some(m) => Ok(Lit::Str {
+                            v: m.as_str().to_string(),
+                        }),
+                        None => Ok(Lit::Null),
+                    }
+                }
+                "to_base64" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("to_base64 requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    use base64::Engine as _;
+                    Ok(Lit::Str {
+                        v: base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+                    })
+                }
+                "from_base64" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("from_base64 requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    use base64::Engine as _;
+                    match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                        Ok(bytes) => Ok(Lit::Str {
+                            v: String::from_utf8_lossy(&bytes).to_string(),
+                        }),
+                        Err(_) => Ok(Lit::Null),
                     }
                 }
                 "vector.cosine" | "vector.dot" | "vector.l2" => {
@@ -8402,6 +10715,663 @@ fn eval_expr(
                     };
                     let score = vector_score(metric, a_vec, b_vec)?;
                     Ok(Lit::F64 { v: score })
+                }
+                // ── JSON functions ──────────────────────────────────
+                "json_extract" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_extract requires at least 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let path_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(path) = lit_to_string_for_like(&path_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    match mysql_json_path_extract(&parsed, &path) {
+                        Some(serde_json::Value::Null) => Ok(Lit::Null),
+                        Some(v) => Ok(Lit::Str {
+                            v: serde_json::to_string(&v).unwrap_or_default(),
+                        }),
+                        None => Ok(Lit::Null),
+                    }
+                }
+                "json_unquote" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_unquote requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    // If it parses as a JSON string, return the inner value
+                    if let Ok(serde_json::Value::String(inner)) =
+                        serde_json::from_str::<serde_json::Value>(&s)
+                    {
+                        return Ok(Lit::Str { v: inner });
+                    }
+                    // Otherwise return as-is
+                    Ok(Lit::Str { v: s })
+                }
+                "json_object" => {
+                    if fargs.len() % 2 != 0 {
+                        anyhow::bail!("json_object requires an even number of args");
+                    }
+                    let mut map = serde_json::Map::new();
+                    for pair in fargs.chunks(2) {
+                        let key = eval_expr(&pair[0], row, ctx, args)?;
+                        let val = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(key) = lit_to_string_for_like(&key) else {
+                            anyhow::bail!("json_object key must be a string");
+                        };
+                        map.insert(key, mysql_lit_to_json_value(&val));
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Object(map))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_array" => {
+                    let mut arr = Vec::with_capacity(fargs.len());
+                    for arg in fargs {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        arr.push(mysql_lit_to_json_value(&val));
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Array(arr))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_contains" => {
+                    if !(2..=3).contains(&fargs.len()) {
+                        anyhow::bail!("json_contains requires 2 or 3 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let candidate = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(cand_str) = lit_to_string_for_like(&candidate) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(cand_val) = serde_json::from_str::<serde_json::Value>(&cand_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(2) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    Ok(Lit::U64 {
+                        v: u64::from(mysql_json_contains(&parsed, &cand_val)),
+                    })
+                }
+                "json_length" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("json_length requires 1 or 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(1) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    let len = match &parsed {
+                        serde_json::Value::Array(a) => a.len(),
+                        serde_json::Value::Object(m) => m.len(),
+                        _ => 1,
+                    };
+                    Ok(Lit::U64 { v: len as u64 })
+                }
+                "json_type" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_type requires 1 arg");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    let t = match &parsed {
+                        serde_json::Value::Null => "NULL",
+                        serde_json::Value::Bool(_) => "BOOLEAN",
+                        serde_json::Value::Number(n) => {
+                            if n.is_f64() {
+                                "DOUBLE"
+                            } else {
+                                "INTEGER"
+                            }
+                        }
+                        serde_json::Value::String(_) => "STRING",
+                        serde_json::Value::Array(_) => "ARRAY",
+                        serde_json::Value::Object(_) => "OBJECT",
+                    };
+                    Ok(Lit::Str { v: t.to_string() })
+                }
+                "json_valid" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("json_valid requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    if matches!(val, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::U64 { v: 0 });
+                    };
+                    let valid = serde_json::from_str::<serde_json::Value>(&s).is_ok();
+                    Ok(Lit::U64 {
+                        v: u64::from(valid),
+                    })
+                }
+                "json_set" => {
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_set requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        let jval = mysql_lit_to_json_value(&val_lit);
+                        mysql_json_path_set(&mut parsed, &path, jval);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_keys" => {
+                    if !(1..=2).contains(&fargs.len()) {
+                        anyhow::bail!("json_keys requires 1 or 2 args");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    if let Some(path_expr) = fargs.get(1) {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            return Ok(Lit::Null);
+                        };
+                        parsed = match mysql_json_path_extract(&parsed, &path) {
+                            Some(v) => v,
+                            None => return Ok(Lit::Null),
+                        };
+                    }
+                    let serde_json::Value::Object(map) = &parsed else {
+                        return Ok(Lit::Null);
+                    };
+                    let keys: Vec<serde_json::Value> = map
+                        .keys()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect();
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&serde_json::Value::Array(keys))
+                            .unwrap_or_default(),
+                    })
+                }
+                "json_merge_preserve" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_merge_preserve requires at least 2 args");
+                    }
+                    let first = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(first_str) = lit_to_string_for_like(&first) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut result) = serde_json::from_str::<serde_json::Value>(&first_str)
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    for arg in &fargs[1..] {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        let Some(s) = lit_to_string_for_like(&val) else {
+                            return Ok(Lit::Null);
+                        };
+                        let Ok(other) = serde_json::from_str::<serde_json::Value>(&s) else {
+                            return Ok(Lit::Null);
+                        };
+                        result = mysql_json_merge_preserve(result, other);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&result).unwrap_or_default(),
+                    })
+                }
+                "json_remove" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("json_remove requires a doc and at least one path");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for path_expr in &fargs[1..] {
+                        let path_lit = eval_expr(path_expr, row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        mysql_json_path_remove(&mut parsed, &path);
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_replace" => {
+                    // Like JSON_SET but only replaces existing paths
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_replace requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        // Only set if path already exists
+                        if mysql_json_path_extract(&parsed, &path).is_some() {
+                            let jval = mysql_lit_to_json_value(&val_lit);
+                            mysql_json_path_set(&mut parsed, &path, jval);
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "json_insert" => {
+                    // Like JSON_SET but only inserts new paths (does not replace existing)
+                    if fargs.len() < 3 || fargs.len() % 2 == 0 {
+                        anyhow::bail!("json_insert requires a doc and path/value pairs");
+                    }
+                    let doc = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(doc_str) = lit_to_string_for_like(&doc) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    for pair in fargs[1..].chunks(2) {
+                        let path_lit = eval_expr(&pair[0], row, ctx, args)?;
+                        let val_lit = eval_expr(&pair[1], row, ctx, args)?;
+                        let Some(path) = lit_to_string_for_like(&path_lit) else {
+                            continue;
+                        };
+                        // Only set if path does NOT already exist
+                        if mysql_json_path_extract(&parsed, &path).is_none() {
+                            let jval = mysql_lit_to_json_value(&val_lit);
+                            mysql_json_path_set(&mut parsed, &path, jval);
+                        }
+                    }
+                    Ok(Lit::Str {
+                        v: serde_json::to_string(&parsed).unwrap_or_default(),
+                    })
+                }
+                "field" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("field requires at least 2 args");
+                    }
+                    let needle = eval_expr(&fargs[0], row, ctx, args)?;
+                    let needle_s = lit_to_string_for_like(&needle);
+                    for (i, arg) in fargs[1..].iter().enumerate() {
+                        let val = eval_expr(arg, row, ctx, args)?;
+                        let val_s = lit_to_string_for_like(&val);
+                        if needle_s == val_s {
+                            return Ok(Lit::U64 { v: (i + 1) as u64 });
+                        }
+                    }
+                    Ok(Lit::U64 { v: 0 })
+                }
+                "elt" => {
+                    if fargs.len() < 2 {
+                        anyhow::bail!("elt requires at least 2 args");
+                    }
+                    let idx = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(idx) = lit_to_i64(&idx) else {
+                        return Ok(Lit::Null);
+                    };
+                    if idx < 1 || idx as usize > fargs.len() - 1 {
+                        return Ok(Lit::Null);
+                    }
+                    eval_expr(&fargs[idx as usize], row, ctx, args)
+                }
+                "inet_aton" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("inet_aton requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let parts: Vec<&str> = s.split('.').collect();
+                    if parts.len() != 4 {
+                        return Ok(Lit::Null);
+                    }
+                    let mut result: u64 = 0;
+                    for part in &parts {
+                        let Ok(octet) = part.parse::<u64>() else {
+                            return Ok(Lit::Null);
+                        };
+                        if octet > 255 {
+                            return Ok(Lit::Null);
+                        }
+                        result = result * 256 + octet;
+                    }
+                    Ok(Lit::U64 { v: result })
+                }
+                "inet_ntoa" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("inet_ntoa requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_u64(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    if n > 0xFFFF_FFFF {
+                        return Ok(Lit::Null);
+                    }
+                    let a = (n >> 24) & 0xFF;
+                    let b = (n >> 16) & 0xFF;
+                    let c = (n >> 8) & 0xFF;
+                    let d = n & 0xFF;
+                    Ok(Lit::Str {
+                        v: format!("{a}.{b}.{c}.{d}"),
+                    })
+                }
+                "bin" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("bin requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        _ => {
+                            let Some(n) = lit_to_i64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::Str {
+                                v: format!("{:b}", n as u64),
+                            })
+                        }
+                    }
+                }
+                "oct" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("oct requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    match &value {
+                        Lit::Null => Ok(Lit::Null),
+                        _ => {
+                            let Some(n) = lit_to_i64(&value) else {
+                                return Ok(Lit::Null);
+                            };
+                            Ok(Lit::Str {
+                                v: format!("{:o}", n as u64),
+                            })
+                        }
+                    }
+                }
+                "conv" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("conv requires 3 args");
+                    }
+                    let n_lit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let from_base = eval_expr(&fargs[1], row, ctx, args)?;
+                    let to_base = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(n_str) = lit_to_string_for_like(&n_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let (Some(from_b), Some(to_b)) = (lit_to_i64(&from_base), lit_to_i64(&to_base))
+                    else {
+                        return Ok(Lit::Null);
+                    };
+                    let from_b_abs = from_b.unsigned_abs() as u32;
+                    let to_b_abs = to_b.unsigned_abs() as u32;
+                    if !(2..=36).contains(&from_b_abs) || !(2..=36).contains(&to_b_abs) {
+                        return Ok(Lit::Null);
+                    }
+                    let n_str = n_str.trim();
+                    let negative = n_str.starts_with('-');
+                    let digits = if negative { &n_str[1..] } else { n_str };
+                    let Ok(val) = u64::from_str_radix(digits, from_b_abs) else {
+                        return Ok(Lit::Null);
+                    };
+                    let converted = mysql_u64_to_base_string(val, to_b_abs);
+                    if negative && to_b < 0 {
+                        Ok(Lit::Str {
+                            v: format!("-{converted}"),
+                        })
+                    } else {
+                        Ok(Lit::Str { v: converted })
+                    }
+                }
+                "crc32" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("crc32 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::U64 {
+                        v: u64::from(crc32_hash(s.as_bytes())),
+                    })
+                }
+                "md5" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("md5 requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let digest = Md5::digest(s.as_bytes());
+                    Ok(Lit::Str {
+                        v: hex_encode(&digest),
+                    })
+                }
+                "sha1" | "sha" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("{name} requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let digest = Sha1::digest(s.as_bytes());
+                    Ok(Lit::Str {
+                        v: hex_encode(&digest),
+                    })
+                }
+                "sha2" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("sha2 requires 2 args");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let len_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(hash_len) = lit_to_i64(&len_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let hex = match hash_len {
+                        224 => hex_encode(&Sha224::digest(s.as_bytes())),
+                        256 | 0 => hex_encode(&Sha256::digest(s.as_bytes())),
+                        384 => hex_encode(&Sha384::digest(s.as_bytes())),
+                        512 => hex_encode(&Sha512::digest(s.as_bytes())),
+                        _ => return Ok(Lit::Null),
+                    };
+                    Ok(Lit::Str { v: hex })
+                }
+                // ── Additional MySQL scalar functions ───────────────
+                "degrees" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("degrees requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_f64(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: n.to_degrees() })
+                }
+                "radians" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("radians requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_f64(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: n.to_radians() })
+                }
+                "period_add" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("period_add requires 2 args");
+                    }
+                    let p = eval_expr(&fargs[0], row, ctx, args)?;
+                    let n = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(period) = lit_to_i64(&p) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(months) = lit_to_i64(&n) else {
+                        return Ok(Lit::Null);
+                    };
+                    let y = period / 100;
+                    let m = period % 100;
+                    let total_months = y * 12 + m + months;
+                    let ry = total_months / 12;
+                    let rm = total_months % 12;
+                    let result = if rm == 0 {
+                        (ry - 1) * 100 + 12
+                    } else {
+                        ry * 100 + rm
+                    };
+                    Ok(Lit::I64 { v: result })
+                }
+                "period_diff" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("period_diff requires 2 args");
+                    }
+                    let p1 = eval_expr(&fargs[0], row, ctx, args)?;
+                    let p2 = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(period1) = lit_to_i64(&p1) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(period2) = lit_to_i64(&p2) else {
+                        return Ok(Lit::Null);
+                    };
+                    let m1 = (period1 / 100) * 12 + (period1 % 100);
+                    let m2 = (period2 / 100) * 12 + (period2 % 100);
+                    Ok(Lit::I64 { v: m1 - m2 })
+                }
+                "makedate" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("makedate requires 2 args");
+                    }
+                    let year_lit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let doy_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(year) = lit_to_i64(&year_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(day_of_year) = lit_to_i64(&doy_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    if day_of_year < 1 || year < 0 || year > 9999 {
+                        return Ok(Lit::Null);
+                    }
+                    // Calculate date from year and day-of-year
+                    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                    let days_in_months: [i64; 12] = [
+                        31,
+                        if is_leap { 29 } else { 28 },
+                        31,
+                        30,
+                        31,
+                        30,
+                        31,
+                        31,
+                        30,
+                        31,
+                        30,
+                        31,
+                    ];
+                    let mut remaining = day_of_year;
+                    let mut month = 0usize;
+                    while month < 12 && remaining > days_in_months[month] {
+                        remaining -= days_in_months[month];
+                        month += 1;
+                    }
+                    if month >= 12 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Str {
+                        v: format!("{year:04}-{:02}-{remaining:02}", month + 1),
+                    })
+                }
+                "maketime" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("maketime requires 3 args");
+                    }
+                    let h = eval_expr(&fargs[0], row, ctx, args)?;
+                    let m = eval_expr(&fargs[1], row, ctx, args)?;
+                    let s = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(hour) = lit_to_i64(&h) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(minute) = lit_to_i64(&m) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(second) = lit_to_i64(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: format!("{hour:02}:{minute:02}:{second:02}"),
+                    })
                 }
                 _ => anyhow::bail!("unsupported function: {name}"),
             }
@@ -8463,7 +11433,320 @@ fn cmp_lit(a: &Lit, b: &Lit) -> anyhow::Result<std::cmp::Ordering> {
         // Cross numeric compare (very small helper)
         (Lit::I64 { v: x }, Lit::U64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
         (Lit::U64 { v: x }, Lit::I64 { v: y }) => Ok((*x as i128).cmp(&(*y as i128))),
-        _ => Ok(Ordering::Equal),
+        _ if lit_to_f64(a).is_some() && lit_to_f64(b).is_some() => Ok(lit_to_f64(a)
+            .zip(lit_to_f64(b))
+            .and_then(|(x, y)| x.partial_cmp(&y))
+            .unwrap_or(Ordering::Equal)),
+        _ => match (lit_to_string_for_like(a), lit_to_string_for_like(b)) {
+            (Some(x), Some(y)) => Ok(x.cmp(&y)),
+            _ => Ok(Ordering::Equal),
+        },
+    }
+}
+
+// ── JSON helpers ──────────────────────────────────────────────
+
+/// Simple JSONPath extractor supporting `$`, `.key`, and `[n]`.
+fn mysql_json_path_extract(doc: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return None;
+    }
+    let rest = &path[1..];
+    let mut current = doc.clone();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next(); // consume '.'
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                if key.is_empty() {
+                    return None;
+                }
+                current = current.get(&key)?.clone();
+            }
+            Some('[') => {
+                chars.next(); // consume '['
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                let idx: usize = idx_str.parse().ok()?;
+                current = current.get(idx)?.clone();
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// Remove a value at a JSONPath location.
+fn mysql_json_path_remove(doc: &mut serde_json::Value, path: &str) {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return;
+    }
+    let rest = &path[1..];
+    if rest.is_empty() {
+        return; // Cannot remove root
+    }
+    let mut segments: Vec<JsonPathSeg> = Vec::new();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next();
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                segments.push(JsonPathSeg::Key(key));
+            }
+            Some('[') => {
+                chars.next();
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    segments.push(JsonPathSeg::Index(idx));
+                }
+            }
+            _ => break,
+        }
+    }
+    if segments.is_empty() {
+        return;
+    }
+    // Navigate to parent and remove the last segment
+    let mut current = &mut *doc;
+    for seg in &segments[..segments.len() - 1] {
+        match seg {
+            JsonPathSeg::Key(key) => {
+                if !current.is_object() {
+                    return;
+                }
+                let Some(next) = current.as_object_mut().unwrap().get_mut(key) else {
+                    return;
+                };
+                current = next;
+            }
+            JsonPathSeg::Index(idx) => {
+                if !current.is_array() {
+                    return;
+                }
+                let arr = current.as_array_mut().unwrap();
+                if *idx >= arr.len() {
+                    return;
+                }
+                current = &mut arr[*idx];
+            }
+        }
+    }
+    match segments.last().unwrap() {
+        JsonPathSeg::Key(key) => {
+            if let serde_json::Value::Object(map) = current {
+                map.remove(key);
+            }
+        }
+        JsonPathSeg::Index(idx) => {
+            if let serde_json::Value::Array(arr) = current {
+                if *idx < arr.len() {
+                    arr.remove(*idx);
+                }
+            }
+        }
+    }
+}
+
+/// Set a value at a JSONPath location (supports `$.key` and `$[n]`).
+fn mysql_json_path_set(doc: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return;
+    }
+    let rest = &path[1..];
+    if rest.is_empty() {
+        *doc = value;
+        return;
+    }
+
+    // Parse path segments
+    let mut segments: Vec<JsonPathSeg> = Vec::new();
+    let mut chars = rest.chars().peekable();
+    while chars.peek().is_some() {
+        match chars.peek() {
+            Some('.') => {
+                chars.next();
+                let mut key = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '.' || c == '[' {
+                        break;
+                    }
+                    key.push(c);
+                    chars.next();
+                }
+                segments.push(JsonPathSeg::Key(key));
+            }
+            Some('[') => {
+                chars.next();
+                let mut idx_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        break;
+                    }
+                    idx_str.push(c);
+                    chars.next();
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    segments.push(JsonPathSeg::Index(idx));
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut current = doc;
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i + 1 == segments.len();
+        match seg {
+            JsonPathSeg::Key(key) => {
+                if is_last {
+                    if let serde_json::Value::Object(map) = current {
+                        map.insert(key.clone(), value);
+                    }
+                    return;
+                }
+                if !current.is_object() {
+                    return;
+                }
+                let obj = current.as_object_mut().unwrap();
+                if !obj.contains_key(key) {
+                    // Create intermediate object
+                    obj.insert(key.clone(), serde_json::Value::Object(Default::default()));
+                }
+                current = obj.get_mut(key).unwrap();
+            }
+            JsonPathSeg::Index(idx) => {
+                if is_last {
+                    if let serde_json::Value::Array(arr) = current {
+                        if *idx < arr.len() {
+                            arr[*idx] = value;
+                        }
+                    }
+                    return;
+                }
+                if !current.is_array() {
+                    return;
+                }
+                let arr = current.as_array_mut().unwrap();
+                if *idx >= arr.len() {
+                    return;
+                }
+                current = &mut arr[*idx];
+            }
+        }
+    }
+}
+
+enum JsonPathSeg {
+    Key(String),
+    Index(usize),
+}
+
+/// Convert a Lit to a serde_json::Value for building JSON results.
+fn mysql_lit_to_json_value(lit: &Lit) -> serde_json::Value {
+    match lit {
+        Lit::Null => serde_json::Value::Null,
+        Lit::Bool { v } => serde_json::Value::Bool(*v),
+        Lit::I64 { v } => serde_json::json!(*v),
+        Lit::U64 { v } => serde_json::json!(*v),
+        Lit::F64 { v } => serde_json::json!(*v),
+        Lit::Str { v } => {
+            // If it looks like valid JSON, embed it directly so
+            // json_object("k", json_object(...)) nests properly.
+            if let Ok(jv) = serde_json::from_str::<serde_json::Value>(v) {
+                jv
+            } else {
+                serde_json::Value::String(v.clone())
+            }
+        }
+        _ => {
+            let s = lit_to_string_for_like(lit).unwrap_or_default();
+            serde_json::Value::String(s)
+        }
+    }
+}
+
+/// MySQL JSON_CONTAINS semantics: check if `target` contains `candidate`.
+fn mysql_json_contains(target: &serde_json::Value, candidate: &serde_json::Value) -> bool {
+    match (target, candidate) {
+        (serde_json::Value::Array(arr), _) => {
+            // Array contains candidate if any element contains it,
+            // or if candidate is an array and all its elements are contained.
+            if let serde_json::Value::Array(cand_arr) = candidate {
+                cand_arr
+                    .iter()
+                    .all(|c| arr.iter().any(|a| mysql_json_contains(a, c)))
+            } else {
+                arr.iter().any(|a| mysql_json_contains(a, candidate))
+            }
+        }
+        (serde_json::Value::Object(tmap), serde_json::Value::Object(cmap)) => cmap
+            .iter()
+            .all(|(k, cv)| tmap.get(k).is_some_and(|tv| mysql_json_contains(tv, cv))),
+        _ => target == candidate,
+    }
+}
+
+/// MySQL JSON_MERGE_PRESERVE: merge two JSON values.
+fn mysql_json_merge_preserve(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
+    match (a, b) {
+        (serde_json::Value::Object(mut ma), serde_json::Value::Object(mb)) => {
+            for (k, vb) in mb {
+                let merged = match ma.remove(&k) {
+                    Some(va) => mysql_json_merge_preserve(va, vb),
+                    None => vb,
+                };
+                ma.insert(k, merged);
+            }
+            serde_json::Value::Object(ma)
+        }
+        (serde_json::Value::Array(mut aa), serde_json::Value::Array(ab)) => {
+            aa.extend(ab);
+            serde_json::Value::Array(aa)
+        }
+        (serde_json::Value::Array(mut aa), b) => {
+            aa.push(b);
+            serde_json::Value::Array(aa)
+        }
+        (a, serde_json::Value::Array(mut ab)) => {
+            ab.insert(0, a);
+            serde_json::Value::Array(ab)
+        }
+        (a, b) => serde_json::Value::Array(vec![a, b]),
     }
 }
 
@@ -8481,6 +11764,1131 @@ fn lit_to_string_for_like(lit: &Lit) -> Option<String> {
         Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => Some(iso.clone()),
         Lit::Uuid { v } => Some(v.clone()),
         Lit::Embedding { .. } => None,
+    }
+}
+
+fn lit_to_i64(lit: &Lit) -> Option<i64> {
+    match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
+        Lit::I64 { v } => Some(*v),
+        Lit::U64 { v } => i64::try_from(*v).ok(),
+        Lit::F64 { v } => Some(*v as i64),
+        Lit::Dec { v } => v.parse::<f64>().ok().map(|v| v as i64),
+        Lit::Str { v } => v.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn lit_to_u64(lit: &Lit) -> Option<u64> {
+    match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
+        Lit::I64 { v } => u64::try_from(*v).ok(),
+        Lit::U64 { v } => Some(*v),
+        Lit::F64 { v } => {
+            if *v >= 0.0 {
+                Some(*v as u64)
+            } else {
+                None
+            }
+        }
+        Lit::Dec { v } | Lit::Str { v } => v.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn crc32_hash(data: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for i in 0..256u32 {
+            let mut crc = i;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = 0xEDB8_8320 ^ (crc >> 1);
+                } else {
+                    crc >>= 1;
+                }
+            }
+            t[i as usize] = crc;
+        }
+        t
+    });
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+fn mysql_u64_to_base_string(mut val: u64, base: u32) -> String {
+    if val == 0 {
+        return "0".to_string();
+    }
+    let digits = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let base = base as u64;
+    let mut buf = Vec::new();
+    while val > 0 {
+        buf.push(digits[(val % base) as usize]);
+        val /= base;
+    }
+    buf.reverse();
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+fn mysql_lit_is_integral_like(lit: &Lit) -> bool {
+    match lit {
+        Lit::Bool { .. } | Lit::I64 { .. } | Lit::U64 { .. } => true,
+        Lit::F64 { v } => v.fract() == 0.0,
+        Lit::Dec { v } | Lit::Str { v } => {
+            let trimmed = v.trim();
+            !trimmed.is_empty()
+                && !trimmed.contains(['.', 'e', 'E'])
+                && trimmed.parse::<i128>().is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn mysql_integral_numeric_value(lit: &Lit) -> Option<i128> {
+    match lit {
+        Lit::Bool { v } => Some(if *v { 1 } else { 0 }),
+        Lit::I64 { v } => Some(*v as i128),
+        Lit::U64 { v } => Some(*v as i128),
+        Lit::F64 { v } if v.fract() == 0.0 => Some(*v as i128),
+        Lit::Dec { v } | Lit::Str { v } => v.trim().parse::<i128>().ok(),
+        _ => None,
+    }
+}
+
+fn mysql_numeric_binary_integral_result(value: i128) -> Lit {
+    if let Ok(v) = i64::try_from(value) {
+        Lit::I64 { v }
+    } else {
+        Lit::F64 { v: value as f64 }
+    }
+}
+
+fn mysql_eval_numeric_binary_op(op: &str, left: &Lit, right: &Lit) -> Lit {
+    if matches!(left, Lit::Null) || matches!(right, Lit::Null) {
+        return Lit::Null;
+    }
+    if op == "div" {
+        let (Some(left), Some(right)) = (lit_to_f64(left), lit_to_f64(right)) else {
+            return Lit::Null;
+        };
+        if right == 0.0 {
+            return Lit::Null;
+        }
+        return Lit::F64 { v: left / right };
+    }
+    if op == "mod" && mysql_lit_is_integral_like(left) && mysql_lit_is_integral_like(right) {
+        let (Some(left), Some(right)) = (
+            mysql_integral_numeric_value(left),
+            mysql_integral_numeric_value(right),
+        ) else {
+            return Lit::Null;
+        };
+        if right == 0 {
+            return Lit::Null;
+        }
+        return mysql_numeric_binary_integral_result(left % right);
+    }
+    if mysql_lit_is_integral_like(left) && mysql_lit_is_integral_like(right) {
+        let (Some(left), Some(right)) = (
+            mysql_integral_numeric_value(left),
+            mysql_integral_numeric_value(right),
+        ) else {
+            return Lit::Null;
+        };
+        let value = match op {
+            "add" => left.saturating_add(right),
+            "sub" => left.saturating_sub(right),
+            "mul" => left.saturating_mul(right),
+            _ => return Lit::Null,
+        };
+        return mysql_numeric_binary_integral_result(value);
+    }
+    let (Some(left), Some(right)) = (lit_to_f64(left), lit_to_f64(right)) else {
+        return Lit::Null;
+    };
+    if op == "mod" {
+        if right == 0.0 {
+            return Lit::Null;
+        }
+        return Lit::F64 { v: left % right };
+    }
+    let value = match op {
+        "add" => left + right,
+        "sub" => left - right,
+        "mul" => left * right,
+        _ => return Lit::Null,
+    };
+    Lit::F64 { v: value }
+}
+
+fn mysql_if_condition_truth(lit: &Lit) -> Option<bool> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(*v),
+        Lit::I64 { v } => Some(*v != 0),
+        Lit::U64 { v } => Some(*v != 0),
+        Lit::F64 { v } => Some(*v != 0.0),
+        Lit::Dec { v } | Lit::Str { v } => v.parse::<f64>().ok().map(|v| v != 0.0),
+        _ => None,
+    }
+}
+
+fn mysql_left_chars(value: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    value.chars().take(count as usize).collect()
+}
+
+fn mysql_right_chars(value: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(count as usize);
+    chars[start..].iter().collect()
+}
+
+fn mysql_substring_chars(value: &str, position: i64, length: Option<i64>) -> String {
+    if matches!(length, Some(len) if len <= 0) || position == 0 {
+        return String::new();
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    let len = chars.len() as i64;
+    let start = if position > 0 {
+        position.saturating_sub(1)
+    } else {
+        len.saturating_add(position).max(0)
+    } as usize;
+    if start >= chars.len() {
+        return String::new();
+    }
+    let end = match length {
+        Some(len) => start.saturating_add(len as usize).min(chars.len()),
+        None => chars.len(),
+    };
+    chars[start..end].iter().collect()
+}
+
+fn mysql_locate_chars(needle: &str, haystack: &str, start: Option<i64>) -> u64 {
+    let haystack_chars = haystack.chars().collect::<Vec<_>>();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    let start = start.unwrap_or(1);
+    if start <= 0 {
+        return 0;
+    }
+    let start_idx = start.saturating_sub(1) as usize;
+    if needle_chars.is_empty() {
+        return start as u64;
+    }
+    if start_idx >= haystack_chars.len() || needle_chars.len() > haystack_chars.len() {
+        return 0;
+    }
+    for idx in start_idx..=haystack_chars.len() - needle_chars.len() {
+        if haystack_chars[idx..idx + needle_chars.len()] == needle_chars[..] {
+            return (idx + 1) as u64;
+        }
+    }
+    0
+}
+
+fn mysql_find_in_set(needle: &str, haystack: &str) -> u64 {
+    if needle.contains(',') || haystack.is_empty() {
+        return 0;
+    }
+    haystack
+        .split(',')
+        .position(|candidate| candidate == needle)
+        .map(|idx| idx as u64 + 1)
+        .unwrap_or(0)
+}
+
+fn mysql_date_time_parts_with_defaults(lit: &Lit) -> Option<(MySqlDateParts, MySqlTimeParts)> {
+    let (date, time) = mysql_parse_date_time_lit_parts(lit)?;
+    Some((
+        date?,
+        time.unwrap_or(MySqlTimeParts {
+            hour: 0,
+            minute: 0,
+            second: 0,
+        }),
+    ))
+}
+
+fn mysql_datediff_lit(left: &Lit, right: &Lit) -> Option<i64> {
+    let left_date = mysql_parse_date_time_lit_parts(left)?.0?;
+    let right_date = mysql_parse_date_time_lit_parts(right)?.0?;
+    Some(mysql_days_from_civil(left_date) - mysql_days_from_civil(right_date))
+}
+
+fn mysql_round_number(value: f64, decimals: i64) -> f64 {
+    let clamped = decimals.clamp(-18, 18) as i32;
+    if clamped >= 0 {
+        let factor = 10_f64.powi(clamped);
+        (value * factor).round() / factor
+    } else {
+        let factor = 10_f64.powi(-clamped);
+        (value / factor).round() * factor
+    }
+}
+
+fn mysql_cast_to_u64(lit: &Lit) -> Option<u64> {
+    match lit {
+        Lit::U64 { v } => Some(*v),
+        Lit::I64 { v } => Some(*v as u64),
+        Lit::F64 { v } => Some(*v as u64),
+        Lit::Dec { v } => v
+            .parse::<f64>()
+            .ok()
+            .map(|value| value as i64 as u64)
+            .or_else(|| v.parse::<u64>().ok()),
+        Lit::Str { v } => v
+            .parse::<i64>()
+            .ok()
+            .map(|value| value as u64)
+            .or_else(|| v.parse::<u64>().ok()),
+        _ => None,
+    }
+}
+
+fn mysql_cast_iso_lit(kind: &str, text: String) -> Lit {
+    match kind {
+        "date" => Lit::Date { iso: text },
+        "time" => Lit::Time { iso: text },
+        _ => Lit::Datetime { iso: text },
+    }
+}
+
+fn mysql_cast_lit(value: Lit, target: &TypeDesc) -> anyhow::Result<Lit> {
+    if matches!(value, Lit::Null) {
+        return Ok(Lit::Null);
+    }
+    Ok(match target.kind.as_str() {
+        "bool" => match mysql_if_condition_truth(&value) {
+            Some(v) => Lit::Bool { v },
+            None => Lit::Null,
+        },
+        "i64" => lit_to_i64(&value)
+            .map(|v| Lit::I64 { v })
+            .unwrap_or(Lit::Null),
+        "u64" => mysql_cast_to_u64(&value)
+            .map(|v| Lit::U64 { v })
+            .unwrap_or(Lit::Null),
+        "f64" => lit_to_f64(&value)
+            .map(|v| Lit::F64 { v })
+            .unwrap_or(Lit::Null),
+        "bytes" => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            Lit::Bytes {
+                b64: BASE64_STANDARD.encode(text.as_bytes()),
+            }
+        }
+        "json" => match value {
+            Lit::Json { .. } => value,
+            Lit::Str { ref v } => match serde_json::from_str::<serde_json::Value>(v) {
+                Ok(json) => Lit::Json { v: json },
+                Err(_) => Lit::Null,
+            },
+            other => Lit::Json {
+                v: lit_to_json_value(other)?,
+            },
+        },
+        "date" | "time" | "datetime" => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            mysql_cast_iso_lit(&target.kind, text)
+        }
+        _ => {
+            let Some(text) = lit_to_string_for_like(&value) else {
+                return Ok(Lit::Null);
+            };
+            Lit::Str { v: text }
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlDateParts {
+    year: i32,
+    month: u8,
+    day: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MySqlTimeParts {
+    hour: u8,
+    minute: u8,
+    second: u8,
+}
+
+fn mysql_is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn mysql_days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if mysql_is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn mysql_parse_date_parts(text: &str) -> Option<MySqlDateParts> {
+    let trimmed = text.trim();
+    let parts = trimmed.split('-').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year = parts[0].parse::<i32>().ok()?;
+    let month = parts[1].parse::<u8>().ok()?;
+    let day = parts[2].parse::<u8>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if day == 0 || day > mysql_days_in_month(year, month) {
+        return None;
+    }
+    Some(MySqlDateParts { year, month, day })
+}
+
+fn mysql_parse_time_parts(text: &str) -> Option<MySqlTimeParts> {
+    let trimmed = text.trim();
+    let trimmed = trimmed.strip_suffix('Z').unwrap_or(trimmed);
+    let trimmed = trimmed.split('.').next().unwrap_or(trimmed);
+    let trimmed = if trimmed.len() > 8 {
+        let bytes = trimmed.as_bytes();
+        if matches!(bytes.get(8), Some(b'+') | Some(b'-')) {
+            &trimmed[..8]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let parts = trimmed.split(':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    let hour = parts[0].parse::<u8>().ok()?;
+    let minute = parts[1].parse::<u8>().ok()?;
+    let second = parts[2].parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(MySqlTimeParts {
+        hour,
+        minute,
+        second,
+    })
+}
+
+fn mysql_parse_date_time_lit_parts(
+    lit: &Lit,
+) -> Option<(Option<MySqlDateParts>, Option<MySqlTimeParts>)> {
+    let text = lit_to_string_for_like(lit)?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((date_text, time_text)) =
+        trimmed.split_once('T').or_else(|| trimmed.split_once(' '))
+    {
+        let date = mysql_parse_date_parts(date_text.trim())?;
+        let time = mysql_parse_time_parts(time_text.trim())?;
+        return Some((Some(date), Some(time)));
+    }
+    if trimmed.contains('-') {
+        return Some((Some(mysql_parse_date_parts(trimmed)?), None));
+    }
+    if trimmed.contains(':') {
+        return Some((None, Some(mysql_parse_time_parts(trimmed)?)));
+    }
+    None
+}
+
+fn mysql_days_from_civil(date: MySqlDateParts) -> i64 {
+    let year = date.year - i32::from(date.month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i32::from(date.month);
+    let day = i32::from(date.day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468
+}
+
+fn mysql_civil_from_days(days: i64) -> MySqlDateParts {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era as i32 + era as i32 * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u8;
+    let month = (month_prime + if month_prime < 10 { 3 } else { -9 }) as u8;
+    year += i32::from(month <= 2);
+    MySqlDateParts { year, month, day }
+}
+
+fn mysql_format_date_parts(date: MySqlDateParts) -> String {
+    format!("{:04}-{:02}-{:02}", date.year, date.month, date.day)
+}
+
+fn mysql_format_time_parts(time: MySqlTimeParts) -> String {
+    format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second)
+}
+
+fn mysql_format_datetime_parts(date: MySqlDateParts, time: MySqlTimeParts) -> String {
+    format!(
+        "{} {}",
+        mysql_format_date_parts(date),
+        mysql_format_time_parts(time)
+    )
+}
+
+const MYSQL_WEEKDAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+const MYSQL_WEEKDAY_SHORT_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+const MYSQL_MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+const MYSQL_MONTH_SHORT_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn mysql_datetime_parts_from_unix_seconds(seconds: i64) -> (MySqlDateParts, MySqlTimeParts) {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let date = mysql_civil_from_days(days);
+    let time = MySqlTimeParts {
+        hour: (seconds_of_day / 3_600) as u8,
+        minute: ((seconds_of_day % 3_600) / 60) as u8,
+        second: (seconds_of_day % 60) as u8,
+    };
+    (date, time)
+}
+
+fn mysql_day_of_year(date: MySqlDateParts) -> u16 {
+    let month_lengths = [
+        31u16,
+        if mysql_is_leap_year(date.year) {
+            29
+        } else {
+            28
+        },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    month_lengths[..date.month.saturating_sub(1) as usize]
+        .iter()
+        .copied()
+        .sum::<u16>()
+        + u16::from(date.day)
+}
+
+fn mysql_weekday_index(date: MySqlDateParts) -> usize {
+    (mysql_days_from_civil(date) + 4).rem_euclid(7) as usize
+}
+
+fn mysql_weekday_monday_index(date: MySqlDateParts) -> i64 {
+    ((mysql_weekday_index(date) + 6) % 7) as i64
+}
+
+fn mysql_quarter(date: MySqlDateParts) -> i64 {
+    i64::from((date.month.saturating_sub(1) / 3) + 1)
+}
+
+fn mysql_extract_datetime_unit_lit(unit: &str, value: &Lit) -> Option<Lit> {
+    let normalized = unit.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "year" | "quarter" | "month" | "day" | "dayofmonth" | "weekday" | "dayofweek"
+        | "dayofyear" => {
+            let (Some(date), _) = mysql_parse_date_time_lit_parts(value)? else {
+                return None;
+            };
+            let out = match normalized.as_str() {
+                "year" => i64::from(date.year),
+                "quarter" => mysql_quarter(date),
+                "month" => i64::from(date.month),
+                "weekday" => mysql_weekday_monday_index(date),
+                "dayofweek" => mysql_weekday_index(date) as i64 + 1,
+                "dayofyear" => i64::from(mysql_day_of_year(date)),
+                _ => i64::from(date.day),
+            };
+            Some(Lit::I64 { v: out })
+        }
+        "hour" | "minute" | "second" => {
+            let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+            let time = time.unwrap_or(MySqlTimeParts {
+                hour: 0,
+                minute: 0,
+                second: 0,
+            });
+            if time.hour == 0 && time.minute == 0 && time.second == 0 && date.is_none() {
+                return None;
+            }
+            let out = match normalized.as_str() {
+                "hour" => i64::from(time.hour),
+                "minute" => i64::from(time.minute),
+                _ => i64::from(time.second),
+            };
+            Some(Lit::I64 { v: out })
+        }
+        _ => None,
+    }
+}
+
+fn mysql_last_day_lit(value: &Lit) -> Option<Lit> {
+    let (Some(date), _) = mysql_parse_date_time_lit_parts(value)? else {
+        return None;
+    };
+    Some(Lit::Date {
+        iso: mysql_format_date_parts(MySqlDateParts {
+            year: date.year,
+            month: date.month,
+            day: mysql_days_in_month(date.year, date.month),
+        }),
+    })
+}
+
+fn mysql_12_hour(hour: u8) -> u8 {
+    match hour % 12 {
+        0 => 12,
+        v => v,
+    }
+}
+
+fn mysql_format_date_time_for_mysql(
+    date: Option<MySqlDateParts>,
+    time: Option<MySqlTimeParts>,
+    format: &str,
+) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        let Some(token) = chars.next() else {
+            out.push('%');
+            break;
+        };
+        match token {
+            '%' => out.push('%'),
+            'Y' => out.push_str(&format!("{:04}", date?.year)),
+            'y' => out.push_str(&format!("{:02}", date?.year.rem_euclid(100))),
+            'm' => out.push_str(&format!("{:02}", date?.month)),
+            'c' => out.push_str(&date?.month.to_string()),
+            'd' => out.push_str(&format!("{:02}", date?.day)),
+            'e' => out.push_str(&date?.day.to_string()),
+            'H' => out.push_str(&format!("{:02}", time?.hour)),
+            'k' => out.push_str(&time?.hour.to_string()),
+            'h' | 'I' => out.push_str(&format!("{:02}", mysql_12_hour(time?.hour))),
+            'l' => out.push_str(&mysql_12_hour(time?.hour).to_string()),
+            'i' => out.push_str(&format!("{:02}", time?.minute)),
+            's' | 'S' => out.push_str(&format!("{:02}", time?.second)),
+            'f' => out.push_str("000000"),
+            'p' => out.push_str(if time?.hour < 12 { "AM" } else { "PM" }),
+            'T' => out.push_str(&mysql_format_time_parts(time?)),
+            'r' => out.push_str(&format!(
+                "{:02}:{:02}:{:02} {}",
+                mysql_12_hour(time?.hour),
+                time?.minute,
+                time?.second,
+                if time?.hour < 12 { "AM" } else { "PM" }
+            )),
+            'M' => out.push_str(MYSQL_MONTH_NAMES.get(date?.month.saturating_sub(1) as usize)?),
+            'b' => {
+                out.push_str(MYSQL_MONTH_SHORT_NAMES.get(date?.month.saturating_sub(1) as usize)?)
+            }
+            'W' => out.push_str(MYSQL_WEEKDAY_NAMES.get(mysql_weekday_index(date?))?),
+            'a' => out.push_str(MYSQL_WEEKDAY_SHORT_NAMES.get(mysql_weekday_index(date?))?),
+            'j' => out.push_str(&format!("{:03}", mysql_day_of_year(date?))),
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+fn mysql_current_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn mysql_current_date_time_parts() -> (MySqlDateParts, MySqlTimeParts) {
+    mysql_datetime_parts_from_unix_seconds(mysql_current_unix_seconds())
+}
+
+fn mysql_current_datetime_lit() -> Lit {
+    let (date, time) = mysql_current_date_time_parts();
+    Lit::Datetime {
+        iso: mysql_format_datetime_parts(date, time),
+    }
+}
+
+fn mysql_current_date_lit() -> Lit {
+    let (date, _) = mysql_current_date_time_parts();
+    Lit::Date {
+        iso: mysql_format_date_parts(date),
+    }
+}
+
+fn mysql_current_time_lit() -> Lit {
+    let (_, time) = mysql_current_date_time_parts();
+    Lit::Time {
+        iso: mysql_format_time_parts(time),
+    }
+}
+
+/// Parse a date/datetime from a string using MySQL %-format specifiers (inverse of DATE_FORMAT).
+fn mysql_str_to_date(input: &str, format: &str) -> Option<Lit> {
+    let mut year: Option<i32> = None;
+    let mut month: Option<u8> = None;
+    let mut day: Option<u8> = None;
+    let mut hour: Option<u8> = None;
+    let mut minute: Option<u8> = None;
+    let mut second: Option<u8> = None;
+
+    let input_bytes = input.as_bytes();
+    let mut pos = 0usize;
+    let mut fmt_chars = format.chars();
+    while let Some(ch) = fmt_chars.next() {
+        if ch != '%' {
+            if pos < input_bytes.len() && input_bytes[pos] == ch as u8 {
+                pos += 1;
+            }
+            continue;
+        }
+        let Some(token) = fmt_chars.next() else { break };
+        match token {
+            'Y' => {
+                let (v, adv) = parse_digits(input, pos, 4)?;
+                year = Some(v as i32);
+                pos += adv;
+            }
+            'y' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                year = Some(if v >= 70 {
+                    1900 + v as i32
+                } else {
+                    2000 + v as i32
+                });
+                pos += adv;
+            }
+            'm' | 'c' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                month = Some(v as u8);
+                pos += adv;
+            }
+            'd' | 'e' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                day = Some(v as u8);
+                pos += adv;
+            }
+            'H' | 'k' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                hour = Some(v as u8);
+                pos += adv;
+            }
+            'h' | 'I' | 'l' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                hour = Some(v as u8);
+                pos += adv;
+            }
+            'i' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                minute = Some(v as u8);
+                pos += adv;
+            }
+            's' | 'S' => {
+                let (v, adv) = parse_digits(input, pos, 2)?;
+                second = Some(v as u8);
+                pos += adv;
+            }
+            _ => {}
+        }
+    }
+
+    let has_time = hour.is_some() || minute.is_some() || second.is_some();
+    if year.is_some() || month.is_some() || day.is_some() {
+        let date = MySqlDateParts {
+            year: year.unwrap_or(0),
+            month: month.unwrap_or(0),
+            day: day.unwrap_or(0),
+        };
+        if has_time {
+            let time = MySqlTimeParts {
+                hour: hour.unwrap_or(0),
+                minute: minute.unwrap_or(0),
+                second: second.unwrap_or(0),
+            };
+            Some(Lit::Datetime {
+                iso: mysql_format_datetime_parts(date, time),
+            })
+        } else {
+            Some(Lit::Date {
+                iso: mysql_format_date_parts(date),
+            })
+        }
+    } else if has_time {
+        let time = MySqlTimeParts {
+            hour: hour.unwrap_or(0),
+            minute: minute.unwrap_or(0),
+            second: second.unwrap_or(0),
+        };
+        Some(Lit::Time {
+            iso: mysql_format_time_parts(time),
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse up to `max_digits` decimal digits starting at `pos` in `input`.
+fn parse_digits(input: &str, pos: usize, max_digits: usize) -> Option<(u64, usize)> {
+    let bytes = input.as_bytes();
+    let mut value = 0u64;
+    let mut count = 0usize;
+    while count < max_digits && pos + count < bytes.len() && bytes[pos + count].is_ascii_digit() {
+        value = value * 10 + u64::from(bytes[pos + count] - b'0');
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    Some((value, count))
+}
+
+/// ISO week number for a date (Monday-based, ISO 8601).
+fn mysql_iso_week(date: MySqlDateParts) -> u8 {
+    let jan4 = MySqlDateParts {
+        year: date.year,
+        month: 1,
+        day: 4,
+    };
+    let jan4_dow = (mysql_days_from_civil(jan4) + 3).rem_euclid(7); // 0=Mon
+    let iso_year_start = mysql_days_from_civil(jan4) - jan4_dow;
+    let current_day = mysql_days_from_civil(date);
+    let diff = current_day - iso_year_start;
+    if diff < 0 {
+        // Belongs to last week of previous year
+        let prev_jan4 = MySqlDateParts {
+            year: date.year - 1,
+            month: 1,
+            day: 4,
+        };
+        let prev_jan4_dow = (mysql_days_from_civil(prev_jan4) + 3).rem_euclid(7);
+        let prev_iso_start = mysql_days_from_civil(prev_jan4) - prev_jan4_dow;
+        return ((current_day - prev_iso_start) / 7 + 1) as u8;
+    }
+    let week = (diff / 7 + 1) as u8;
+    if week > 52 {
+        // Check if it belongs to week 1 of next year
+        let next_jan4 = MySqlDateParts {
+            year: date.year + 1,
+            month: 1,
+            day: 4,
+        };
+        let next_jan4_dow = (mysql_days_from_civil(next_jan4) + 3).rem_euclid(7);
+        let next_iso_start = mysql_days_from_civil(next_jan4) - next_jan4_dow;
+        if current_day >= next_iso_start {
+            return 1;
+        }
+    }
+    week
+}
+
+/// CONVERT_TZ: apply numeric hour offset conversion.
+fn mysql_convert_tz(value: &Lit, from_tz: &str, to_tz: &str) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    let from_offset = mysql_parse_tz_offset(from_tz)?;
+    let to_offset = mysql_parse_tz_offset(to_tz)?;
+    let delta = to_offset - from_offset;
+    if delta == 0 {
+        return Some(value.clone());
+    }
+    let base_seconds = mysql_days_from_civil(date) * 86_400
+        + i64::from(time.hour) * 3_600
+        + i64::from(time.minute) * 60
+        + i64::from(time.second)
+        + delta;
+    let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base_seconds);
+    Some(Lit::Datetime {
+        iso: mysql_format_datetime_parts(new_date, new_time),
+    })
+}
+
+fn mysql_parse_tz_offset(tz: &str) -> Option<i64> {
+    let trimmed = tz.trim();
+    if trimmed.eq_ignore_ascii_case("utc") || trimmed == "+00:00" || trimmed == "-00:00" {
+        return Some(0);
+    }
+    let (sign, rest) = if let Some(rest) = trimmed.strip_prefix('+') {
+        (1i64, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('-') {
+        (-1i64, rest)
+    } else {
+        return None;
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hours = parts[0].parse::<i64>().ok()?;
+    let minutes = parts[1].parse::<i64>().ok()?;
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+/// Parse a time string like "HH:MM:SS" or "HH:MM" into total seconds.
+fn mysql_time_str_to_seconds(s: &str) -> Option<i64> {
+    let trimmed = s.trim();
+    let (sign, rest) = if let Some(r) = trimmed.strip_prefix('-') {
+        (-1i64, r)
+    } else {
+        (1i64, trimmed)
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    match parts.len() {
+        3 => {
+            let h = parts[0].parse::<i64>().ok()?;
+            let m = parts[1].parse::<i64>().ok()?;
+            let s = parts[2].parse::<i64>().ok()?;
+            Some(sign * (h * 3_600 + m * 60 + s))
+        }
+        2 => {
+            let h = parts[0].parse::<i64>().ok()?;
+            let m = parts[1].parse::<i64>().ok()?;
+            Some(sign * (h * 3_600 + m * 60))
+        }
+        1 => {
+            let s = parts[0].parse::<i64>().ok()?;
+            Some(sign * s)
+        }
+        _ => None,
+    }
+}
+
+/// Add seconds to a datetime/date/time Lit.
+fn mysql_datetime_add_seconds(value: &Lit, secs: i64) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let had_time = time.is_some();
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    let base = mysql_days_from_civil(date) * 86_400
+        + i64::from(time.hour) * 3_600
+        + i64::from(time.minute) * 60
+        + i64::from(time.second)
+        + secs;
+    let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base);
+    Some(if had_time {
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(new_date, new_time),
+        }
+    } else {
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(new_date, new_time),
+        }
+    })
+}
+
+/// SEC_TO_TIME: convert integer seconds to a time string.
+fn mysql_seconds_to_time_lit(secs: i64) -> Lit {
+    let sign = if secs < 0 { "-" } else { "" };
+    let abs = secs.unsigned_abs();
+    let h = abs / 3_600;
+    let m = (abs % 3_600) / 60;
+    let s = abs % 60;
+    Lit::Str {
+        v: format!("{}{:02}:{:02}:{:02}", sign, h, m, s),
+    }
+}
+
+fn mysql_unix_timestamp_from_lit(lit: &Lit) -> Option<i64> {
+    let (date, time) = mysql_parse_date_time_lit_parts(lit)?;
+    let date = date?;
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    Some(
+        mysql_days_from_civil(date) * 86_400
+            + i64::from(time.hour) * 3_600
+            + i64::from(time.minute) * 60
+            + i64::from(time.second),
+    )
+}
+
+fn mysql_from_unixtime_lit(lit: &Lit, format: Option<&str>) -> Option<Lit> {
+    let seconds = lit_to_f64(lit)?;
+    if !seconds.is_finite() {
+        return None;
+    }
+    let (date, time) = mysql_datetime_parts_from_unix_seconds(seconds.trunc() as i64);
+    match format {
+        Some(pattern) => mysql_format_date_time_for_mysql(Some(date), Some(time), pattern)
+            .map(|v| Lit::Str { v }),
+        None => Some(Lit::Datetime {
+            iso: mysql_format_datetime_parts(date, time),
+        }),
+    }
+}
+
+fn mysql_normalize_interval_unit(unit: &str) -> String {
+    let normalized = unit.trim().to_ascii_lowercase();
+    normalized
+        .strip_prefix("sql_tsi_")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn mysql_add_months(date: MySqlDateParts, months: i64) -> Option<MySqlDateParts> {
+    let total_months = i64::from(date.year) * 12 + i64::from(date.month) - 1 + months;
+    let year = i32::try_from(total_months.div_euclid(12)).ok()?;
+    let month = total_months.rem_euclid(12) as u8 + 1;
+    let day = date.day.min(mysql_days_in_month(year, month));
+    Some(MySqlDateParts { year, month, day })
+}
+
+fn mysql_datetime_add_interval_lit(value: &Lit, unit: &str, amount: i64) -> Option<Lit> {
+    let (date, time) = mysql_parse_date_time_lit_parts(value)?;
+    let date = date?;
+    let had_time = time.is_some();
+    let time = time.unwrap_or(MySqlTimeParts {
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    let normalized = mysql_normalize_interval_unit(unit);
+    let wants_datetime = matches!(normalized.as_str(), "hour" | "minute" | "second") || had_time;
+
+    let (next_date, next_time) = match normalized.as_str() {
+        "year" => (mysql_add_months(date, amount.saturating_mul(12))?, time),
+        "quarter" => (mysql_add_months(date, amount.saturating_mul(3))?, time),
+        "month" => (mysql_add_months(date, amount)?, time),
+        "week" | "day" | "hour" | "minute" | "second" => {
+            let factor = match normalized.as_str() {
+                "week" => 86_400 * 7,
+                "day" => 86_400,
+                "hour" => 3_600,
+                "minute" => 60,
+                _ => 1,
+            };
+            let base_seconds = mysql_days_from_civil(date)
+                .checked_mul(86_400)?
+                .checked_add(i64::from(time.hour) * 3_600)?
+                .checked_add(i64::from(time.minute) * 60)?
+                .checked_add(i64::from(time.second))?;
+            let target_seconds = base_seconds.checked_add(amount.checked_mul(factor)?)?;
+            mysql_datetime_parts_from_unix_seconds(target_seconds)
+        }
+        _ => return None,
+    };
+
+    Some(if wants_datetime {
+        Lit::Datetime {
+            iso: mysql_format_datetime_parts(next_date, next_time),
+        }
+    } else {
+        Lit::Date {
+            iso: mysql_format_date_parts(next_date),
+        }
+    })
+}
+
+fn mysql_timestampdiff_lit(unit: &str, start: &Lit, end: &Lit) -> Option<i64> {
+    let normalized = mysql_normalize_interval_unit(unit);
+    match normalized.as_str() {
+        "month" | "quarter" | "year" => {
+            let start = mysql_date_time_parts_with_defaults(start)?;
+            let end = mysql_date_time_parts_with_defaults(end)?;
+            let mut months = i64::from(end.0.year - start.0.year) * 12 + i64::from(end.0.month)
+                - i64::from(start.0.month);
+            let end_partial = (end.0.day, end.1.hour, end.1.minute, end.1.second);
+            let start_partial = (start.0.day, start.1.hour, start.1.minute, start.1.second);
+            if months > 0 && end_partial < start_partial {
+                months -= 1;
+            } else if months < 0 && end_partial > start_partial {
+                months += 1;
+            }
+            Some(match normalized.as_str() {
+                "month" => months,
+                "quarter" => months / 3,
+                _ => months / 12,
+            })
+        }
+        _ => {
+            let start_seconds = mysql_unix_timestamp_from_lit(start)?;
+            let end_seconds = mysql_unix_timestamp_from_lit(end)?;
+            let diff_seconds = end_seconds - start_seconds;
+            Some(match normalized.as_str() {
+                "microsecond" => diff_seconds.saturating_mul(1_000_000),
+                "second" => diff_seconds,
+                "minute" => diff_seconds / 60,
+                "hour" => diff_seconds / 3_600,
+                "day" => diff_seconds / 86_400,
+                "week" => diff_seconds / (86_400 * 7),
+                _ => return None,
+            })
+        }
     }
 }
 
@@ -8676,6 +13084,90 @@ fn build_secondary_index(
     }
 }
 
+fn secondary_index_row_key(columns: &[String], row: &RowObject) -> Option<String> {
+    let mut values = Vec::with_capacity(columns.len());
+    for col in columns {
+        let value = row.get(col)?.clone();
+        values.push(value);
+    }
+    if values.is_empty() {
+        return None;
+    }
+    Some(secondary_index_value_key(&values))
+}
+
+fn rebuild_secondary_indexes_if_stale(
+    schema: &TableSchema,
+    tdata: &TableData,
+) -> anyhow::Result<()> {
+    ensure_mysql_compat_secondary_indexes(schema, tdata);
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        if index.built_version != schema.table_version {
+            *index = build_secondary_index(
+                schema.table_version,
+                &index.columns,
+                &index.include,
+                &tdata.rows,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn secondary_index_add_row(tdata: &TableData, idx: usize, row: &RowObject) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        let Some(key) = secondary_index_row_key(&index.columns, row) else {
+            continue;
+        };
+        index.keys.entry(key).or_default().push(idx);
+    }
+    Ok(())
+}
+
+fn secondary_index_remove_row(
+    tdata: &TableData,
+    idx: usize,
+    row: &RowObject,
+) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        let Some(key) = secondary_index_row_key(&index.columns, row) else {
+            continue;
+        };
+        let mut remove_bucket = false;
+        if let Some(values) = index.keys.get_mut(&key) {
+            values.retain(|candidate| *candidate != idx);
+            remove_bucket = values.is_empty();
+        }
+        if remove_bucket {
+            index.keys.remove(&key);
+        }
+    }
+    Ok(())
+}
+
+fn set_secondary_indexes_built_version(tdata: &TableData, version: u64) -> anyhow::Result<()> {
+    let mut guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in guard.values_mut() {
+        index.built_version = version;
+    }
+    Ok(())
+}
+
 fn register_secondary_index(
     schema: &TableSchema,
     tdata: &TableData,
@@ -8722,6 +13214,7 @@ fn secondary_index_candidates(
     tdata: &TableData,
     filters: &HashMap<String, Lit>,
 ) -> Option<Vec<usize>> {
+    ensure_mysql_compat_secondary_indexes(schema, tdata);
     let mut guard = tdata.secondary_indexes.lock().ok()?;
     if guard.is_empty() {
         return None;
@@ -8855,9 +13348,15 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Cryptographic-quality PRNG for differential privacy noise generation.
+///
+/// Uses a keyed construction: each output is `value_id(key || counter)`, then
+/// the first 8 bytes are taken as a u64. This provides statistical quality far
+/// superior to an LCG while remaining deterministic for reproducibility.
 #[derive(Debug, Clone)]
 struct DpRng {
-    state: u64,
+    key: [u8; 16],
+    counter: u64,
 }
 
 impl DpRng {
@@ -8867,12 +13366,21 @@ impl DpRng {
         } else {
             seed
         };
-        Self { state: seed }
+        // Derive a 128-bit key from the seed via value_id.
+        let id = value_id(&seed.to_le_bytes());
+        Self {
+            key: id,
+            counter: 0,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        self.state
+        let mut buf = [0u8; 24];
+        buf[..16].copy_from_slice(&self.key);
+        buf[16..].copy_from_slice(&self.counter.to_le_bytes());
+        let id = value_id(&buf);
+        self.counter = self.counter.wrapping_add(1);
+        u64::from_le_bytes(id[..8].try_into().unwrap())
     }
 
     fn next_f64(&mut self) -> f64 {
@@ -8940,13 +13448,112 @@ fn dp_refresh_budget(budget: &mut DpBudget, now_ms: u64) {
     if now_ms.saturating_sub(budget.refreshed_at_ms) >= window {
         budget.consumed_epsilon = 0.0;
         budget.consumed_delta = 0.0;
+        budget.rdp_alphas.clear();
+        budget.query_count = 0;
         budget.refreshed_at_ms = now_ms;
     }
+}
+
+/// Default RDP alpha orders for composition tracking.
+const RDP_ALPHA_ORDERS: &[f64] = &[2.0, 3.0, 5.0, 10.0, 25.0, 50.0, 100.0];
+
+/// Compute the Rényi DP cost of a single Gaussian mechanism query at order α.
+/// For Gaussian with σ = sensitivity * sqrt(2 ln(1.25/δ)) / ε:
+///   RDP(α) = α * sensitivity² / (2 * σ²)
+fn rdp_gaussian_cost(alpha: f64, sensitivity: f64, sigma: f64) -> f64 {
+    if sigma <= 0.0 || alpha <= 1.0 {
+        return f64::INFINITY;
+    }
+    alpha * sensitivity * sensitivity / (2.0 * sigma * sigma)
+}
+
+/// Compute the Rényi DP cost of a single Laplace mechanism query at order α.
+/// RDP(α) = (1/(α-1)) * ln( α/(2α-1) * exp((α-1)/b) + (α-1)/(2α-1) * exp(-α/b) )
+/// where b = sensitivity / ε (the scale parameter).
+fn rdp_laplace_cost(alpha: f64, sensitivity: f64, epsilon: f64) -> f64 {
+    if epsilon <= 0.0 || alpha <= 1.0 || sensitivity <= 0.0 {
+        return f64::INFINITY;
+    }
+    let b = sensitivity / epsilon;
+    let a = alpha;
+    let t1 = a / (2.0 * a - 1.0) * ((a - 1.0) / b).exp();
+    let t2 = (a - 1.0) / (2.0 * a - 1.0) * (-a / b).exp();
+    (t1 + t2).ln() / (a - 1.0)
+}
+
+/// Convert RDP guarantee at order α to (ε,δ)-DP: ε = rdp_eps - ln(δ)/(α-1).
+fn rdp_to_eps_delta(alpha: f64, rdp_eps: f64, delta: f64) -> f64 {
+    if alpha <= 1.0 || delta <= 0.0 {
+        return f64::INFINITY;
+    }
+    rdp_eps - delta.ln() / (alpha - 1.0)
+}
+
+/// Update RDP composition tracker and return the tightest (ε,δ)-DP bound.
+fn dp_rdp_compose(
+    budget: &mut DpBudget,
+    mechanism: &str,
+    sensitivity: f64,
+    epsilon: f64,
+    delta: f64,
+) -> f64 {
+    if budget.rdp_alphas.is_empty() {
+        budget.rdp_alphas = RDP_ALPHA_ORDERS.iter().map(|&a| (a, 0.0)).collect();
+    }
+
+    for entry in budget.rdp_alphas.iter_mut() {
+        let (alpha, accumulated) = entry;
+        let cost = match mechanism {
+            "gaussian" => {
+                let sigma = if epsilon > 0.0 && delta > 0.0 {
+                    sensitivity * (2.0 * (1.25 / delta).ln()).sqrt() / epsilon
+                } else {
+                    0.0
+                };
+                rdp_gaussian_cost(*alpha, sensitivity, sigma)
+            }
+            _ => rdp_laplace_cost(*alpha, sensitivity, epsilon),
+        };
+        *accumulated += cost;
+    }
+    budget.query_count += 1;
+
+    // Find the tightest bound across all alpha orders.
+    let target_delta = if budget.total_delta > 0.0 {
+        budget.total_delta
+    } else {
+        1e-5
+    };
+    budget
+        .rdp_alphas
+        .iter()
+        .map(|(alpha, rdp_eps)| rdp_to_eps_delta(*alpha, *rdp_eps, target_delta))
+        .fold(f64::INFINITY, f64::min)
 }
 
 fn dp_budget_summary(budget: &DpBudget) -> serde_json::Value {
     let remaining_epsilon = (budget.total_epsilon - budget.consumed_epsilon).max(0.0);
     let remaining_delta = (budget.total_delta - budget.consumed_delta).max(0.0);
+    // Compute tightest RDP-based epsilon bound.
+    let target_delta = if budget.total_delta > 0.0 {
+        budget.total_delta
+    } else {
+        1e-5
+    };
+    let rdp_epsilon = if budget.rdp_alphas.is_empty() {
+        None
+    } else {
+        let best = budget
+            .rdp_alphas
+            .iter()
+            .map(|(alpha, rdp_eps)| rdp_to_eps_delta(*alpha, *rdp_eps, target_delta))
+            .fold(f64::INFINITY, f64::min);
+        if best.is_finite() {
+            Some(best)
+        } else {
+            None
+        }
+    };
     serde_json::json!({
         "principal": budget.principal,
         "total_epsilon": budget.total_epsilon,
@@ -8956,7 +13563,9 @@ fn dp_budget_summary(budget: &DpBudget) -> serde_json::Value {
         "remaining_epsilon": remaining_epsilon,
         "remaining_delta": remaining_delta,
         "refresh_window_ms": budget.refresh_window_ms,
-        "refreshed_at_ms": budget.refreshed_at_ms
+        "refreshed_at_ms": budget.refreshed_at_ms,
+        "rdp_composed_epsilon": rdp_epsilon,
+        "query_count": budget.query_count
     })
 }
 
@@ -9380,6 +13989,78 @@ fn forensic_record_hash(
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
     let id = value_id(&bytes);
     hex16(&id)
+}
+
+/// Compute a Merkle tree root over a sequence of forensic records.
+/// The tree is constructed as a binary hash tree over the record hashes.
+/// This provides O(log n) proof of inclusion for any record in the chain.
+fn forensic_merkle_root(records: &[ForensicRecord]) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
+    // Iteratively combine pairs until we reach a single root.
+    while hashes.len() > 1 {
+        let mut next = Vec::new();
+        let mut i = 0;
+        while i < hashes.len() {
+            if i + 1 < hashes.len() {
+                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
+                let id = value_id(combined.as_bytes());
+                next.push(hex16(&id));
+                i += 2;
+            } else {
+                // Odd element: promote unchanged.
+                next.push(hashes[i].clone());
+                i += 1;
+            }
+        }
+        hashes = next;
+    }
+    hashes.into_iter().next()
+}
+
+/// Generate a Merkle inclusion proof for a specific record index.
+/// Returns the sibling hashes needed to reconstruct the root.
+fn forensic_merkle_proof(records: &[ForensicRecord], target_idx: usize) -> Vec<(String, bool)> {
+    if records.is_empty() || target_idx >= records.len() {
+        return Vec::new();
+    }
+    let mut hashes: Vec<String> = records.iter().map(|r| r.hash.clone()).collect();
+    let mut proof = Vec::new();
+    let mut idx = target_idx;
+
+    while hashes.len() > 1 {
+        let mut next = Vec::new();
+        let mut i = 0;
+        let mut new_idx = 0;
+        while i < hashes.len() {
+            if i + 1 < hashes.len() {
+                if i == idx {
+                    // Target is left child; sibling is right.
+                    proof.push((hashes[i + 1].clone(), true));
+                    new_idx = next.len();
+                } else if i + 1 == idx {
+                    // Target is right child; sibling is left.
+                    proof.push((hashes[i].clone(), false));
+                    new_idx = next.len();
+                }
+                let combined = format!("{}:{}", hashes[i], hashes[i + 1]);
+                let id = value_id(combined.as_bytes());
+                next.push(hex16(&id));
+                i += 2;
+            } else {
+                if i == idx {
+                    new_idx = next.len();
+                }
+                next.push(hashes[i].clone());
+                i += 1;
+            }
+        }
+        hashes = next;
+        idx = new_idx;
+    }
+    proof
 }
 
 // -----------------------------
@@ -10102,19 +14783,67 @@ fn rows_to_objects(cols: &[ColumnMeta], rows: &[Vec<Lit>]) -> anyhow::Result<ser
 // -----------------------------
 
 const CAUSALITY_FORMAT_V1: &str = "etag_chain_v1";
+const CAUSALITY_FORMAT_V2: &str = "vector_clock_v2";
 
 fn build_causality_token(deps: &[CausalityDependency]) -> CausalityToken {
     CausalityToken {
-        format: CAUSALITY_FORMAT_V1.to_string(),
+        format: CAUSALITY_FORMAT_V2.to_string(),
         deps: deps.to_vec(),
     }
+}
+
+/// Merge two causality tokens, taking the component-wise maximum.
+/// This implements vector clock merge semantics: merged[t] = max(a[t], b[t]).
+fn merge_causality_tokens(a: &CausalityToken, b: &CausalityToken) -> CausalityToken {
+    let mut merged: BTreeMap<String, CausalityDependency> = BTreeMap::new();
+    for dep in a.deps.iter().chain(b.deps.iter()) {
+        let key = dep.table.clone();
+        let entry = merged.entry(key).or_insert_with(|| dep.clone());
+        // Take component-wise max.
+        if let (Some(cur_v), Some(new_v)) = (entry.v, dep.v) {
+            entry.v = Some(cur_v.max(new_v));
+        } else if dep.v.is_some() {
+            entry.v = dep.v;
+        }
+        if let (Some(cur_seq), Some(new_seq)) = (entry.change_seq, dep.change_seq) {
+            entry.change_seq = Some(cur_seq.max(new_seq));
+        } else if dep.change_seq.is_some() {
+            entry.change_seq = dep.change_seq;
+        }
+    }
+    CausalityToken {
+        format: CAUSALITY_FORMAT_V2.to_string(),
+        deps: merged.into_values().collect(),
+    }
+}
+
+/// Check if token `a` causally dominates token `b` (a >= b in all components).
+fn causality_dominates(a: &CausalityToken, b: &CausalityToken) -> bool {
+    for dep_b in &b.deps {
+        let dep_a = a.deps.iter().find(|d| d.table == dep_b.table);
+        let Some(dep_a) = dep_a else {
+            return false;
+        };
+        if let (Some(va), Some(vb)) = (dep_a.v, dep_b.v) {
+            if va < vb {
+                return false;
+            }
+        }
+        if let (Some(sa), Some(sb)) = (dep_a.change_seq, dep_b.change_seq) {
+            if sa < sb {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn ensure_min_causality(
     min: &CausalityToken,
     current: &[CausalityDependency],
 ) -> anyhow::Result<()> {
-    if min.format != CAUSALITY_FORMAT_V1 {
+    // Support both V1 and V2 formats.
+    if min.format != CAUSALITY_FORMAT_V1 && min.format != CAUSALITY_FORMAT_V2 {
         anyhow::bail!("invalid_request: unsupported causality format");
     }
 
@@ -10281,6 +15010,12 @@ fn mysql_compat_index_defs(schema: &TableSchema) -> Vec<CompatIndexDef> {
         .collect()
 }
 
+fn ensure_mysql_compat_secondary_indexes(schema: &TableSchema, tdata: &TableData) {
+    for index in mysql_compat_index_defs(schema) {
+        let _ = register_secondary_index(schema, tdata, &index.columns, &[]);
+    }
+}
+
 fn mysql_compat_indexes_json(schema: &TableSchema) -> Vec<serde_json::Value> {
     schema
         .compat_mysql
@@ -10333,13 +15068,6 @@ fn row_matches_compat_index(row: &RowObject, other: &RowObject, columns: &[Strin
     compared
 }
 
-#[derive(Debug, Clone)]
-struct MySqlCompatUniqueRuntimeIndex {
-    name: String,
-    columns: Vec<String>,
-    keys: HashMap<String, Vec<usize>>,
-}
-
 fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String> {
     let mut values = Vec::with_capacity(columns.len());
     for column in columns {
@@ -10355,77 +15083,59 @@ fn mysql_compat_unique_key(columns: &[String], row: &RowObject) -> Option<String
     Some(secondary_index_value_key(&values))
 }
 
-fn mysql_compat_unique_runtime_indexes(
+fn duplicate_key_message(index_name: &str) -> String {
+    format!("duplicate key for {index_name}")
+}
+
+fn primary_key_index_name(schema: &TableSchema) -> &str {
+    if schema.primary_key.is_empty() {
+        "PRIMARY KEY"
+    } else {
+        "PRIMARY"
+    }
+}
+
+fn primary_key_conflict_key(
     schema: &TableSchema,
-    tdata: &TableData,
-) -> Vec<MySqlCompatUniqueRuntimeIndex> {
-    mysql_compat_index_defs(schema)
-        .into_iter()
-        .filter(|index| index.unique)
-        .map(|index| {
-            let mut keys: HashMap<String, Vec<usize>> = HashMap::new();
-            for (idx, entry) in tdata.rows.iter().enumerate() {
-                if entry.deleted {
-                    continue;
-                }
-                let Some(key) = mysql_compat_unique_key(&index.columns, &entry.row) else {
-                    continue;
-                };
-                keys.entry(key).or_default().push(idx);
-            }
-            MySqlCompatUniqueRuntimeIndex {
-                name: index.name,
-                columns: index.columns,
-                keys,
-            }
-        })
-        .collect()
-}
-
-fn mysql_compat_unique_index_add_row(
-    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
-    idx: usize,
-    row: &RowObject,
-) {
-    for index in indexes.iter_mut() {
-        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
-            continue;
-        };
-        index.keys.entry(key).or_default().push(idx);
-    }
-}
-
-fn mysql_compat_unique_index_remove_row(
-    indexes: &mut [MySqlCompatUniqueRuntimeIndex],
-    idx: usize,
-    row: &RowObject,
-) {
-    for index in indexes.iter_mut() {
-        let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
-            continue;
-        };
-        let mut remove_bucket = false;
-        if let Some(values) = index.keys.get_mut(&key) {
-            values.retain(|candidate| *candidate != idx);
-            remove_bucket = values.is_empty();
-        }
-        if remove_bucket {
-            index.keys.remove(&key);
-        }
-    }
-}
-
-fn mysql_compat_unique_conflict(
-    indexes: &[MySqlCompatUniqueRuntimeIndex],
     tdata: &TableData,
     row: &RowObject,
     skip_idx: Option<usize>,
-) -> Option<String> {
-    for index in indexes {
+) -> anyhow::Result<Option<String>> {
+    let pk = extract_pk(schema, row)?;
+    let key = pk_key(&pk);
+    let conflict = tdata
+        .pk_index
+        .get(&key)
+        .copied()
+        .filter(|idx| skip_idx != Some(*idx))
+        .and_then(|idx| tdata.rows.get(idx))
+        .map(|entry| !entry.deleted)
+        .unwrap_or(false);
+    Ok(if conflict { Some(key) } else { None })
+}
+
+fn mysql_compat_unique_conflict(
+    schema: &TableSchema,
+    tdata: &TableData,
+    row: &RowObject,
+    skip_idx: Option<usize>,
+) -> anyhow::Result<Option<String>> {
+    rebuild_secondary_indexes_if_stale(schema, tdata)?;
+    let guard = tdata
+        .secondary_indexes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+    for index in mysql_compat_index_defs(schema)
+        .into_iter()
+        .filter(|index| index.unique)
+    {
         let Some(key) = mysql_compat_unique_key(&index.columns, row) else {
             continue;
         };
-        let Some(candidates) = index.keys.get(&key) else {
+        let Some(secondary) = guard.get(&secondary_index_key(&index.columns, &[])) else {
+            continue;
+        };
+        let Some(candidates) = secondary.keys.get(&key) else {
             continue;
         };
         for idx in candidates {
@@ -10439,11 +15149,31 @@ fn mysql_compat_unique_conflict(
                 continue;
             }
             if row_matches_compat_index(row, &entry.row, &index.columns) {
-                return Some(index.name.clone());
+                return Ok(Some(index.name));
             }
         }
     }
-    None
+    Ok(None)
+}
+
+fn mysql_compat_validate_unique_columns(
+    tdata: &TableData,
+    columns: &[String],
+    index_name: &str,
+) -> anyhow::Result<()> {
+    let mut seen = HashMap::<String, usize>::new();
+    for (idx, entry) in tdata.rows.iter().enumerate() {
+        if entry.deleted {
+            continue;
+        }
+        let Some(key) = mysql_compat_unique_key(columns, &entry.row) else {
+            continue;
+        };
+        if seen.insert(key, idx).is_some() {
+            anyhow::bail!("conflict: {}", duplicate_key_message(index_name));
+        }
+    }
+    Ok(())
 }
 
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
@@ -10572,6 +15302,40 @@ fn rename_mysql_compat_index_columns(schema: &mut TableSchema, old_name: &str, n
     };
 }
 
+fn remove_mysql_compat_index_column(schema: &mut TableSchema, column_name: &str) {
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    indexes.retain_mut(|entry| {
+        let Some(columns) = entry.get_mut("columns").and_then(|v| v.as_array_mut()) else {
+            return false;
+        };
+        columns.retain(|value| {
+            !value
+                .as_str()
+                .map(|name| name.eq_ignore_ascii_case(column_name))
+                .unwrap_or(false)
+        });
+        !columns.is_empty()
+    });
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+}
+
 fn set_mysql_compat_index(schema: &mut TableSchema, name: &str, columns: &[String], unique: bool) {
     let mut root = schema
         .compat_mysql
@@ -10641,6 +15405,48 @@ fn remove_mysql_compat_index(schema: &mut TableSchema, name: &str) -> bool {
         Some(serde_json::Value::Object(root))
     };
     removed
+}
+
+fn rename_mysql_compat_index(schema: &mut TableSchema, old_name: &str, new_name: &str) -> bool {
+    if old_name.eq_ignore_ascii_case(new_name) {
+        return false;
+    }
+    let mut root = schema
+        .compat_mysql
+        .take()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let mut indexes = root
+        .get("indexes")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut renamed = false;
+    for entry in indexes.iter_mut() {
+        let same_name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|existing| existing.eq_ignore_ascii_case(old_name))
+            .unwrap_or(false);
+        if !same_name {
+            continue;
+        }
+        if let Some(name) = entry.get_mut("name") {
+            *name = serde_json::Value::String(new_name.to_string());
+            renamed = true;
+        }
+        break;
+    }
+    if indexes.is_empty() {
+        root.remove("indexes");
+    } else {
+        root.insert("indexes".to_string(), serde_json::Value::Array(indexes));
+    }
+    schema.compat_mysql = if root.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(root))
+    };
+    renamed
 }
 
 #[derive(Debug, Clone)]
@@ -11121,6 +15927,379 @@ fn vector_score(metric: VectorMetric, a: &[f32], b: &[f32]) -> anyhow::Result<f6
     }
 }
 
+// ---------------------------------------------------
+// HNSW (Hierarchical Navigable Small World) graph index
+// ---------------------------------------------------
+
+/// Key for identifying a vector index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HnswIndexKey {
+    table: TableKey,
+    column: String,
+}
+
+/// A single node in the HNSW graph.
+#[derive(Debug, Clone)]
+struct HnswNode {
+    /// Index into the table's row array.
+    row_idx: usize,
+    /// Neighbors per layer. Layer 0 has M_max0 neighbors, others M_max.
+    neighbors: Vec<Vec<usize>>,
+}
+
+/// HNSW graph index for approximate nearest neighbor search.
+#[derive(Debug)]
+struct HnswIndex {
+    nodes: Vec<HnswNode>,
+    /// Entry point node index (top layer).
+    entry_point: Option<usize>,
+    /// Maximum layer in the graph.
+    max_layer: usize,
+    /// Maximum neighbors per layer (M parameter).
+    m: usize,
+    /// Maximum neighbors at layer 0.
+    m_max0: usize,
+    /// ef_construction: beam width during insert.
+    ef_construction: usize,
+    /// Dimensionality of vectors.
+    dims: u32,
+    /// Metric used for distance computation.
+    metric: VectorMetric,
+    /// ml = 1/ln(M) for layer assignment.
+    ml: f64,
+    /// Total vectors indexed.
+    count: usize,
+}
+
+impl HnswIndex {
+    fn new(dims: u32, metric: VectorMetric) -> Self {
+        let m = 16;
+        let m_max0 = 32;
+        Self {
+            nodes: Vec::new(),
+            entry_point: None,
+            max_layer: 0,
+            m,
+            m_max0,
+            ef_construction: 64,
+            dims,
+            metric,
+            ml: 1.0 / (m as f64).ln(),
+            count: 0,
+        }
+    }
+
+    /// Assign a random layer for a new node using the ml parameter.
+    fn random_layer(&self, seed: u64) -> usize {
+        let id = value_id(&seed.to_le_bytes());
+        let u = u64::from_le_bytes(id[..8].try_into().unwrap()) as f64 / u64::MAX as f64;
+        let u = u.max(1e-12);
+        ((-u.ln() * self.ml).floor() as usize).min(32)
+    }
+
+    /// Insert a vector into the HNSW index.
+    fn insert(
+        &mut self,
+        row_idx: usize,
+        vector: &[f32],
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) {
+        let node_idx = self.nodes.len();
+        let seed = (row_idx as u64)
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add(self.count as u64);
+        let level = self.random_layer(seed);
+
+        let mut node = HnswNode {
+            row_idx,
+            neighbors: vec![Vec::new(); level + 1],
+        };
+
+        if self.entry_point.is_none() {
+            self.entry_point = Some(node_idx);
+            self.max_layer = level;
+            self.nodes.push(node);
+            self.count += 1;
+            return;
+        }
+
+        let ep = self.entry_point.unwrap();
+        let mut current = ep;
+
+        // Greedy descent from top layer to level+1.
+        for l in (level + 1..=self.max_layer).rev() {
+            current = self.greedy_closest(current, vector, l, all_vectors);
+        }
+
+        // Insert at layers level..=0 with ef_construction beam search.
+        let target_level = level.min(self.max_layer);
+        for l in (0..=target_level).rev() {
+            let neighbors =
+                self.search_layer(current, vector, self.ef_construction, l, all_vectors);
+            let max_conn = if l == 0 { self.m_max0 } else { self.m };
+            let selected: Vec<usize> = neighbors
+                .iter()
+                .take(max_conn)
+                .map(|&(idx, _)| idx)
+                .collect();
+
+            node.neighbors[l] = selected.clone();
+
+            // Add bidirectional edges.
+            for &neighbor_idx in &selected {
+                if neighbor_idx < self.nodes.len() {
+                    let neighbor = &mut self.nodes[neighbor_idx];
+                    if l < neighbor.neighbors.len() {
+                        neighbor.neighbors[l].push(node_idx);
+                        // Prune if over limit.
+                        if neighbor.neighbors[l].len() > max_conn {
+                            self.prune_neighbors(neighbor_idx, l, max_conn, all_vectors);
+                        }
+                    }
+                }
+            }
+
+            if !neighbors.is_empty() {
+                current = neighbors[0].0;
+            }
+        }
+
+        self.nodes.push(node);
+        self.count += 1;
+
+        if level > self.max_layer {
+            self.max_layer = level;
+            self.entry_point = Some(node_idx);
+        }
+    }
+
+    /// Greedy search for the single closest node at a given layer.
+    fn greedy_closest(
+        &self,
+        start: usize,
+        query: &[f32],
+        layer: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> usize {
+        let mut current = start;
+        let mut best_dist = self.distance(current, query, all_vectors);
+        loop {
+            let mut improved = false;
+            let neighbors = if layer < self.nodes[current].neighbors.len() {
+                &self.nodes[current].neighbors[layer]
+            } else {
+                return current;
+            };
+            for &n in neighbors {
+                if n >= self.nodes.len() {
+                    continue;
+                }
+                let d = self.distance(n, query, all_vectors);
+                if d < best_dist {
+                    best_dist = d;
+                    current = n;
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        current
+    }
+
+    /// Beam search at a given layer, returning up to ef nearest neighbors.
+    fn search_layer(
+        &self,
+        entry: usize,
+        query: &[f32],
+        ef: usize,
+        layer: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> Vec<(usize, f64)> {
+        let mut visited = HashSet::new();
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        let mut results: Vec<(usize, f64)> = Vec::new();
+
+        let d = self.distance(entry, query, all_vectors);
+        candidates.push((entry, d));
+        results.push((entry, d));
+        visited.insert(entry);
+
+        while let Some(pos) = candidates
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                a.1 .1
+                    .partial_cmp(&b.1 .1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+        {
+            let (c_idx, c_dist) = candidates.remove(pos);
+
+            let worst_result = results
+                .iter()
+                .map(|r| r.1)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if c_dist > worst_result && results.len() >= ef {
+                break;
+            }
+
+            let neighbors = if layer < self.nodes[c_idx].neighbors.len() {
+                &self.nodes[c_idx].neighbors[layer]
+            } else {
+                continue;
+            };
+
+            for &n in neighbors {
+                if n >= self.nodes.len() || visited.contains(&n) {
+                    continue;
+                }
+                visited.insert(n);
+                let d = self.distance(n, query, all_vectors);
+                let worst = results
+                    .iter()
+                    .map(|r| r.1)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if d < worst || results.len() < ef {
+                    candidates.push((n, d));
+                    results.push((n, d));
+                    results
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                    if results.len() > ef {
+                        results.truncate(ef);
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Search the HNSW graph for k approximate nearest neighbors.
+    fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> Vec<(usize, f64)> {
+        let Some(ep) = self.entry_point else {
+            return Vec::new();
+        };
+
+        let mut current = ep;
+        for l in (1..=self.max_layer).rev() {
+            current = self.greedy_closest(current, query, l, all_vectors);
+        }
+
+        let mut results = self.search_layer(current, query, ef_search.max(k), 0, all_vectors);
+        results.truncate(k);
+        results
+    }
+
+    /// Compute distance (lower = closer) from a node to a query.
+    fn distance(
+        &self,
+        node_idx: usize,
+        query: &[f32],
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) -> f64 {
+        let row_idx = self.nodes[node_idx].row_idx;
+        let Some(vec) = all_vectors(row_idx) else {
+            return f64::INFINITY;
+        };
+        // Convert similarity scores to distances (HNSW needs distance, not similarity).
+        match self.metric {
+            VectorMetric::Cosine => {
+                let score = cosine_similarity(&vec, query);
+                1.0 - score
+            }
+            VectorMetric::Dot => {
+                let score = dot_product(&vec, query);
+                -score // negate so lower = more similar
+            }
+            VectorMetric::L2 => l2_distance(&vec, query),
+        }
+    }
+
+    fn prune_neighbors(
+        &mut self,
+        node_idx: usize,
+        layer: usize,
+        max_conn: usize,
+        all_vectors: &dyn Fn(usize) -> Option<Vec<f32>>,
+    ) {
+        if node_idx >= self.nodes.len() {
+            return;
+        }
+        let node_row = self.nodes[node_idx].row_idx;
+        let Some(node_vec) = all_vectors(node_row) else {
+            return;
+        };
+        let neighbors = &self.nodes[node_idx].neighbors[layer];
+        let mut scored: Vec<(usize, f64)> = neighbors
+            .iter()
+            .filter_map(|&n| {
+                if n >= self.nodes.len() {
+                    return None;
+                }
+                let d = {
+                    let Some(v) = all_vectors(self.nodes[n].row_idx) else {
+                        return None;
+                    };
+                    match self.metric {
+                        VectorMetric::Cosine => 1.0 - cosine_similarity(&v, &node_vec),
+                        VectorMetric::Dot => -dot_product(&v, &node_vec),
+                        VectorMetric::L2 => l2_distance(&v, &node_vec),
+                    }
+                };
+                Some((n, d))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(max_conn);
+        self.nodes[node_idx].neighbors[layer] = scored.into_iter().map(|(n, _)| n).collect();
+    }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let xf = *x as f64;
+        let yf = *y as f64;
+        dot += xf * yf;
+        na += xf * xf;
+        nb += yf * yf;
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+fn dot_product(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
+}
+
+fn l2_distance(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = (*x as f64) - (*y as f64);
+            d * d
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
 #[derive(Debug)]
 struct SqlAutoparamExtract {
     normalized_sql: String,
@@ -11388,6 +16567,8 @@ fn sql_is_keyword(word: &str) -> bool {
             | "not"
             | "like"
             | "ilike"
+            | "regexp"
+            | "rlike"
             | "between"
             | "is"
             | "group"
@@ -11654,7 +16835,13 @@ fn token_op(token: Option<&SqlToken>) -> Option<&str> {
         }) => Some(op.as_str()),
         Some(SqlToken {
             kind: SqlTokenKind::Keyword(kw),
-        }) if matches!(kw.as_str(), "in" | "like" | "ilike" | "between") => Some(kw.as_str()),
+        }) if matches!(
+            kw.as_str(),
+            "in" | "like" | "ilike" | "regexp" | "rlike" | "between"
+        ) =>
+        {
+            Some(kw.as_str())
+        }
         _ => None,
     }
 }
@@ -12063,6 +17250,8 @@ fn render_expr_summary(expr: &Expr) -> String {
             "gte" => binary_expr_summary(">=", a, b),
             "like" => binary_expr_summary("like", a, b),
             "ilike" => binary_expr_summary("ilike", a, b),
+            "regexp" => binary_expr_summary("regexp", a, b),
+            "null_safe_eq" => binary_expr_summary("<=>", a, b),
             "in" => {
                 let left = a
                     .as_ref()
@@ -12479,9 +17668,12 @@ fn merge_numeric_f64(a: &Lit, b: &Lit, op: fn(f64, f64) -> f64) -> Option<Lit> {
 
 fn lit_to_f64(lit: &Lit) -> Option<f64> {
     match lit {
+        Lit::Bool { v } => Some(if *v { 1.0 } else { 0.0 }),
         Lit::I64 { v } => Some(*v as f64),
         Lit::U64 { v } => Some(*v as f64),
         Lit::F64 { v } => Some(*v),
+        Lit::Dec { v } => v.parse::<f64>().ok(),
+        Lit::Str { v } => v.parse::<f64>().ok(),
         _ => None,
     }
 }
@@ -16606,6 +21798,91 @@ mod tests {
     }
 
     #[test]
+    fn mysql_compat_indexes_seed_secondary_index_candidates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_secondary_index_seed");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_idx".to_string(),
+            vec!["city".to_string()],
+            false,
+        )?;
+        drop(engine);
+
+        let reopened = Engine::open(&dir)?;
+        let (schema, tdata) = reopened.get_table(&table)?;
+        let secondary_index_count = tdata
+            .secondary_indexes
+            .lock()
+            .map(|guard| guard.len())
+            .unwrap_or_default();
+        assert_eq!(secondary_index_count, 1);
+        let mut filters = HashMap::new();
+        filters.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
+        assert_eq!(candidates.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn migration_intent_report_detects_pagination() -> anyhow::Result<()> {
         let dir = temp_dir("intent_pagination");
         let engine = Engine::open(&dir)?;
@@ -17843,6 +23120,1492 @@ mod tests {
         assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
 
         fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_mysql_scalar_functions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_scalar_functions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hé".to_string(),
+                    },
+                ),
+                ("parent_id", Lit::Null),
+            ])],
+            None,
+        )?;
+
+        let lower_expr = Expr::Func {
+            name: "lower".to_string(),
+            args: vec![Expr::Col {
+                col: "slug".to_string(),
+                table: None,
+            }],
+            distinct: None,
+        };
+        let ifnull_expr = Expr::Func {
+            name: "ifnull".to_string(),
+            args: vec![
+                Expr::Col {
+                    col: "parent_id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 0 },
+                },
+            ],
+            distinct: None,
+        };
+        let query = base_query(
+            "app",
+            "posts",
+            vec![
+                lower_expr.clone(),
+                Expr::Func {
+                    name: "upper".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "length".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "char_length".to_string(),
+                    args: vec![Expr::Col {
+                        col: "slug".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "coalesce".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "parent_id".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::U64 { v: 0 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                ifnull_expr.clone(),
+                Expr::Func {
+                    name: "concat".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "-".to_string() },
+                        },
+                        ifnull_expr,
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "trim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "  hi  ".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "ltrim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "  hi".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "rtrim".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::Str {
+                            v: "hi  ".to_string(),
+                        },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "left".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "right".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "substring".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "replace".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "e".to_string() },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "nullif".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hé".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "if".to_string(),
+                    args: vec![
+                        Expr::Op {
+                            op: "eq".to_string(),
+                            a: Some(Box::new(Expr::Lit {
+                                lit: Lit::I64 { v: 1 },
+                            })),
+                            b: Some(Box::new(Expr::Lit {
+                                lit: Lit::I64 { v: 1 },
+                            })),
+                            args: None,
+                            list: None,
+                            lo: None,
+                            hi: None,
+                        },
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "miss".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "locate".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "instr".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "é".to_string()
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "abs".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::I64 { v: -7 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "round".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::F64 { v: 1.75 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "floor".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::F64 { v: 1.75 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "ceil".to_string(),
+                    args: vec![Expr::Lit {
+                        lit: Lit::F64 { v: 1.2 },
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "mod".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 7 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 4 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "least".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str { v: "z".to_string() },
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str { v: "a".to_string() },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "greatest".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 5 },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "find_in_set".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "slug".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "x,hé,z".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "isnull".to_string(),
+                    args: vec![Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Cast {
+                    cast: skeindb_skeinql::types::CastExpr {
+                        expr: Box::new(Expr::Col {
+                            col: "id".to_string(),
+                            table: None,
+                        }),
+                        to: type_desc("string"),
+                    },
+                },
+                Expr::Cast {
+                    cast: skeindb_skeinql::types::CastExpr {
+                        expr: Box::new(Expr::Lit {
+                            lit: Lit::Str { v: "7".to_string() },
+                        }),
+                        to: TypeDesc {
+                            kind: "u64".to_string(),
+                            max: None,
+                            precision: None,
+                            scale: None,
+                            charset: None,
+                            collation: None,
+                            unsigned: Some(true),
+                        },
+                    },
+                },
+                Expr::Case {
+                    case_: skeindb_skeinql::types::CaseExpr {
+                        when: vec![skeindb_skeinql::types::CaseWhen {
+                            r#if: Expr::Op {
+                                op: "is_null".to_string(),
+                                a: Some(Box::new(Expr::Col {
+                                    col: "parent_id".to_string(),
+                                    table: None,
+                                })),
+                                b: None,
+                                args: None,
+                                list: None,
+                                lo: None,
+                                hi: None,
+                            },
+                            then: Expr::Lit {
+                                lit: Lit::Str {
+                                    v: "root".to_string(),
+                                },
+                            },
+                        }],
+                        r#else: Some(Box::new(Expr::Lit {
+                            lit: Lit::Str {
+                                v: "child".to_string(),
+                            },
+                        })),
+                    },
+                },
+                Expr::Case {
+                    case_: skeindb_skeinql::types::CaseExpr {
+                        when: vec![skeindb_skeinql::types::CaseWhen {
+                            r#if: Expr::Op {
+                                op: "eq".to_string(),
+                                a: Some(Box::new(Expr::Col {
+                                    col: "slug".to_string(),
+                                    table: None,
+                                })),
+                                b: Some(Box::new(Expr::Lit {
+                                    lit: Lit::Str {
+                                        v: "hé".to_string(),
+                                    },
+                                })),
+                                args: None,
+                                list: None,
+                                lo: None,
+                                hi: None,
+                            },
+                            then: Expr::Lit {
+                                lit: Lit::Str {
+                                    v: "match".to_string(),
+                                },
+                            },
+                        }],
+                        r#else: Some(Box::new(Expr::Lit {
+                            lit: Lit::Str {
+                                v: "miss".to_string(),
+                            },
+                        })),
+                    },
+                },
+            ],
+            Some(eq_expr(
+                lower_expr,
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "hé".to_string(),
+                    },
+                },
+            )),
+        );
+
+        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::Str {
+                    v: "hé".to_string()
+                },
+                Lit::Str {
+                    v: "HÉ".to_string()
+                },
+                Lit::U64 { v: 3 },
+                Lit::U64 { v: 2 },
+                Lit::U64 { v: 0 },
+                Lit::U64 { v: 0 },
+                Lit::Str {
+                    v: "hé-0".to_string()
+                },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str {
+                    v: "hi".to_string()
+                },
+                Lit::Str { v: "h".to_string() },
+                Lit::Str {
+                    v: "é".to_string()
+                },
+                Lit::Str {
+                    v: "é".to_string()
+                },
+                Lit::Str {
+                    v: "he".to_string()
+                },
+                Lit::Null,
+                Lit::Str {
+                    v: "hé".to_string()
+                },
+                Lit::U64 { v: 2 },
+                Lit::U64 { v: 2 },
+                Lit::I64 { v: 7 },
+                Lit::F64 { v: 1.8 },
+                Lit::I64 { v: 1 },
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 3 },
+                Lit::Str { v: "a".to_string() },
+                Lit::I64 { v: 5 },
+                Lit::U64 { v: 2 },
+                Lit::U64 { v: 1 },
+                Lit::Str { v: "1".to_string() },
+                Lit::U64 { v: 7 },
+                Lit::Str {
+                    v: "root".to_string()
+                },
+                Lit::Str {
+                    v: "match".to_string()
+                },
+            ]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_mysql_arithmetic_expressions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_arithmetic_expressions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[("id", Lit::U64 { v: 2 }), ("parent_id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 3 }), ("parent_id", Lit::U64 { v: 2 })]),
+                row(&[("id", Lit::U64 { v: 4 }), ("parent_id", Lit::U64 { v: 1 })]),
+            ],
+            None,
+        )?;
+
+        let projection_query = base_query(
+            "app",
+            "posts",
+            vec![
+                Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 1 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "sub".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 1 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "mul".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "div".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Op {
+                    op: "mod".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 2 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 4 },
+                },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 0 },
+                Lit::I64 { v: 2 },
+                Lit::F64 { v: 0.5 },
+                Lit::I64 { v: 1 },
+            ]]
+        );
+
+        let mut ordered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 0 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: 1 },
+                },
+            )),
+        );
+        ordered_query.order_by = vec![
+            OrderBy {
+                expr: Expr::Op {
+                    op: "add".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "parent_id".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::I64 { v: 0 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                },
+                dir: Some(OrderDir::Desc),
+            },
+            OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                dir: Some(OrderDir::Asc),
+            },
+        ];
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        assert_eq!(
+            ordered_rows,
+            vec![vec![Lit::U64 { v: 2 }], vec![Lit::U64 { v: 4 }]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_select_supports_mysql_datetime_functions() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_datetime_functions");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "published_at".to_string(),
+                    r#type: type_desc("datetime"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-01 00:00:00".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-02 03:04:05".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "published_at",
+                        Lit::Datetime {
+                            iso: "2020-01-03 06:07:08".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let projection_query = base_query(
+            "app",
+            "posts",
+            vec![
+                Expr::Func {
+                    name: "date".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "year".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "month".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "day".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "weekday".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayofweek".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayofyear".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "monthname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "dayname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "quarter".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "last_day".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "year".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hour".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "hour".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "minute".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "second".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "unix_timestamp".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "date_format".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "%Y-%m-%d %H:%i:%s".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "from_unixtime".to_string(),
+                    args: vec![Expr::Func {
+                        name: "unix_timestamp".to_string(),
+                        args: vec![Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        }],
+                        distinct: None,
+                    }],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "datediff".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "2020-01-01 00:00:00".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "timestampdiff".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hour".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "2020-01-02 00:00:00".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "date_add".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 2 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "date_sub".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "hour".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 3 },
+                        },
+                    ],
+                    distinct: None,
+                },
+                Expr::Func {
+                    name: "timestampadd".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "minute".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 30 },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            )),
+        );
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Lit::Date {
+                    iso: "2020-01-02".to_string(),
+                },
+                Lit::I64 { v: 2020 },
+                Lit::I64 { v: 1 },
+                Lit::I64 { v: 2 },
+                Lit::I64 { v: 3 },
+                Lit::I64 { v: 5 },
+                Lit::I64 { v: 2 },
+                Lit::Str {
+                    v: "January".to_string(),
+                },
+                Lit::Str {
+                    v: "Thursday".to_string(),
+                },
+                Lit::I64 { v: 1 },
+                Lit::Date {
+                    iso: "2020-01-31".to_string(),
+                },
+                Lit::I64 { v: 2020 },
+                Lit::I64 { v: 3 },
+                Lit::I64 { v: 3 },
+                Lit::I64 { v: 4 },
+                Lit::I64 { v: 5 },
+                Lit::I64 { v: 1_577_934_245 },
+                Lit::Str {
+                    v: "2020-01-02 03:04:05".to_string(),
+                },
+                Lit::Datetime {
+                    iso: "2020-01-02 03:04:05".to_string(),
+                },
+                Lit::I64 { v: 1 },
+                Lit::I64 { v: 3 },
+                Lit::Datetime {
+                    iso: "2020-01-04 03:04:05".to_string(),
+                },
+                Lit::Datetime {
+                    iso: "2020-01-02 00:04:05".to_string(),
+                },
+                Lit::Datetime {
+                    iso: "2020-01-02 03:34:05".to_string(),
+                },
+            ]]
+        );
+
+        let date_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "date".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2020-01-03".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, filtered_rows) = execute_select(&engine, &date_filtered_query, &[])?;
+        assert_eq!(filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let formatted_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "date_format".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "%Y-%m-%d".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2020-01-03".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, formatted_filtered_rows) =
+            execute_select(&engine, &formatted_filtered_query, &[])?;
+        assert_eq!(formatted_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let datediff_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "ge".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "datediff".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "2020-01-01 00:00:00".to_string(),
+                            },
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 2 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, datediff_filtered_rows) =
+            execute_select(&engine, &datediff_filtered_query, &[])?;
+        assert_eq!(datediff_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let dayname_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "dayname".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Friday".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, dayname_filtered_rows) = execute_select(&engine, &dayname_filtered_query, &[])?;
+        assert_eq!(dayname_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let extract_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "extract".to_string(),
+                    args: vec![
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 3 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, extract_filtered_rows) = execute_select(&engine, &extract_filtered_query, &[])?;
+        assert_eq!(extract_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let date_add_filtered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "date_add".to_string(),
+                    args: vec![
+                        Expr::Col {
+                            col: "published_at".to_string(),
+                            table: None,
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "day".to_string(),
+                            },
+                        },
+                        Expr::Lit {
+                            lit: Lit::I64 { v: 1 },
+                        },
+                    ],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2020-01-04 06:07:08".to_string(),
+                    },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        let (_cols, date_add_filtered_rows) =
+            execute_select(&engine, &date_add_filtered_query, &[])?;
+        assert_eq!(date_add_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
+
+        let mut ordered_query = base_query(
+            "app",
+            "posts",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Func {
+                    name: "year".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::I64 { v: 2020 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+        ordered_query.order_by = vec![
+            OrderBy {
+                expr: Expr::Func {
+                    name: "unix_timestamp".to_string(),
+                    args: vec![Expr::Col {
+                        col: "published_at".to_string(),
+                        table: None,
+                    }],
+                    distinct: None,
+                },
+                dir: Some(OrderDir::Desc),
+            },
+            OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                dir: Some(OrderDir::Asc),
+            },
+        ];
+        ordered_query.limit = Some(LimitClause {
+            limit: Some(2),
+            offset: Some(0),
+        });
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        assert_eq!(
+            ordered_rows,
+            vec![vec![Lit::U64 { v: 3 }], vec![Lit::U64 { v: 2 }]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_current_datetime_functions_return_date_like_literals() -> anyhow::Result<()> {
+        let row = row(&[]);
+
+        let now = eval_expr(
+            &Expr::Func {
+                name: "now".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Datetime { iso: now_iso } = now else {
+            panic!("expected datetime literal");
+        };
+        assert!(mysql_parse_date_time_lit_parts(&Lit::Datetime { iso: now_iso }).is_some());
+
+        let curdate = eval_expr(
+            &Expr::Func {
+                name: "curdate".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Date { iso: curdate_iso } = curdate else {
+            panic!("expected date literal");
+        };
+        let (date, time) =
+            mysql_parse_date_time_lit_parts(&Lit::Date { iso: curdate_iso }).unwrap();
+        assert!(date.is_some());
+        assert!(time.is_none());
+
+        let curtime = eval_expr(
+            &Expr::Func {
+                name: "curtime".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        let Lit::Time { iso: curtime_iso } = curtime else {
+            panic!("expected time literal");
+        };
+        let (date, time) =
+            mysql_parse_date_time_lit_parts(&Lit::Time { iso: curtime_iso }).unwrap();
+        assert!(date.is_none());
+        assert!(time.is_some());
+
+        let unix_now = eval_expr(
+            &Expr::Func {
+                name: "unix_timestamp".to_string(),
+                args: Vec::new(),
+                distinct: None,
+            },
+            &row,
+            None,
+            &[],
+        )?;
+        assert!(matches!(unix_now, Lit::I64 { v } if v > 1_500_000_000));
+
         Ok(())
     }
 
@@ -19760,7 +26523,7 @@ mod tests {
         let err = engine
             .data_update(&table, &predicate, &set, None, None, &[])
             .expect_err("expected unique conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
 
         set.insert(
             "email".to_string(),
@@ -19804,7 +26567,265 @@ mod tests {
                 None,
             )
             .expect_err("expected duplicate insert conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn primary_key_updates_reject_duplicates_and_refresh_pk_lookup() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_primary_key_update_conflict");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let mut set = RowObject::new();
+        set.insert("id".to_string(), Lit::U64 { v: 1 });
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            },
+        );
+        let err = engine
+            .data_update(&table, &predicate, &set, None, None, &[])
+            .expect_err("expected primary-key duplicate conflict");
+        assert!(err.to_string().contains("duplicate key"));
+
+        set.insert("id".to_string(), Lit::U64 { v: 3 });
+        let moved = engine.data_update(&table, &predicate, &set, None, None, &[])?;
+        assert_eq!(moved.affected, 1);
+        assert!(engine.data_get(&table, vec![Lit::U64 { v: 2 }]).is_err());
+        let moved_row = engine.data_get(&table, vec![Lit::U64 { v: 3 }])?;
+        assert_eq!(
+            moved_row.row.get("email"),
+            Some(&Lit::Str {
+                v: "b@example.com".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn secondary_index_cache_persists_and_reloads() -> anyhow::Result<()> {
+        let dir = temp_dir("secondary_index_cache_persist");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "email_unique",
+                    "columns": ["email"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "b@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let index_cache_path = engine.table_secondary_index_path("app", "users");
+        let disk = load_json::<SecondaryIndexCacheDisk>(&index_cache_path)
+            .expect("secondary index cache should be persisted");
+        assert_eq!(disk.format_version, SECONDARY_INDEX_CACHE_FORMAT_VERSION);
+        assert_eq!(disk.row_count, 2);
+        assert_eq!(disk.indexes.len(), 1);
+
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        let (_schema, tdata) = reopened.get_table(&table)?;
+        let index_count = tdata
+            .secondary_indexes
+            .lock()
+            .map(|guard| guard.len())
+            .unwrap_or_default();
+        assert_eq!(index_count, 1);
+        let err = reopened
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "a@example.com".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected duplicate-key conflict after reopen");
+        assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_add_unique_index_rejects_existing_duplicates() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_unique_index_existing_duplicates");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "dup@example.com".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "email",
+                        Lit::Str {
+                            v: "dup@example.com".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let err = engine
+            .schema_add_mysql_compat_index(
+                &table,
+                "email_unique".to_string(),
+                vec!["email".to_string()],
+                true,
+            )
+            .expect_err("expected duplicate-key conflict when creating unique index");
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -19937,7 +26958,471 @@ mod tests {
                 None,
             )
             .expect_err("expected renamed unique index conflict");
-        assert!(err.to_string().contains("conflict"));
+        assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_column_updates_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": "n-a"}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_rename_mysql_compat_column(&table, "slug", "post_slug")?;
+
+        let desc = engine.describe_table("app", "posts")?;
+        assert!(desc
+            .get("compat_mysql")
+            .and_then(|v| v.get("column_defaults"))
+            .and_then(|v| v.get("slug"))
+            .is_none());
+        assert_eq!(
+            desc.get("compat_mysql")
+                .and_then(|v| v.get("column_defaults"))
+                .and_then(|v| v.get("post_slug"))
+                .and_then(|v| serde_json::from_value::<Lit>(v.clone()).ok()),
+            Some(Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert_eq!(
+            desc.get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("columns"))
+                .and_then(|v| v.as_array())
+                .and_then(|cols| cols.first())
+                .and_then(|v| v.as_str()),
+            Some("post_slug")
+        );
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("post_slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+        assert!(!fetched.row.contains_key("slug"));
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "post_slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("duplicate key"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_drop_column_updates_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_drop_column");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "metrics",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "keep_col".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "drop_col".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "drop_col": {"t": "str", "v": "legacy"}
+                },
+                "indexes": [{
+                    "name": "drop_col_idx",
+                    "columns": ["drop_col"],
+                    "unique": false
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "metrics".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "keep_col",
+                    Lit::Str {
+                        v: "stay".to_string(),
+                    },
+                ),
+                (
+                    "drop_col",
+                    Lit::Str {
+                        v: "gone".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_drop_mysql_compat_column(&table, "drop_col")?;
+
+        let desc = engine.describe_table("app", "metrics")?;
+        let columns = desc
+            .get("columns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].get("name").and_then(|v| v.as_str()), Some("id"));
+        assert_eq!(
+            columns[1].get("name").and_then(|v| v.as_str()),
+            Some("keep_col")
+        );
+        assert!(desc
+            .get("compat_mysql")
+            .and_then(|v| v.get("column_defaults"))
+            .and_then(|v| v.get("drop_col"))
+            .is_none());
+        assert!(desc
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .map(|indexes| indexes.is_empty())
+            .unwrap_or(true));
+
+        let fetched = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("keep_col"),
+            Some(&Lit::Str {
+                v: "stay".to_string()
+            })
+        );
+        assert!(!fetched.row.contains_key("drop_col"));
+
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "keep_col",
+                    Lit::Str {
+                        v: "still".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_index_updates_schema_metadata() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_index");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.schema_rename_mysql_compat_index(&table, "slug_unique", "slug_login_uq")?;
+
+        let desc = engine.describe_table("app", "posts")?;
+        let indexes = desc
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].get("name").and_then(|v| v.as_str()),
+            Some("slug_login_uq")
+        );
+        assert_eq!(
+            indexes[0].get("columns").and_then(|v| v.as_array()),
+            Some(&vec![serde_json::Value::String("slug".to_string())])
+        );
+
+        let err = engine
+            .data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("duplicate key"));
+        assert!(err.to_string().contains("slug_login_uq"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn mysql_compat_rename_table_preserves_schema_rows_and_indexes() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_compat_rename_table");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "slug".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            Some(serde_json::json!({
+                "column_defaults": {
+                    "slug": {"t": "str", "v": "n-a"}
+                },
+                "indexes": [{
+                    "name": "slug_unique",
+                    "columns": ["slug"],
+                    "unique": true
+                }]
+            })),
+        )?;
+
+        let source = BaseTableRef {
+            db: "app".to_string(),
+            table: "posts".to_string(),
+            r#as: None,
+        };
+        let target = BaseTableRef {
+            db: "app".to_string(),
+            table: "archived_posts".to_string(),
+            r#as: None,
+        };
+
+        engine.data_insert(
+            &source,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "slug",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.rename_table(&source, &target)?;
+        assert_eq!(
+            engine.list_tables("app")?,
+            vec!["archived_posts".to_string()]
+        );
+        assert!(engine.data_get(&source, vec![Lit::U64 { v: 1 }]).is_err());
+
+        let desc = engine.describe_table("app", "archived_posts")?;
+        assert_eq!(
+            desc.get("compat_mysql")
+                .and_then(|v| v.get("column_defaults"))
+                .and_then(|v| v.get("slug"))
+                .and_then(|v| serde_json::from_value::<Lit>(v.clone()).ok()),
+            Some(Lit::Str {
+                v: "n-a".to_string()
+            })
+        );
+        assert_eq!(
+            desc.get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("slug_unique")
+        );
+
+        let fetched = engine.data_get(&target, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            fetched.row.get("slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+
+        drop(engine);
+
+        let mut reopened = Engine::open(&dir)?;
+        assert_eq!(
+            reopened.list_tables("app")?,
+            vec!["archived_posts".to_string()]
+        );
+        let reopened_desc = reopened.describe_table("app", "archived_posts")?;
+        assert_eq!(
+            reopened_desc
+                .get("indexes")
+                .and_then(|v| v.as_array())
+                .and_then(|indexes| indexes.first())
+                .and_then(|index| index.get("columns"))
+                .and_then(|v| v.as_array())
+                .and_then(|cols| cols.first())
+                .and_then(|v| v.as_str()),
+            Some("slug")
+        );
+
+        let reopened_fetched = reopened.data_get(&target, vec![Lit::U64 { v: 1 }])?;
+        assert_eq!(
+            reopened_fetched.row.get("slug"),
+            Some(&Lit::Str {
+                v: "hello".to_string()
+            })
+        );
+
+        let err = reopened
+            .data_insert(
+                &target,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "slug",
+                        Lit::Str {
+                            v: "hello".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )
+            .expect_err("expected renamed unique index conflict");
+        assert!(err.to_string().contains("duplicate key"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -20659,5 +28144,348 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    // ===============================================
+    // Research feature tests
+    // ===============================================
+
+    #[test]
+    fn r04_dp_rng_deterministic_and_uniform() {
+        // Verify the new hash-based PRNG is deterministic and well-distributed.
+        let mut rng1 = DpRng::new(42);
+        let mut rng2 = DpRng::new(42);
+        for _ in 0..100 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+
+        // Check that next_f64 is in [0, 1).
+        let mut rng = DpRng::new(12345);
+        for _ in 0..1000 {
+            let v = rng.next_f64();
+            assert!(v >= 0.0 && v < 1.0, "next_f64 out of range: {v}");
+        }
+
+        // Verify different seeds produce different sequences.
+        let mut r1 = DpRng::new(1);
+        let mut r2 = DpRng::new(2);
+        let v1 = r1.next_u64();
+        let v2 = r2.next_u64();
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn r04_rdp_composition_tracking() -> anyhow::Result<()> {
+        let dir = temp_dir("rdp_composition");
+        let mut engine = Engine::open(&dir)?;
+        seed_events_table(&mut engine, "a", "b")?;
+
+        // Set up DP budget.
+        engine.dp_budget_set(DpBudgetSetParams {
+            principal: "alice".into(),
+            total_epsilon: 10.0,
+            total_delta: 1e-5,
+            refresh_window_ms: None,
+        })?;
+
+        // Run a DP aggregate.
+        let result = engine.dp_aggregate(DpAggregateParams {
+            table: BaseTableRef {
+                db: "app".into(),
+                table: "events".into(),
+                r#as: None,
+            },
+            aggregates: vec![DpAggregateSpec {
+                op: "count".into(),
+                column: None,
+                r#as: Some("n".into()),
+                bounds: None,
+                percentile: None,
+            }],
+            epsilon: 1.0,
+            delta: Some(1e-6),
+            mechanism: Some("laplace".into()),
+            principal: Some("alice".into()),
+            group_by: Vec::new(),
+            r#where: None,
+            seed: Some(42),
+        })?;
+        assert!(!result.rows.is_empty());
+
+        // Check that the budget summary now includes RDP info.
+        let budget_obj = engine.dp_budgets.get("alice").unwrap();
+        let info = dp_budget_summary(budget_obj);
+        assert!(info.get("rdp_composed_epsilon").is_some());
+        assert_eq!(
+            info.get("query_count")
+                .and_then(|v: &serde_json::Value| v.as_u64()),
+            Some(1)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn r10_hnsw_index_basic() {
+        // Test HNSW index construction and search.
+        let mut hnsw = HnswIndex::new(3, VectorMetric::Cosine);
+        let vectors: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![0.7, 0.7, 0.0],
+            vec![0.0, 0.7, 0.7],
+        ];
+        let lookup: HashMap<usize, Vec<f32>> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, v.clone()))
+            .collect();
+        let all_vectors = |row_idx: usize| -> Option<Vec<f32>> { lookup.get(&row_idx).cloned() };
+
+        for (i, v) in vectors.iter().enumerate() {
+            hnsw.insert(i, v, &all_vectors);
+        }
+
+        assert_eq!(hnsw.count, 5);
+        assert!(hnsw.entry_point.is_some());
+
+        // Search for nearest to [1.0, 0.0, 0.0] — should find itself as #1.
+        let results = hnsw.search(&[1.0, 0.0, 0.0], 3, 32, &all_vectors);
+        assert!(!results.is_empty());
+        // The first result should be node 0 (exact match, distance ~0).
+        assert_eq!(results[0].0, 0);
+    }
+
+    #[test]
+    fn r08_view_dependency_cascade() -> anyhow::Result<()> {
+        let dir = temp_dir("view_dep_cascade");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".into(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".into(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".into()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".into(),
+                table: "users".into(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::U64 { v: 100 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::U64 { v: 200 })]),
+            ],
+            None,
+        )?;
+
+        // Create a view.
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![
+                    Expr::Col {
+                        table: None,
+                        col: "id".into(),
+                    },
+                    Expr::Col {
+                        table: None,
+                        col: "score".into(),
+                    },
+                ],
+                None,
+            ),
+            if_not_exists: None,
+        })?;
+
+        // Verify view is not stale initially.
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["stale"].as_bool(), Some(false));
+
+        // Insert a row into the base table — view should become stale.
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".into(),
+                table: "users".into(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                ("score", Lit::U64 { v: 300 }),
+            ])],
+            None,
+        )?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(status.views[0]["stale"].as_bool(), Some(true));
+
+        // Test explain deps includes info.
+        let deps = engine.view_explain_deps(ViewExplainDepsParams {
+            view: BaseTableRef {
+                db: "app".into(),
+                table: "top_users".into(),
+                r#as: None,
+            },
+        })?;
+        assert!(!deps.deps.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn r13_vector_clock_causality() {
+        // Test vector clock merge and dominance.
+        let token_a = CausalityToken {
+            format: CAUSALITY_FORMAT_V2.to_string(),
+            deps: vec![
+                CausalityDependency {
+                    table: "t1".into(),
+                    v: Some(5),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+                CausalityDependency {
+                    table: "t2".into(),
+                    v: Some(3),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+            ],
+        };
+        let token_b = CausalityToken {
+            format: CAUSALITY_FORMAT_V2.to_string(),
+            deps: vec![
+                CausalityDependency {
+                    table: "t1".into(),
+                    v: Some(3),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+                CausalityDependency {
+                    table: "t2".into(),
+                    v: Some(7),
+                    change_seq: None,
+                    view: None,
+                    stale: None,
+                },
+            ],
+        };
+
+        let merged = merge_causality_tokens(&token_a, &token_b);
+        assert_eq!(merged.format, CAUSALITY_FORMAT_V2);
+        // Merged should have max(5,3)=5 for t1 and max(3,7)=7 for t2.
+        let t1 = merged.deps.iter().find(|d| d.table == "t1").unwrap();
+        let t2 = merged.deps.iter().find(|d| d.table == "t2").unwrap();
+        assert_eq!(t1.v, Some(5));
+        assert_eq!(t2.v, Some(7));
+
+        // a does not dominate b (a.t2=3 < b.t2=7), b does not dominate a.
+        assert!(!causality_dominates(&token_a, &token_b));
+        assert!(!causality_dominates(&token_b, &token_a));
+
+        // Merged dominates both.
+        assert!(causality_dominates(&merged, &token_a));
+        assert!(causality_dominates(&merged, &token_b));
+    }
+
+    #[test]
+    fn r06_forensic_merkle_root_and_proof() {
+        // Build a small forensic chain and verify Merkle root.
+        let mut prev = "genesis".to_string();
+        let mut records = Vec::new();
+        for i in 0..8 {
+            let hash = forensic_record_hash(&prev, i, 1000 + i, "app", "events", "insert", None, i);
+            records.push(ForensicRecord {
+                id: i,
+                ts_ms: 1000 + i,
+                db: "app".into(),
+                table: "events".into(),
+                op: "insert".into(),
+                pk: None,
+                change_seq: i,
+                prev_hash: prev.clone(),
+                hash: hash.clone(),
+            });
+            prev = hash;
+        }
+
+        // Merkle root should be deterministic.
+        let root1 = forensic_merkle_root(&records);
+        let root2 = forensic_merkle_root(&records);
+        assert!(root1.is_some());
+        assert_eq!(root1, root2);
+
+        // Merkle proof for record 3.
+        let proof = forensic_merkle_proof(&records, 3);
+        assert!(!proof.is_empty(), "proof should have siblings");
+
+        // Modifying a record should change the Merkle root.
+        let mut tampered = records.clone();
+        tampered[3].hash = "tampered".to_string();
+        let root_tampered = forensic_merkle_root(&tampered);
+        assert_ne!(root1, root_tampered);
+    }
+
+    #[test]
+    fn r04_dp_laplace_noise_has_correct_scale() {
+        let mut rng = DpRng::new(42);
+        let b = 1.0; // scale = sensitivity / epsilon = 1.0/1.0
+                     // Laplace(0, b) has variance 2b^2 = 2.0
+        let expected_var = 2.0 * b * b;
+        let n = 10000;
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for _ in 0..n {
+            let noise = dp_laplace_noise(&mut rng, b);
+            sum += noise;
+            sum_sq += noise * noise;
+        }
+        let mean = sum / n as f64;
+        let var = sum_sq / n as f64 - mean * mean;
+        assert!((mean).abs() < 0.1, "mean should be near 0, got {mean}");
+        assert!(
+            (var - expected_var).abs() < 1.0,
+            "variance should be near {expected_var}, got {var}"
+        );
     }
 }

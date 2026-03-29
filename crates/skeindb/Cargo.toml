@@ -2,6 +2,7 @@
 name = "skeindb"
 version = "0.3.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 base64 = "0.22"
@@ -17,11 +18,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
 sysinfo = "0.30"
 quinn = "0.10"
 rustls = "0.21"
 rustls-pemfile = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+regex = "1"
 
 skeindb-core = { path = "../skeindb-core" }
 skeindb-ir = { path = "../skeindb-ir" }

@@ -9,6 +9,21 @@
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
     <style>
       :root{color-scheme:light;--bg:#eef2f7;--panel:#fff;--panel-2:#f7f9fc;--ink:#1c2733;--muted:#5b6572;--line:#d7dde6;--accent:#2b6cb0;--accent-2:#2f855a;--accent-3:#b7791f;--danger:#c53030;--shadow:0 18px 40px rgba(26,36,52,.12)}
+      html.dark{color-scheme:dark;--bg:#12171e;--panel:#1a2029;--panel-2:#212833;--ink:#d9dfe8;--muted:#8892a0;--line:#2d3544;--accent:#5b9bd5;--accent-2:#68d391;--accent-3:#ecc94b;--danger:#fc8181;--shadow:0 18px 40px rgba(0,0,0,.35)}
+      html.dark body{background:radial-gradient(900px 600px at 10% -20%,rgba(40,60,100,.4) 0%,rgba(40,60,100,0) 60%),radial-gradient(900px 600px at 90% 0%,rgba(60,50,30,.3) 0%,rgba(60,50,30,0) 60%),linear-gradient(180deg,#151b24 0%,#0f141b 100%)}
+      html.dark .sidebar{background:linear-gradient(180deg,#1a2029 0%,#151b24 100%);border-right-color:var(--line)}
+      html.dark .nav-item.active{background:var(--panel-2);border-color:var(--line)}
+      html.dark .card{background:var(--panel);border-color:var(--line)}
+      html.dark input,html.dark textarea,html.dark select{background:var(--panel-2);color:var(--ink);border-color:var(--line)}
+      html.dark pre{background:var(--panel-2);color:var(--ink)}
+      html.dark .easy-sidebar{background:var(--panel);border-color:var(--line)}
+      html.dark .inline-edit-input{background:var(--panel-2);color:var(--ink);border-color:var(--accent)}
+      html.dark .inline-edit-input.pk-readonly{background:var(--panel);color:var(--muted)}
+      html.dark .row-action-btn{background:var(--panel-2);border-color:var(--line);color:var(--ink)}
+      html.dark .topbar{border-bottom-color:var(--line)}
+      html.dark .context-bar{background:var(--panel-2);border-color:var(--line)}
+      html.dark table thead{background:var(--panel-2)}
+      html.dark table tbody tr:hover{background:rgba(91,155,213,.1)}
       *{box-sizing:border-box}
       body{margin:0;font-family:"IBM Plex Sans","Segoe UI",sans-serif;background:radial-gradient(900px 600px at 10% -20%,rgba(207,225,255,.6) 0%,rgba(207,225,255,0) 60%),radial-gradient(900px 600px at 90% 0%,rgba(255,239,213,.6) 0%,rgba(255,239,213,0) 60%),linear-gradient(180deg,#f7f9fc 0%,#e9edf5 100%);color:var(--ink)}
       body[data-mode="console"] .nav-item[data-scope="admin"]{display:none}
@@ -204,12 +219,81 @@
       .row-action-btn{padding:3px 6px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:#fff;cursor:pointer;transition:all .12s;min-width:24px}
       .row-action-btn:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.1)}
       .row-action-btn.edit{color:var(--accent)}.row-action-btn.copy{color:var(--accent-2)}.row-action-btn.delete{color:var(--danger)}
+      .null-value{color:var(--muted);font-style:italic;font-size:10px;opacity:.7;background:rgba(0,0,0,.03);padding:1px 5px;border-radius:3px;user-select:none}
+      html.dark .null-value{background:rgba(255,255,255,.05)}
       @media(max-width:860px){.easy-layout{grid-template-columns:1fr}.easy-sidebar{max-height:200px;border-right:none;border-bottom:1px solid var(--line)}}
       @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
       @media(max-width:980px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}.nav{flex-direction:row;flex-wrap:wrap}.panel{padding:12px}.card.wide{grid-column:1/-1}.builder-row,.builder-row.compact{grid-template-columns:1fr 1fr}}
+      /* Visual polish */
+      .sidebar::-webkit-scrollbar,.tree::-webkit-scrollbar,.easy-tree::-webkit-scrollbar,.easy-sidebar::-webkit-scrollbar{width:5px}
+      .sidebar::-webkit-scrollbar-thumb,.tree::-webkit-scrollbar-thumb,.easy-tree::-webkit-scrollbar-thumb,.easy-sidebar::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+      .sidebar::-webkit-scrollbar-thumb:hover,.tree::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+      input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,108,176,.15)}
+      html.dark input:focus,html.dark textarea:focus,html.dark select:focus{box-shadow:0 0 0 3px rgba(91,155,213,.2)}
+      .card{transition:box-shadow .2s ease,border-color .2s ease}
+      .card:hover{box-shadow:0 8px 24px rgba(26,36,52,.1);border-color:rgba(43,108,176,.2)}
+      html.dark .card:hover{box-shadow:0 8px 24px rgba(0,0,0,.3);border-color:rgba(91,155,213,.25)}
+      .primary{transition:all .15s ease}
+      .primary:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(43,108,176,.3)}
+      .primary:active{transform:translateY(0);box-shadow:none}
+      .pill{transition:all .2s ease}
+      .pill.ok{background:#c6f6d5;color:#22543d}html.dark .pill.ok{background:rgba(104,211,145,.15);color:#68d391}
+      .pill.warn{background:#fefcbf;color:#744210}html.dark .pill.warn{background:rgba(236,201,75,.15);color:#ecc94b}
+      .pill.error{background:#fed7d7;color:#9b2c2c}html.dark .pill.error{background:rgba(252,129,129,.15);color:#fc8181}
+      @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+      .conn-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+      .conn-dot.ok{background:#38a169;animation:pulse 2s infinite}
+      .conn-dot.warn{background:#d69e2e}
+      .conn-dot.error{background:#e53e3e}
+      html.dark .conn-dot.ok{background:#68d391}html.dark .conn-dot.warn{background:#ecc94b}html.dark .conn-dot.error{background:#fc8181}
+      /* Toast */
+      .toast-container{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+      .toast-msg{pointer-events:auto;padding:10px 16px;border-radius:10px;font-size:12px;font-weight:500;box-shadow:0 8px 24px rgba(0,0,0,.15);animation:toastIn .3s ease;max-width:360px;display:flex;align-items:center;gap:8px}
+      .toast-msg.success{background:#38a169;color:#fff}
+      .toast-msg.error{background:#e53e3e;color:#fff}
+      .toast-msg.info{background:var(--accent);color:#fff}
+      @keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+      @keyframes toastOut{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(20px)}}
+      /* Command palette */
+      .cmd-palette-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:10000;display:flex;justify-content:center;padding-top:15vh;opacity:0;transition:opacity .15s;pointer-events:none}
+      .cmd-palette-overlay.open{opacity:1;pointer-events:auto}
+      html.dark .cmd-palette-overlay{background:rgba(0,0,0,.6)}
+      .cmd-palette{background:var(--panel);border:1px solid var(--line);border-radius:16px;width:480px;max-height:400px;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.2);transform:translateY(-8px);transition:transform .15s}
+      .cmd-palette-overlay.open .cmd-palette{transform:translateY(0)}
+      .cmd-palette-input{border:none;background:transparent;padding:14px 18px;font-size:15px;font-family:inherit;color:var(--ink);outline:none;border-bottom:1px solid var(--line)}
+      .cmd-palette-results{overflow-y:auto;flex:1;padding:6px}
+      .cmd-palette-item{padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:10px;color:var(--ink);transition:background .1s}
+      .cmd-palette-item:hover,.cmd-palette-item.selected{background:rgba(43,108,176,.1)}
+      html.dark .cmd-palette-item:hover,html.dark .cmd-palette-item.selected{background:rgba(91,155,213,.15)}
+      .cmd-palette-item .cmd-item-label{font-weight:500}
+      .cmd-palette-item .cmd-item-hint{font-size:11px;color:var(--muted);margin-left:auto}
+      /* Kbd hints */
+      kbd{display:inline-block;padding:2px 6px;font-size:10px;font-family:"IBM Plex Mono",monospace;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;color:var(--muted);line-height:1.4}
+      /* SQL history */
+      .sql-history{margin-top:8px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+      .sql-history-item{padding:6px 10px;border-radius:6px;font-size:11px;font-family:"IBM Plex Mono",monospace;cursor:pointer;color:var(--muted);border:1px solid transparent;transition:all .12s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .sql-history-item:hover{background:rgba(43,108,176,.08);border-color:var(--line);color:var(--ink)}
+      /* Dark mode toggle */
+      .theme-toggle{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--muted);padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;transition:all .15s}
+      .theme-toggle:hover{background:rgba(43,108,176,.08);color:var(--ink)}
+      .theme-toggle-icon{font-size:14px}
+      /* Collapsible nav groups */
+      .nav-group-title{cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none;transition:color .15s}
+      .nav-group-title:hover{color:var(--ink)}
+      .nav-group-title::before{content:'▾';font-size:9px;transition:transform .2s}
+      .nav-group-title.collapsed::before{transform:rotate(-90deg)}
+      .nav-group-title.collapsed~.nav-item{display:none!important}
+      /* Sortable column headers */
+      th.sortable{cursor:pointer;user-select:none;position:relative}
+      th.sortable:hover{color:var(--accent)}
+      th.sortable::after{content:'';display:inline-block;margin-left:4px;opacity:0.3;font-size:10px}
+      th.sort-asc::after{content:'▲';opacity:1}
+      th.sort-desc::after{content:'▼';opacity:1}
     </style>
   </head>
   <body data-app="skeinadmin" data-mode="admin">
+    <div class="toast-container" id="toastContainer"></div>
+    <div class="cmd-palette-overlay" id="cmdPalette"><div class="cmd-palette"><input class="cmd-palette-input" id="cmdInput" placeholder="Search actions, panels, methods…" autocomplete="off" /><div class="cmd-palette-results" id="cmdResults"></div></div></div>
     <div class="app-shell">
       <aside class="sidebar">
         <div><div class="brand-title">SkeinAdmin</div><div class="brand-sub">SkeinDB control plane</div></div>
@@ -246,8 +330,9 @@
           <div class="tree" id="dbTree">Connect to load databases.</div>
           <div class="actions"><button id="btnReloadTree" class="ghost sm">Reload</button></div>
         </div>
+        <button class="theme-toggle" id="themeToggle"><span class="theme-toggle-icon">🌙</span> Dark mode</button>
         <div class="sidebar-footer">
-          <div class="pill" id="connStatus">Disconnected</div>
+          <div class="pill" id="connStatus"><span class="conn-dot warn" id="connDotSidebar"></span>Disconnected</div>
           <div>/console opens the workspace view.</div>
         </div>
       </aside>
@@ -267,7 +352,7 @@
               <button id="btnTransport" class="admin-only sm">Transport</button>
               <button id="btnShutdown" class="admin-only danger sm">Shutdown</button>
             </div>
-            <div class="topbar-meta"><div class="pill" id="connBadge">Disconnected</div><div class="hint" id="connSummary">Connect to start.</div></div>
+            <div class="topbar-meta"><div class="pill" id="connBadge"><span class="conn-dot warn" id="connDot"></span>Disconnected</div><div class="hint" id="connSummary">Connect to start.</div></div>
           </div>
         </header>
         <nav class="top-tabs">
@@ -290,7 +375,7 @@
 
         <!-- OVERVIEW --><section class="panel active" data-panel="overview">
           <div class="panel-grid">
-            <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, then click Connect.</li><li>Create a database and table using the guided builders.</li><li>Use Browse &amp; Edit for row operations and Cluster Manager for topology.</li></ol><div class="callout">Every management path is available in two layers: guided forms for day-to-day workflows and advanced JSON/RPC controls for full fidelity.</div><div class="actions"><button id="btnQuickCreateDb" class="sm">New Database</button><button id="btnQuickCreateTable" class="sm">New Table</button><button id="btnQuickInsertRow" class="sm">Insert Row</button><button id="btnQuickBrowseData" class="sm">Browse Table</button><button id="btnQuickCluster" class="sm">Open Cluster</button></div></div>
+            <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, then click Connect.</li><li>Create a database and table using the guided builders.</li><li>Use Browse &amp; Edit for row operations and Cluster Manager for topology.</li></ol><div class="callout">Every management path is available in two layers: guided forms for day-to-day workflows and advanced JSON/RPC controls for full fidelity.<br/><br/>Keyboard shortcuts: <kbd>⌘K</kbd> Command palette &nbsp; <kbd>⌘↵</kbd> Run SQL &nbsp; <kbd>Esc</kbd> Close dialogs</div><div class="actions"><button id="btnQuickCreateDb" class="sm">New Database</button><button id="btnQuickCreateTable" class="sm">New Table</button><button id="btnQuickInsertRow" class="sm">Insert Row</button><button id="btnQuickBrowseData" class="sm">Browse Table</button><button id="btnQuickCluster" class="sm">Open Cluster</button></div></div>
 
             <!-- Server Info -->
             <div class="card"><h2>&#x1F4E1; Server Info</h2>
@@ -410,12 +495,16 @@
                 <button class="easy-tab" data-etab="create">New Table</button>
                 <button class="easy-tab" data-etab="export">Export</button>
                 <button class="easy-tab" data-etab="operations">Operations</button>
+                <button class="easy-tab" data-etab="sql">SQL</button>
               </nav>
               <!-- Browse Tab -->
               <div class="easy-tab-pane active" data-etab="browse">
                 <div class="easy-toolbar">
                   <button id="easyBtnInsertFromBrowse" class="primary sm">&#x271A; Insert row</button>
                   <button id="easyBtnRefreshBrowse" class="sm">&#x21bb; Refresh</button>
+                  <label class="easy-toolbar-label">
+                    <input id="easyQuickFilter" placeholder="Quick filter rows…" style="width:150px" />
+                  </label>
                   <div style="flex:1"></div>
                   <label class="easy-toolbar-label">Show
                     <select id="easyPerPage"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option><option value="250">250</option></select>
@@ -519,6 +608,17 @@
                 </div>
                 <pre id="easyOpsOut" class="hint" style="margin-top:8px">Select an operation above.</pre>
               </div>
+              <!-- SQL Tab -->
+              <div class="easy-tab-pane" data-etab="sql">
+                <div class="hint" style="margin-bottom:8px">Run SQL directly against the selected database.</div>
+                <textarea id="easySqlText" rows="4" placeholder="SELECT * FROM my_table WHERE id > 1;" style="width:100%;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:8px;resize:vertical"></textarea>
+                <div class="actions" style="margin-top:8px">
+                  <button id="easyBtnRunSql" class="primary sm">&#x25B6; Run</button>
+                  <button id="easyBtnClearSql" class="ghost sm">Clear</button>
+                </div>
+                <div class="table-wrap" style="margin-top:10px"><table id="easySqlGrid"></table></div>
+                <pre id="easySqlOut" class="hint" style="margin-top:8px"></pre>
+              </div>
             </div>
           </div>
         </section>
@@ -530,6 +630,7 @@
               <div class="actions"><button id="btnSqlTplSelect" class="sm">SELECT *</button><button id="btnSqlTplShowDb" class="sm">SHOW DB</button><button id="btnSqlTplShowTables" class="sm">SHOW TABLES</button><button id="btnSqlTplUseDb" class="sm">USE DB</button><button id="btnSqlTplInsert" class="sm">INSERT</button><button id="btnSqlTplCreateDb" class="sm">CREATE DB</button><button id="btnSqlTplCreateTable" class="sm">CREATE TABLE</button></div>
               <div class="actions"><button id="btnSqlExec" class="primary">Run SQL</button><button id="btnSqlExplain" class="ghost">Explain</button></div>
               <pre id="sqlOut">Waiting for SQL.</pre>
+              <details class="help"><summary>Recent Queries <kbd>↑</kbd></summary><div class="sql-history" id="sqlHistory">No queries yet.</div></details>
               <div class="table-wrap"><table id="sqlTable"></table></div>
             </div>
             <div class="card wide"><h2>SkeinQL Runner</h2>

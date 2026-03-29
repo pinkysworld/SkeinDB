@@ -1,7 +1,7 @@
 # SkeinDB On-Disk Format v0.3 (v0.2 compatible)
 
 Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-02-24
+Last updated: 2026-03-11
 
 This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.
@@ -32,6 +32,10 @@ data/
   schema_changes.json         (prototype schema change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v1)
+  tables/
+    <db>/<table>.json         (prototype row store, format v2)
+    <db>/<table>.rseg         (prototype row segment container, format v1)
+    <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
   wal/
     wal-000001.log
   rows/
@@ -311,6 +315,37 @@ Behavior:
 Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
 - If both files are missing or unreadable, the table loads as empty.
+
+### 11.4 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
+
+Optional persisted cache for the engine's reusable secondary-index state.
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "row_count": 2,
+  "indexes": [
+    {
+      "built_version": 7,
+      "columns": ["email"],
+      "include": [],
+      "keys": {
+        "[{\"t\":\"str\",\"v\":\"a@example.com\"}]": [0],
+        "[{\"t\":\"str\",\"v\":\"b@example.com\"}]": [1]
+      }
+    }
+  ]
+}
+```
+
+Rules:
+- `row_count` must match the currently loaded table row count or the cache is ignored.
+- `built_version` is the table-version snapshot the cache was built from; stale caches may be rebuilt in memory before use.
+- `columns` and `include` use the same ordering semantics as the prototype secondary-index advisor.
+- `keys` map the JSON-encoded composite key to row indexes inside the current table snapshot.
+- Missing files or unknown `format_version` values are ignored and fall back to rebuilding from row data.
 
 ---
 

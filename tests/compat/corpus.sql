@@ -1,372 +1,266 @@
--- SkeinDB Compatibility Corpus v0.1
+-- SkeinDB MySQL Compatibility Corpus
+-- Each statement is separated by a semicolon and exercised by the mysql_compat_corpus_roundtrip test.
+-- Comments starting with -- are stripped before execution.
 
+-- ── DDL ──────────────────────────────────────────────────
+CREATE DATABASE IF NOT EXISTS corpus_db;
+USE corpus_db;
+CREATE TABLE IF NOT EXISTS users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(100),
+  email VARCHAR(200),
+  age INT,
+  salary DECIMAL(10,2),
+  department VARCHAR(50),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS orders (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  user_id INT,
+  product VARCHAR(100),
+  amount DECIMAL(10,2),
+  status VARCHAR(20) DEFAULT 'pending',
+  ordered_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS categories (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(100),
+  parent_id INT
+);
+
+-- ── INSERT ───────────────────────────────────────────────
+INSERT INTO users (name, email, age, salary, department) VALUES ('Alice', 'alice@example.com', 30, 75000.00, 'Engineering');
+INSERT INTO users (name, email, age, salary, department) VALUES ('Bob', 'bob@example.com', 25, 65000.00, 'Marketing');
+INSERT INTO users (name, email, age, salary, department) VALUES ('Charlie', 'charlie@example.com', 35, 85000.00, 'Engineering');
+INSERT INTO users (name, email, age, salary, department) VALUES ('Diana', 'diana@example.com', 28, 70000.00, 'Sales');
+INSERT INTO users (name, email, age, salary, department) VALUES ('Eve', 'eve@example.com', 32, 90000.00, 'Engineering');
+INSERT INTO orders (user_id, product, amount, status) VALUES (1, 'Widget', 29.99, 'completed');
+INSERT INTO orders (user_id, product, amount, status) VALUES (1, 'Gadget', 49.99, 'completed');
+INSERT INTO orders (user_id, product, amount, status) VALUES (2, 'Widget', 29.99, 'pending');
+INSERT INTO orders (user_id, product, amount, status) VALUES (3, 'Gizmo', 99.99, 'completed');
+INSERT INTO orders (user_id, product, amount, status) VALUES (4, 'Widget', 29.99, 'cancelled');
+INSERT INTO categories (name, parent_id) VALUES ('Electronics', NULL);
+INSERT INTO categories (name, parent_id) VALUES ('Software', 1);
+INSERT INTO categories (name, parent_id) VALUES ('Hardware', 1);
+
+-- ── Basic SELECT ─────────────────────────────────────────
 SELECT 1;
+SELECT 1 + 1;
+SELECT 'hello';
+SELECT NULL;
 SELECT VERSION();
 SELECT DATABASE();
-SELECT @@sql_mode;
-SELECT @@lower_case_table_names;
+SELECT USER();
+SELECT NOW();
+SELECT CURDATE();
+SELECT CURTIME();
 SELECT @@version_comment LIMIT 1;
-SELECT @@version_comment LIMIT 0,1;
-SELECT @@version_comment LIMIT 1 OFFSET 1;
 
-SHOW VARIABLES LIKE 'sql_mode';
-SHOW VARIABLES LIKE 'lower_case_table_names';
-SHOW VARIABLES LIKE 'sql_auto_is_null';
-SHOW VARIABLES LIKE 'time_zone';
-SHOW VARIABLES LIKE 'transaction_isolation';
-SHOW VARIABLES LIKE 'character_set_%';
-SHOW VARIABLES LIKE 'collation_%';
-SHOW VARIABLES;
-SHOW SESSION VARIABLES LIKE 'sql_mode';
-SHOW GLOBAL VARIABLES WHERE Variable_name = 'time_zone';
-SHOW STATUS;
-SHOW GLOBAL STATUS LIKE 'threads_%';
-SHOW CHARACTER SET LIKE 'utf8mb4';
-SHOW COLLATION WHERE Charset = 'utf8mb4';
+-- ── SELECT with expressions ──────────────────────────────
+SELECT * FROM users;
+SELECT name, email FROM users;
+SELECT name AS user_name, email AS user_email FROM users;
+SELECT * FROM users WHERE age > 30;
+SELECT * FROM users WHERE department = 'Engineering';
+SELECT * FROM users WHERE age BETWEEN 25 AND 35;
+SELECT * FROM users WHERE name LIKE 'A%';
+SELECT * FROM users WHERE name IN ('Alice', 'Bob');
+SELECT * FROM users WHERE email IS NOT NULL;
+SELECT * FROM users ORDER BY age ASC;
+SELECT * FROM users ORDER BY salary DESC;
+SELECT * FROM users ORDER BY department, name;
+SELECT * FROM users LIMIT 3;
+SELECT * FROM users LIMIT 2 OFFSET 1;
+SELECT DISTINCT department FROM users;
 
-SELECT @@transaction_isolation;
-SELECT @@sql_auto_is_null;
-SELECT @@character_set_server;
-SELECT @@collation_database;
+-- ── Aggregates ───────────────────────────────────────────
+SELECT COUNT(*) FROM users;
+SELECT COUNT(name) FROM users;
+SELECT SUM(salary) FROM users;
+SELECT AVG(salary) FROM users;
+SELECT MIN(age) FROM users;
+SELECT MAX(age) FROM users;
+SELECT department, COUNT(*) FROM users GROUP BY department;
+SELECT department, AVG(salary) FROM users GROUP BY department;
+SELECT department, SUM(salary) FROM users GROUP BY department;
+SELECT department, MIN(age), MAX(age) FROM users GROUP BY department;
+SELECT department, COUNT(*) AS cnt FROM users GROUP BY department HAVING cnt > 1;
+SELECT department, GROUP_CONCAT(name) FROM users GROUP BY department;
 
+-- ── String functions ─────────────────────────────────────
+SELECT UPPER('hello');
+SELECT LOWER('HELLO');
+SELECT LENGTH('hello');
+SELECT CONCAT('hello', ' ', 'world');
+SELECT CONCAT_WS('-', 'a', 'b', 'c');
+SELECT SUBSTRING('hello world', 1, 5);
+SELECT TRIM('  hello  ');
+SELECT LTRIM('  hello');
+SELECT RTRIM('hello  ');
+SELECT REPLACE('hello world', 'world', 'earth');
+SELECT REVERSE('hello');
+SELECT REPEAT('ab', 3);
+SELECT LPAD('hi', 5, '0');
+SELECT RPAD('hi', 5, '0');
+SELECT LEFT('hello', 3);
+SELECT RIGHT('hello', 3);
+SELECT CHAR_LENGTH('hello');
+SELECT SUBSTRING_INDEX('www.example.com', '.', 2);
+SELECT ASCII('A');
+SELECT CHAR(65);
+SELECT QUOTE('hello');
+
+-- ── Numeric functions ────────────────────────────────────
+SELECT ABS(-5);
+SELECT CEIL(4.3);
+SELECT FLOOR(4.7);
+SELECT ROUND(4.567, 2);
+SELECT TRUNCATE(4.567, 2);
+SELECT MOD(10, 3);
+SELECT POWER(2, 10);
+SELECT SQRT(16);
+SELECT GREATEST(1, 2, 3);
+SELECT LEAST(1, 2, 3);
+SELECT DEGREES(3.14159265358979);
+SELECT RADIANS(180);
+
+-- ── Date/Time functions ──────────────────────────────────
+SELECT PERIOD_ADD(202301, 5);
+SELECT PERIOD_DIFF(202306, 202301);
+SELECT MAKEDATE(2023, 32);
+SELECT MAKETIME(10, 30, 45);
+
+-- ── Hash / Crypto functions ──────────────────────────────
+SELECT MD5('hello');
+SELECT SHA1('hello');
+SELECT SHA2('hello', 256);
+SELECT CRC32('hello');
+
+-- ── JSON functions ───────────────────────────────────────
+SELECT JSON_EXTRACT('{"a":1,"b":2}', '$.a');
+SELECT JSON_UNQUOTE('"hello"');
+SELECT JSON_OBJECT('key', 'value');
+SELECT JSON_ARRAY(1, 2, 3);
+SELECT JSON_CONTAINS('{"a":1}', '1', '$.a');
+
+-- ── Encoding functions ───────────────────────────────────
+SELECT TO_BASE64('hello');
+SELECT FROM_BASE64('aGVsbG8=');
+SELECT HEX('hello');
+SELECT UNHEX('68656C6C6F');
+SELECT BIT_LENGTH('hello');
+
+-- ── SET / GET user variables ─────────────────────────────
+SET @myvar = 'test_value';
+SELECT @myvar;
+SET @counter = 42;
+SELECT @counter;
+
+-- ── Session compat SET statements ────────────────────────
 SET NAMES utf8mb4;
 SET CHARACTER SET utf8mb4;
-SET SESSION sql_mode = '';
-SET SQL_AUTO_IS_NULL = 0;
-SET SESSION sql_notes = 0;
-SET time_zone = '+00:00';
-SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;
-SET SESSION transaction_read_only = OFF;
+SET @@session.sql_mode = '';
+SET autocommit = 1;
 
-CREATE DATABASE IF NOT EXISTS skein_test;
-USE skein_test;
+-- ── Transaction support ──────────────────────────────────
+BEGIN;
+INSERT INTO users (name, email, age, salary, department) VALUES ('TxUser', 'tx@example.com', 40, 50000.00, 'Test');
+COMMIT;
 
-DROP TABLE IF EXISTS wp_options;
-DROP TABLE IF EXISTS wp_posts;
-DROP TABLE IF EXISTS wp_users;
+-- ── JOIN queries ─────────────────────────────────────────
+SELECT u.name, o.product, o.amount FROM users u JOIN orders o ON u.id = o.user_id;
+SELECT u.name, o.product FROM users u LEFT JOIN orders o ON u.id = o.user_id;
+SELECT u.name, COUNT(o.id) AS order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name;
 
-CREATE TABLE wp_options (
-  option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  option_name VARCHAR(191) NOT NULL,
-  option_value LONGTEXT NOT NULL,
-  autoload VARCHAR(20) NOT NULL DEFAULT 'yes',
-  PRIMARY KEY (option_id),
-  UNIQUE KEY option_name (option_name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+-- ── Subqueries ───────────────────────────────────────────
+SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'completed');
+SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) AS order_count FROM users;
 
-CREATE TABLE wp_posts (
-  ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  post_author BIGINT UNSIGNED NOT NULL DEFAULT 0,
-  post_date DATETIME NOT NULL,
-  post_status VARCHAR(20) NOT NULL DEFAULT 'publish',
-  post_title TEXT NOT NULL,
-  PRIMARY KEY (ID),
-  KEY post_status (post_status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+-- ── UNION ────────────────────────────────────────────────
+SELECT name FROM users WHERE department = 'Engineering' UNION ALL SELECT name FROM users WHERE department = 'Marketing';
 
-ALTER TABLE wp_posts
-  ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title;
+-- ── UPDATE / DELETE ──────────────────────────────────────
+UPDATE users SET salary = salary * 1.1 WHERE department = 'Engineering';
+DELETE FROM orders WHERE status = 'cancelled';
 
-ALTER TABLE wp_posts
-  ADD KEY post_author (post_author);
+-- ── INSERT variants ──────────────────────────────────────
+INSERT INTO users (name, email, age, salary, department) VALUES ('Frank', 'frank@example.com', 45, 95000.00, 'Engineering');
+INSERT IGNORE INTO users (name, email, age, salary, department) VALUES ('Grace', 'grace@example.com', 27, 62000.00, 'Marketing');
+REPLACE INTO categories (id, name, parent_id) VALUES (2, 'Software', 1);
 
-CREATE TABLE wp_users (
-  id BIGINT UNSIGNED NOT NULL,
-  user_login VARCHAR(60) NOT NULL,
-  PRIMARY KEY (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
+-- ── CASE expressions ─────────────────────────────────────
+SELECT name, CASE WHEN age < 30 THEN 'young' WHEN age < 35 THEN 'mid' ELSE 'senior' END AS age_group FROM users;
 
-LOCK TABLES wp_options WRITE;
+-- ── COALESCE / IFNULL / IF ───────────────────────────────
+SELECT COALESCE(NULL, NULL, 'default');
+SELECT IFNULL(NULL, 'fallback');
+SELECT IF(1 > 0, 'yes', 'no');
+SELECT NULLIF(1, 1);
+SELECT NULLIF(1, 2);
+
+-- ── EXISTS ───────────────────────────────────────────────
+SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = users.id);
+
+-- ── SHOW / DESCRIBE / EXPLAIN ────────────────────────────
+SHOW DATABASES;
+SHOW TABLES;
+DESCRIBE users;
+
+-- ── ALTER TABLE ──────────────────────────────────────────
+ALTER TABLE users ADD COLUMN active BOOLEAN DEFAULT TRUE;
+
+-- ── TRUNCATE ─────────────────────────────────────────────
+-- TRUNCATE TABLE categories;  -- commented out to preserve data for later statements
+
+-- ── LIKE patterns ────────────────────────────────────────
+SELECT * FROM users WHERE name LIKE '%li%';
+SELECT * FROM users WHERE email LIKE '%@example.com';
+
+-- ── REGEXP ───────────────────────────────────────────────
+SELECT REGEXP_REPLACE('hello world', 'world', 'earth');
+SELECT REGEXP_SUBSTR('hello123world', '[0-9]+');
+
+-- ── CAST / CONVERT ───────────────────────────────────────
+SELECT CAST(42 AS CHAR);
+SELECT CAST('2023-01-15' AS DATE);
+
+-- ── Compound INSERT ──────────────────────────────────────
+INSERT INTO categories (name, parent_id) VALUES ('Networking', 1), ('Storage', 1);
+
+-- ── COUNT DISTINCT ───────────────────────────────────────
+SELECT COUNT(DISTINCT department) FROM users;
+
+-- ── ORDER BY with LIMIT ──────────────────────────────────
+SELECT name, salary FROM users ORDER BY salary DESC LIMIT 3;
+
+-- ── SELECT with arithmetic ───────────────────────────────
+SELECT name, salary, salary * 12 AS annual FROM users;
+
+-- ── BETWEEN with dates ───────────────────────────────────
+SELECT * FROM users WHERE age BETWEEN 25 AND 35 ORDER BY age;
+
+-- ── Multiple conditions ──────────────────────────────────
+SELECT * FROM users WHERE department = 'Engineering' AND age > 30;
+SELECT * FROM users WHERE department = 'Engineering' OR department = 'Marketing';
+
+-- ── NULL handling ────────────────────────────────────────
+SELECT * FROM users WHERE email IS NOT NULL;
+SELECT COALESCE(NULL, 'default_value');
+
+-- ── INSERT ... ON DUPLICATE KEY UPDATE ───────────────────
+INSERT INTO users (name, email, age, salary, department) VALUES ('Hank', 'hank@example.com', 50, 100000.00, 'Executive') ON DUPLICATE KEY UPDATE salary = VALUES(salary);
+
+-- ── Information Schema ───────────────────────────────────
+SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'corpus_db' LIMIT 5;
+SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'corpus_db' AND TABLE_NAME = 'users' LIMIT 10;
+
+-- ── LOCK / UNLOCK stubs ─────────────────────────────────
+LOCK TABLES users READ;
 UNLOCK TABLES;
 
-SHOW DATABASES;
-SHOW TABLES FROM skein_test;
-SHOW FULL TABLES FROM skein_test;
-SHOW FULL TABLES FROM skein_test WHERE Table_type = 'BASE TABLE';
-SHOW TABLES FROM skein_test LIKE 'wp_%';
+-- ── DROP TABLE ───────────────────────────────────────────
+-- DROP TABLE IF EXISTS categories;  -- keep for other tests
 
-SHOW TABLE STATUS FROM skein_test LIKE 'wp_posts';
-SHOW FULL COLUMNS FROM wp_options;
-SHOW INDEX FROM wp_options;
-SHOW INDEX FROM wp_posts;
-SHOW KEYS FROM wp_posts;
-SHOW CREATE TABLE wp_options;
-SHOW CREATE TABLE wp_posts;
-DESCRIBE wp_posts;
-
-SELECT table_name
-  FROM information_schema.tables
- WHERE table_schema = 'skein_test';
-
-SELECT column_name, data_type
-  FROM information_schema.columns
- WHERE table_schema='skein_test' AND table_name='wp_posts'
- ORDER BY ordinal_position;
-
-INSERT INTO wp_options (option_name, option_value, autoload)
-VALUES
-  ('siteurl', 'https://example.com', 'yes'),
-  ('home', 'https://example.com', 'yes'),
-  ('blogname', 'SkeinDB Test', 'yes');
-
-INSERT INTO wp_options (option_name, option_value)
-VALUES ('timezone_string', 'UTC');
-
-SELECT option_name, option_value FROM wp_options WHERE autoload = 'yes' ORDER BY option_name;
-SELECT option_name FROM wp_options WHERE option_name IN ('siteurl', 'home') ORDER BY option_name;
-SELECT option_value FROM wp_options WHERE option_name = 'siteurl';
-SELECT option_value FROM wp_options WHERE option_name = 'home';
-SELECT autoload FROM wp_options WHERE option_name='timezone_string';
-INSERT IGNORE INTO wp_options (option_name, option_value)
-VALUES ('timezone_string', 'Europe/Berlin');
-SELECT option_value FROM wp_options WHERE option_name='timezone_string';
-REPLACE INTO wp_options (option_name, option_value, autoload)
-VALUES ('timezone_string', 'Europe/Berlin', 'no');
-SELECT option_value FROM wp_options WHERE option_name='timezone_string';
-SELECT autoload FROM wp_options WHERE option_name='timezone_string';
-
-UPDATE wp_options SET option_value='https://example.org' WHERE option_name='siteurl';
-UPDATE wp_options SET option_value='https://example.org' WHERE option_name='home';
-INSERT IGNORE INTO wp_options (option_id, option_name, option_value, autoload)
-VALUES (1, 'siteurl', 'https://ignored.example', 'yes');
-
-SELECT option_value FROM wp_options WHERE option_name = 'siteurl';
-SELECT option_value FROM wp_options WHERE option_name = 'home';
-
-INSERT INTO wp_options (option_name, option_value, autoload)
-VALUES ('siteurl', 'https://example.net', 'yes')
-ON DUPLICATE KEY UPDATE
-  option_value = VALUES(option_value),
-  autoload = VALUES(autoload);
-
-SELECT option_value FROM wp_options WHERE option_name='siteurl';
-
-INSERT INTO wp_options (option_value, option_name, autoload)
-VALUES ('https://example.shuffle', 'siteurl', 'no')
-ON DUPLICATE KEY UPDATE
-  option_value = VALUES(option_value),
-  autoload = VALUES(autoload);
-
-SELECT option_value, autoload FROM wp_options WHERE option_name='siteurl';
-
-REPLACE INTO wp_options (option_value, option_name, autoload)
-VALUES ('https://example.replace-shuffled', 'siteurl', 'yes');
-
-SELECT option_value, autoload FROM wp_options WHERE option_name='siteurl';
-
-REPLACE INTO wp_options (option_id, option_name, option_value, autoload)
-VALUES (1, 'siteurl', 'https://example.replace', 'yes');
-
-SELECT option_value FROM wp_options WHERE option_name='siteurl';
-
-INSERT INTO wp_users (id, user_login)
-VALUES
-  (1, 'ada'),
-  (2, 'grace'),
-  (4, 'margaret');
-
-CREATE UNIQUE INDEX user_login_unique ON wp_users (user_login);
-
-SHOW INDEX FROM wp_users;
-
-INSERT IGNORE INTO wp_users (id, user_login)
-VALUES (5, 'ada');
-
-SELECT COUNT(*) AS user_count
-  FROM wp_users;
-
-ALTER TABLE wp_users DROP INDEX user_login_unique;
-
-SHOW INDEX FROM wp_users;
-
-INSERT INTO wp_posts (post_author, post_date, post_status, post_title)
-VALUES
-  (1, '2020-01-01 00:00:00', 'publish', 'Hello'),
-  (1, '2020-01-02 00:00:00', 'draft', 'Draft 1'),
-  (2, '2020-01-03 00:00:00', 'publish', 'World'),
-  (2, '2020-01-04 00:00:00', 'publish', 'More'),
-  (3, '2020-01-05 00:00:00', 'publish', 'Even More');
-
-SELECT post_name
-  FROM wp_posts
- WHERE ID = 1;
-
-SELECT p.post_author, u.user_login
-  FROM wp_posts AS p
-  LEFT JOIN wp_users AS u
-    ON p.post_author = u.id
- WHERE u.user_login IS NULL
- ORDER BY p.post_author ASC;
-
-SELECT p.ID
-  FROM wp_posts AS p
-  LEFT JOIN wp_users AS u
-    ON p.post_author = u.id
- WHERE u.user_login = 'ada'
- ORDER BY p.ID ASC;
-
-SELECT u.id, p.ID
-  FROM wp_posts AS p
-  RIGHT JOIN wp_users AS u
-    ON p.post_author = u.id
- WHERE p.ID IS NULL
- ORDER BY u.id ASC;
-
-SELECT p.ID, u.user_login, ux.user_login
-  FROM wp_posts AS p
-  LEFT JOIN wp_users AS u
-    ON p.post_author = u.id
-  LEFT JOIN wp_users AS ux
-    ON ux.id = u.id
- WHERE p.ID = 1
- ORDER BY p.ID ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE post_title = NULL
- ORDER BY ID ASC;
-
-SELECT COUNT(*) AS publish_count
-  FROM wp_posts
- WHERE post_status = 'publish';
-
-SELECT COUNT(post_author) AS author_count
-  FROM wp_posts
- WHERE post_status = 'publish';
-
-SELECT SUM(post_author) AS author_sum
-  FROM wp_posts
- WHERE post_status = 'publish';
-
-SELECT post_status, COUNT(*) AS status_count
-  FROM wp_posts
- GROUP BY post_status
- ORDER BY post_status ASC;
-
-SELECT post_author, SUM(post_author) AS author_sum_by_author
-  FROM wp_posts
- WHERE post_status = 'publish'
- GROUP BY post_author
- ORDER BY post_author ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE post_status = 'publish' OR post_status = 'draft'
- ORDER BY ID ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE (post_status = 'publish' OR post_status = 'draft')
-   AND post_author = 1
- ORDER BY ID ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE post_status NOT IN ('draft')
- ORDER BY ID ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE post_title NOT LIKE 'Dr%'
- ORDER BY ID ASC;
-
-SELECT ID
-  FROM wp_posts
- WHERE post_status LIKE 'pub%'
- ORDER BY ID DESC
- LIMIT 0, 2;
-
-SELECT SQL_CALC_FOUND_ROWS ID
-  FROM wp_posts
- WHERE post_status='publish'
- ORDER BY ID
- LIMIT 2;
-
-SELECT FOUND_ROWS();
-
-SELECT SQL_CALC_FOUND_ROWS p.ID
-  FROM wp_posts AS p
-  LEFT JOIN wp_posts AS px
-    ON px.post_author = p.post_author
- WHERE p.post_status='publish'
- GROUP BY p.ID
- ORDER BY p.ID ASC
- LIMIT 0, 2;
-
-SELECT FOUND_ROWS();
-
-SET @@SESSION.autocommit=0;
-
-BEGIN;
-INSERT INTO wp_options (option_name, option_value, autoload)
-VALUES ('txn_test', '1', 'no');
-SELECT option_value FROM wp_options WHERE option_name='txn_test';
-ROLLBACK;
-SELECT option_value FROM wp_options WHERE option_name='txn_test';
-
-BEGIN;
-INSERT INTO wp_options (option_name, option_value, autoload)
-VALUES ('txn_test', '2', 'no');
-COMMIT;
-SELECT option_value FROM wp_options WHERE option_name='txn_test';
-
-SET LOCAL autocommit=1;
-
-CREATE TABLE compat_alter_subq (
-  id BIGINT UNSIGNED NOT NULL,
-  ref_id BIGINT UNSIGNED NULL,
-  slug VARCHAR(20) NOT NULL DEFAULT '',
-  PRIMARY KEY (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;
-
-INSERT INTO compat_alter_subq (id, ref_id, slug)
-VALUES
-  (1, NULL, 'root'),
-  (2, 1, 'child'),
-  (3, 2, 'leaf');
-
-ALTER TABLE compat_alter_subq
-  MODIFY COLUMN slug VARCHAR(20) NOT NULL DEFAULT 'n-a';
-
-ALTER TABLE compat_alter_subq
-  CHANGE COLUMN ref_id parent_id BIGINT UNSIGNED NULL;
-
-INSERT INTO compat_alter_subq (id, parent_id)
-VALUES (4, 1);
-
-SELECT slug
-  FROM compat_alter_subq
- WHERE id = 4;
-
-SELECT id
-  FROM compat_alter_subq
- WHERE parent_id IN (
-   SELECT id
-     FROM compat_alter_subq
-    WHERE id < 3
- )
- ORDER BY id ASC;
-
-SELECT id
-  FROM compat_alter_subq
- WHERE EXISTS (
-   SELECT 1
-     FROM compat_alter_subq
-    WHERE slug = 'n-a'
- )
- ORDER BY id ASC
- LIMIT 0, 2;
-
-SELECT id
-  FROM compat_alter_subq
- WHERE NOT EXISTS (
-   SELECT 1
-     FROM compat_alter_subq
-    WHERE id = 999
- )
- ORDER BY id ASC
- LIMIT 0, 2;
-
-SHOW STATUS LIKE 'Threads_connected';
-SHOW ENGINES;
-SHOW GRANTS;
+-- ── Final verification ───────────────────────────────────
+SELECT COUNT(*) FROM users;
+SELECT COUNT(*) FROM orders;

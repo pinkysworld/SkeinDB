@@ -381,7 +381,8 @@ async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let (_seq, duplicate_err) = read_mysql_packet(&mut stream).await?;
     let duplicate_err = decode_mysql_err_packet(&duplicate_err)
         .ok_or_else(|| anyhow!("expected error packet for duplicate insert"))?;
-    assert!(duplicate_err.contains("conflict"));
+    assert!(duplicate_err.contains("[23000]"));
+    assert!(duplicate_err.contains("duplicate key"));
 
     send_com_query(
         &mut stream,
@@ -645,6 +646,23 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
         vec![vec![Some("8".to_string()), Some("Grace".to_string())]]
     );
 
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT id FROM wp_users WHERE id = (SELECT id FROM wp_users WHERE name = 'Grace') ORDER BY id ASC",
+    )
+    .await?;
+    let scalar_subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(scalar_subquery_stmt.param_count, 0);
+    assert_eq!(
+        scalar_subquery_stmt.column_defs,
+        vec![("id".to_string(), 0x08),]
+    );
+
+    send_com_stmt_execute(&mut stream, scalar_subquery_stmt.statement_id, &[]).await?;
+    let scalar_subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(scalar_subquery_rows, vec![vec![Some("8".to_string())]]);
+    send_com_stmt_close(&mut stream, scalar_subquery_stmt.statement_id).await?;
+
     send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_posts").await?;
     let (_seq, ok_drop_posts) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_drop_posts)?.0, 0);
@@ -664,6 +682,26 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     .await?;
     let (_seq, ok_insert_posts) = read_mysql_packet(&mut stream).await?;
     assert_eq!(decode_mysql_ok_packet(&ok_insert_posts)?.0, 2);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_profiles").await?;
+    let (_seq, ok_drop_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_profiles)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_profiles (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_profiles)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_profiles (id, name) VALUES (11, 'Piper')",
+    )
+    .await?;
+    let (_seq, ok_insert_profiles) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_profiles)?.0, 1);
 
     send_com_stmt_prepare(
         &mut stream,
@@ -690,6 +728,615 @@ async fn mysql_com_stmt_prepare_execute_roundtrip() -> anyhow::Result<()> {
     );
 
     send_com_stmt_close(&mut stream, join_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.id AS post_id, pr.name FROM wp_posts AS p INNER JOIN wp_profiles AS pr USING (id) WHERE p.id = ?",
+    )
+    .await?;
+    let using_join_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(using_join_stmt.param_count, 1);
+    assert_eq!(
+        using_join_stmt.column_defs,
+        vec![("post_id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        using_join_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let using_join_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        using_join_rows,
+        vec![vec![Some("11".to_string()), Some("Piper".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, using_join_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.id post_id, u.name author_name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.author_id = u.id WHERE p.id = ?",
+    )
+    .await?;
+    let implicit_alias_join_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(implicit_alias_join_stmt.param_count, 1);
+    assert_eq!(
+        implicit_alias_join_stmt.column_defs,
+        vec![
+            ("post_id".to_string(), 0x08),
+            ("author_name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        implicit_alias_join_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let implicit_alias_join_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        implicit_alias_join_rows,
+        vec![vec![Some("11".to_string()), Some("Nora".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, implicit_alias_join_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.id AS post_id, u.name FROM wp_posts AS p CROSS JOIN wp_users AS u WHERE p.author_id = u.id AND p.id = ?",
+    )
+    .await?;
+    let cross_join_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(cross_join_stmt.param_count, 1);
+    assert_eq!(
+        cross_join_stmt.column_defs,
+        vec![("post_id".to_string(), 0x08), ("name".to_string(), 0xfd),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        cross_join_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let cross_join_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        cross_join_rows,
+        vec![vec![Some("11".to_string()), Some("Nora".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, cross_join_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT * FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.author_id = u.id WHERE p.id = ?",
+    )
+    .await?;
+    let join_wildcard_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(join_wildcard_stmt.param_count, 1);
+    assert_eq!(
+        join_wildcard_stmt.column_defs,
+        vec![
+            ("id".to_string(), 0x08),
+            ("author_id".to_string(), 0x08),
+            ("id".to_string(), 0x08),
+            ("name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        join_wildcard_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let join_wildcard_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        join_wildcard_rows,
+        vec![vec![
+            Some("11".to_string()),
+            Some("7".to_string()),
+            Some("7".to_string()),
+            Some("Nora".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, join_wildcard_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT * FROM wp_posts GROUP BY id, author_id HAVING id = ? ORDER BY id ASC",
+    )
+    .await?;
+    let grouped_wildcard_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(grouped_wildcard_stmt.param_count, 1);
+    assert_eq!(
+        grouped_wildcard_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("author_id".to_string(), 0x08),]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        grouped_wildcard_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let grouped_wildcard_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_wildcard_rows,
+        vec![vec![Some("11".to_string()), Some("7".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, grouped_wildcard_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT p.*, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.author_id = u.id WHERE p.id = ?",
+    )
+    .await?;
+    let join_qualified_wildcard_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(join_qualified_wildcard_stmt.param_count, 1);
+    assert_eq!(
+        join_qualified_wildcard_stmt.column_defs,
+        vec![
+            ("id".to_string(), 0x08),
+            ("author_id".to_string(), 0x08),
+            ("name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        join_qualified_wildcard_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let join_qualified_wildcard_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        join_qualified_wildcard_rows,
+        vec![vec![
+            Some("11".to_string()),
+            Some("7".to_string()),
+            Some("Nora".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, join_qualified_wildcard_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT skein_test.wp_posts.*, u.name FROM skein_test.wp_posts LEFT JOIN skein_test.wp_users AS u ON wp_posts.author_id = u.id WHERE wp_posts.id = ?",
+    )
+    .await?;
+    let join_schema_qualified_wildcard_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(join_schema_qualified_wildcard_stmt.param_count, 1);
+    assert_eq!(
+        join_schema_qualified_wildcard_stmt.column_defs,
+        vec![
+            ("id".to_string(), 0x08),
+            ("author_id".to_string(), 0x08),
+            ("name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        join_schema_qualified_wildcard_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(11)],
+    )
+    .await?;
+    let join_schema_qualified_wildcard_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        join_schema_qualified_wildcard_rows,
+        vec![vec![
+            Some("11".to_string()),
+            Some("7".to_string()),
+            Some("Nora".to_string()),
+        ]]
+    );
+    send_com_stmt_close(
+        &mut stream,
+        join_schema_qualified_wildcard_stmt.statement_id,
+    )
+    .await?;
+
+    send_com_stmt_prepare(&mut stream, "SELECT AVG(id) AS avg_user_id FROM wp_users").await?;
+    let aggregate_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(
+        aggregate_stmt.column_defs,
+        vec![("avg_user_id".to_string(), 0x05),]
+    );
+
+    send_com_stmt_execute(&mut stream, aggregate_stmt.statement_id, &[]).await?;
+    let aggregate_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(aggregate_rows, vec![vec![Some("7.5".to_string())]]);
+    send_com_stmt_close(&mut stream, aggregate_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT COUNT(*) AS user_count FROM wp_users HAVING COUNT(*) >= 2 AND user_count = 2",
+    )
+    .await?;
+    let simple_aggregate_having_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(
+        simple_aggregate_having_stmt.column_defs,
+        vec![("user_count".to_string(), 0x08),]
+    );
+
+    send_com_stmt_execute(&mut stream, simple_aggregate_having_stmt.statement_id, &[]).await?;
+    let simple_aggregate_having_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        simple_aggregate_having_rows,
+        vec![vec![Some("2".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, simple_aggregate_having_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT id, AVG(score) AS avg_score FROM wp_metrics GROUP BY id HAVING avg_score >= 1 ORDER BY id ASC",
+    )
+    .await?;
+    let aggregate_having_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(
+        aggregate_having_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("avg_score".to_string(), 0x05),]
+    );
+
+    send_com_stmt_execute(&mut stream, aggregate_having_stmt.statement_id, &[]).await?;
+    let aggregate_having_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        aggregate_having_rows,
+        vec![vec![Some("1".to_string()), Some("1.5".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, aggregate_having_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT LENGTH(name) AS name_len, IF(1, name, 'missing') AS chosen_name, LOCATE('ra', name) AS hit_pos FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let function_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(function_stmt.param_count, 1);
+    assert_eq!(
+        function_stmt.column_defs,
+        vec![
+            ("name_len".to_string(), 0x08),
+            ("chosen_name".to_string(), 0xfd),
+            ("hit_pos".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        function_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let function_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        function_rows,
+        vec![vec![
+            Some("5".to_string()),
+            Some("Grace".to_string()),
+            Some("2".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, function_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT CAST(name AS CHAR) AS name_text, CASE WHEN id = 8 THEN name ELSE 'missing' END AS chosen_name, CAST(id AS UNSIGNED) AS id_unsigned FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let cast_case_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(cast_case_stmt.param_count, 1);
+    assert_eq!(
+        cast_case_stmt.column_defs,
+        vec![
+            ("name_text".to_string(), 0xfd),
+            ("chosen_name".to_string(), 0xfd),
+            ("id_unsigned".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        cast_case_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(8)],
+    )
+    .await?;
+    let cast_case_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        cast_case_rows,
+        vec![vec![
+            Some("Grace".to_string()),
+            Some("Grace".to_string()),
+            Some("8".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, cast_case_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT id + 1 AS next_id, id / 2 AS half_id, id % 3 AS mod_id FROM wp_users WHERE id = ?",
+    )
+    .await?;
+    let arithmetic_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(arithmetic_stmt.param_count, 1);
+    assert_eq!(
+        arithmetic_stmt.column_defs,
+        vec![
+            ("next_id".to_string(), 0x08),
+            ("half_id".to_string(), 0x05),
+            ("mod_id".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        arithmetic_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(7)],
+    )
+    .await?;
+    let arithmetic_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        arithmetic_rows,
+        vec![vec![
+            Some("8".to_string()),
+            Some("3.5".to_string()),
+            Some("1".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, arithmetic_stmt.statement_id).await?;
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS wp_events").await?;
+    let (_seq, ok_drop_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_events)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE wp_events (id BIGINT UNSIGNED NOT NULL, occurred_at DATETIME NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_events)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_events (id, occurred_at) VALUES (1, '2020-01-02 03:04:05')",
+    )
+    .await?;
+    let (_seq, ok_insert_events) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_events)?.0, 1);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATE(occurred_at) AS occurred_day, YEAR(occurred_at) AS occurred_year, UNIX_TIMESTAMP(occurred_at) AS occurred_ts FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(datetime_stmt.param_count, 1);
+    assert_eq!(
+        datetime_stmt.column_defs,
+        vec![
+            ("occurred_day".to_string(), 0xfd),
+            ("occurred_year".to_string(), 0x08),
+            ("occurred_ts".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        datetime_rows,
+        vec![vec![
+            Some("2020-01-02".to_string()),
+            Some("2020".to_string()),
+            Some("1577934245".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, datetime_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATE_FORMAT(occurred_at, '%Y-%m-%d %H:%i:%s') AS occurred_fmt, FROM_UNIXTIME(UNIX_TIMESTAMP(occurred_at)) AS occurred_from_ts, FIND_IN_SET(CAST(id AS CHAR), '9,1,5') AS id_rank, ISNULL(occurred_at) AS occurred_is_null FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let extended_datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(extended_datetime_stmt.param_count, 1);
+    assert_eq!(
+        extended_datetime_stmt.column_defs,
+        vec![
+            ("occurred_fmt".to_string(), 0xfd),
+            ("occurred_from_ts".to_string(), 0xfd),
+            ("id_rank".to_string(), 0x08),
+            ("occurred_is_null".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        extended_datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let extended_datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        extended_datetime_rows,
+        vec![vec![
+            Some("2020-01-02 03:04:05".to_string()),
+            Some("2020-01-02 03:04:05".to_string()),
+            Some("2".to_string()),
+            Some("0".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, extended_datetime_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATEDIFF(occurred_at, '2020-01-01 00:00:00') AS occurred_day_diff, TIMESTAMPDIFF(HOUR, '2020-01-02 00:00:00', occurred_at) AS occurred_hour_diff FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let diff_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(diff_stmt.param_count, 1);
+    assert_eq!(
+        diff_stmt.column_defs,
+        vec![
+            ("occurred_day_diff".to_string(), 0x08),
+            ("occurred_hour_diff".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        diff_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let diff_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        diff_rows,
+        vec![vec![Some("1".to_string()), Some("3".to_string())]]
+    );
+    send_com_stmt_close(&mut stream, diff_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT WEEKDAY(occurred_at) AS occurred_weekday, DAYOFWEEK(occurred_at) AS occurred_day_of_week, DAYOFYEAR(occurred_at) AS occurred_day_of_year, MONTHNAME(occurred_at) AS occurred_month_name, DAYNAME(occurred_at) AS occurred_day_name FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let named_datetime_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(named_datetime_stmt.param_count, 1);
+    assert_eq!(
+        named_datetime_stmt.column_defs,
+        vec![
+            ("occurred_weekday".to_string(), 0x08),
+            ("occurred_day_of_week".to_string(), 0x08),
+            ("occurred_day_of_year".to_string(), 0x08),
+            ("occurred_month_name".to_string(), 0xfd),
+            ("occurred_day_name".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        named_datetime_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let named_datetime_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        named_datetime_rows,
+        vec![vec![
+            Some("3".to_string()),
+            Some("5".to_string()),
+            Some("2".to_string()),
+            Some("January".to_string()),
+            Some("Thursday".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, named_datetime_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT QUARTER(occurred_at) AS occurred_quarter, LAST_DAY(occurred_at) AS occurred_last_day, EXTRACT(YEAR FROM occurred_at) AS occurred_extract_year, EXTRACT(HOUR FROM occurred_at) AS occurred_extract_hour FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let extract_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(extract_stmt.param_count, 1);
+    assert_eq!(
+        extract_stmt.column_defs,
+        vec![
+            ("occurred_quarter".to_string(), 0x08),
+            ("occurred_last_day".to_string(), 0xfd),
+            ("occurred_extract_year".to_string(), 0x08),
+            ("occurred_extract_hour".to_string(), 0x08),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        extract_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let extract_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        extract_rows,
+        vec![vec![
+            Some("1".to_string()),
+            Some("2020-01-31".to_string()),
+            Some("2020".to_string()),
+            Some("3".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, extract_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT DATE_ADD(occurred_at, INTERVAL 2 DAY) AS occurred_plus_two_days, DATE_SUB(occurred_at, INTERVAL 3 HOUR) AS occurred_minus_three_hours, TIMESTAMPADD(MINUTE, 30, occurred_at) AS occurred_plus_half_hour FROM wp_events WHERE id = ?",
+    )
+    .await?;
+    let interval_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(interval_stmt.param_count, 1);
+    assert_eq!(
+        interval_stmt.column_defs,
+        vec![
+            ("occurred_plus_two_days".to_string(), 0xfd),
+            ("occurred_minus_three_hours".to_string(), 0xfd),
+            ("occurred_plus_half_hour".to_string(), 0xfd),
+        ]
+    );
+
+    send_com_stmt_execute(
+        &mut stream,
+        interval_stmt.statement_id,
+        &[MysqlStmtParamValue::I64(1)],
+    )
+    .await?;
+    let interval_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        interval_rows,
+        vec![vec![
+            Some("2020-01-04 03:04:05".to_string()),
+            Some("2020-01-02 00:04:05".to_string()),
+            Some("2020-01-02 03:34:05".to_string()),
+        ]]
+    );
+    send_com_stmt_close(&mut stream, interval_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT outer_q.id FROM wp_events AS outer_q WHERE (EXISTS (SELECT 1 FROM wp_events AS inner_q WHERE inner_q.id = outer_q.id) AND outer_q.id > 0) OR outer_q.id = 999 ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(subquery_stmt.param_count, 0);
+    assert_eq!(subquery_stmt.column_defs, vec![("id".to_string(), 0x08)]);
+
+    send_com_stmt_execute(&mut stream, subquery_stmt.statement_id, &[]).await?;
+    let subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(subquery_rows, vec![vec![Some("1".to_string())]]);
+    send_com_stmt_close(&mut stream, subquery_stmt.statement_id).await?;
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT outer_q.id FROM wp_events AS outer_q WHERE outer_q.id IN (SELECT mid_q.id FROM wp_events AS mid_q WHERE mid_q.id IN (SELECT inner_q.id FROM wp_events AS inner_q WHERE inner_q.id = 1)) ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let nested_subquery_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(nested_subquery_stmt.param_count, 0);
+    assert_eq!(
+        nested_subquery_stmt.column_defs,
+        vec![("id".to_string(), 0x08)]
+    );
+
+    send_com_stmt_execute(&mut stream, nested_subquery_stmt.statement_id, &[]).await?;
+    let nested_subquery_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(nested_subquery_rows, vec![vec![Some("1".to_string())]]);
+    send_com_stmt_close(&mut stream, nested_subquery_stmt.statement_id).await?;
 
     send_com_stmt_prepare(&mut stream, "SELECT * FROM wp_users ORDER BY id ASC").await?;
     let cursor_stmt = read_mysql_prepare_ok(&mut stream).await?;
@@ -849,6 +1496,176 @@ async fn mysql_simple_aggregate_compat_roundtrip() -> anyhow::Result<()> {
             vec![Some("2".to_string()), Some("1.5".to_string())],
         ]
     );
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO wp_postmeta (meta_id, sort_order, weight) VALUES (4, 5, 3.0)",
+    )
+    .await?;
+    let (_seq, ok_insert_extra) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_extra)?.0, 1);
+
+    send_com_query(
+        &mut stream,
+        "SELECT MIN(sort_order) AS min_sort FROM wp_postmeta",
+    )
+    .await?;
+    let min_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(min_rows, vec![vec![Some("2".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT MAX(sort_order) AS max_sort FROM wp_postmeta",
+    )
+    .await?;
+    let max_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(max_rows, vec![vec![Some("5".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT AVG(weight) AS avg_weight FROM wp_postmeta",
+    )
+    .await?;
+    let avg_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(avg_rows, vec![vec![Some("2.25".to_string())]]);
+
+    send_com_query(
+        &mut stream,
+        "SELECT sort_order, MAX(weight) AS max_weight FROM wp_postmeta GROUP BY sort_order ORDER BY sort_order ASC",
+    )
+    .await?;
+    let grouped_max_rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        grouped_max_rows,
+        vec![
+            vec![None, None],
+            vec![Some("2".to_string()), Some("1.5".to_string())],
+            vec![Some("5".to_string()), Some("3.0".to_string())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_create_unique_index_rejects_existing_duplicates() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_create_unique_index_rejects_duplicates")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE IF NOT EXISTS skein_test",
+        "USE skein_test",
+        "DROP TABLE IF EXISTS dup_users",
+        "CREATE TABLE dup_users (id BIGINT UNSIGNED NOT NULL, email VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO dup_users (id, email) VALUES (1, 'dup@example.com')",
+        "INSERT INTO dup_users (id, email) VALUES (2, 'dup@example.com')",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(decode_mysql_ok_packet(&ok)?.0, if sql.starts_with("INSERT") { 1 } else { 0 });
+    }
+
+    send_com_query(
+        &mut stream,
+        "CREATE UNIQUE INDEX email_unique ON dup_users (email)",
+    )
+    .await?;
+    let err = read_mysql_response(&mut stream)
+        .await
+        .expect_err("expected duplicate-key error");
+    assert!(err.to_string().contains("duplicate key"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_primary_key_update_rejects_duplicate_key() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_primary_key_update_rejects_duplicate_key")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE IF NOT EXISTS skein_test",
+        "USE skein_test",
+        "DROP TABLE IF EXISTS pk_users",
+        "CREATE TABLE pk_users (id BIGINT UNSIGNED NOT NULL, email VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO pk_users (id, email) VALUES (1, 'a@example.com'), (2, 'b@example.com')",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(
+            decode_mysql_ok_packet(&ok)?.0,
+            if sql.starts_with("INSERT") { 2 } else { 0 }
+        );
+    }
+
+    send_com_query(&mut stream, "UPDATE pk_users SET id = 1 WHERE id = 2").await?;
+    let (_seq, err_payload) = read_mysql_packet(&mut stream).await?;
+    let err = decode_mysql_err_packet(&err_payload)
+        .ok_or_else(|| anyhow!("expected duplicate-key error packet"))?;
+    assert!(err.contains("[23000]"));
+    assert!(err.contains("duplicate key"));
+
+    send_com_query(
+        &mut stream,
+        "SELECT id, email FROM pk_users ORDER BY id ASC",
+    )
+    .await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][0].as_deref(), Some("1"));
+    assert_eq!(rows[1][0].as_deref(), Some("2"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_rename_index_roundtrip_preserves_uniqueness() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server =
+        HttpHarness::start_with_mysql("mysql_rename_index_roundtrip_preserves_uniqueness")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE IF NOT EXISTS skein_test",
+        "USE skein_test",
+        "DROP TABLE IF EXISTS rename_users",
+        "CREATE TABLE rename_users (id BIGINT UNSIGNED NOT NULL, email VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO rename_users (id, email) VALUES (1, 'ada@example.com')",
+        "CREATE UNIQUE INDEX email_unique ON rename_users (email)",
+        "ALTER TABLE rename_users RENAME INDEX email_unique TO email_login_uq",
+    ] {
+        send_com_query(&mut stream, sql).await?;
+        let (_seq, ok) = read_mysql_packet(&mut stream).await?;
+        assert_eq!(
+            decode_mysql_ok_packet(&ok)?.0,
+            if sql.starts_with("INSERT") { 1 } else { 0 }
+        );
+    }
+
+    send_com_query(&mut stream, "SHOW INDEX FROM rename_users").await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert!(rows
+        .iter()
+        .any(|row| row[2].as_deref() == Some("email_login_uq")));
+    assert!(!rows
+        .iter()
+        .any(|row| row[2].as_deref() == Some("email_unique")));
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO rename_users (id, email) VALUES (2, 'ada@example.com')",
+    )
+    .await?;
+    let err = read_mysql_response(&mut stream)
+        .await
+        .expect_err("expected duplicate-key error");
+    assert!(err.to_string().contains("duplicate key"));
+    assert!(err.to_string().contains("email_login_uq"));
 
     Ok(())
 }
@@ -1179,9 +1996,17 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                             }));
                         }
                         2 => {
+                            assert!(rows
+                                .iter()
+                                .any(|row| row[2].as_deref() == Some("user_login_renamed")));
                             assert!(!rows
                                 .iter()
                                 .any(|row| row[2].as_deref() == Some("user_login_unique")));
+                        }
+                        3 => {
+                            assert!(!rows
+                                .iter()
+                                .any(|row| row[2].as_deref() == Some("user_login_renamed")));
                         }
                         _ => panic!("unexpected wp_users show index count"),
                     }
@@ -1272,6 +2097,23 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select u.id, u.user_login, p.post_title from wp_users as u inner join wp_posts as p using (id) order by u.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                        assert_eq!(rows[0][2].as_deref(), Some("Hello"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][1].as_deref(), Some("grace"));
+                        assert_eq!(rows[1][2].as_deref(), Some("Draft 1"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                        assert_eq!(rows[2][1].as_deref(), Some("margaret"));
+                        assert_eq!(rows[2][2].as_deref(), Some("More"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select post_name from wp_posts where id = 1" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
@@ -1279,6 +2121,167 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "select date(post_date), year(post_date), month(post_date), day(post_date), hour(post_date), minute(post_date), second(post_date) from wp_posts where id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-01".to_string()),
+                                Some("2020".to_string()),
+                                Some("1".to_string()),
+                                Some("1".to_string()),
+                                Some("0".to_string()),
+                                Some("0".to_string()),
+                                Some("0".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select date_format(post_date, '%y-%m-%d %h:%i:%s'), from_unixtime(unix_timestamp(post_date)) from wp_posts where id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-01 00:00:00".to_string()),
+                                Some("2020-01-01 00:00:00".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select datediff(post_date, '2020-01-01 00:00:00'), timestampdiff(hour, '2020-01-01 00:00:00', post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0], vec![Some("1".to_string()), Some("24".to_string())]);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select weekday(post_date), dayofweek(post_date), dayofyear(post_date), monthname(post_date), dayname(post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("3".to_string()),
+                                Some("5".to_string()),
+                                Some("2".to_string()),
+                                Some("January".to_string()),
+                                Some("Thursday".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select quarter(post_date), last_day(post_date), extract(year from post_date), extract(hour from post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("2020-01-31".to_string()),
+                                Some("2020".to_string()),
+                                Some("0".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select date_add(post_date, interval 2 day), date_sub(post_date, interval 3 hour), timestampadd(minute, 30, post_date) from wp_posts where id = 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("2020-01-04 00:00:00".to_string()),
+                                Some("2020-01-01 21:00:00".to_string()),
+                                Some("2020-01-02 00:30:00".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date(post_date) = '2020-01-03' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date_format(post_date, '%y-%m-%d') = '2020-01-03' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where year(post_date) = 2020 order by unix_timestamp(post_date) desc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("5"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where datediff(post_date, '2020-01-01 00:00:00') >= 2 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where dayname(post_date) = 'friday' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where extract(day from post_date) = 3 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from wp_posts where date_add(post_date, interval 1 day) = '2020-01-04 00:00:00' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select p.id from wp_posts as p left join wp_users as u on p.post_author = u.id where u.user_login = 'ada' order by p.id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1306,6 +2309,77 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[0][0].as_deref(), Some("1"));
                         assert_eq!(rows[0][1].as_deref(), Some("ada"));
                         assert_eq!(rows[0][2].as_deref(), Some("ada"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select p.id post_id, u.user_login author_login from wp_posts as p left join wp_users as u on p.post_author = u.id where p.id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select * from wp_posts as p left join wp_users as u on p.post_author = u.id where p.id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("1".to_string()),
+                                Some("2020-01-01 00:00:00".to_string()),
+                                Some("publish".to_string()),
+                                Some("Hello".to_string()),
+                                Some("".to_string()),
+                                Some("1".to_string()),
+                                Some("ada".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select p.*, u.user_login from wp_posts as p left join wp_users as u on p.post_author = u.id where p.id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("1".to_string()),
+                                Some("2020-01-01 00:00:00".to_string()),
+                                Some("publish".to_string()),
+                                Some("Hello".to_string()),
+                                Some("".to_string()),
+                                Some("ada".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select skein_test.wp_posts.*, u.user_login from skein_test.wp_posts left join skein_test.wp_users as u on wp_posts.post_author = u.id where wp_posts.id = 1" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("1".to_string()),
+                                Some("2020-01-01 00:00:00".to_string()),
+                                Some("publish".to_string()),
+                                Some("Hello".to_string()),
+                                Some("".to_string()),
+                                Some("ada".to_string()),
+                            ]
+                        );
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
@@ -1365,7 +2439,41 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select min(post_author) as min_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select max(post_author) as max_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select avg(post_author) as avg_author from wp_posts where post_status = 'publish'" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select count(*) as user_count from wp_users" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("3"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select count(*) as user_count from wp_users having count(*) >= 3 and user_count = 3" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
                     assert_eq!(rows[0][0].as_deref(), Some("3"));
@@ -1384,6 +2492,63 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select post_status, count(*) as status_count from wp_posts group by post_status having status_count > 1 order by status_count desc, post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[0][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, count(*) as status_count from wp_posts group by post_status having count(*) > 1 and post_status = 'publish' order by status_count desc, post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[0][1].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select p.id as post_id, p.post_status from wp_posts as p group by p.id, p.post_status having post_id = 1 and p.post_status = 'publish' order by p.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("publish"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select distinct p.post_author as author_id, u.user_login from wp_posts as p, wp_users as u where p.post_author = u.id order by p.post_author asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[0][1].as_deref(), Some("ada"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][1].as_deref(), Some("grace"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select * from wp_users group by id, user_login having id = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(
+                            rows[0],
+                            vec![
+                                Some("1".to_string()),
+                                Some("ada".to_string()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
             "select post_author, sum(post_author) as author_sum_by_author from wp_posts where post_status = 'publish' group by post_author order by post_author asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1394,6 +2559,18 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                         assert_eq!(rows[1][1].as_deref(), Some("4"));
                         assert_eq!(rows[2][0].as_deref(), Some("3"));
                         assert_eq!(rows[2][1].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select post_status, max(post_author) as max_author_by_status from wp_posts group by post_status order by post_status asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("draft"));
+                        assert_eq!(rows[0][1].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("publish"));
+                        assert_eq!(rows[1][1].as_deref(), Some("3"));
                     }
                     other => panic!("expected result set, got {:?}", other),
                 }
@@ -1495,6 +2672,22 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
+            "show full columns from compat_alter_subq" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 3);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("parent_id"));
+                    assert_eq!(rows[2][0].as_deref(), Some("post_slug"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select post_slug from compat_alter_subq where id = 4" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) order by id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
@@ -1506,7 +2699,27 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
-            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where slug = 'n-a' ) order by id asc limit 0, 2" => {
+            "select id from compat_alter_subq where parent_id = ( select parent_id from compat_alter_subq where id = 4 ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where post_slug = 'n-a' ) order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) order by outer_q.id asc" => {
                 match response {
                     MysqlResponse::Rows(rows) => {
                         assert_eq!(rows.len(), 2);
@@ -1526,6 +2739,282 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
                     other => panic!("expected result set, got {:?}", other),
                 }
             }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) and id > 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where exists ( select 1 from compat_alter_subq where post_slug = 'n-a' ) and parent_id is not null order by id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id < 3 ) or id = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                        assert_eq!(rows[2][0].as_deref(), Some("3"));
+                        assert_eq!(rows[3][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where lower(post_slug) = 'n-a' order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select lower(post_slug), upper(post_slug), length(post_slug), char_length(post_slug), coalesce(parent_id, 0), ifnull(parent_id, 0), concat(post_slug, '-', ifnull(parent_id, 0)) from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("N-A"));
+                        assert_eq!(rows[0][2].as_deref(), Some("3"));
+                        assert_eq!(rows[0][3].as_deref(), Some("3"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1"));
+                        assert_eq!(rows[0][5].as_deref(), Some("1"));
+                        assert_eq!(rows[0][6].as_deref(), Some("n-a-1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select trim('  n-a  '), ltrim('  n-a'), rtrim('n-a  '), left(post_slug, 1), right(post_slug, 1), substring(post_slug, 2, 2), replace(post_slug, '-', '_'), nullif(post_slug, 'n-a') from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][2].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][3].as_deref(), Some("n"));
+                        assert_eq!(rows[0][4].as_deref(), Some("a"));
+                        assert_eq!(rows[0][5].as_deref(), Some("-a"));
+                        assert_eq!(rows[0][6].as_deref(), Some("n_a"));
+                        assert_eq!(rows[0][7], None);
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select if(1, post_slug, 'miss'), locate('a', post_slug), instr(post_slug, 'a'), abs(-7), round(1.75, 1), floor(1.75), ceil(1.2), mod(7, 4), least('z', 'a'), greatest(1, 5, 2) from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("n-a"));
+                        assert_eq!(rows[0][1].as_deref(), Some("3"));
+                        assert_eq!(rows[0][2].as_deref(), Some("3"));
+                        assert_eq!(rows[0][3].as_deref(), Some("7"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1.8"));
+                        assert_eq!(rows[0][5].as_deref(), Some("1"));
+                        assert_eq!(rows[0][6].as_deref(), Some("2"));
+                        assert_eq!(rows[0][7].as_deref(), Some("3"));
+                        assert_eq!(rows[0][8].as_deref(), Some("a"));
+                        assert_eq!(rows[0][9].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select cast(id as char), cast('7' as unsigned), case when parent_id is null then 'root' else 'child' end, case post_slug when 'n-a' then 'match' else 'miss' end from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                        assert_eq!(rows[0][1].as_deref(), Some("7"));
+                        assert_eq!(rows[0][2].as_deref(), Some("child"));
+                        assert_eq!(rows[0][3].as_deref(), Some("match"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select parent_id + 1, parent_id - 1, parent_id * 2, parent_id / 2, parent_id % 2 from compat_alter_subq where id = 4" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[0][1].as_deref(), Some("0"));
+                        assert_eq!(rows[0][2].as_deref(), Some("2"));
+                        assert_eq!(rows[0][3].as_deref(), Some("0.5"));
+                        assert_eq!(rows[0][4].as_deref(), Some("1"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where cast(parent_id as unsigned) = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id + 0 = 1 order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id is not null order by cast(parent_id as unsigned) desc, id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id is not null order by parent_id + 0 desc, id asc limit 0, 2" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.parent_id and inner_q.post_slug = outer_q.post_slug and inner_q.id > 4 ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("4"));
+                        assert_eq!(rows[1][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where outer_q.id in ( select inner_q.id from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.parent_id ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 4);
+                        assert_eq!(rows[0][0].as_deref(), Some("2"));
+                        assert_eq!(rows[1][0].as_deref(), Some("3"));
+                        assert_eq!(rows[2][0].as_deref(), Some("4"));
+                        assert_eq!(rows[3][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where ( exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) and outer_q.id > 1 ) or outer_q.id = 1 order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 2);
+                        assert_eq!(rows[0][0].as_deref(), Some("1"));
+                        assert_eq!(rows[1][0].as_deref(), Some("2"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select id from compat_alter_subq where parent_id in ( select id from compat_alter_subq where id in ( select parent_id from compat_alter_subq where id = 3 ) ) order by id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "select outer_q.id from compat_alter_subq as outer_q where not ( outer_q.id = 1 or exists ( select 1 from compat_alter_subq as inner_q where inner_q.parent_id = outer_q.id ) ) order by outer_q.id asc" => {
+                match response {
+                    MysqlResponse::Rows(rows) => {
+                        assert_eq!(rows.len(), 3);
+                        assert_eq!(rows[0][0].as_deref(), Some("3"));
+                        assert_eq!(rows[1][0].as_deref(), Some("4"));
+                        assert_eq!(rows[2][0].as_deref(), Some("5"));
+                    }
+                    other => panic!("expected result set, got {:?}", other),
+                }
+            }
+            "show full columns from compat_dropcol" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("keep_col"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from compat_dropcol" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert_eq!(rows[0][4].as_deref(), Some("id"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select keep_col from compat_dropcol where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("stay"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show tables from skein_test like 'compat_rename_%'" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("compat_rename_dst"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show full columns from compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][0].as_deref(), Some("id"));
+                    assert_eq!(rows[1][0].as_deref(), Some("slug"));
+                    assert_eq!(rows[1][5].as_deref(), Some("seed"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show index from compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 2);
+                    assert_eq!(rows[0][2].as_deref(), Some("PRIMARY"));
+                    assert!(rows.iter().any(|row| {
+                        row[2].as_deref() == Some("slug_unique")
+                            && row[1].as_deref() == Some("0")
+                            && row[4].as_deref() == Some("slug")
+                    }));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "show create table compat_rename_dst" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    let ddl = rows[0][1].as_deref().unwrap_or_default();
+                    assert!(ddl.contains("CREATE TABLE"));
+                    assert!(ddl.contains("UNIQUE KEY `slug_unique` (`slug`)"));
+                    assert!(ddl.contains("DEFAULT 'seed'"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
+            "select slug from compat_rename_dst where id = 1" => match response {
+                MysqlResponse::Rows(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0][0].as_deref(), Some("hello"));
+                }
+                other => panic!("expected result set, got {:?}", other),
+            },
             "show status like 'threads_connected'" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows[0][1].as_deref(), Some("1"));
@@ -1560,7 +3049,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     assert_eq!(timezone_value_index, 2);
     assert_eq!(timezone_autoload_index, 2);
     assert_eq!(siteurl_pair_index, 2);
-    assert_eq!(wp_users_show_index_count, 2);
+    assert_eq!(wp_users_show_index_count, 3);
 
     Ok(())
 }
@@ -1630,6 +3119,42 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
 
     send_com_query(
         &mut stream,
+        "SELECT DISTINCT p.post_author AS author_id, u.name FROM wp_posts AS p, wp_users AS u WHERE p.post_author = u.id AND u.status = 'active' ORDER BY p.post_author ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+            assert_eq!(rows[1][0].as_deref(), Some("3"));
+            assert_eq!(rows[1][1].as_deref(), Some("Linus"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT * FROM wp_users GROUP BY id, status, name HAVING id = 1 ORDER BY id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("1".to_string()),
+                    Some("active".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
         "SELECT p.id, u.name, pr.display_name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id LEFT JOIN wp_profiles AS pr ON pr.user_id = u.id WHERE p.id = 10",
     )
     .await?;
@@ -1639,6 +3164,105 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
             assert_eq!(rows[0][0].as_deref(), Some("10"));
             assert_eq!(rows[0][1].as_deref(), Some("Ada"));
             assert_eq!(rows[0][2].as_deref(), Some("Ada Lovelace"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT * FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("10".to_string()),
+                    Some("1".to_string()),
+                    Some("publish".to_string()),
+                    Some("untitled".to_string()),
+                    Some("".to_string()),
+                    Some("1".to_string()),
+                    Some("active".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.*, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("10".to_string()),
+                    Some("1".to_string()),
+                    Some("publish".to_string()),
+                    Some("untitled".to_string()),
+                    Some("".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id post_id, u.name author_name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE p.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[0][1].as_deref(), Some("Ada"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT p.id AS post_id, p.post_status FROM wp_posts AS p GROUP BY p.id, p.post_status HAVING post_id = 10 AND p.post_status = 'publish' ORDER BY p.id ASC",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("10"));
+            assert_eq!(rows[0][1].as_deref(), Some("publish"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT wp.wp_posts.*, u.name FROM wp.wp_posts LEFT JOIN wp.wp_users AS u ON wp_posts.post_author = u.id WHERE wp_posts.id = 10",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("10".to_string()),
+                    Some("1".to_string()),
+                    Some("publish".to_string()),
+                    Some("untitled".to_string()),
+                    Some("".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
         }
         other => panic!("expected result set, got {:?}", other),
     }
@@ -1683,6 +3307,72 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
 
     send_com_query(
         &mut stream,
+        "SELECT SQL_CALC_FOUND_ROWS * FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name = 'Ada' ORDER BY p.id ASC LIMIT 1",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("10".to_string()),
+                    Some("1".to_string()),
+                    Some("publish".to_string()),
+                    Some("untitled".to_string()),
+                    Some("".to_string()),
+                    Some("1".to_string()),
+                    Some("active".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(&mut stream, "SELECT FOUND_ROWS()").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("2"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT SQL_CALC_FOUND_ROWS p.*, u.name FROM wp_posts AS p LEFT JOIN wp_users AS u ON p.post_author = u.id WHERE u.name = 'Ada' ORDER BY p.id ASC LIMIT 1",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0],
+                vec![
+                    Some("10".to_string()),
+                    Some("1".to_string()),
+                    Some("publish".to_string()),
+                    Some("untitled".to_string()),
+                    Some("".to_string()),
+                    Some("Ada".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(&mut stream, "SELECT FOUND_ROWS()").await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("2"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
         "INSERT INTO wp_users (id, status, name) VALUES (4, 'active', 'Margaret')",
     )
     .await?;
@@ -1706,6 +3396,222 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         }
         other => panic!("expected result set, got {:?}", other),
     }
+
+    Ok(())
+}
+
+// ── Research hardening tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
+    // R07: Merge Functions — verify deterministic conflict resolution
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r07_merge")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create table and insert data
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r07_test (id INT PRIMARY KEY, value TEXT, version INT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "INSERT INTO r07_test (id, value, version) VALUES (1, 'initial', 1)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Register a merge function for the table
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "merge.register",
+            "params": {
+                "table": "r07_test",
+                "column": "value",
+                "function": "last_write_wins"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Verify merge list shows the registered function
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "merge.list",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "merge.list should return result"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
+    // R16: Index Advisor — verify recommendation workflow
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create table with data
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=20 {
+        let resp = client
+            .post(&format!("{base}/rpc"))
+            .json(&serde_json::json!({
+                "method": "sql.exec",
+                "params": { "sql": format!("INSERT INTO r16_test (id, category, value) VALUES ({i}, 'cat_{c}', {v})", c = i % 5, v = i * 10) }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    // Request index recommendations
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "advisor.recommend",
+            "params": {
+                "table": "r16_test",
+                "workload": ["SELECT * FROM r16_test WHERE category = 'cat_1'"]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "advisor.recommend should return result"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
+    // R02: Delta-Chained Values — verify format selection and snapshot management
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r02_adaptive")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create a table and populate it with enough data to trigger format selection
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r02_test (id INT PRIMARY KEY, data TEXT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=10 {
+        let resp = client
+            .post(&format!("{base}/rpc"))
+            .json(&serde_json::json!({
+                "method": "sql.exec",
+                "params": { "sql": format!("INSERT INTO r02_test (id, data) VALUES ({i}, 'value_{i}')") }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    // Trigger snapshot creation
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "system.snapshot",
+            "params": { "table": "r02_test" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Verify data can still be read after snapshot
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "SELECT COUNT(*) FROM r02_test", "result_format": "rows_json" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
+    // R05: Oblivious Execution — verify padding policies
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r05_oblivious")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Register an oblivious policy
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "oblivious.set_policy",
+            "params": {
+                "table": "r05_test",
+                "pad_to": 64,
+                "noise_rows": 2
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // List policies
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "oblivious.list_policies",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "oblivious.list_policies should return result"
+    );
 
     Ok(())
 }

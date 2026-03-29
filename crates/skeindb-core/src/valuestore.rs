@@ -181,6 +181,36 @@ pub struct DeltaCompactionReport {
     pub energy: EnergyEstimate,
 }
 
+/// Topology analysis report for delta chain optimization (R03).
+#[derive(Debug, Clone)]
+pub struct DeltaTopologyReport {
+    pub total_entries: usize,
+    pub cell_entries: usize,
+    pub delta_entries: usize,
+    pub avg_depth: f64,
+    pub max_depth: usize,
+    pub p50_depth: usize,
+    pub p99_depth: usize,
+    pub max_fanout: usize,
+    pub avg_fanout: f64,
+    pub skip_patch_count: usize,
+    pub total_cell_bytes: u64,
+    pub total_delta_bytes: u64,
+    pub savings_ratio: f64,
+    pub hot_chains: Vec<HotChainInfo>,
+}
+
+/// Information about a delta chain that may need optimization.
+#[derive(Debug, Clone)]
+pub struct HotChainInfo {
+    pub id: ValueId,
+    pub depth: usize,
+    pub skip_patches: usize,
+    pub bytes: usize,
+    pub needs_compaction: bool,
+    pub needs_skip_patch: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct LookupTrace {
     pub probes: usize,
@@ -576,6 +606,110 @@ impl ValueStore {
             } else {
                 total as f64 / steps.len() as f64
             },
+        }
+    }
+
+    /// Analyze the delta chain topology for optimization opportunities.
+    ///
+    /// Returns statistics about chain depths, fan-out, and identifies hot chains
+    /// (chains with high depth that would benefit from compaction or skip patches).
+    pub fn topology_analysis(&self) -> DeltaTopologyReport {
+        let mut total_entries = 0usize;
+        let mut cell_entries = 0usize;
+        let mut delta_entries = 0usize;
+        let mut depths: Vec<usize> = Vec::new();
+        let mut base_fanout: HashMap<ValueId, usize> = HashMap::new();
+        let mut hot_chains: Vec<HotChainInfo> = Vec::new();
+        let mut total_delta_bytes = 0u64;
+        let mut total_cell_bytes = 0u64;
+        let mut skip_patch_count = 0usize;
+        let max_chain_depth = self.config.delta_policy.max_chain;
+
+        for (id, idx) in self.index.iter() {
+            let Some(entry) = self.entries.get(*idx) else {
+                continue;
+            };
+            total_entries += 1;
+
+            match entry.kind {
+                ValueKind::Cell => {
+                    cell_entries += 1;
+                    total_cell_bytes += entry.bytes.len() as u64;
+                }
+                ValueKind::Delta => {
+                    delta_entries += 1;
+                    total_delta_bytes += entry.bytes.len() as u64;
+                    if let Some(delta) = &entry.delta {
+                        depths.push(delta.depth);
+                        *base_fanout.entry(delta.base).or_insert(0) += 1;
+                        skip_patch_count += delta.skip.len();
+
+                        // Identify hot chains (depth exceeds 75% of max, or no skip patches on deep chains).
+                        let depth_threshold = if max_chain_depth > 0 {
+                            (max_chain_depth * 3) / 4
+                        } else {
+                            3
+                        };
+                        if delta.depth > depth_threshold {
+                            hot_chains.push(HotChainInfo {
+                                id: *id,
+                                depth: delta.depth,
+                                skip_patches: delta.skip.len(),
+                                bytes: entry.bytes.len(),
+                                needs_compaction: max_chain_depth > 0
+                                    && delta.depth >= max_chain_depth,
+                                needs_skip_patch: delta.depth > 2 && delta.skip.is_empty(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        depths.sort_unstable();
+        let avg_depth = if depths.is_empty() {
+            0.0
+        } else {
+            depths.iter().sum::<usize>() as f64 / depths.len() as f64
+        };
+        let max_depth = depths.last().copied().unwrap_or(0);
+        let p50_depth = quantile(&depths, 0.50);
+        let p99_depth = quantile(&depths, 0.99);
+
+        // Find high-fanout bases (many deltas share the same base).
+        let max_fanout = base_fanout.values().copied().max().unwrap_or(0);
+        let avg_fanout = if base_fanout.is_empty() {
+            0.0
+        } else {
+            base_fanout.values().sum::<usize>() as f64 / base_fanout.len() as f64
+        };
+
+        // Sort hot chains by depth (worst first).
+        hot_chains.sort_by(|a, b| b.depth.cmp(&a.depth));
+        hot_chains.truncate(20);
+
+        let savings_ratio = if total_cell_bytes + total_delta_bytes > 0 {
+            total_delta_bytes as f64 / (total_cell_bytes + total_delta_bytes) as f64
+        } else {
+            0.0
+        };
+
+        DeltaTopologyReport {
+            total_entries,
+            cell_entries,
+            delta_entries,
+            avg_depth,
+            max_depth,
+            p50_depth,
+            p99_depth,
+            max_fanout,
+            avg_fanout,
+            skip_patch_count,
+            total_cell_bytes,
+            total_delta_bytes,
+            savings_ratio,
+            hot_chains,
         }
     }
 
