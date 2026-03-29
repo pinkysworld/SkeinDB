@@ -11248,6 +11248,131 @@ fn eval_expr(
                     };
                     Ok(Lit::Str { v: hex })
                 }
+                // ── Additional MySQL scalar functions ───────────────
+                "degrees" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("degrees requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_f64(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: n.to_degrees() })
+                }
+                "radians" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("radians requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(n) = lit_to_f64(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::F64 { v: n.to_radians() })
+                }
+                "period_add" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("period_add requires 2 args");
+                    }
+                    let p = eval_expr(&fargs[0], row, ctx, args)?;
+                    let n = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(period) = lit_to_i64(&p) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(months) = lit_to_i64(&n) else {
+                        return Ok(Lit::Null);
+                    };
+                    let y = period / 100;
+                    let m = period % 100;
+                    let total_months = y * 12 + m + months;
+                    let ry = total_months / 12;
+                    let rm = total_months % 12;
+                    let result = if rm == 0 {
+                        (ry - 1) * 100 + 12
+                    } else {
+                        ry * 100 + rm
+                    };
+                    Ok(Lit::I64 { v: result })
+                }
+                "period_diff" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("period_diff requires 2 args");
+                    }
+                    let p1 = eval_expr(&fargs[0], row, ctx, args)?;
+                    let p2 = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(period1) = lit_to_i64(&p1) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(period2) = lit_to_i64(&p2) else {
+                        return Ok(Lit::Null);
+                    };
+                    let m1 = (period1 / 100) * 12 + (period1 % 100);
+                    let m2 = (period2 / 100) * 12 + (period2 % 100);
+                    Ok(Lit::I64 { v: m1 - m2 })
+                }
+                "makedate" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("makedate requires 2 args");
+                    }
+                    let year_lit = eval_expr(&fargs[0], row, ctx, args)?;
+                    let doy_lit = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(year) = lit_to_i64(&year_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(day_of_year) = lit_to_i64(&doy_lit) else {
+                        return Ok(Lit::Null);
+                    };
+                    if day_of_year < 1 || year < 0 || year > 9999 {
+                        return Ok(Lit::Null);
+                    }
+                    // Calculate date from year and day-of-year
+                    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                    let days_in_months: [i64; 12] = [
+                        31,
+                        if is_leap { 29 } else { 28 },
+                        31,
+                        30,
+                        31,
+                        30,
+                        31,
+                        31,
+                        30,
+                        31,
+                        30,
+                        31,
+                    ];
+                    let mut remaining = day_of_year;
+                    let mut month = 0usize;
+                    while month < 12 && remaining > days_in_months[month] {
+                        remaining -= days_in_months[month];
+                        month += 1;
+                    }
+                    if month >= 12 {
+                        return Ok(Lit::Null);
+                    }
+                    Ok(Lit::Str {
+                        v: format!("{year:04}-{:02}-{remaining:02}", month + 1),
+                    })
+                }
+                "maketime" => {
+                    if fargs.len() != 3 {
+                        anyhow::bail!("maketime requires 3 args");
+                    }
+                    let h = eval_expr(&fargs[0], row, ctx, args)?;
+                    let m = eval_expr(&fargs[1], row, ctx, args)?;
+                    let s = eval_expr(&fargs[2], row, ctx, args)?;
+                    let Some(hour) = lit_to_i64(&h) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(minute) = lit_to_i64(&m) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(second) = lit_to_i64(&s) else {
+                        return Ok(Lit::Null);
+                    };
+                    Ok(Lit::Str {
+                        v: format!("{hour:02}:{minute:02}:{second:02}"),
+                    })
+                }
                 _ => anyhow::bail!("unsupported function: {name}"),
             }
         }

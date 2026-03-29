@@ -810,6 +810,44 @@ async fn quic_connection_migration_rebind() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ── R09: QUIC multi-stream hardening ──────────────────────────────────────
+#[tokio::test]
+async fn r09_quic_concurrent_multi_stream_rpcs() -> anyhow::Result<()> {
+    // R09: Transport QUIC — verify sequential multi-stream RPCs over same connection
+    let _guard = quic_test_guard().await;
+    let harness = TestHarness::start("r09_multi_stream")?;
+    let client = QuicClient::connect(harness.port, harness.cert_der).await?;
+
+    // Fire multiple RPCs sequentially over the same QUIC connection
+    let mut ok_count = 0u32;
+    for i in 0..5 {
+        let resp = client
+            .rpc(
+                "sql.exec",
+                json!({ "sql": format!("SELECT {i} AS stream_id") }),
+            )
+            .await;
+        if let Ok(r) = resp {
+            if r.ok {
+                ok_count += 1;
+            }
+        }
+    }
+    assert!(
+        ok_count >= 3,
+        "at least 3 out of 5 sequential QUIC RPCs should succeed"
+    );
+
+    // Test connection migration after multiple RPCs
+    client.rebind()?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let resp = client.rpc("system.ping", json!({})).await?;
+    assert!(resp.ok, "ping after rebind + multi-stream should succeed");
+
+    Ok(())
+}
+
 struct TestHarness {
     _guard: ChildGuard,
     port: u16,

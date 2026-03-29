@@ -66,26 +66,26 @@ const PANEL_META = {
 // Research tracks
 // ---------------------------------------------------------------------------
 const RESEARCH_TRACKS = [
-  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['system.capabilities'] },
-  { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities'] },
-  { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['settings.get'] },
-  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit_log'], panel: 'privacy' },
-  { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy' },
-  { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics' },
-  { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge' },
-  { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views' },
-  { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'] },
-  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index_status'], panel: 'vectors' },
-  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['autoparam.analyze', 'autoparam.classify'], panel: 'nl' },
-  { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl' },
-  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'] },
-  { id: 'R14', title: 'Edge Bundles', desc: 'Offline write queue with sync-on-reconnect.', methods: ['settings.get'] },
-  { id: 'R15', title: 'Schema Evolution', desc: 'Online schema changes with merge-based migration.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'] },
-  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.synthesize', 'advisor.history', 'advisor.apply', 'advisor.dismiss'], panel: 'advisor' },
-  { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration' },
-  { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['system.capabilities'] },
-  { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm' },
-  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['system.capabilities'] }
+  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['system.capabilities'], status: 'prototype' },
+  { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities'], status: 'hardened' },
+  { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['settings.get'], status: 'hardened' },
+  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit_log'], panel: 'privacy', status: 'hardened' },
+  { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
+  { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
+  { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
+  { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
+  { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], status: 'hardened' },
+  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index_status'], panel: 'vectors', status: 'hardened' },
+  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['autoparam.analyze', 'autoparam.classify'], panel: 'nl', status: 'prototype' },
+  { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'prototype' },
+  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'], status: 'hardened' },
+  { id: 'R14', title: 'Edge Bundles', desc: 'Offline write queue with sync-on-reconnect.', methods: ['settings.get'], status: 'prototype' },
+  { id: 'R15', title: 'Schema Evolution', desc: 'Online schema changes with merge-based migration.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], status: 'prototype' },
+  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.synthesize', 'advisor.history', 'advisor.apply', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
+  { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
+  { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['system.capabilities'], status: 'prototype' },
+  { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
+  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['system.capabilities'], status: 'prototype' }
 ];
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ const RESEARCH_TRACKS = [
 // ---------------------------------------------------------------------------
 const FEATURE_CENTER = [
   { title: 'Easy Viewer', desc: 'Click-first controls for daily operations.', panel: 'easy' },
-  { title: 'SQL Compat', desc: 'MySQL-compatible SQL layer.', panel: 'workspace' },
+  { title: 'SQL Compat', desc: 'MySQL-compatible SQL layer with window functions.', panel: 'workspace' },
   { title: 'SkeinQL', desc: 'Native structured query API.', panel: 'workspace' },
   { title: 'Schema Mgmt', desc: 'Create/alter DB and tables.', panel: 'schema' },
   { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
@@ -111,7 +111,9 @@ const FEATURE_CENTER = [
   { title: 'Migration', desc: 'Compat rewrites + intent reports.', panel: 'migration' },
   { title: 'NL Lab', desc: 'NL-to-SkeinQL + autoparam.', panel: 'nl' },
   { title: 'QUIC Transport', desc: 'HTTP/3 native transport.', panel: 'cluster' },
-  { title: 'Import/Export', desc: 'Bulk data operations.', panel: 'import' }
+  { title: 'Import/Export', desc: 'Bulk data operations.', panel: 'import' },
+  { title: 'Window Functions', desc: 'ROW_NUMBER, RANK, DENSE_RANK + OVER.', panel: 'workspace' },
+  { title: 'User Variables', desc: 'SET @var / SELECT @var session state.', panel: 'workspace' }
 ];
 
 // ---------------------------------------------------------------------------
@@ -1544,6 +1546,18 @@ function easyGridCheckedCount() {
 // Browse tab – Data grid with inline edit/delete/copy
 // ---------------------------------------------------------------------------
 
+function easyIsNumericType(kind) {
+  return ['i64', 'u64', 'f64', 'i32', 'u32', 'f32', 'int', 'float', 'decimal', 'number'].includes((kind || '').toLowerCase());
+}
+
+function easyFormatCellValue(lit, colName) {
+  if (!lit || lit.t === 'null') return { text: 'NULL', isNull: true };
+  const val = formatLit(lit);
+  const truncated = val.length > 120 ? val.substring(0, 120) + '\u2026' : val;
+  const colMeta = easyColumnSchema(colName);
+  return { text: truncated, isNull: false, fullText: val, numeric: easyIsNumericType(colMeta.kind) };
+}
+
 function easyRenderDataGrid() {
   const table = $('easyDataGrid');
   if (!table) return;
@@ -1556,19 +1570,37 @@ function easyRenderDataGrid() {
   }
   const thead = document.createElement('thead');
   const hr = document.createElement('tr');
+  const thNum = document.createElement('th'); thNum.style.cssText = 'width:36px;text-align:center;color:var(--muted);font-size:10px'; thNum.textContent = '#'; hr.appendChild(thNum);
   const thCheck = document.createElement('th'); thCheck.style.width = '32px'; thCheck.textContent = '\u2610'; hr.appendChild(thCheck);
   const thActions = document.createElement('th'); thActions.textContent = 'Actions'; thActions.style.minWidth = '110px'; hr.appendChild(thActions);
-  cols.forEach(col => { const th = document.createElement('th'); th.textContent = col; hr.appendChild(th); });
+  cols.forEach(col => {
+    const th = document.createElement('th');
+    const colMeta = easyColumnSchema(col);
+    th.textContent = col;
+    th.title = col + ' (' + (colMeta.kind || 'string') + ')' + (colMeta.primary ? ' \uD83D\uDD11' : '') + (colMeta.nullable ? ', nullable' : '');
+    if (colMeta.primary) th.style.borderBottom = '2px solid var(--accent)';
+    if (easyIsNumericType(colMeta.kind)) th.style.textAlign = 'right';
+    hr.appendChild(th);
+  });
   thead.appendChild(hr); table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
   const filter = (STATE.easyBrowseFilter || '').toLowerCase();
+  const offset = STATE.easyBrowseOffset || 0;
+  let visibleCount = 0;
   STATE.easyBrowseRows.forEach((row, idx) => {
     if (filter && !cols.some(col => formatLit(row[col]).toLowerCase().includes(filter))) return;
+    visibleCount++;
     const rowPkKey = easyRowPkKey(row);
     const isEditing = idx === STATE.easyGridEditIndex;
     const tr = document.createElement('tr');
     if (isEditing) tr.className = 'editing-row';
+
+    // Row number
+    const tdNum = document.createElement('td');
+    tdNum.style.cssText = 'text-align:center;color:var(--muted);font-size:10px;user-select:none';
+    tdNum.textContent = String(offset + idx + 1);
+    tr.appendChild(tdNum);
 
     // Checkbox
     const tdCheck = document.createElement('td'); tdCheck.className = 'table-check';
@@ -1616,9 +1648,14 @@ function easyRenderDataGrid() {
         input.addEventListener('keydown', e => { if (e.key === 'Enter') easySaveRowEdit(idx); if (e.key === 'Escape') easyCancelRowEdit(); });
         td.appendChild(input);
       } else {
-        const val = formatLit(row[col]);
-        td.textContent = val.length > 120 ? val.substring(0, 120) + '\u2026' : val;
-        td.title = val;
+        const cell = easyFormatCellValue(row[col], col);
+        if (cell.isNull) {
+          td.innerHTML = '<i class="null-value">NULL</i>';
+        } else {
+          td.textContent = cell.text;
+          td.title = cell.fullText || cell.text;
+          if (cell.numeric) td.style.textAlign = 'right';
+        }
       }
       tr.appendChild(td);
     });
@@ -1629,9 +1666,9 @@ function easyRenderDataGrid() {
   // Pagination info
   const info = $('easyPgInfo');
   if (info) {
-    const offset = STATE.easyBrowseOffset || 0;
     const count = STATE.easyBrowseRows.length;
-    info.textContent = count ? 'Showing rows ' + (offset + 1) + '\u2013' + (offset + count) + ' (offset ' + offset + ')' : 'No rows in this table.';
+    const shown = filter ? visibleCount + ' of ' + count + ' (filtered)' : count;
+    info.textContent = count ? 'Showing rows ' + (offset + 1) + '\u2013' + (offset + count) + ' \u00B7 ' + shown + ' rows' : 'No rows in this table.';
   }
   easyUpdateCheckedInfo();
 }
@@ -1876,11 +1913,22 @@ function easyRenderInsertForm(prefill) {
     target.textContent = 'Select a table from the sidebar to insert data.';
     return;
   }
+  // Table summary
+  const summary = document.createElement('div');
+  summary.className = 'hint';
+  const pkCols = STATE.easyRowColumns.filter(c => c.primary).map(c => c.name);
+  const reqCols = STATE.easyRowColumns.filter(c => !c.nullable && !c.auto_increment && !c.primary).map(c => c.name);
+  summary.textContent = STATE.easyRowColumns.length + ' columns' +
+    (pkCols.length ? ' \u00B7 PK: ' + pkCols.join(', ') : '') +
+    (reqCols.length ? ' \u00B7 Required: ' + reqCols.join(', ') : '');
+  target.appendChild(summary);
   const grid = document.createElement('div');
   grid.className = 'easy-edit-fields-grid';
   STATE.easyRowColumns.forEach(col => {
     const item = document.createElement('div');
     item.className = 'easy-field-item';
+    if (!col.nullable && !col.auto_increment) item.style.borderLeft = '3px solid var(--accent)';
+    else if (col.primary) item.style.borderLeft = '3px solid var(--accent-3)';
     item.dataset.colName = col.name;
     item.dataset.colKind = col.kind;
     item.dataset.colPrimary = col.primary ? 'true' : 'false';
@@ -2183,6 +2231,36 @@ async function easyDropDbOp() {
 }
 
 // ---------------------------------------------------------------------------
+// Easy Viewer – SQL sub-tab
+// ---------------------------------------------------------------------------
+
+async function easyRunSql() {
+  const sql = $('easySqlText') ? $('easySqlText').value.trim() : '';
+  if (!sql) { easyShowToast('Enter a SQL query first.', 'info'); return; }
+  try {
+    const db = easyGetSelectedDb();
+    const res = await call('sql.exec', cleanParams({ sql, default_db: db || resolveDefaultDb() }), 'easySqlOut');
+    if (!res || !res.json || !res.json.ok || !res.json.result) {
+      setOut(res?.json || res, 'easySqlOut');
+      return;
+    }
+    const r = res.json.result;
+    const tbl = extractSqlTable(r);
+    if (tbl) renderTable('easySqlGrid', tbl.columns, tbl.rows);
+    else renderTable('easySqlGrid', [], []);
+    setOut(r, 'easySqlOut');
+    easyShowToast('\u2713 SQL executed.', 'success');
+    if (r.statement === 'create_database' || r.statement === 'create_table' || r.statement === 'drop_table') {
+      await loadDbTree();
+      easyRefreshTargetsFromTree();
+    }
+  } catch (e) {
+    easyShowToast('SQL error: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easySqlOut');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SQL
 // ---------------------------------------------------------------------------
 function setSqlText(v) { if ($('sqlText')) { $('sqlText').value = v; $('sqlText').focus(); } }
@@ -2472,7 +2550,10 @@ function renderResearchDashboard() {
   grid.textContent = '';
   RESEARCH_TRACKS.forEach(track => {
     const card = document.createElement('div'); card.className = 'research-card';
-    card.innerHTML = '<h3>' + escapeHtml(track.id) + ' — ' + escapeHtml(track.title) + '</h3>' +
+    const statusCls = track.status === 'hardened' ? 'tag secondary' : 'tag';
+    const statusLabel = track.status === 'hardened' ? '\u2705 Hardened' : '\uD83E\uDDEA Prototype';
+    card.innerHTML = '<h3>' + escapeHtml(track.id) + ' — ' + escapeHtml(track.title) +
+      ' <span class="' + statusCls + '">' + statusLabel + '</span></h3>' +
       '<div class="desc">' + escapeHtml(track.desc) + '</div>' +
       '<div class="hint">Methods: ' + escapeHtml(track.methods.join(', ')) + '</div>';
     const acts = document.createElement('div'); acts.className = 'actions';
@@ -2507,7 +2588,8 @@ function renderResearchSettings() {
   grid.textContent = '';
   RESEARCH_TRACKS.forEach(track => {
     const card = document.createElement('div'); card.className = 'feature-card';
-    card.innerHTML = '<div class="feature-title">' + escapeHtml(track.id) + '</div><div class="hint">' + escapeHtml(track.title) + '</div>';
+    const statusBadge = track.status === 'hardened' ? ' <span class="tag secondary" style="font-size:8px">hardened</span>' : ' <span class="tag" style="font-size:8px">prototype</span>';
+    card.innerHTML = '<div class="feature-title">' + escapeHtml(track.id) + statusBadge + '</div><div class="hint">' + escapeHtml(track.title) + '</div>';
     const toggle = document.createElement('label'); toggle.style.cssText = 'display:flex;gap:4px;align-items:center;font-size:11px;cursor:pointer;';
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true; cb.dataset.track = track.id;
     toggle.appendChild(cb); toggle.appendChild(document.createTextNode('Enabled'));
@@ -3201,8 +3283,12 @@ wire('easyBtnExportStruct', easyDoExportStruct);
 wire('easyBtnTruncate', easyTruncateTable);
 wire('easyBtnDropTable', easyDropTableOp);
 wire('easyBtnDropDb', easyDropDbOp);
+wire('easyBtnRunSql', easyRunSql);
+wire('easyBtnClearSql', () => { if ($('easySqlText')) $('easySqlText').value = ''; renderTable('easySqlGrid', [], []); setOut('', 'easySqlOut'); });
+if ($('easySqlText')) $('easySqlText').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); easyRunSql(); } });
 if ($('easyTreeFilter')) $('easyTreeFilter').addEventListener('input', () => easyRenderTree());
 if ($('easyPerPage')) $('easyPerPage').addEventListener('change', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
+if ($('easyQuickFilter')) $('easyQuickFilter').addEventListener('input', e => { STATE.easyBrowseFilter = e.target.value; easyRenderDataGrid(); });
 document.querySelectorAll('.easy-tab').forEach(btn => {
   btn.addEventListener('click', () => easySetSubTab(btn.dataset.etab));
 });

@@ -53,7 +53,7 @@ SkeinDB adoption strategy:
 - SELECT ... FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE (locking hints stripped for compatibility)
 - UNION / UNION ALL
 - Comparison / `IN` / `LIKE` predicates now treat `NULL` as SQL-style unknown rather than matching like an ordinary value
-- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`, `FIELD`, `ELT`, `INET_ATON`, `INET_NTOA`, `BIN`, `OCT`, `CONV`, `CRC32`, `MD5`, `SHA1` / `SHA`, `SHA2`, `INSERT` (string), `MAKE_SET`, `EXPORT_SET`, and `QUOTE` in translated projections and simple predicates
+- MySQL-style scalar functions now include baseline `LOWER` / `UPPER`, `LENGTH` / `CHAR_LENGTH`, `TRIM` / `LTRIM` / `RTRIM`, `LEFT` / `RIGHT`, `SUBSTRING` / `SUBSTR`, `REPLACE`, `NULLIF`, `IF`, `LOCATE`, `INSTR`, `FIND_IN_SET`, `ISNULL`, `ABS`, `ROUND`, `FLOOR`, `CEIL` / `CEILING`, `MOD`, `LEAST`, `GREATEST`, `COALESCE`, `IFNULL`, `CONCAT`, `CONCAT_WS`, `REPEAT`, `REVERSE`, `LPAD`, `RPAD`, `SPACE`, `HEX`, `UNHEX`, `FORMAT`, `SIGN`, `SQRT`, `POW` / `POWER`, `TRUNCATE`, `LOG` / `LN`, `LOG2`, `LOG10`, `EXP`, `PI`, `RAND`, `UUID`, `SLEEP`, `BENCHMARK`, `FIELD`, `ELT`, `INET_ATON`, `INET_NTOA`, `BIN`, `OCT`, `CONV`, `CRC32`, `MD5`, `SHA1` / `SHA`, `SHA2`, `INSERT` (string), `MAKE_SET`, `EXPORT_SET`, `QUOTE`, `SUBSTRING_INDEX`, `ASCII`, `ORD`, `CHAR`, `STRCMP`, `BIT_LENGTH`, `OCTET_LENGTH`, `REGEXP_REPLACE`, `REGEXP_SUBSTR`, `TO_BASE64`, and `FROM_BASE64` in translated projections and simple predicates
 - JSON function coverage: `JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`, `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`, `JSON_REMOVE`, `JSON_REPLACE`, and `JSON_INSERT`
 - Session/system functions: `USER()` / `CURRENT_USER()` / `SESSION_USER()` / `SYSTEM_USER()`, `LAST_INSERT_ID()` (with session tracking), `CONNECTION_ID()`
 - Translated scalar expressions now also include baseline `CASE ... WHEN ... THEN ... ELSE ... END` and `CAST(... AS ...)` support in projections, simple predicates, and scalar-expression `ORDER BY` clauses
@@ -62,7 +62,7 @@ SkeinDB adoption strategy:
 - INNER JOIN, LEFT JOIN, RIGHT JOIN, NATURAL JOIN, and FULL OUTER JOIN (single-join and basic left-associative multi-join chains)
 - Derived tables / FROM subqueries: `SELECT * FROM (SELECT ...) AS alias`
 - Common table expressions (CTEs): `WITH name AS (SELECT ...) SELECT * FROM name`
-- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)`, and `GROUP_CONCAT()` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`)
+- GROUP BY + full aggregate semantics remain mostly open, but compatibility shims now cover simple single-result and single-column grouped `COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)`, and `GROUP_CONCAT()` queries (including baseline grouped `HAVING` for simple alias/aggregate-expression top-level `AND` predicates plus basic grouped `ORDER BY` / `LIMIT` / `OFFSET`), plus **multi-column `GROUP BY`** queries with multiple group columns and multiple aggregate expressions
 - Non-aggregate `GROUP BY` compatibility now includes WordPress-style de-dup queries when grouped columns match the full projected column set (rewritten through the `DISTINCT` path, including `SQL_CALC_FOUND_ROWS` flows)
 - SQL_CALC_FOUND_ROWS + FOUND_ROWS()
 - Compatibility subquery rewrites now cover parenthesized top-level `AND` / `OR` boolean trees that mix translated predicates with `IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` and simple scalar comparison predicates such as `col = (SELECT ...)`, negated `NOT (...)` wrappers when the resulting boolean tree can still be pushed into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple equality-based correlated rewrites for base-table subqueries, including correlated `IN` and multi-column `EXISTS` membership cases; scalar-subquery comparisons currently require one projected column and at most one row, and broader correlated/nested forms still remain open
@@ -110,7 +110,11 @@ SkeinDB adoption strategy:
 - `character_sets` (utf8mb4, utf8, latin1, binary)
 - `collations` (6 standard collations)
 - `engines` (SkeinDB engine row)
-- richer compatibility views such as `user_privileges` remain backlog work
+- `routines` (empty stub)
+- `triggers` (empty stub)
+- `views` (empty stub)
+- `processlist` (single-row stub)
+- `user_privileges` (single-row stub)
 
 ---
 
@@ -153,7 +157,7 @@ scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, 
 (`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
 `character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
 and `EXPLAIN` with real table name extraction.
-The corpus has expanded from 1034 lines to 1081 lines with over 350 SQL statements.
+The corpus has expanded from 1081 lines to 1130 lines with over 374 SQL statements.
 
 ---
 

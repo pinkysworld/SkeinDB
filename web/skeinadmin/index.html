@@ -219,6 +219,8 @@
       .row-action-btn{padding:3px 6px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:#fff;cursor:pointer;transition:all .12s;min-width:24px}
       .row-action-btn:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.1)}
       .row-action-btn.edit{color:var(--accent)}.row-action-btn.copy{color:var(--accent-2)}.row-action-btn.delete{color:var(--danger)}
+      .null-value{color:var(--muted);font-style:italic;font-size:10px;opacity:.7;background:rgba(0,0,0,.03);padding:1px 5px;border-radius:3px;user-select:none}
+      html.dark .null-value{background:rgba(255,255,255,.05)}
       @media(max-width:860px){.easy-layout{grid-template-columns:1fr}.easy-sidebar{max-height:200px;border-right:none;border-bottom:1px solid var(--line)}}
       @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
       @media(max-width:980px){.app-shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line)}.nav{flex-direction:row;flex-wrap:wrap}.panel{padding:12px}.card.wide{grid-column:1/-1}.builder-row,.builder-row.compact{grid-template-columns:1fr 1fr}}
@@ -493,12 +495,16 @@
                 <button class="easy-tab" data-etab="create">New Table</button>
                 <button class="easy-tab" data-etab="export">Export</button>
                 <button class="easy-tab" data-etab="operations">Operations</button>
+                <button class="easy-tab" data-etab="sql">SQL</button>
               </nav>
               <!-- Browse Tab -->
               <div class="easy-tab-pane active" data-etab="browse">
                 <div class="easy-toolbar">
                   <button id="easyBtnInsertFromBrowse" class="primary sm">&#x271A; Insert row</button>
                   <button id="easyBtnRefreshBrowse" class="sm">&#x21bb; Refresh</button>
+                  <label class="easy-toolbar-label">
+                    <input id="easyQuickFilter" placeholder="Quick filter rows…" style="width:150px" />
+                  </label>
                   <div style="flex:1"></div>
                   <label class="easy-toolbar-label">Show
                     <select id="easyPerPage"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option><option value="250">250</option></select>
@@ -601,6 +607,17 @@
                   </div>
                 </div>
                 <pre id="easyOpsOut" class="hint" style="margin-top:8px">Select an operation above.</pre>
+              </div>
+              <!-- SQL Tab -->
+              <div class="easy-tab-pane" data-etab="sql">
+                <div class="hint" style="margin-bottom:8px">Run SQL directly against the selected database.</div>
+                <textarea id="easySqlText" rows="4" placeholder="SELECT * FROM my_table WHERE id > 1;" style="width:100%;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:8px;resize:vertical"></textarea>
+                <div class="actions" style="margin-top:8px">
+                  <button id="easyBtnRunSql" class="primary sm">&#x25B6; Run</button>
+                  <button id="easyBtnClearSql" class="ghost sm">Clear</button>
+                </div>
+                <div class="table-wrap" style="margin-top:10px"><table id="easySqlGrid"></table></div>
+                <pre id="easySqlOut" class="hint" style="margin-top:8px"></pre>
               </div>
             </div>
           </div>

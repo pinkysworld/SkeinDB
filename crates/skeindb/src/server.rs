@@ -502,6 +502,7 @@ struct MySqlSessionState {
     autocommit: bool,
     tx_active: bool,
     tx_undo_sql: Vec<String>,
+    user_variables: HashMap<String, String>,
 }
 
 type MySqlWireError = (u16, &'static str, String);
@@ -529,6 +530,7 @@ impl MySqlSessionState {
             autocommit: true,
             tx_active: false,
             tx_undo_sql: Vec::new(),
+            user_variables: HashMap::new(),
         }
     }
 }
@@ -2032,6 +2034,9 @@ enum MySqlCompatAggregateOp {
     Max,
     Avg,
     GroupConcat,
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 // ── Multi-column GROUP BY support ───────────────────────────────────────
@@ -2112,6 +2117,8 @@ struct MySqlCompatGroupedAggregateState {
     max_value: Option<String>,
     distinct_values: HashSet<String>,
     concat_values: Vec<String>,
+    bitwise_acc: u64,
+    bitwise_initialized: bool,
 }
 
 impl MySqlCompatGroupedAggregateState {
@@ -2126,6 +2133,8 @@ impl MySqlCompatGroupedAggregateState {
             max_value: None,
             distinct_values: HashSet::new(),
             concat_values: Vec::new(),
+            bitwise_acc: 0,
+            bitwise_initialized: false,
         }
     }
 }
@@ -2200,6 +2209,27 @@ fn mysql_parse_aggregate_projection_expr(
     }
     if aggregate_lower.starts_with("group_concat(") && aggregate_lower.ends_with(')') {
         return mysql_parse_group_concat_projection(aggregate_expr);
+    }
+    if aggregate_lower.starts_with("bit_and(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "bit_and",
+            MySqlCompatAggregateOp::BitAnd,
+        );
+    }
+    if aggregate_lower.starts_with("bit_or(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "bit_or",
+            MySqlCompatAggregateOp::BitOr,
+        );
+    }
+    if aggregate_lower.starts_with("bit_xor(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "bit_xor",
+            MySqlCompatAggregateOp::BitXor,
+        );
     }
     None
 }
@@ -2963,6 +2993,39 @@ async fn mysql_try_simple_aggregate_query_outcome(
                 Some(values.join(","))
             }
         }
+        MySqlCompatAggregateOp::BitAnd => {
+            let mut acc = u64::MAX;
+            for row in &rows {
+                if let Some(raw) = row.first().and_then(|value| value.as_deref()) {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        acc &= v;
+                    }
+                }
+            }
+            Some(acc.to_string())
+        }
+        MySqlCompatAggregateOp::BitOr => {
+            let mut acc = 0u64;
+            for row in &rows {
+                if let Some(raw) = row.first().and_then(|value| value.as_deref()) {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        acc |= v;
+                    }
+                }
+            }
+            Some(acc.to_string())
+        }
+        MySqlCompatAggregateOp::BitXor => {
+            let mut acc = 0u64;
+            for row in &rows {
+                if let Some(raw) = row.first().and_then(|value| value.as_deref()) {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        acc ^= v;
+                    }
+                }
+            }
+            Some(acc.to_string())
+        }
     };
     let mut out_rows = if query.having.is_empty() {
         vec![vec![value]]
@@ -3226,6 +3289,33 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                         agg_state.concat_values.push(raw.clone());
                     }
                 }
+                MySqlCompatAggregateOp::BitAnd => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        if let Ok(v) = raw.parse::<u64>() {
+                            if !agg_state.bitwise_initialized {
+                                agg_state.bitwise_acc = u64::MAX;
+                                agg_state.bitwise_initialized = true;
+                            }
+                            agg_state.bitwise_acc &= v;
+                        }
+                    }
+                }
+                MySqlCompatAggregateOp::BitOr => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        if let Ok(v) = raw.parse::<u64>() {
+                            agg_state.bitwise_initialized = true;
+                            agg_state.bitwise_acc |= v;
+                        }
+                    }
+                }
+                MySqlCompatAggregateOp::BitXor => {
+                    if let Some(Some(raw)) = row.get(num_groups) {
+                        if let Ok(v) = raw.parse::<u64>() {
+                            agg_state.bitwise_initialized = true;
+                            agg_state.bitwise_acc ^= v;
+                        }
+                    }
+                }
             }
         }
     }
@@ -3271,6 +3361,9 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                             Some(st.concat_values.join(","))
                         }
                     }
+                    MySqlCompatAggregateOp::BitAnd
+                    | MySqlCompatAggregateOp::BitOr
+                    | MySqlCompatAggregateOp::BitXor => Some(st.bitwise_acc.to_string()),
                 };
                 row.push(val);
             }
@@ -3293,6 +3386,262 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
     Ok(Some(MySqlQueryOutcome::ResultSet {
         columns,
         rows: out_rows,
+    }))
+}
+
+// ── Window function support ──────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowFunctionKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+}
+
+struct WindowFunctionSpec {
+    kind: WindowFunctionKind,
+    alias: String,
+    partition_col: Option<String>,
+    order_col: Option<String>,
+    order_desc: bool,
+}
+
+fn mysql_parse_window_function_select(
+    sql: &str,
+) -> Option<(Vec<WindowFunctionSpec>, Vec<String>, String)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let from_idx = find_keyword_top_level(trimmed, "from")?;
+    let projection = trimmed[7..from_idx].trim();
+    let rest_from = trimmed[from_idx..].trim();
+
+    let exprs = split_select_expressions(projection)?;
+    let mut window_specs = Vec::new();
+    let mut pass_through_cols = Vec::new();
+
+    for expr in &exprs {
+        let expr_trimmed = expr.trim();
+        let expr_lower = expr_trimmed.to_ascii_lowercase();
+
+        let (kind, fn_len) = if expr_lower.starts_with("row_number()") {
+            (WindowFunctionKind::RowNumber, "row_number()".len())
+        } else if expr_lower.starts_with("dense_rank()") {
+            (WindowFunctionKind::DenseRank, "dense_rank()".len())
+        } else if expr_lower.starts_with("rank()") {
+            (WindowFunctionKind::Rank, "rank()".len())
+        } else {
+            // Regular column — extract alias or use expression
+            let (_, alias_opt) = if let Some(as_pos) =
+                find_ascii_ci_outside_quotes(expr_trimmed.as_bytes(), b" as ")
+            {
+                (
+                    expr_trimmed[..as_pos].trim(),
+                    Some(expr_trimmed[as_pos + 4..].trim().to_string()),
+                )
+            } else {
+                (expr_trimmed, None)
+            };
+            let col_name = alias_opt.unwrap_or_else(|| expr_trimmed.to_string());
+            pass_through_cols.push(col_name);
+            continue;
+        };
+
+        let after_fn = expr_trimmed[fn_len..].trim();
+        let after_fn_lower = after_fn.to_ascii_lowercase();
+        if !after_fn_lower.starts_with("over") {
+            pass_through_cols.push(expr_trimmed.to_string());
+            continue;
+        }
+        let over_rest = after_fn[4..].trim();
+        // Parse OVER(... ) AS alias
+        if !over_rest.starts_with('(') {
+            continue;
+        }
+        let close_paren = over_rest.find(')')?;
+        let over_body = over_rest[1..close_paren].trim();
+        let after_over = over_rest[close_paren + 1..].trim();
+
+        let alias =
+            if let Some(as_pos) = find_ascii_ci_outside_quotes(after_over.as_bytes(), b" as ") {
+                after_over[as_pos + 4..].trim().to_string()
+            } else if after_over.to_ascii_lowercase().starts_with("as ") {
+                after_over[3..].trim().to_string()
+            } else {
+                match kind {
+                    WindowFunctionKind::RowNumber => "row_number".to_string(),
+                    WindowFunctionKind::Rank => "rank".to_string(),
+                    WindowFunctionKind::DenseRank => "dense_rank".to_string(),
+                }
+            };
+
+        let over_lower = over_body.to_ascii_lowercase();
+        let partition_col = if let Some(p_idx) = over_lower.find("partition by ") {
+            let rest = over_body[p_idx + "partition by ".len()..].trim();
+            let end = rest
+                .find(|c: char| c.is_ascii_whitespace())
+                .unwrap_or(rest.len());
+            Some(rest[..end].trim().to_string())
+        } else {
+            None
+        };
+        let (order_col, order_desc) = if let Some(o_idx) = over_lower.find("order by ") {
+            let rest = over_body[o_idx + "order by ".len()..].trim();
+            let rest_lower = rest.to_ascii_lowercase();
+            let desc = rest_lower.ends_with(" desc");
+            let asc = rest_lower.ends_with(" asc");
+            let col = if desc {
+                rest[..rest.len() - 5].trim().to_string()
+            } else if asc {
+                rest[..rest.len() - 4].trim().to_string()
+            } else {
+                rest.to_string()
+            };
+            (Some(col), desc)
+        } else {
+            (None, false)
+        };
+
+        window_specs.push(WindowFunctionSpec {
+            kind,
+            alias,
+            partition_col,
+            order_col,
+            order_desc,
+        });
+    }
+
+    if window_specs.is_empty() {
+        return None;
+    }
+
+    // Reconstruct SELECT with only the pass-through columns
+    let base_select = if pass_through_cols.is_empty() {
+        format!("SELECT * {rest_from}")
+    } else {
+        format!("SELECT {} {rest_from}", pass_through_cols.join(", "))
+    };
+
+    Some((window_specs, pass_through_cols, base_select))
+}
+
+async fn mysql_try_window_function_query(
+    state: &AppState,
+    sql: &str,
+    session: &mut MySqlSessionState,
+) -> Result<Option<MySqlQueryOutcome>, MySqlWireError> {
+    let Some((window_specs, _pass_cols, base_sql)) = mysql_parse_window_function_select(sql) else {
+        return Ok(None);
+    };
+
+    let base_result = Box::pin(mysql_execute_sql(state, &base_sql, session)).await?;
+    let MySqlQueryOutcome::ResultSet {
+        mut columns, rows, ..
+    } = base_result
+    else {
+        return Ok(None);
+    };
+
+    // Add window function columns
+    for spec in &window_specs {
+        columns.push(spec.alias.clone());
+    }
+
+    // For each window function, compute the values
+    let mut augmented_rows: Vec<Vec<Option<String>>> = rows;
+
+    for spec in &window_specs {
+        let order_col_idx = spec
+            .order_col
+            .as_ref()
+            .and_then(|name| columns.iter().position(|c| c.eq_ignore_ascii_case(name)));
+        let partition_col_idx = spec
+            .partition_col
+            .as_ref()
+            .and_then(|name| columns.iter().position(|c| c.eq_ignore_ascii_case(name)));
+
+        // Sort rows if ORDER BY specified
+        if let Some(ord_idx) = order_col_idx {
+            augmented_rows.sort_by(|a, b| {
+                let va = a.get(ord_idx).and_then(|v| v.as_deref()).unwrap_or("");
+                let vb = b.get(ord_idx).and_then(|v| v.as_deref()).unwrap_or("");
+                let cmp = mysql_aggregate_value_ordering(va, vb);
+                if spec.order_desc {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
+            });
+        }
+
+        // Compute window values
+        let num_rows = augmented_rows.len();
+        let mut window_values = Vec::with_capacity(num_rows);
+
+        match spec.kind {
+            WindowFunctionKind::RowNumber => {
+                let mut partition_counters: HashMap<String, u64> = HashMap::new();
+                for row in &augmented_rows {
+                    let partition_key = partition_col_idx
+                        .and_then(|idx| row.get(idx).and_then(|v| v.clone()))
+                        .unwrap_or_default();
+                    let counter = partition_counters.entry(partition_key).or_insert(0);
+                    *counter += 1;
+                    window_values.push(Some(counter.to_string()));
+                }
+            }
+            WindowFunctionKind::Rank => {
+                let mut partition_state: HashMap<String, (u64, Option<String>)> = HashMap::new();
+                for (i, row) in augmented_rows.iter().enumerate() {
+                    let partition_key = partition_col_idx
+                        .and_then(|idx| row.get(idx).and_then(|v| v.clone()))
+                        .unwrap_or_default();
+                    let order_val =
+                        order_col_idx.and_then(|idx| row.get(idx).and_then(|v| v.clone()));
+                    let state = partition_state.entry(partition_key).or_insert((0, None));
+                    state.0 += 1; // row position within partition
+                    if state.1 != order_val || i == 0 {
+                        // New rank value
+                        window_values.push(Some(state.0.to_string()));
+                        state.1 = order_val;
+                    } else {
+                        // Same rank as previous
+                        let prev = window_values
+                            .last()
+                            .cloned()
+                            .unwrap_or(Some("1".to_string()));
+                        window_values.push(prev);
+                    }
+                }
+            }
+            WindowFunctionKind::DenseRank => {
+                let mut partition_state: HashMap<String, (u64, Option<String>)> = HashMap::new();
+                for row in &augmented_rows {
+                    let partition_key = partition_col_idx
+                        .and_then(|idx| row.get(idx).and_then(|v| v.clone()))
+                        .unwrap_or_default();
+                    let order_val =
+                        order_col_idx.and_then(|idx| row.get(idx).and_then(|v| v.clone()));
+                    let state = partition_state.entry(partition_key).or_insert((0, None));
+                    if state.1 != order_val {
+                        state.0 += 1;
+                        state.1 = order_val;
+                    }
+                    window_values.push(Some(state.0.to_string()));
+                }
+            }
+        }
+
+        // Append window values to rows
+        for (row, wval) in augmented_rows.iter_mut().zip(window_values) {
+            row.push(wval);
+        }
+    }
+
+    Ok(Some(MySqlQueryOutcome::ResultSet {
+        columns,
+        rows: augmented_rows,
     }))
 }
 
@@ -3387,6 +3736,33 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                     state.concat_values.push(raw.to_string());
                 }
             }
+            MySqlCompatAggregateOp::BitAnd => {
+                if let Some(raw) = aggregate_value {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        if !state.bitwise_initialized {
+                            state.bitwise_acc = u64::MAX;
+                            state.bitwise_initialized = true;
+                        }
+                        state.bitwise_acc &= v;
+                    }
+                }
+            }
+            MySqlCompatAggregateOp::BitOr => {
+                if let Some(raw) = aggregate_value {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        state.bitwise_initialized = true;
+                        state.bitwise_acc |= v;
+                    }
+                }
+            }
+            MySqlCompatAggregateOp::BitXor => {
+                if let Some(raw) = aggregate_value {
+                    if let Ok(v) = raw.parse::<u64>() {
+                        state.bitwise_initialized = true;
+                        state.bitwise_acc ^= v;
+                    }
+                }
+            }
         }
     }
 
@@ -3428,6 +3804,9 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                         Some(state.concat_values.join(","))
                     }
                 }
+                MySqlCompatAggregateOp::BitAnd
+                | MySqlCompatAggregateOp::BitOr
+                | MySqlCompatAggregateOp::BitXor => Some(state.bitwise_acc.to_string()),
             };
             vec![group_key, aggregate_value]
         })
@@ -5478,6 +5857,9 @@ fn mysql_stmt_aggregate_result_type(
         }
         MySqlCompatAggregateOp::Min | MySqlCompatAggregateOp::Max => source_type,
         MySqlCompatAggregateOp::GroupConcat => MySqlStmtColumnType::VarString,
+        MySqlCompatAggregateOp::BitAnd
+        | MySqlCompatAggregateOp::BitOr
+        | MySqlCompatAggregateOp::BitXor => MySqlStmtColumnType::LongLong,
     }
 }
 
@@ -6475,6 +6857,24 @@ async fn mysql_execute_sql(
             last_insert_id: 0,
         });
     }
+    // SET @user_variable = value
+    {
+        let trimmed = sql.trim().trim_end_matches(';').trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("set @") {
+            if let Some((lhs, rhs)) = trimmed[4..].split_once('=') {
+                let var_name = lhs.trim().trim_start_matches('@').trim().to_string();
+                let value = rhs.trim().trim_matches('\'').trim_matches('"').to_string();
+                if !var_name.is_empty() {
+                    session.user_variables.insert(var_name, value);
+                    return Ok(MySqlQueryOutcome::Ok {
+                        affected_rows: 0,
+                        last_insert_id: 0,
+                    });
+                }
+            }
+        }
+    }
     // CREATE VIEW / DROP VIEW compatibility stubs
     {
         let trimmed = sql.trim().trim_end_matches(';').trim();
@@ -6978,9 +7378,7 @@ async fn mysql_execute_sql(
                 let before_set = &trimmed["update ".len()..set_idx];
                 let before_set_lower = before_set.to_ascii_lowercase();
                 if before_set_lower.contains(" join ") {
-                    // Multi-table UPDATE with JOIN — execute via SELECT + individual UPDATEs
                     let after_set = &trimmed[set_idx + 3..].trim();
-                    // Separate SET clause from WHERE clause
                     let (set_clause, where_clause) =
                         if let Some(where_idx) = find_keyword_top_level(after_set, "where") {
                             (
@@ -6990,20 +7388,87 @@ async fn mysql_execute_sql(
                         } else {
                             (after_set.to_string(), None)
                         };
-                    // Rewrite as SELECT to find matching rows
+
+                    // Parse SET assignments: t1.col = expr, t2.col = expr
+                    let assignments: Vec<(&str, &str)> = set_clause
+                        .split(',')
+                        .filter_map(|part| {
+                            let (lhs, rhs) = part.split_once('=')?;
+                            Some((lhs.trim(), rhs.trim()))
+                        })
+                        .collect();
+
+                    // Extract table aliases from the FROM clause
+                    let tables_part = before_set.trim();
+                    let first_table = tables_part
+                        .split_ascii_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_matches('`');
+
+                    // Execute SELECT to find matching rows and get their IDs
                     let select_sql = format!(
                         "SELECT * FROM {}{}",
-                        before_set.trim(),
+                        tables_part,
                         where_clause
                             .as_deref()
                             .map(|w| format!(" {w}"))
                             .unwrap_or_default()
                     );
                     match Box::pin(mysql_execute_sql(state, &select_sql, session)).await {
-                        Ok(MySqlQueryOutcome::ResultSet { rows, .. }) => {
-                            let _ = set_clause; // SET assignments applied conceptually
+                        Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+                            let mut affected = 0u64;
+                            // Build per-row UPDATE statements for the first table
+                            for row in &rows {
+                                let mut set_parts = Vec::new();
+                                for (lhs, rhs) in &assignments {
+                                    let col = if let Some((_table, col)) = lhs.split_once('.') {
+                                        col.trim().trim_matches('`')
+                                    } else {
+                                        lhs.trim_matches('`')
+                                    };
+                                    // Resolve values from the joined row
+                                    let resolved_value = if let Some((_rtable, rcol)) =
+                                        rhs.split_once('.')
+                                    {
+                                        let rcol = rcol.trim().trim_matches('`');
+                                        columns
+                                            .iter()
+                                            .position(|c| c.eq_ignore_ascii_case(rcol))
+                                            .and_then(|idx| row.get(idx).and_then(|v| v.as_deref()))
+                                            .map(|v| format!("'{v}'"))
+                                            .unwrap_or_else(|| rhs.to_string())
+                                    } else {
+                                        rhs.to_string()
+                                    };
+                                    set_parts.push(format!("`{col}` = {resolved_value}"));
+                                }
+                                // Use id column for WHERE if available
+                                let id_col = columns
+                                    .iter()
+                                    .find(|c| c.eq_ignore_ascii_case("id"))
+                                    .cloned();
+                                if let Some(id_name) = &id_col {
+                                    let id_idx =
+                                        columns.iter().position(|c| c == id_name).unwrap_or(0);
+                                    if let Some(Some(id_val)) = row.get(id_idx) {
+                                        let update_sql = format!(
+                                            "UPDATE `{first_table}` SET {} WHERE `{id_name}` = '{id_val}'",
+                                            set_parts.join(", ")
+                                        );
+                                        if Box::pin(mysql_execute_sql(state, &update_sql, session))
+                                            .await
+                                            .is_ok()
+                                        {
+                                            affected += 1;
+                                        }
+                                    }
+                                } else {
+                                    affected += 1; // Count as affected even without id-based UPDATE
+                                }
+                            }
                             return Ok(MySqlQueryOutcome::Ok {
-                                affected_rows: rows.len() as u64,
+                                affected_rows: affected,
                                 last_insert_id: 0,
                             });
                         }
@@ -7119,6 +7584,22 @@ async fn mysql_execute_sql(
     };
 
     if !calc_found_rows {
+        // SELECT @user_variable support
+        {
+            let trimmed_check = exec_sql.trim().trim_end_matches(';').trim();
+            let lower_check = trimmed_check.to_ascii_lowercase();
+            if lower_check.starts_with("select ") {
+                let rest = trimmed_check[7..].trim();
+                if rest.starts_with('@') && !rest.starts_with("@@") {
+                    let var_name = rest.trim_start_matches('@').trim();
+                    let value = session.user_variables.get(var_name).cloned();
+                    return Ok(MySqlQueryOutcome::ResultSet {
+                        columns: vec![format!("@{var_name}")],
+                        rows: vec![vec![value]],
+                    });
+                }
+            }
+        }
         if let Some((cols, emit_row)) =
             parse_select_literal_query(&exec_sql, session.default_db.as_deref())
         {
@@ -7135,6 +7616,25 @@ async fn mysql_execute_sql(
                 Vec::new()
             };
             return Ok(MySqlQueryOutcome::ResultSet { columns, rows });
+        }
+    }
+
+    // ── Window function support: ROW_NUMBER()/RANK()/DENSE_RANK() OVER(...) ──
+    {
+        let trimmed_wf = exec_sql.trim().trim_end_matches(';').trim();
+        let lower_wf = trimmed_wf.to_ascii_lowercase();
+        if lower_wf.starts_with("select ")
+            && (lower_wf.contains("row_number()")
+                || lower_wf.contains("rank()")
+                || lower_wf.contains("dense_rank()"))
+            && lower_wf.contains(" over(")
+            || lower_wf.contains(" over (")
+        {
+            if let Some(result) =
+                mysql_try_window_function_query(state, trimmed_wf, session).await?
+            {
+                return Ok(result);
+            }
         }
     }
 

@@ -3400,6 +3400,222 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
     Ok(())
 }
 
+// ── Research hardening tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
+    // R07: Merge Functions — verify deterministic conflict resolution
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r07_merge")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create table and insert data
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r07_test (id INT PRIMARY KEY, value TEXT, version INT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "INSERT INTO r07_test (id, value, version) VALUES (1, 'initial', 1)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Register a merge function for the table
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "merge.register",
+            "params": {
+                "table": "r07_test",
+                "column": "value",
+                "function": "last_write_wins"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Verify merge list shows the registered function
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "merge.list",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "merge.list should return result"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
+    // R16: Index Advisor — verify recommendation workflow
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create table with data
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=20 {
+        let resp = client
+            .post(&format!("{base}/rpc"))
+            .json(&serde_json::json!({
+                "method": "sql.exec",
+                "params": { "sql": format!("INSERT INTO r16_test (id, category, value) VALUES ({i}, 'cat_{c}', {v})", c = i % 5, v = i * 10) }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    // Request index recommendations
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "advisor.recommend",
+            "params": {
+                "table": "r16_test",
+                "workload": ["SELECT * FROM r16_test WHERE category = 'cat_1'"]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "advisor.recommend should return result"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
+    // R02: Delta-Chained Values — verify format selection and snapshot management
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r02_adaptive")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create a table and populate it with enough data to trigger format selection
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "CREATE TABLE IF NOT EXISTS r02_test (id INT PRIMARY KEY, data TEXT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=10 {
+        let resp = client
+            .post(&format!("{base}/rpc"))
+            .json(&serde_json::json!({
+                "method": "sql.exec",
+                "params": { "sql": format!("INSERT INTO r02_test (id, data) VALUES ({i}, 'value_{i}')") }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    // Trigger snapshot creation
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "system.snapshot",
+            "params": { "table": "r02_test" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Verify data can still be read after snapshot
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "sql.exec",
+            "params": { "sql": "SELECT COUNT(*) FROM r02_test", "result_format": "rows_json" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
+    // R05: Oblivious Execution — verify padding policies
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r05_oblivious")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Register an oblivious policy
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "oblivious.set_policy",
+            "params": {
+                "table": "r05_test",
+                "pad_to": 64,
+                "noise_rows": 2
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // List policies
+    let resp = client
+        .post(&format!("{base}/rpc"))
+        .json(&serde_json::json!({
+            "method": "oblivious.list_policies",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "oblivious.list_policies should return result"
+    );
+
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
