@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-03-12
+Last updated: 2026-03-30
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -18,6 +18,7 @@ The repo is intentionally written so you can read it in two ways:
 2) **Core APIs**
    - `SKEINQL.md` (JSON-RPC control plane spec)
    - `MYSQL_COMPAT.md` (MySQL protocol surface and current coverage)
+   - `PG_COMPAT.md` (current PostgreSQL wire-protocol baseline and open gaps)
    - `SKEINADMIN.md` (embedded web console)
 
 3) **Web-native consistency & traffic reduction**

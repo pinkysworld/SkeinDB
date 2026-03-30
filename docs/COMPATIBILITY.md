@@ -1,12 +1,12 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
 Status: Draft v0.2
-Last updated: 2026-03-12
+Last updated: 2026-03-30
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
-- Speak PostgreSQL wire protocol (port 5432, planned) so existing PG apps work unchanged.
-- Translate MySQL / PostgreSQL SQL into SkeinIR.
+- Speak PostgreSQL wire protocol (port 5432, partial baseline today) so early PG clients can connect while broader dialect/catalog parity is completed.
+- Translate MySQL / the current PostgreSQL subset into SkeinIR.
 - Provide SkeinQL native API + console for proprietary features.
 
 ---
@@ -157,7 +157,7 @@ scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, 
 (`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
 `character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
 and `EXPLAIN` with real table name extraction.
-The corpus has expanded from 1081 lines to 1130 lines with over 374 SQL statements.
+The corpus has expanded to 1657 lines with about 672 semicolon-terminated SQL statements.
 
 ---
 
@@ -190,19 +190,17 @@ Notes:
 
 ---
 
-## 6) PostgreSQL compatibility (planned)
+## 6) PostgreSQL compatibility (current partial baseline)
 
-SkeinDB will add a PostgreSQL v3 wire protocol listener on a separate port (default 5432).
+SkeinDB now ships a PostgreSQL v3 wire protocol listener on a separate port (default 5432).
+The implementation is intentionally narrow but test-backed.
 
-### Target scope
-- **Wire protocol:** PostgreSQL v3 frontend/backend message flow
-- **Authentication:** SCRAM-SHA-256 + trust mode
-- **SQL dialect extensions:** `RETURNING`, dollar-quoting (`$$...$$`), `::` type casts, `ILIKE`, array literals, `ON CONFLICT DO UPDATE/NOTHING`
-- **System catalogs:** `pg_catalog.pg_type`, `pg_catalog.pg_class`, `pg_catalog.pg_namespace`, `pg_catalog.pg_attribute`
-- **Extended query protocol:** Parse/Bind/Describe/Execute/Sync cycle
-- **Type OID mapping:** INT4, INT8, TEXT, FLOAT8, BOOL, TIMESTAMP, JSONB, BYTEA, UUID
-- **Error codes:** PostgreSQL SQLSTATE error format
-- **Compatibility targets:** psql, pgAdmin, DBeaver, Django, Rails, SQLAlchemy
+### Current baseline
+- **Wire protocol:** PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `RowDescription`, `DataRow`, `CommandComplete`, and `ErrorResponse`
+- **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; cleartext-password auth path when it is set
+- **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries and a `SELECT version()` compatibility response
+- **Transaction handling:** `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
+- **Extended query protocol:** stub acknowledgements only; full Parse/Bind/Describe/Execute semantics remain open
 
 ### Architecture
 Both MySQL and PostgreSQL frontends parse SQL into the shared `SqlPlan` / SkeinQL IR layer, so the execution engine is fully protocol-agnostic.
@@ -217,4 +215,11 @@ HTTP  (8080) ──┘
 - `--pg <port>` CLI flag (0 = disabled)
 - `pg_port` in `skeindb-config.json`
 
-See `docs/PG_COMPAT.md` for the full specification.
+### Still open
+- SCRAM-SHA-256 authentication
+- PG session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, richer `ReadyForQuery` state)
+- PG SQL dialect extensions such as `RETURNING`, dollar-quoting, `::` casts, `ILIKE`, arrays, and `ON CONFLICT`
+- `pg_catalog` virtual tables and driver bootstrap compatibility
+- PostgreSQL SQLSTATE parity and broader driver/framework coverage
+
+See `docs/PG_COMPAT.md` for the tested scope, examples, and backlog map.

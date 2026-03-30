@@ -1,231 +1,138 @@
 # PostgreSQL Compatibility
 
-SkeinDB offers a PostgreSQL v3 wire protocol listener alongside the existing MySQL listener.
-Both protocols translate SQL into the shared SkeinQL IR and execute against the same Engine — no engine changes are required.
+Last updated: 2026-03-30
+
+Status: Partial baseline
+
+SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
+The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.
 
 ## Quick start
 
 ```bash
-# skeindb-config.json already ships with pg_port: 5432
-cargo run
+# Trust auth when SKEINDB_TOKEN is unset
+cargo run -- serve --data ./data --http 8080 --mysql 3306 --pg 5432
 
-# In another terminal
-psql -h 127.0.0.1 -p 5432 -U skein -d app -c "SELECT 1"
+psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" -c "SELECT 1"
+
+# If SKEINDB_TOKEN is set, use the same value as the password:
+PGPASSWORD="$SKEINDB_TOKEN" \
+  psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" \
+  -c "SELECT version()"
 ```
 
-## Architecture
+Notes:
+- `sslmode=disable` is recommended for now because the listener explicitly rejects PostgreSQL SSL negotiation with `N`.
+- The PG listener shares the same underlying execution engine as MySQL and SkeinQL.
 
-```
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│  MySQL 3306  │   │  PG   5432   │   │  HTTP  8080  │
-│  (server.rs) │   │  (pg_*.rs)   │   │  (server.rs) │
-└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-       │                  │                   │
-       ▼                  ▼                   ▼
-  ┌──────────────────────────────────────────────┐
-  │             SqlPlan / SkeinQL IR             │
-  └────────────────────┬─────────────────────────┘
-                       ▼
-              ┌──────────────────┐
-              │      Engine      │
-              │  (engine.rs)     │
-              └──────────────────┘
-```
+## Implemented today
 
-### Module layout
+- PostgreSQL v3 message framing in `pg_wire.rs`
+- `StartupMessage` and `SSLRequest` parsing
+- startup response batch: `AuthenticationOk` / `ParameterStatus` / `BackendKeyData` / `ReadyForQuery`
+- trust auth when `SKEINDB_TOKEN` is unset
+- cleartext-password auth path when `SKEINDB_TOKEN` is set
+- SSL negotiation rejection (`'N'`)
+- simple query protocol delegated to the shared SQL execution engine
+- special-case `SELECT version()` compatibility response
+- empty-query handling
+- `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
+- `Terminate` handling
+- extended-query protocol acknowledgements as stubs only
 
-| File | Purpose |
-|------|---------|
-| `pg_wire.rs` | **Implemented.** PG v3 message framing: 1-byte tag + 4-byte BE length + payload. StartupMessage/SSLRequest parsing, all backend message builders (RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, ReadyForQuery, etc.), common PG type OIDs, 20 unit tests. |
-| `server.rs` (PG section) | **Implemented.** `handle_pg_connection()` + `run_pg_listener()` — SSL rejection, trust/cleartext auth, ParameterStatus batch, simple query protocol, transaction stubs, extended query protocol stubs. 6 integration tests. |
-| `pg_auth.rs` | Planned. SCRAM-SHA-256 (RFC 5802/7677) |
-| `pg_session.rs` | Planned. `PgSessionState`: search_path, DateStyle, TimeZone, tx state (I/T/E) |
-| `pg_parse.rs` | Planned. PG SQL dialect → SqlPlan translation |
-| `pg_types.rs` | Planned. TypeDesc ↔ PG OID mapping + text/binary encoding |
-| `pg_catalog.rs` | Planned. Virtual `pg_catalog.*` system tables |
-| `pg_functions.rs` | Planned. PG-specific scalar/aggregate function implementations |
+## Module map
 
-## Configuration
-
-```json
-{
-  "pg_port": 5432
-}
-```
-
-Set `pg_port` to `0` to disable the PostgreSQL listener.
-
-## Claimed version
-
-SkeinDB identifies itself as **PostgreSQL 16.0 (SkeinDB compatibility)** via `server_version` and `SELECT version()`.
+| File | Status | Purpose |
+|------|--------|---------|
+| `pg_wire.rs` | Implemented | PG v3 message framing, startup parsing, backend message encode/write helpers, common PG type OIDs, unit tests |
+| `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, SSL rejection, simple query loop, transaction stubs, extended-protocol stubs |
+| `pg_auth.rs` | Planned | SCRAM-SHA-256 and richer auth paths |
+| `pg_session.rs` | Planned | `search_path`, `DateStyle`, `TimeZone`, tx-state tracking, `client_encoding` |
+| `pg_parse.rs` | Planned | PG-specific SQL dialect features (`RETURNING`, `::`, `ILIKE`, arrays, dollar-quoting, `ON CONFLICT`) |
+| `pg_types.rs` | Planned | Richer OID mapping plus text/binary format parity |
+| `pg_catalog.rs` | Planned | Virtual `pg_catalog.*` tables |
+| `pg_functions.rs` | Planned | PG-specific scalar/aggregate functions |
 
 ## Authentication
 
 | Method | Status | Notes |
 |--------|--------|-------|
 | trust | Supported | Default when `SKEINDB_TOKEN` is not set |
-| SCRAM-SHA-256 | Supported | Password from `SKEINDB_TOKEN` env var |
-| md5 | Not supported | Legacy; use SCRAM-SHA-256 instead |
-| certificate | Not supported | — |
+| cleartext password | Supported | Uses `SKEINDB_TOKEN` as the password gate |
+| SCRAM-SHA-256 | Planned | Backlog item T401 |
+| md5 | Not planned | Prefer SCRAM once implemented |
+| TLS client certs | Not implemented | SSL negotiation is currently rejected |
 
-## Wire protocol
+## Protocol surface
 
 ### Simple query protocol
 
-`Query` message → parse SQL → execute → `RowDescription` + `DataRow`* + `CommandComplete` + `ReadyForQuery`.
+The listener accepts `Query` messages and routes supported SQL into the shared execution engine.
+For the common shared SQL subset, responses are encoded as:
+
+- `RowDescription`
+- zero or more `DataRow`
+- `CommandComplete`
+- `ReadyForQuery`
+
+`SELECT version()` is also handled explicitly so PG clients get a PostgreSQL-shaped version string.
 
 ### Extended query protocol
 
-`Parse` → `Bind` → `Describe` → `Execute` → `Sync` cycle.
-Supports named and unnamed statements/portals, `$1`/`$2` parameter placeholders.
+The listener currently accepts the extended-query message family only as a compatibility scaffold.
+`Parse`, `Bind`, `Describe`, `Execute`, `Close`, and `Sync` are acknowledged with stub behavior, but real prepared-statement / portal semantics, parameter placeholders, and driver-grade lifecycle handling are still open work.
 
-### COPY protocol
+### Transactions
 
-Basic `COPY ... FROM STDIN` (CSV/text) and `COPY ... TO STDOUT` for bulk data transfer.
+`BEGIN`, `COMMIT`, and `ROLLBACK` are accepted as compatibility stubs.
+Full PostgreSQL transaction-state semantics, including richer `ReadyForQuery` state management (`I` / `T` / `E`) and failed-transaction blocks, are still open.
 
-## SQL dialect
+## Tested flows
 
-### Supported PG-specific syntax
+Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 
-| Feature | Example | Notes |
-|---------|---------|-------|
-| Double-quoted identifiers | `SELECT "Column" FROM "Table"` | MySQL uses backticks |
-| Dollar-quoting | `$$text$$`, `$tag$text$tag$` | String literals |
-| Type casts | `'5'::int`, `CAST('5' AS int)` | Both forms |
-| RETURNING | `INSERT ... RETURNING *` | INSERT/UPDATE/DELETE |
-| ILIKE | `WHERE name ILIKE '%foo%'` | Case-insensitive LIKE |
-| IS DISTINCT FROM | `WHERE a IS DISTINCT FROM b` | NULL-safe inequality |
-| Boolean literals | `TRUE`, `FALSE` | Not `1`/`0` |
-| ARRAY literals | `ARRAY[1, 2, 3]` | Array constructor |
-| ON CONFLICT | `INSERT ... ON CONFLICT DO UPDATE SET ...` | UPSERT |
-| FETCH FIRST | `FETCH FIRST 10 ROWS ONLY` | Alternative to LIMIT |
-| SERIAL / BIGSERIAL | `id SERIAL PRIMARY KEY` | Maps to auto_increment |
+- startup handshake reaches `ReadyForQuery`
+- simple query `SELECT 1`
+- simple query `SELECT version()`
+- empty query returns the expected empty response flow
+- `Terminate` closes the connection cleanly
+- SSL negotiation is rejected correctly
 
-### Supported DDL
+`pg_wire.rs` also carries 20 unit tests for message framing and encode/decode behavior.
 
-- `CREATE TABLE` / `DROP TABLE` / `ALTER TABLE` (add/drop/rename column, add/drop constraint)
-- `CREATE INDEX` / `CREATE INDEX CONCURRENTLY` (concurrently accepted, ignored)
-- `CREATE SCHEMA` → maps to database
-- `CREATE VIEW` / `DROP VIEW`
-- `COMMENT ON TABLE|COLUMN`
+## Claimed version and startup behavior
 
-### Supported DML
+- `SELECT version()` returns a PostgreSQL-flavored SkeinDB string
+- the listener emits startup `ParameterStatus` messages during connection setup
+- the default port is `5432`
+- `--pg 0` disables the listener
 
-- `INSERT` / `INSERT ... RETURNING` / `INSERT ... ON CONFLICT`
-- `UPDATE` / `UPDATE ... RETURNING`
-- `DELETE` / `DELETE ... RETURNING`
-- `SELECT` with full expression support (joins, subqueries, CTEs, UNION, aggregates, window functions)
+## Not implemented yet
 
-## System catalogs
+- SCRAM-SHA-256 authentication
+- PostgreSQL session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, `standard_conforming_strings`)
+- PG-specific SQL dialect features such as `RETURNING`, `::` casts, dollar-quoting, `ILIKE`, arrays, `FETCH FIRST`, and `ON CONFLICT`
+- `pg_catalog` system tables and PG bootstrap-query compatibility for tools/frameworks
+- COPY protocol
+- PostgreSQL SQLSTATE parity
+- richer type encoding and binary format support
+- production-grade driver compatibility for Django, Rails, SQLAlchemy, `pgAdmin`, `DBeaver`, `psycopg`, and `node-postgres`
 
-| Catalog table | Status |
-|---------------|--------|
-| `pg_catalog.pg_database` | Supported |
-| `pg_catalog.pg_namespace` | Supported |
-| `pg_catalog.pg_class` | Supported |
-| `pg_catalog.pg_attribute` | Supported |
-| `pg_catalog.pg_type` | Supported |
-| `pg_catalog.pg_index` | Supported |
-| `pg_catalog.pg_constraint` | Supported |
-| `pg_catalog.pg_proc` | Stub (empty) |
-| `pg_catalog.pg_settings` | Supported |
-| `pg_catalog.pg_stat_activity` | Supported |
-| `information_schema.tables` | Supported |
-| `information_schema.columns` | Supported |
-| `information_schema.schemata` | Supported |
+## Architecture
 
-## PG-specific functions
+Both SQL frontends target the same shared execution layer:
 
-### String
-`string_agg()`, `split_part()`, `encode()`/`decode()`, `gen_random_uuid()`, `to_char()`, `to_number()`
-
-### Date/Time
-`now()`, `current_timestamp`, `extract(epoch FROM ...)`, `age()`, `date_trunc()`, `to_date()`, `to_timestamp()`
-
-### JSON
-`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `jsonb_build_object()`, `jsonb_agg()`, `jsonb_array_elements()`, `json_each()`, `jsonb_set()`, `jsonb_insert()`
-
-### Array
-`array_length()`, `unnest()`, `array_cat()`, `array_append()`, `array_agg()`, `ANY(array)`, `ALL(array)`
-
-### Aggregate
-`string_agg()`, `array_agg()`, `bool_and()`, `bool_or()`, `every()`
-
-## Type mapping
-
-| PG type | OID | SkeinQL TypeDesc | Notes |
-|---------|-----|------------------|-------|
-| `boolean` | 16 | `bool` | |
-| `smallint` | 21 | `i16` | |
-| `integer` | 23 | `i32` | |
-| `bigint` | 20 | `i64` | |
-| `real` | 700 | `f32` | |
-| `double precision` | 701 | `f64` | |
-| `text` | 25 | `string` | |
-| `varchar(n)` | 1043 | `string` | Length enforced |
-| `bytea` | 17 | `bytes` | |
-| `json` | 114 | `json` | |
-| `jsonb` | 3802 | `json` | Stored as JSON |
-| `timestamp` | 1114 | `timestamp` | |
-| `date` | 1082 | `date` | |
-| `time` | 1083 | `time` | |
-| `uuid` | 2950 | `string` | UUID format validated |
-| `numeric` | 1700 | `f64` | Approximate |
-| `serial` | 23 | `u32` + auto_increment | |
-| `bigserial` | 20 | `u64` + auto_increment | |
-
-## Transaction behavior
-
-PostgreSQL uses implicit transactions: each statement auto-commits unless inside an explicit `BEGIN` block.
-
-The `ReadyForQuery` message encodes transaction state:
-- `I` — idle (no transaction)
-- `T` — in transaction block
-- `E` — failed transaction (all statements error until `ROLLBACK`)
-
-## SQLSTATE error codes
-
-| Code | Meaning |
-|------|---------|
-| `42P01` | Undefined table |
-| `42703` | Undefined column |
-| `23505` | Unique violation |
-| `23502` | Not-null violation |
-| `42601` | Syntax error |
-| `42P06` | Duplicate schema |
-| `42P07` | Duplicate table |
-| `25P02` | In failed SQL transaction |
-| `08003` | Connection does not exist |
-
-## Known gaps
-
-- **LISTEN/NOTIFY**: Not yet implemented. Plan: map to SkeinDB CDC subscriptions.
-- **PL/pgSQL**: `DO $$ ... $$` blocks are accepted but return "not supported" error.
-- **Large Objects (lo_\*)**: Not implemented.
-- **Cursors (DECLARE/FETCH/CLOSE)**: Extended query portals are supported; SQL-level `DECLARE CURSOR` is not yet.
-- **Advisory locks**: Not implemented.
-- **VACUUM/ANALYZE**: Accepted as no-ops.
-
-## Testing
-
-```bash
-# Run PG compatibility tests
-cargo test pg_
-
-# Test corpus
-psql -h 127.0.0.1 -p 5432 -f tests/compat/pg_corpus.sql
+```text
+MySQL (3306) ──┐
+PG    (5432) ──┤──→ SqlPlan / SkeinQL IR ──→ Engine
+HTTP  (8080) ──┘
 ```
 
-## Compatibility targets
+## Backlog map
 
-| Tool/Framework | Status | Notes |
-|----------------|--------|-------|
-| psql | Target | Primary CLI tool |
-| pgAdmin | Target | GUI administration |
-| DBeaver | Target | Universal database tool |
-| Django | Target | `django.db.backends.postgresql` |
-| Rails | Target | `activerecord-postgresql-adapter` |
-| SQLAlchemy | Target | `postgresql://` dialect |
-| psycopg2 | Target | Python driver |
-| node-postgres | Target | Node.js driver |
-| JDBC PostgreSQL | Target | Java driver |
+Phase 25 in `docs/PROJECT_BACKLOG.md` tracks the remaining PostgreSQL work:
+
+- T400 / T403 / T418 are complete
+- T401-T417 remain open for auth hardening, PG parser work, catalogs, extended protocol, result typing, and driver compatibility
+
+Use `docs/TRUE_STATUS_MATRIX.md` when you want the runtime-backed truth snapshot rather than the aspirational roadmap.

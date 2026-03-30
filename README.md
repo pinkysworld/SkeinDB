@@ -1,15 +1,15 @@
 # SkeinDB
 
-Last updated: 2026-03-12
+Last updated: 2026-03-30
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
-1) **Adoption:** drop-in **MySQL compatibility** (and planned **PostgreSQL compatibility**) so existing applications can connect with minimal change.
+1) **Adoption:** drop-in **MySQL compatibility** plus an early **PostgreSQL compatibility baseline** so existing applications can connect with minimal change.
 2) **Research extensibility:** a clean, web-native control plane (**SkeinQL**) and a set of novel primitives (ETag-driven cache coherency, query-scoped patches, delta-chained MVCC, hash-chained WAL, sandboxed Wasm extensions) intended to make systems research easier to prototype and evaluate.
 
 The repository is written so you can:
 - run SkeinDB as a portable binary (HTTP + admin console)
-- use MySQL tools as soon as the compatibility layer is implemented/expanded
+- use MySQL tools today and exercise early PostgreSQL clients against the current PG baseline
 - extend the engine via well-scoped crates and specs
 
 > Implementation note
@@ -24,7 +24,7 @@ The repository is written so you can:
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
 - **MySQL adoption layer:** MySQL protocol surface + migration/telemetry tooling.
-- **PostgreSQL adoption layer (planned):** PostgreSQL v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, :: casts, pg_catalog.
+- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, SSL rejection, simple query execution, transaction stubs, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
@@ -32,7 +32,7 @@ The repository is written so you can:
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
 - **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
 - **Security extensions:** hash-chained WAL for tamper evidence.
-- **6 hardened research tracks:** R03 (delta topology analysis), R04 (differential privacy with RDP composition), R06 (forensic Merkle proofs), R08 (incremental view maintenance with cascading invalidation), R10 (HNSW vector search), R13 (causal vector-clock ETags).
+- **14 hardened research tracks:** R02-R11 and R13-R16 are hardened with runtime evidence and integration tests; see `docs/TRUE_STATUS_MATRIX.md`.
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
@@ -63,7 +63,7 @@ cargo build --release
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
 ```
 
-With PostgreSQL listener (planned):
+With PostgreSQL listener (partial baseline):
 
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --pg 5432
@@ -155,10 +155,11 @@ For what is implemented vs planned, see the docs and the backlog:
 - `docs/RESEARCH_AGENDA.md`
 - `docs/TRUE_STATUS_MATRIX.md`
 
-Recent documentation updates (2026-02-24):
-- `docs/GETTING_STARTED.md`: storage + dedup stats walkthrough
-- `docs/ON_DISK_FORMAT.md`: table row `format_version: 2` ValueID ref encoding
-- `docs/SKEINADMIN.md`: admin/console UX and observability notes
+Recent documentation updates (2026-03-30):
+- `docs/PG_COMPAT.md`: rewritten to the current PG v3 baseline and open tasks
+- `docs/PROJECT_BACKLOG.md`: status sync for PostgreSQL docs + current corpus numbers
+- `docs/TRUE_STATUS_MATRIX.md`: refreshed backlog counts and compatibility snapshot
+- `site/index.html` / `docs/site/index.html`: synced public stats and feature badges
 
 ---
 

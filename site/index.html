@@ -443,11 +443,11 @@
     <div class="stat-label">Admin Panels</div>
   </div>
   <div class="stat">
-    <div class="stat-num">243</div>
+    <div class="stat-num">285</div>
     <div class="stat-label">Automated Tests</div>
   </div>
   <div class="stat">
-    <div class="stat-num">&lt;23s</div>
+    <div class="stat-num">&lt;25s</div>
     <div class="stat-label">Full Test Suite</div>
   </div>
 </div>
@@ -469,19 +469,19 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔌</div>
       <h3>MySQL Wire Protocol</h3>
-      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with 370+ translated SQL statements, window functions, user variables, prepared statements, and full COM_QUERY compatibility.</p>
+      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with a 670+ statement compatibility corpus, window functions, user variables, prepared statements, and broad COM_QUERY coverage.</p>
     </div>
     <div class="feature-card">
-      <span class="status-badge status-planned">Planned</span>
+      <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with any PostgreSQL client. Planned support for PG v3 wire protocol on port 5432 with SCRAM-SHA-256 auth, RETURNING, dollar-quoting, :: casts, and pg_catalog.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, SSL rejection, simple queries, transaction stubs, and extended-protocol scaffolding backed by the shared engine.</p>
     </div>
     <div class="feature-card">
-      <span class="status-badge status-planned">Planned</span>
+      <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">⚡</div>
       <h3>HTTP + QUIC Dual Transport</h3>
-      <p>Every RPC method works identically over HTTP/1.1, HTTP/2, and QUIC. Dedicated integration tests confirm transport-level behavioral parity.</p>
+      <p>SkeinQL RPC runs over HTTP/1.1, HTTP/2, and QUIC from the same binary, with dedicated integration tests for transport parity and reconnect behavior.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -641,7 +641,7 @@
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">⚙️</div><div class="stat-label">Axum</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🔒</div><div class="stat-label">Quinn (QUIC)</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐬</div><div class="stat-label">MySQL Protocol</div></div>
-    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐘</div><div class="stat-label">PostgreSQL (planned)</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐘</div><div class="stat-label">PostgreSQL (partial)</div></div>
     <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">📦</div><div class="stat-label">Single Binary</div></div>
   </div>
 </section>
