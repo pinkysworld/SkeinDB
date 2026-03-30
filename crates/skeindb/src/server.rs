@@ -15,7 +15,7 @@ use axum::{
     extract::Path,
     extract::State,
     http::{header, HeaderMap, Method, StatusCode},
-    response::{Html, IntoResponse},
+    response::{sse, Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
@@ -144,6 +144,7 @@ pub(crate) struct AppState {
     coalesce: Arc<QueryCoalescer>,
     transport: TransportCapabilities,
     shutdown_tx: watch::Sender<bool>,
+    etag_notify: Arc<tokio::sync::broadcast::Sender<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1198,6 +1199,7 @@ fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
             Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string()))
         }
         "autocommit" => Some(MySqlLiteral::Int(1)),
+        "skein.autoparameterize" => Some(MySqlLiteral::Int(0)),
         _ => None,
     }
 }
@@ -1214,6 +1216,7 @@ fn mysql_known_session_vars() -> &'static [&'static str] {
         "collation_database",
         "collation_server",
         "lower_case_table_names",
+        "skein.autoparameterize",
         "sql_auto_is_null",
         "sql_log_bin",
         "sql_mode",
@@ -8430,6 +8433,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         quic: opts.quic_port.is_some(),
     };
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (etag_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
     let state = AppState {
         started: Instant::now(),
@@ -8447,6 +8451,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         coalesce: Arc::new(QueryCoalescer::default()),
         transport,
         shutdown_tx,
+        etag_notify: Arc::new(etag_tx),
     };
 
     // Load persisted settings if present.
@@ -8458,6 +8463,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .route("/api/v1/rpc", post(rpc_handler))
         .route("/api/v1/sql/exec", post(sql_exec_http_handler))
         .route("/api/v1/q/:query_id", get(prepared_get_handler))
+        .route("/api/v1/q/:query_id/events", get(prepared_sse_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/console", get(console_handler))
@@ -8843,6 +8849,70 @@ async fn prepared_get_handler(
         )
             .into_response(),
     }
+}
+
+/// SSE endpoint for live ETag change notifications on a prepared query.
+///
+/// Clients subscribe to `/api/v1/q/{query_id}/events` and receive an SSE event
+/// each time a data mutation touches the table the prepared query depends on.
+/// Each event carries the latest ETag so the client can decide whether to
+/// re-fetch the full result set.
+async fn prepared_sse_handler(
+    Path(query_id): Path<String>,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    let table_key = {
+        let eng = state.engine.read().await;
+        let Some(pq) = eng.get_prepared(&query_id) else {
+            return (StatusCode::NOT_FOUND, "unknown query_id").into_response();
+        };
+        match &*pq.query.body {
+            QueryBody::Select { select } => {
+                if let Some(refs) = &select.from {
+                    if let Some(TableRef::Base(b)) = refs.first() {
+                        format!("{}.{}", b.db, b.table)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        }
+    };
+
+    let rx = state.etag_notify.subscribe();
+    let engine = state.engine.clone();
+    let qid = query_id.clone();
+
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
+    use tokio_stream::StreamExt;
+
+    let mapped = stream.filter_map(move |msg| {
+        let tk = table_key.clone();
+        let eng = engine.clone();
+        let qid = qid.clone();
+        match msg {
+            Ok(changed_key) if changed_key == tk || tk.is_empty() => {
+                Some(Ok::<_, std::convert::Infallible>(
+                    sse::Event::default().data(
+                        serde_json::json!({
+                            "query_id": qid,
+                            "table": changed_key,
+                            "changed": true,
+                        })
+                        .to_string(),
+                    ),
+                ))
+            }
+            _ => None,
+        }
+    });
+
+    sse::Sse::new(mapped)
+        .keep_alive(sse::KeepAlive::default())
+        .into_response()
 }
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -9780,6 +9850,9 @@ pub(crate) async fn handle_rpc(
                     let r = eng
                         .data_insert(&p.into, p.rows, p.returning)
                         .map_err(to_rpc_error)?;
+                    let _ = state
+                        .etag_notify
+                        .send(format!("{}.{}", p.into.db, p.into.table));
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -9803,6 +9876,9 @@ pub(crate) async fn handle_rpc(
                             &p.args,
                         )
                         .map_err(to_rpc_error)?;
+                    let _ = state
+                        .etag_notify
+                        .send(format!("{}.{}", p.inner.table.db, p.inner.table.table));
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -9819,6 +9895,9 @@ pub(crate) async fn handle_rpc(
                     let r = eng
                         .data_delete(&p.inner.table, &p.inner.r#where, p.inner.limit, &p.args)
                         .map_err(to_rpc_error)?;
+                    let _ = state
+                        .etag_notify
+                        .send(format!("{}.{}", p.inner.table.db, p.inner.table.table));
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -10042,6 +10121,76 @@ pub(crate) async fn handle_rpc(
                         Ok(serde_json::to_value(r)
                             .map_err(|e| RpcError::new("internal", e.to_string()))?)
                     }
+                }
+
+                "query.subscribe" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        query_id: String,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let Some(pq) = eng.get_prepared(&p.query_id) else {
+                        return Err(RpcError::new("not_found", "unknown query_id"));
+                    };
+                    let table_key = match &*pq.query.body {
+                        QueryBody::Select { select } => {
+                            if let Some(refs) = &select.from {
+                                if let Some(TableRef::Base(b)) = refs.first() {
+                                    format!("{}.{}", b.db, b.table)
+                                } else {
+                                    String::new()
+                                }
+                            } else {
+                                String::new()
+                            }
+                        }
+                        _ => String::new(),
+                    };
+                    Ok(serde_json::json!({
+                        "query_id": p.query_id,
+                        "sse_url": format!("/api/v1/q/{}/events", p.query_id),
+                        "table_key": table_key
+                    }))
+                }
+
+                // --------------------
+                // security.*
+                // --------------------
+                "security.token.create" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        #[serde(default)]
+                        role: Option<String>,
+                        #[serde(default)]
+                        label: Option<String>,
+                        #[serde(default)]
+                        ttl_ms: Option<u64>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let token = eng.create_api_token(
+                        p.role.as_deref().unwrap_or("admin"),
+                        p.label.as_deref().unwrap_or(""),
+                        p.ttl_ms.unwrap_or(0),
+                    );
+                    Ok(serde_json::to_value(&token)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "security.token.list" => {
+                    let eng = state.engine.read().await;
+                    let tokens = eng.list_api_tokens();
+                    Ok(serde_json::json!({ "tokens": tokens }))
+                }
+                "security.token.revoke" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        token_id: String,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let revoked = eng.revoke_api_token(&p.token_id);
+                    Ok(serde_json::json!({ "revoked": revoked }))
                 }
 
                 // --------------------
@@ -17034,6 +17183,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "query.select"
             | "query.patch"
             | "query.execute_prepared"
+            | "query.subscribe"
             | "oblivious.policy.get"
             | "oblivious.explain"
             | "forensic.query"
@@ -17051,6 +17201,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "telemetry.migration_hints"
             | "plan_cache.status"
             | "stats.coalescing"
+            | "security.token.list"
     )
 }
 
@@ -17177,6 +17328,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "query.execute_prepared",
         "query.select",
         "query.patch",
+        "query.subscribe",
         "dp.aggregate",
         "dp.budget.set",
         "dp.budget.get",
@@ -17205,6 +17357,9 @@ fn system_capabilities(state: &AppState) -> Value {
         "view.explain_deps",
         "cdc.subscribe_table",
         "cdc.poll",
+        "security.token.create",
+        "security.token.list",
+        "security.token.revoke",
     ];
     serde_json::json!({
         "mysql_compat": false,
@@ -17477,6 +17632,8 @@ mod tests {
         assert!(js.contains("easyDoCreateTable"));
         assert!(js.contains("easyRenderDataGrid"));
         assert!(js.contains("easyDeleteCheckedRows"));
+        assert!(js.contains("securityRefreshTokens"));
+        assert!(js.contains("securityCreateToken"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
@@ -17595,6 +17752,7 @@ mod tests {
         let local_rpc_url = "http://127.0.0.1:8080".to_string();
         let local_node_id = "node-test".to_string();
         let (shutdown_tx, _) = watch::channel(false);
+        let (etag_tx, _) = tokio::sync::broadcast::channel::<String>(64);
         AppState {
             started: Instant::now(),
             data_dir: dir,
@@ -17614,6 +17772,7 @@ mod tests {
                 quic: false,
             },
             shutdown_tx,
+            etag_notify: Arc::new(etag_tx),
         }
     }
 

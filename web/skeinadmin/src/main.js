@@ -2922,6 +2922,79 @@ function renderResearchStatusGrid() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Security — Token management (T122)
+// ---------------------------------------------------------------------------
+async function securityCreateToken() {
+  const label = $('secTokenLabel')?.value.trim() || '';
+  const role = $('secTokenRole')?.value || 'admin';
+  const ttlHrs = parseInt($('secTokenTtl')?.value, 10) || 0;
+  const ttlMs = ttlHrs > 0 ? ttlHrs * 3600000 : 0;
+  try {
+    const r = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
+    if (r?.secret) {
+      const el = $('secTokenOut');
+      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + r.secret;
+    }
+    await securityRefreshTokens();
+  } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
+}
+
+async function securityRefreshTokens() {
+  try {
+    const r = await call('security.token.list', {}, 'secTokenOut');
+    const grid = $('secTokenGrid'); if (!grid) return;
+    const tokens = r?.tokens || [];
+    if (!tokens.length) { grid.innerHTML = '<div class="hint">No tokens created yet.</div>'; return; }
+    let h = '<table class="data-table"><thead><tr><th>ID</th><th>Role</th><th>Label</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody>';
+    tokens.forEach(t => {
+      const created = t.created_at_ms ? new Date(t.created_at_ms).toLocaleString() : '-';
+      const expires = t.expires_at_ms ? new Date(t.expires_at_ms).toLocaleString() : 'never';
+      h += '<tr><td style="font-family:monospace;font-size:11px">' + escapeHtml(t.token_id) + '</td><td>' + escapeHtml(t.role) + '</td><td>' + escapeHtml(t.label || '-') + '</td><td>' + created + '</td><td>' + expires + '</td>';
+      h += '<td><button class="danger sm" onclick="securityRevokeToken(\'' + escapeHtml(t.token_id) + '\')">Revoke</button></td></tr>';
+    });
+    h += '</tbody></table>';
+    grid.innerHTML = h;
+  } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
+}
+
+async function securityRevokeToken(tokenId) {
+  const ok = await skeinModal('\uD83D\uDD12', 'Revoke Token', 'Permanently revoke token <b>' + escapeHtml(tokenId) + '</b>?', [
+    { label: 'Cancel', cls: 'secondary' },
+    { label: 'Revoke', cls: 'danger', value: true }
+  ]);
+  if (!ok) return;
+  try {
+    await call('security.token.revoke', { token_id: tokenId }, 'secTokenOut');
+    await securityRefreshTokens();
+  } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
+}
+
+// ---------------------------------------------------------------------------
+// Top Queries by fingerprint (T214)
+// ---------------------------------------------------------------------------
+async function securityTopQueries() {
+  try {
+    const r = await call('stats.top_queries', { limit: 20 }, null);
+    const grid = $('secTopQueryGrid'); if (!grid) return;
+    const queries = r?.queries || [];
+    if (!queries.length) { grid.innerHTML = '<div class="hint">No query statistics available yet.</div>'; return; }
+    let h = '<table class="data-table"><thead><tr><th>#</th><th>Fingerprint</th><th>Count</th><th>Avg (ms)</th><th>Last Seen</th></tr></thead><tbody>';
+    queries.forEach((q, i) => {
+      const fp = q.fingerprint || q.sql || '-';
+      const count = q.count || q.exec_count || 0;
+      const avg = typeof q.avg_ms === 'number' ? q.avg_ms.toFixed(1) : (typeof q.total_ms === 'number' && count ? (q.total_ms / count).toFixed(1) : '-');
+      const last = q.last_seen_ms ? new Date(q.last_seen_ms).toLocaleString() : '-';
+      h += '<tr><td>' + (i + 1) + '</td><td style="font-family:monospace;font-size:11px;max-width:400px;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(fp) + '</td><td>' + count + '</td><td>' + avg + '</td><td>' + last + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    grid.innerHTML = h;
+  } catch (e) {
+    const grid = $('secTopQueryGrid');
+    if (grid) grid.innerHTML = '<div class="hint">Query stats not available.</div>';
+  }
+}
+
 function renderResearchSettings() {
   const grid = $('researchSettingsGrid'); if (!grid) return;
   grid.textContent = '';
@@ -3790,6 +3863,11 @@ wire('btnMigrationDownloadJson', () => exportMigrationReport('json'));
 wire('btnMigrationDownloadMd', () => exportMigrationReport('md'));
 wire('btnMigrationDownloadHtml', () => exportMigrationReport('html'));
 wire('btnMigrationCopyMd', copyMigrationMarkdown);
+
+// Security Tokens
+wire('btnSecCreateToken', securityCreateToken);
+wire('btnSecRefreshTokens', securityRefreshTokens);
+wire('btnSecTopQueries', securityTopQueries);
 
 // RPC
 wire('btnRpcSend', rpcSend);
