@@ -157,7 +157,7 @@ scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, 
 (`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
 `character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
 and `EXPLAIN` with real table name extraction.
-The corpus has expanded to 1657 lines with about 678 semicolon-terminated SQL statements.
+The corpus has expanded to 1657 lines with about 678 semicolon-terminated SQL statements, and dedicated MySQL-wire regressions now also cover WordPress installer seed queries (escaped single-row `INSERT`s, trailing `/* ... */` comments, serialized option upserts, and `information_schema.TABLES ... IN (...) AND ENGINE = ...` probes), WordPress Users-screen role-count aggregates built from `COUNT(NULLIF(<predicate>, false))`, and Site Health storage-summary queries. A fresh live WordPress admin sweep across Dashboard, Posts, Pages, Media, Comments, Themes, Site Editor, Plugins, Users, Tools, Site Health, and Settings now completes with an empty `debug.log`; the only remaining 500s in that smoke are the theme-owned `nav-menus` / `widgets` pages.
 
 ---
 

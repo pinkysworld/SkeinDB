@@ -3766,6 +3766,258 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
     Ok(())
 }
 
+#[tokio::test]
+async fn mysql_supports_wordpress_admin_aggregate_and_site_health_queries() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_wp_admin_aggregate_shapes")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS wordpress",
+        "USE wordpress",
+        "CREATE TABLE wp_comments (comment_ID BIGINT NOT NULL, PRIMARY KEY (comment_ID))",
+        "CREATE TABLE wp_options (option_id BIGINT NOT NULL, PRIMARY KEY (option_id))",
+        "CREATE TABLE wp_posts (ID BIGINT NOT NULL, PRIMARY KEY (ID))",
+        "CREATE TABLE wp_terms (term_id BIGINT NOT NULL, PRIMARY KEY (term_id))",
+        "CREATE TABLE wp_users (ID BIGINT NOT NULL, user_login VARCHAR(64) NOT NULL, PRIMARY KEY (ID))",
+        "CREATE TABLE wp_usermeta (umeta_id BIGINT NOT NULL, user_id BIGINT NOT NULL, meta_key VARCHAR(255) NOT NULL, meta_value TEXT NOT NULL, PRIMARY KEY (umeta_id))",
+        "INSERT INTO wp_users (ID, user_login) VALUES (1, 'admin'), (2, 'subscriber')",
+        "INSERT INTO wp_usermeta (umeta_id, user_id, meta_key, meta_value) VALUES (1, 1, 'wp_capabilities', 'a:1:{s:13:\"administrator\";b:1;}'), (2, 2, 'wp_capabilities', 'a:1:{s:10:\"subscriber\";b:1;}')",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet for {stmt:?}, got {:?}", other),
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT COUNT(NULLIF(`meta_value` LIKE '%\\\"administrator\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"editor\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"author\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"contributor\\\"%', false)), COUNT(NULLIF(`meta_value` LIKE '%\\\"subscriber\\\"%', false)), COUNT(NULLIF(`meta_value` = 'a:0:{}', false)), COUNT(*) FROM wp_usermeta INNER JOIN wp_users ON user_id = ID WHERE meta_key = 'wp_capabilities'",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert_eq!(rows[0][1].as_deref(), Some("0"));
+            assert_eq!(rows[0][2].as_deref(), Some("0"));
+            assert_eq!(rows[0][3].as_deref(), Some("0"));
+            assert_eq!(rows[0][4].as_deref(), Some("1"));
+            assert_eq!(rows[0][5].as_deref(), Some("0"));
+            assert_eq!(rows[0][6].as_deref(), Some("2"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wordpress' AND TABLE_NAME IN ('wp_comments','wp_options','wp_posts','wp_terms','wp_users') GROUP BY TABLE_NAME",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 5);
+            let mut table_names = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.as_deref()))
+                .collect::<Vec<_>>();
+            table_names.sort_unstable();
+            assert_eq!(
+                table_names,
+                vec![
+                    "wp_comments",
+                    "wp_options",
+                    "wp_posts",
+                    "wp_terms",
+                    "wp_users"
+                ]
+            );
+            for row in rows {
+                assert_eq!(row.get(1).and_then(|value| value.as_deref()), Some("0"));
+                assert_eq!(row.get(2).and_then(|value| value.as_deref()), Some("0"));
+            }
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_supports_wordpress_installer_seed_queries() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_wp_installer_seed")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS wp",
+        "USE wp",
+        "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_date DATETIME NOT NULL, post_date_gmt DATETIME NOT NULL, post_content TEXT NOT NULL, post_excerpt TEXT NOT NULL, comment_status VARCHAR(20) NOT NULL, post_title VARCHAR(255) NOT NULL, post_name VARCHAR(200) NOT NULL, post_modified DATETIME NOT NULL, post_modified_gmt DATETIME NOT NULL, guid VARCHAR(255) NOT NULL, post_type VARCHAR(20) NOT NULL, to_ping TEXT NOT NULL, pinged TEXT NOT NULL, post_content_filtered TEXT NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_options (option_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, option_name VARCHAR(191) NOT NULL, option_value LONGTEXT NOT NULL, autoload VARCHAR(20) NOT NULL DEFAULT 'yes', PRIMARY KEY (option_id), UNIQUE KEY option_name (option_name))",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet, got {:?}", other),
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO `wp_posts` (`id`, `post_author`, `post_date`, `post_date_gmt`, `post_content`, `post_excerpt`, `comment_status`, `post_title`, `post_name`, `post_modified`, `post_modified_gmt`, `guid`, `post_type`, `to_ping`, `pinged`, `post_content_filtered`) VALUES (2, 1, '2026-03-30 19:25:11', '2026-03-30 19:25:11', '<!-- wp:paragraph -->\\n<p>This is an example page. It\\'s different from a blog post.</p>\\n<!-- /wp:paragraph -->', '', 'closed', 'Sample Page', 'sample-page', '2026-03-30 19:25:11', '2026-03-30 19:25:11', 'http://127.0.0.1:18081/?page_id=2', 'page', '', '', '')",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT post_content, post_title FROM wp_posts WHERE id = 2",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][1].as_deref(), Some("Sample Page"));
+            let content = rows[0][0].as_deref().unwrap_or_default();
+            assert!(content.contains("It's different from a blog post."));
+            assert!(content.contains("<!-- wp:paragraph -->"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT IGNORE INTO `wp_options` ( `option_name`, `option_value`, `autoload` ) VALUES ('auto_updater.lock', '1774898730', 'off') /* LOCK */",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO `wp_options` (`option_name`, `option_value`, `autoload`) VALUES ('_site_transient_wp_theme_files_patterns-test', 'a:2:{s:7:\\\"version\\\";s:3:\\\"1.4\\\";s:8:\\\"patterns\\\";a:1:{s:12:\\\"comments.php\\\";a:1:{s:5:\\\"title\\\";s:8:\\\"Comments\\\";}}}', 'off') ON DUPLICATE KEY UPDATE `option_name` = VALUES(`option_name`), `option_value` = VALUES(`option_value`), `autoload` = VALUES(`autoload`)",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Ok { .. } => {}
+        other => panic!("expected OK packet, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT option_value FROM wp_options WHERE option_name = '_site_transient_wp_theme_files_patterns-test'",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            let value = rows[0][0].as_deref().unwrap_or_default();
+            assert!(value.contains("version"));
+            assert!(value.contains("comments.php"));
+            assert!(value.contains("Comments"));
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wp' AND TABLE_NAME IN ('wp_users','wp_usermeta','wp_posts','wp_options') AND ENGINE = 'MyISAM'",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert!(rows.is_empty());
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_com_query_strips_qualified_projection_labels() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_projection_labels")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    for stmt in [
+        "CREATE DATABASE IF NOT EXISTS app",
+        "USE app",
+        "DROP TABLE IF EXISTS users",
+        "CREATE TABLE users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO users (id, name) VALUES (7, 'Mia')",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet, got {:?}", other),
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT DISTINCT u.id, u.name FROM users AS u WHERE u.id = 7",
+    )
+    .await?;
+    let (columns, rows) = read_mysql_text_result(&mut stream).await?;
+    assert_eq!(columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(
+        rows,
+        vec![vec![Some("7".to_string()), Some("Mia".to_string())]]
+    );
+
+    for stmt in [
+        "DROP TABLE IF EXISTS wp_term_taxonomy",
+        "DROP TABLE IF EXISTS wp_terms",
+        "CREATE TABLE wp_terms (term_id BIGINT UNSIGNED NOT NULL, name VARCHAR(255) NOT NULL, slug VARCHAR(255) NOT NULL, term_group BIGINT NOT NULL, PRIMARY KEY (term_id))",
+        "CREATE TABLE wp_term_taxonomy (term_taxonomy_id BIGINT UNSIGNED NOT NULL, term_id BIGINT UNSIGNED NOT NULL, taxonomy VARCHAR(255) NOT NULL, description TEXT NOT NULL, parent BIGINT UNSIGNED NOT NULL, count BIGINT NOT NULL, PRIMARY KEY (term_taxonomy_id))",
+        "INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (1, 'Uncategorized', 'uncategorized', 0)",
+        "INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (1, 1, 'category', '', 0, 1)",
+    ] {
+        send_com_query(&mut stream, stmt).await?;
+        match read_mysql_response(&mut stream).await? {
+            MysqlResponse::Ok { .. } => {}
+            other => panic!("expected OK packet, got {:?}", other),
+        }
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT t.*, tt.* FROM wp_terms AS t INNER JOIN wp_term_taxonomy AS tt ON t.term_id = tt.term_id WHERE t.term_id = 1",
+    )
+    .await?;
+    let (columns, rows) = read_mysql_text_result(&mut stream).await?;
+    assert_eq!(
+        columns,
+        vec![
+            "term_id".to_string(),
+            "name".to_string(),
+            "slug".to_string(),
+            "term_group".to_string(),
+            "term_taxonomy_id".to_string(),
+            "term_id".to_string(),
+            "taxonomy".to_string(),
+            "description".to_string(),
+            "parent".to_string(),
+            "count".to_string(),
+        ]
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_deref(), Some("1"));
+    assert_eq!(rows[0][6].as_deref(), Some("category"));
+
+    Ok(())
+}
+
 // ── Research hardening tests ────────────────────────────────────────────
 
 #[tokio::test]
@@ -4811,6 +5063,35 @@ async fn read_mysql_text_result_rows(
         rows.push(decode_mysql_text_row(&payload, column_count)?);
     }
     Ok(rows)
+}
+
+async fn read_mysql_text_result(
+    stream: &mut TcpStream,
+) -> anyhow::Result<(Vec<String>, Vec<Vec<Option<String>>>)> {
+    let (_seq, column_count_payload) = read_mysql_packet(stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&column_count_payload) {
+        return Err(anyhow!("mysql error packet: {}", err));
+    }
+    let mut cur = 0usize;
+    let column_count = decode_lenenc_int(&column_count_payload, &mut cur)?;
+    let mut columns = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        let (name, _column_type) = decode_mysql_column_definition(&payload)?;
+        columns.push(name);
+    }
+    let (_seq, eof1) = read_mysql_packet(stream).await?;
+    assert_eq!(eof1.first().copied(), Some(0xfe));
+
+    let mut rows = Vec::new();
+    loop {
+        let (_seq, payload) = read_mysql_packet(stream).await?;
+        if payload.first().copied() == Some(0xfe) && payload.len() < 9 {
+            break;
+        }
+        rows.push(decode_mysql_text_row(&payload, column_count)?);
+    }
+    Ok((columns, rows))
 }
 
 #[derive(Debug)]

@@ -23,7 +23,7 @@ The repository is written so you can:
 ## Highlights
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
-- **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility including Site Health metadata queries, and migration/telemetry tooling.
+- **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility including Users/Site Health query coverage, installer seed-query regressions, and a clean live admin smoke across core screens (theme-owned `nav-menus` / `widgets` limitations aside), plus migration/telemetry tooling.
 - **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, SSL rejection, simple query execution, transaction stubs, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators, including cacheable prepared-query GETs.
@@ -37,7 +37,7 @@ The repository is written so you can:
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
+- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, dialect-aware SQL profiles, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
 - **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
 
 ---
