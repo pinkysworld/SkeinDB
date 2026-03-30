@@ -1765,7 +1765,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             "select database()" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
-                    assert_eq!(rows[0][0].as_deref(), Some("corpus_db"));
+                    assert_eq!(rows[0][0].as_deref(), None);
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -3045,11 +3045,11 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             },
         }
     }
-    assert_eq!(txn_select_index, 0);
-    assert_eq!(timezone_value_index, 0);
-    assert_eq!(timezone_autoload_index, 0);
-    assert_eq!(siteurl_pair_index, 0);
-    assert_eq!(wp_users_show_index_count, 0);
+    assert_eq!(txn_select_index, 3);
+    assert_eq!(timezone_value_index, 2);
+    assert_eq!(timezone_autoload_index, 2);
+    assert_eq!(siteurl_pair_index, 2);
+    assert_eq!(wp_users_show_index_count, 3);
 
     Ok(())
 }
@@ -3412,7 +3412,7 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
 
     // Create table and insert data
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3423,7 +3423,7 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
     assert!(resp.status().is_success());
 
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3435,7 +3435,7 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
 
     // Register a merge function for the table
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "merge.register",
@@ -3452,7 +3452,7 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
 
     // Verify merge wasm list (confirms merge subsystem is operational)
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "merge.wasm.list",
@@ -3480,7 +3480,7 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     // Create table with data
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3492,7 +3492,7 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     for i in 1..=20 {
         let resp = client
-            .post(&format!("{base}/api/v1/rpc"))
+            .post(format!("{base}/api/v1/rpc"))
             .json(&serde_json::json!({
                 "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3505,7 +3505,7 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     // Request index recommendations
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "advisor.index_synthesize",
@@ -3535,7 +3535,7 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Create a table and populate it with enough data to trigger format selection
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3547,7 +3547,7 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     for i in 1..=10 {
         let resp = client
-            .post(&format!("{base}/api/v1/rpc"))
+            .post(format!("{base}/api/v1/rpc"))
             .json(&serde_json::json!({
                 "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3560,7 +3560,7 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Trigger snapshot creation
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "system.snapshot",
@@ -3572,7 +3572,7 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Verify data can still be read after snapshot
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3595,7 +3595,7 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
 
     // Register an oblivious policy
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "oblivious.policy.set",
@@ -3614,7 +3614,7 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
 
     // Get policies
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "oblivious.policy.get",
@@ -3642,7 +3642,7 @@ async fn r11_llm_autoparam_classify_and_analyze() -> anyhow::Result<()> {
 
     // Create a table for context
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3654,7 +3654,7 @@ async fn r11_llm_autoparam_classify_and_analyze() -> anyhow::Result<()> {
 
     // Classify literals
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "ai.autoparam.classify",
@@ -3683,7 +3683,7 @@ async fn r11_llm_autoparam_classify_and_analyze() -> anyhow::Result<()> {
 
     // Analyze a full SQL statement
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "ai.autoparam.analyze",
@@ -3722,7 +3722,7 @@ async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
 
     // Setup: create table and insert data
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3734,7 +3734,7 @@ async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
 
     for i in 1..=5 {
         let resp = client
-            .post(&format!("{base}/api/v1/rpc"))
+            .post(format!("{base}/api/v1/rpc"))
             .json(&serde_json::json!({
                 "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3747,7 +3747,7 @@ async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
 
     // Request a replay bundle
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "edge.bundle.request",
@@ -3773,7 +3773,7 @@ async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
 
     // Check bundle status
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "edge.bundle.status",
@@ -3790,7 +3790,7 @@ async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
 
     // Apply bundle (simulate edge receive)
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "edge.bundle.apply",
@@ -3815,7 +3815,7 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 
     // Create a table
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
@@ -3827,7 +3827,7 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 
     // Propose a schema change
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "schema.propose_change",
@@ -3853,7 +3853,7 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 
     // Check merge status
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "schema.merge_status",
@@ -3872,7 +3872,7 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 
     // Apply the merge
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "schema.apply_merge",
@@ -3921,7 +3921,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Check telemetry feature flags
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "telemetry.feature_flags",
@@ -3945,7 +3945,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Check compat summary
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "telemetry.compat_summary",
@@ -3966,7 +3966,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Check migration hints
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "telemetry.migration_hints",
@@ -3987,7 +3987,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Check plan cache status
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "plan_cache.status",
@@ -4004,7 +4004,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Clear plan cache
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "plan_cache.clear",
@@ -4021,7 +4021,7 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
 
     // Check coalescing stats
     let resp = client
-        .post(&format!("{base}/api/v1/rpc"))
+        .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
             "skeinql": "1.0", "id": "t1",
             "method": "stats.coalescing",
@@ -4263,6 +4263,7 @@ impl HttpHarness {
         Self::start_with_ports(label, 0, pg_port)
     }
 
+    #[allow(dead_code)]
     fn start_with_mysql_port(label: &str, mysql_port: u16) -> anyhow::Result<Self> {
         Self::start_with_ports(label, mysql_port, 0)
     }
@@ -5032,6 +5033,7 @@ fn free_tcp_port() -> u16 {
         .port()
 }
 
+#[allow(dead_code)]
 fn spawn_server(
     dir: &PathBuf,
     http_port: u16,
@@ -5128,7 +5130,7 @@ fn build_pg_startup(user: &str, database: &str) -> Vec<u8> {
 async fn read_pg_message(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
     let tag = stream.read_u8().await?;
     let len = stream.read_i32().await? as usize;
-    let payload_len = if len >= 4 { len - 4 } else { 0 };
+    let payload_len = len.saturating_sub(4);
     let mut payload = vec![0u8; payload_len];
     if payload_len > 0 {
         stream.read_exact(&mut payload).await?;

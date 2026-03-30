@@ -9411,7 +9411,6 @@ async fn prepared_sse_handler(
     };
 
     let rx = state.etag_notify.subscribe();
-    let engine = state.engine.clone();
     let qid = query_id.clone();
 
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
@@ -9419,7 +9418,6 @@ async fn prepared_sse_handler(
 
     let mapped = stream.filter_map(move |msg| {
         let tk = table_key.clone();
-        let eng = engine.clone();
         let qid = qid.clone();
         match msg {
             Ok(changed_key) if changed_key == tk || tk.is_empty() => {

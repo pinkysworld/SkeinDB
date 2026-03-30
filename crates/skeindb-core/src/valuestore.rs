@@ -300,11 +300,11 @@ impl BloomFilter {
         let h2 = u64::from_le_bytes([id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]]);
         let m = self.m_bits as u64;
         let mut out = [0usize; 7];
-        for i in 0..7 {
+        for (i, slot) in out.iter_mut().enumerate() {
             let h = h1
                 .wrapping_add((i as u64).wrapping_mul(h2))
                 .wrapping_add(i as u64);
-            out[i] = (h % m) as usize;
+            *slot = (h % m) as usize;
         }
         out
     }

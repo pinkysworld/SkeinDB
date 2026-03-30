@@ -1124,6 +1124,59 @@ SELECT * FROM information_schema.views;
 SELECT * FROM information_schema.processlist;
 SELECT * FROM information_schema.user_privileges;
 
+-- ── corpus_db fixture setup ──────────────────────────────
+CREATE DATABASE IF NOT EXISTS corpus_db;
+USE corpus_db;
+
+DROP TABLE IF EXISTS orders;
+DROP TABLE IF EXISTS categories;
+DROP TABLE IF EXISTS users;
+
+CREATE TABLE users (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(100) NOT NULL,
+  email VARCHAR(191) NULL,
+  age INT NULL,
+  salary DOUBLE NULL,
+  department VARCHAR(64) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY user_email (email)
+);
+
+CREATE TABLE orders (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  product VARCHAR(191) NOT NULL,
+  amount DOUBLE NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  PRIMARY KEY (id)
+);
+
+CREATE TABLE categories (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  name VARCHAR(191) NOT NULL,
+  parent_id BIGINT NULL,
+  PRIMARY KEY (id)
+);
+
+INSERT INTO users (name, email, age, salary, department) VALUES
+  ('Alice', 'alice@example.com', 31, 90000.00, 'Engineering'),
+  ('Bob', 'bob@example.com', 36, 85000.00, 'Engineering'),
+  ('Carol', 'carol@example.com', 29, 62000.00, 'Marketing'),
+  ('Dave', 'dave@example.com', 41, 73000.00, 'Sales'),
+  ('Eve', 'eve@example.com', 34, 68000.00, 'Support');
+
+INSERT INTO orders (user_id, product, amount, status) VALUES
+  (1, 'Laptop', 1299.00, 'completed'),
+  (1, 'Mouse', 25.00, 'cancelled'),
+  (2, 'Monitor', 399.00, 'completed'),
+  (3, 'Campaign', 500.00, 'pending');
+
+INSERT INTO categories (id, name, parent_id) VALUES
+  (1, 'Hardware', NULL),
+  (2, 'Software', 1),
+  (3, 'Services', NULL);
+
 -- ── Session compat SET statements ────────────────────────
 SET NAMES utf8mb4;
 SET CHARACTER SET utf8mb4;
