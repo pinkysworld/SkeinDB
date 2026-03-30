@@ -463,10 +463,9 @@ SELECT CONNECTION_ID();
 -- NOTE: FOUND_ROWS() is exercised in the hardcoded WordPress-style section of cluster_rpc.rs (depends on prior SQL_CALC_FOUND_ROWS state)
 
 -- ── SELECT FOR UPDATE / SHARE (locking hint stripping) ───
--- TODO: locking hints not yet stripped from WHERE clause parsing
--- SELECT * FROM users WHERE id = 1 FOR UPDATE;
--- SELECT * FROM users WHERE id = 1 FOR SHARE;
--- SELECT * FROM users WHERE id = 1 LOCK IN SHARE MODE;
+SELECT * FROM users WHERE id = 1 FOR UPDATE;
+SELECT * FROM users WHERE id = 1 FOR SHARE;
+SELECT * FROM users WHERE id = 1 LOCK IN SHARE MODE;
 
 -- ── Additional scalar functions ──────────────────────────
 SELECT RAND();
@@ -485,6 +484,150 @@ SELECT MONTHNAME(NOW());
 SELECT DAYNAME(NOW());
 SELECT QUARTER(NOW());
 SELECT SYSDATE();
+
+-- ── Numeric / math functions ─────────────────────────────
+SELECT ABS(-42);
+SELECT SIGN(-7);
+SELECT MOD(10, 3);
+SELECT TRUNCATE(3.14159, 2);
+SELECT ROUND(3.14159, 2);
+SELECT CEIL(4.2);
+SELECT FLOOR(4.8);
+SELECT POWER(2, 10);
+SELECT SQRT(144);
+SELECT LOG(2.718281828);
+SELECT LOG2(1024);
+SELECT LOG10(1000);
+SELECT EXP(1);
+SELECT PI();
+SELECT DEGREES(PI());
+SELECT RADIANS(180);
+SELECT CRC32('hello');
+
+-- ── String functions (extended) ──────────────────────────
+SELECT SUBSTRING_INDEX('www.example.com', '.', 2);
+SELECT ASCII('A');
+SELECT ORD('A');
+SELECT CHAR(65);
+SELECT STRCMP('a', 'b');
+SELECT BIT_LENGTH('hello');
+SELECT OCTET_LENGTH('hello');
+SELECT TO_BASE64('hello');
+SELECT FROM_BASE64(TO_BASE64('hello'));
+SELECT REGEXP_REPLACE('abc123', '[0-9]+', '#');
+SELECT REGEXP_SUBSTR('abc123def', '[0-9]+');
+SELECT QUOTE('it''s');
+SELECT SOUNDEX('Robert');
+SELECT MAKE_SET(5, 'a', 'b', 'c', 'd');
+SELECT EXPORT_SET(5, 'Y', 'N', ',', 4);
+
+-- ── Bit / hash functions ─────────────────────────────────
+SELECT BIN(255);
+SELECT OCT(255);
+SELECT CONV('ff', 16, 10);
+SELECT MD5('hello');
+SELECT SHA1('hello');
+SELECT SHA2('hello', 256);
+
+-- ── Date/time functions (extended) ───────────────────────
+SELECT PERIOD_ADD(202306, 3);
+SELECT PERIOD_DIFF(202309, 202306);
+SELECT MAKEDATE(2023, 180);
+SELECT MAKETIME(12, 30, 45);
+SELECT EXTRACT(YEAR FROM '2023-06-15');
+SELECT LAST_DAY('2023-06-15');
+SELECT DATE_ADD('2023-06-15', INTERVAL 1 MONTH);
+SELECT DATE_SUB('2023-06-15', INTERVAL 7 DAY);
+SELECT DATEDIFF('2023-06-15', '2023-01-01');
+SELECT TIMESTAMPDIFF(MONTH, '2023-01-01', '2023-06-15');
+SELECT FROM_UNIXTIME(1686830400);
+SELECT UNIX_TIMESTAMP('2023-06-15 12:00:00');
+SELECT DATE_FORMAT(NOW(), '%Y-%m-%d');
+SELECT STR_TO_DATE('15-06-2023', '%d-%m-%Y');
+
+-- ── JSON functions ───────────────────────────────────────
+SELECT JSON_EXTRACT('{"a":1,"b":2}', '$.a');
+SELECT JSON_UNQUOTE('"hello"');
+SELECT JSON_OBJECT('key', 'value');
+SELECT JSON_ARRAY(1, 2, 3);
+SELECT JSON_CONTAINS('{"a":1}', '1', '$.a');
+SELECT JSON_LENGTH('{"a":1, "b":2}');
+SELECT JSON_TYPE('42');
+SELECT JSON_VALID('{"a":1}');
+SELECT JSON_SET('{"a":1}', '$.b', 2);
+SELECT JSON_KEYS('{"a":1, "b":2}');
+SELECT JSON_MERGE_PRESERVE('{"a":1}', '{"b":2}');
+
+-- ── Window functions ─────────────────────────────────────
+-- TODO: window function evaluation over tables
+-- SELECT id, name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM users;
+-- SELECT id, name, RANK() OVER (ORDER BY name) AS rnk FROM users;
+-- SELECT id, name, DENSE_RANK() OVER (ORDER BY name) AS drnk FROM users;
+
+-- ── CTE (WITH ... AS) ───────────────────────────────────
+WITH active AS (SELECT * FROM users WHERE id > 0) SELECT * FROM active;
+
+-- ── Subqueries (broadened) ───────────────────────────────
+SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE id < 10);
+SELECT * FROM users WHERE EXISTS (SELECT 1 FROM users WHERE id = 1);
+-- TODO: scalar subquery in WHERE
+-- SELECT * FROM users WHERE id = (SELECT MIN(id) FROM users);
+-- TODO: scalar subquery in projection
+-- SELECT (SELECT COUNT(*) FROM users) AS total;
+
+-- ── Multi-table operations ───────────────────────────────
+DELETE u FROM users u WHERE u.id = 999;
+
+-- ── Advanced JOIN variants ───────────────────────────────
+-- TODO: NATURAL JOIN / CROSS JOIN support
+-- SELECT * FROM users NATURAL JOIN users AS u2;
+-- SELECT * FROM users u1 CROSS JOIN users u2;
+
+-- ── INSERT ... SELECT ────────────────────────────────────
+INSERT INTO users (id, name) SELECT id + 1000, name FROM users WHERE id < 3;
+
+-- ── UNION ────────────────────────────────────────────────
+SELECT id, name FROM users WHERE id < 3 UNION ALL SELECT id, name FROM users WHERE id >= 3;
+SELECT id, name FROM users WHERE id < 3 UNION SELECT id, name FROM users WHERE id >= 3;
+
+-- ── Derived tables ──────────────────────────────────────
+SELECT dt.id FROM (SELECT id FROM users WHERE id > 0) AS dt;
+
+-- ── NULL-safe equality ───────────────────────────────────
+SELECT * FROM users WHERE name <=> NULL;
+
+-- ── REGEXP ───────────────────────────────────────────────
+SELECT * FROM users WHERE name REGEXP '^[A-Z]';
+SELECT * FROM users WHERE name RLIKE '[a-z]+';
+
+-- ── EXPLAIN stub ─────────────────────────────────────────
+EXPLAIN SELECT * FROM users;
+
+-- ── Maintenance no-ops ───────────────────────────────────
+ANALYZE TABLE users;
+OPTIMIZE TABLE users;
+CHECK TABLE users;
+REPAIR TABLE users;
+FLUSH TABLES;
+FLUSH PRIVILEGES;
+
+-- ── SHOW variants ────────────────────────────────────────
+SHOW WARNINGS;
+SHOW ERRORS;
+SHOW PROCESSLIST;
+SHOW FULL PROCESSLIST;
+SHOW TRIGGERS;
+SHOW EVENTS;
+SHOW PROCEDURE STATUS;
+SHOW FUNCTION STATUS;
+SHOW PLUGINS;
+SHOW PROFILES;
+SHOW CREATE DATABASE test;
+
+-- ── System variables ─────────────────────────────────────
+SELECT @@version;
+SELECT @@version_comment;
+SELECT @@max_allowed_packet;
 
 -- ── SET GLOBAL no-op ─────────────────────────────────────
 SET GLOBAL wait_timeout = 28800;

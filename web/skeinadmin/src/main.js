@@ -2754,10 +2754,46 @@ async function exportData() {
     const res = await call('query.select', { query: { schema: t.db, table: t.table, select: [{ col: '*' }] }, result_format: 'rows_json' }, 'importOut');
     if (res?.json?.ok && res.json.result) {
       const fmt = $('importFormat')?.value || 'json';
-      if (fmt === 'json') downloadBlob(JSON.stringify(res.json.result, null, 2), t.db + '_' + t.table + '.json', 'application/json');
-      else setOut(res.json.result, 'importOut');
+      if (fmt === 'csv') {
+        const csv = resultToCSV(res.json.result);
+        downloadBlob(csv, t.db + '_' + t.table + '.csv', 'text/csv');
+      } else {
+        downloadBlob(JSON.stringify(res.json.result, null, 2), t.db + '_' + t.table + '.json', 'application/json');
+      }
     }
   } catch (e) { setOut({error:String(e)},'importOut'); }
+}
+
+function resultToCSV(result) {
+  const rows = result.rows || result.data || [];
+  if (!rows.length) return '';
+  const keys = Object.keys(rows[0]);
+  const escape = v => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const header = keys.map(escape).join(',');
+  const body = rows.map(row => keys.map(k => { const cell = row[k]; return escape(cell && typeof cell === 'object' && 'v' in cell ? cell.v : cell); }).join(',')).join('\n');
+  return header + '\n' + body;
+}
+
+function parseCSV(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length < 2) return [];
+  const parseRow = line => {
+    const cells = []; let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQ) { if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; } else if (ch === '"') inQ = false; else cur += ch; }
+      else { if (ch === '"') inQ = true; else if (ch === ',') { cells.push(cur); cur = ''; } else cur += ch; }
+    }
+    cells.push(cur);
+    return cells;
+  };
+  const headers = parseRow(lines[0]);
+  return lines.slice(1).map(line => {
+    const vals = parseRow(line);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = vals[i] ?? ''; });
+    return obj;
+  });
 }
 
 async function exportSchema() {
@@ -2781,8 +2817,14 @@ async function importData() {
   try {
     const t = readDbTable('importDb','importTable');
     const raw = $('importData')?.value.trim(); if (!raw) throw new Error('Data required');
-    const data = parseJsonInput(raw, 'Import data');
-    const rows = Array.isArray(data) ? data : [data];
+    const fmt = $('importFormat')?.value || 'json';
+    let rows;
+    if (fmt === 'csv') {
+      rows = parseCSV(raw);
+    } else {
+      const data = parseJsonInput(raw, 'Import data');
+      rows = Array.isArray(data) ? data : [data];
+    }
     // Convert plain objects to typed values
     const typedRows = rows.map(row => {
       const out = {};

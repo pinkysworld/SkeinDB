@@ -313,6 +313,11 @@ impl ValueStore {
         self.entries.is_empty()
     }
 
+    /// Check whether a ValueId exists in the store without mutating state.
+    pub fn contains(&self, id: ValueId) -> bool {
+        self.index.contains_key(&id)
+    }
+
     pub fn stats(&self) -> ValueStoreStats {
         let mut stats = self.stats.clone();
         stats.entries = self.entries.len();
