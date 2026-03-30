@@ -1205,6 +1205,11 @@ impl Engine {
         v
     }
 
+    /// Acquire a lock on the ValueStore for CAS object operations.
+    pub fn value_store_lock(&self) -> std::sync::MutexGuard<'_, ValueStore> {
+        self.value_store.lock().expect("value_store lock poisoned")
+    }
+
     pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
         self.catalog
             .databases
@@ -10783,6 +10788,45 @@ fn eval_expr(
                     Ok(Lit::Str {
                         v: format!("'{escaped}'"),
                     })
+                }
+                "soundex" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("soundex requires 1 arg");
+                    }
+                    let val = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(s) = lit_to_string_for_like(&val) else {
+                        return Ok(Lit::Null);
+                    };
+                    let mut code = String::with_capacity(4);
+                    for ch in s.chars() {
+                        let upper = ch.to_ascii_uppercase();
+                        if !upper.is_ascii_alphabetic() {
+                            continue;
+                        }
+                        if code.is_empty() {
+                            code.push(upper);
+                            continue;
+                        }
+                        let digit = match upper {
+                            'B' | 'F' | 'P' | 'V' => '1',
+                            'C' | 'G' | 'J' | 'K' | 'Q' | 'S' | 'X' | 'Z' => '2',
+                            'D' | 'T' => '3',
+                            'L' => '4',
+                            'M' | 'N' => '5',
+                            'R' => '6',
+                            _ => '0',
+                        };
+                        if digit != '0' && code.chars().last() != Some(digit) {
+                            code.push(digit);
+                        }
+                        if code.len() == 4 {
+                            break;
+                        }
+                    }
+                    while code.len() < 4 {
+                        code.push('0');
+                    }
+                    Ok(Lit::Str { v: code })
                 }
                 "substring_index" => {
                     if fargs.len() != 3 {

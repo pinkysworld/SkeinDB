@@ -476,6 +476,15 @@ enum MySqlStmtColumnType {
     VarString,
 }
 
+// MySQL column flags (COM_STMT_PREPARE column definition bitmask)
+const MYSQL_COL_FLAG_NOT_NULL: u16 = 0x0001;
+const MYSQL_COL_FLAG_PRIMARY_KEY: u16 = 0x0002;
+const MYSQL_COL_FLAG_UNIQUE_KEY: u16 = 0x0004;
+const MYSQL_COL_FLAG_UNSIGNED: u16 = 0x0020;
+const MYSQL_COL_FLAG_AUTO_INCREMENT: u16 = 0x0200;
+const MYSQL_COL_FLAG_BINARY: u16 = 0x0080;
+const MYSQL_COL_FLAG_NUM: u16 = 0x8000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MySqlStmtParamType {
     type_code: u8,
@@ -486,6 +495,7 @@ struct MySqlStmtParamType {
 struct MySqlStmtPrepareColumn {
     name: String,
     column_type: MySqlStmtColumnType,
+    flags: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -1199,6 +1209,7 @@ fn mysql_session_var_value(raw: &str) -> Option<MySqlLiteral> {
             Some(MySqlLiteral::Str("utf8mb4_general_ci".to_string()))
         }
         "autocommit" => Some(MySqlLiteral::Int(1)),
+        "max_allowed_packet" => Some(MySqlLiteral::Int(67_108_864)),
         "skein.autoparameterize" => Some(MySqlLiteral::Int(0)),
         _ => None,
     }
@@ -1216,6 +1227,7 @@ fn mysql_known_session_vars() -> &'static [&'static str] {
         "collation_database",
         "collation_server",
         "lower_case_table_names",
+        "max_allowed_packet",
         "skein.autoparameterize",
         "sql_auto_is_null",
         "sql_log_bin",
@@ -5545,6 +5557,15 @@ fn mysql_literal_text(lit: &MySqlLiteral) -> Option<String> {
 }
 
 fn mysql_column_definition_packet_with_type(name: &str, column_type: u8, len: u32) -> Vec<u8> {
+    mysql_column_definition_packet_with_type_flags(name, column_type, len, 0)
+}
+
+fn mysql_column_definition_packet_with_type_flags(
+    name: &str,
+    column_type: u8,
+    len: u32,
+    flags: u16,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     mysql_push_lenenc_bytes(&mut payload, b"def");
     mysql_push_lenenc_bytes(&mut payload, b"");
@@ -5556,7 +5577,7 @@ fn mysql_column_definition_packet_with_type(name: &str, column_type: u8, len: u3
     payload.extend_from_slice(&0x21u16.to_le_bytes());
     payload.extend_from_slice(&len.to_le_bytes());
     payload.push(column_type);
-    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&flags.to_le_bytes());
     payload.push(0);
     payload.extend_from_slice(&[0u8; 2]);
     payload
@@ -5913,11 +5934,17 @@ fn mysql_stmt_expr_type(
         Expr::Func { name, args, .. } => match name.as_str() {
             "count" | "length" | "char_length" | "character_length" | "locate" | "instr"
             | "find_in_set" | "isnull" | "datediff" | "timestampdiff" | "weekday" | "dayofweek"
-            | "dayofyear" | "quarter" | "extract" => MySqlStmtColumnType::LongLong,
+            | "dayofyear" | "quarter" | "extract" | "bit_length" | "octet_length" | "ascii"
+            | "ord" | "strcmp" | "crc32" | "json_length" | "json_contains" | "json_valid" => {
+                MySqlStmtColumnType::LongLong
+            }
             "year" | "month" | "day" | "dayofmonth" | "hour" | "minute" | "second"
-            | "unix_timestamp" | "sign" | "sleep" | "benchmark" => MySqlStmtColumnType::LongLong,
+            | "unix_timestamp" | "sign" | "sleep" | "benchmark" | "period_add" | "period_diff"
+            | "inet_aton" => MySqlStmtColumnType::LongLong,
             "avg" | "round" | "sqrt" | "pow" | "power" | "truncate" | "log" | "ln" | "log2"
-            | "log10" | "exp" | "pi" | "rand" => MySqlStmtColumnType::Double,
+            | "log10" | "exp" | "pi" | "rand" | "degrees" | "radians" => {
+                MySqlStmtColumnType::Double
+            }
             "sum" | "abs" | "floor" | "ceil" | "ceiling" | "mod" => args
                 .iter()
                 .map(|expr| mysql_stmt_expr_type(expr, table_descs))
@@ -5928,13 +5955,84 @@ fn mysql_stmt_expr_type(
                 .map(|expr| mysql_stmt_expr_type(expr, table_descs))
                 .reduce(mysql_stmt_merge_column_types)
                 .unwrap_or(MySqlStmtColumnType::VarString),
-            "lower" | "lcase" | "upper" | "ucase" | "trim" | "ltrim" | "rtrim" | "left"
-            | "right" | "substring" | "substr" | "replace" | "concat" | "concat_ws" | "repeat"
-            | "reverse" | "lpad" | "rpad" | "space" | "hex" | "unhex" | "format" | "uuid"
-            | "date" | "date_format" | "from_unixtime" | "date_add" | "date_sub"
-            | "timestampadd" | "now" | "current_timestamp" | "localtimestamp" | "curdate"
-            | "current_date" | "curtime" | "current_time" | "localtime" | "monthname"
-            | "dayname" | "last_day" => MySqlStmtColumnType::VarString,
+            "lower"
+            | "lcase"
+            | "upper"
+            | "ucase"
+            | "trim"
+            | "ltrim"
+            | "rtrim"
+            | "left"
+            | "right"
+            | "substring"
+            | "substr"
+            | "replace"
+            | "concat"
+            | "concat_ws"
+            | "repeat"
+            | "reverse"
+            | "lpad"
+            | "rpad"
+            | "space"
+            | "hex"
+            | "unhex"
+            | "format"
+            | "uuid"
+            | "date"
+            | "date_format"
+            | "from_unixtime"
+            | "date_add"
+            | "date_sub"
+            | "timestampadd"
+            | "now"
+            | "current_timestamp"
+            | "localtimestamp"
+            | "curdate"
+            | "current_date"
+            | "curtime"
+            | "current_time"
+            | "localtime"
+            | "monthname"
+            | "dayname"
+            | "last_day"
+            | "str_to_date"
+            | "makedate"
+            | "maketime"
+            | "quote"
+            | "soundex"
+            | "char"
+            | "make_set"
+            | "export_set"
+            | "substring_index"
+            | "regexp_replace"
+            | "regexp_substr"
+            | "to_base64"
+            | "from_base64"
+            | "bin"
+            | "oct"
+            | "conv"
+            | "md5"
+            | "sha1"
+            | "sha"
+            | "sha2"
+            | "inet_ntoa"
+            | "json_extract"
+            | "json_unquote"
+            | "json_object"
+            | "json_array"
+            | "json_set"
+            | "json_keys"
+            | "json_merge_preserve"
+            | "json_type"
+            | "convert_tz"
+            | "addtime"
+            | "subtime"
+            | "time_to_sec"
+            | "sec_to_time"
+            | "field"
+            | "elt"
+            | "sysdate"
+            | "group_concat" => MySqlStmtColumnType::VarString,
             _ => MySqlStmtColumnType::VarString,
         },
         Expr::Cast { cast } => mysql_stmt_column_type_for_type_desc(&cast.to),
@@ -5952,6 +6050,90 @@ fn mysql_stmt_expr_type(
         }
         Expr::Subquery { .. } | Expr::Exists { .. } => MySqlStmtColumnType::VarString,
     }
+}
+
+/// Compute MySQL column flags from table descriptor metadata.
+fn mysql_stmt_expr_flags(expr: &Expr, table_descs: &[MySqlStmtPrepareTableDesc]) -> u16 {
+    match expr {
+        Expr::Col { col, table } => {
+            mysql_stmt_resolve_column_flags(table_descs, col, table.as_deref())
+        }
+        Expr::Func { name, .. } => {
+            let n = name.to_ascii_lowercase();
+            match n.as_str() {
+                "count" | "sum" | "avg" | "min" | "max" | "bit_and" | "bit_or" | "bit_xor" => {
+                    MYSQL_COL_FLAG_NOT_NULL | MYSQL_COL_FLAG_NUM
+                }
+                // Scalar functions returning integers / floats → NUM
+                "length" | "char_length" | "character_length" | "octet_length" | "bit_length"
+                | "ascii" | "ord" | "locate" | "instr" | "position" | "strcmp" | "crc32"
+                | "abs" | "sign" | "ceil" | "ceiling" | "floor" | "round" | "truncate" | "mod"
+                | "pow" | "power" | "sqrt" | "exp" | "log" | "log2" | "log10" | "ln"
+                | "degrees" | "radians" | "pi" | "rand" | "year" | "month" | "day"
+                | "dayofmonth" | "dayofweek" | "dayofyear" | "hour" | "minute" | "second"
+                | "quarter" | "week" | "yearweek" | "weekday" | "extract" | "period_add"
+                | "period_diff" | "unix_timestamp" | "datediff" | "timestampdiff"
+                | "time_to_sec" | "sec_to_time" | "isnull" | "ifnull" | "nullif" | "coalesce"
+                | "field" | "find_in_set" | "inet_aton" | "json_length" | "json_contains"
+                | "json_valid" | "sleep" | "benchmark" | "connection_id" | "last_insert_id"
+                | "found_rows" => MYSQL_COL_FLAG_NUM,
+                _ => 0,
+            }
+        }
+        Expr::Op { op, .. } => match op.as_str() {
+            "add" | "sub" | "mul" | "div" | "mod" => MYSQL_COL_FLAG_NUM,
+            _ => 0,
+        },
+        Expr::Lit { lit } => match lit {
+            Lit::I64 { .. } | Lit::U64 { .. } | Lit::F64 { .. } | Lit::Bool { .. } => {
+                MYSQL_COL_FLAG_NUM
+            }
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Resolve column flags from table descriptor metadata (NOT_NULL, PRIMARY_KEY, UNSIGNED, etc.).
+fn mysql_stmt_resolve_column_flags(
+    table_descs: &[MySqlStmtPrepareTableDesc],
+    col: &str,
+    _table_alias: Option<&str>,
+) -> u16 {
+    for td in table_descs {
+        if let Some(columns) = td.desc.get("columns").and_then(|v| v.as_array()) {
+            for column in columns {
+                if column.get("name").and_then(|v| v.as_str()) == Some(col) {
+                    let mut flags = 0u16;
+                    // NOT NULL flag
+                    if column.get("nullable").and_then(|v| v.as_bool()) == Some(false) {
+                        flags |= MYSQL_COL_FLAG_NOT_NULL;
+                    }
+                    // Type-based flags
+                    let kind = column
+                        .get("type")
+                        .and_then(|t| t.get("kind"))
+                        .and_then(|k| k.as_str())
+                        .unwrap_or("");
+                    match kind {
+                        "u64" => flags |= MYSQL_COL_FLAG_UNSIGNED | MYSQL_COL_FLAG_NUM,
+                        "i64" | "bool" => flags |= MYSQL_COL_FLAG_NUM,
+                        "f64" => flags |= MYSQL_COL_FLAG_NUM,
+                        "bytes" => flags |= MYSQL_COL_FLAG_BINARY,
+                        _ => {}
+                    }
+                    // Primary key flag
+                    if let Some(pk) = td.desc.get("primary_key").and_then(|v| v.as_array()) {
+                        if pk.iter().any(|k| k.as_str() == Some(col)) {
+                            flags |= MYSQL_COL_FLAG_PRIMARY_KEY | MYSQL_COL_FLAG_NOT_NULL;
+                        }
+                    }
+                    return flags;
+                }
+            }
+        }
+    }
+    0
 }
 
 fn mysql_expand_select_projection_wildcards(
@@ -6075,9 +6257,11 @@ fn mysql_stmt_prepare_columns_from_select(
         .enumerate()
         .map(|(idx, item)| {
             let column_type = mysql_stmt_expr_type(&item.expr, table_descs);
+            let flags = mysql_stmt_expr_flags(&item.expr, table_descs);
             MySqlStmtPrepareColumn {
                 name: projection_label(item, idx),
                 column_type,
+                flags,
             }
         })
         .collect()
@@ -6130,6 +6314,7 @@ async fn mysql_stmt_prepare_columns(
             .map(|(name, lit)| MySqlStmtPrepareColumn {
                 name,
                 column_type: mysql_stmt_column_type_for_mysql_literal(&lit),
+                flags: 0,
             })
             .collect();
     }
@@ -6146,6 +6331,7 @@ async fn mysql_stmt_prepare_columns(
         return vec![MySqlStmtPrepareColumn {
             name: query.alias,
             column_type: mysql_stmt_aggregate_result_type(query.aggregate_op, source_type),
+            flags: MYSQL_COL_FLAG_NOT_NULL | MYSQL_COL_FLAG_NUM,
         }];
     }
 
@@ -6158,6 +6344,10 @@ async fn mysql_stmt_prepare_columns(
             .first()
             .map(|column| column.column_type)
             .unwrap_or(MySqlStmtColumnType::VarString);
+        let group_flags = source_columns
+            .first()
+            .map(|column| column.flags)
+            .unwrap_or(0);
         let aggregate_source_type = source_columns
             .get(1)
             .map(|column| column.column_type)
@@ -6166,6 +6356,7 @@ async fn mysql_stmt_prepare_columns(
             MySqlStmtPrepareColumn {
                 name: query.group_alias,
                 column_type: group_type,
+                flags: group_flags,
             },
             MySqlStmtPrepareColumn {
                 name: query.aggregate_alias,
@@ -6173,6 +6364,7 @@ async fn mysql_stmt_prepare_columns(
                     query.aggregate_op,
                     aggregate_source_type,
                 ),
+                flags: MYSQL_COL_FLAG_NOT_NULL | MYSQL_COL_FLAG_NUM,
             },
         ];
     }
@@ -7872,10 +8064,11 @@ async fn mysql_send_prepare_ok(
                 MySqlStmtColumnType::Double => 24,
                 MySqlStmtColumnType::VarString => 255,
             };
-            let packet = mysql_column_definition_packet_with_type(
+            let packet = mysql_column_definition_packet_with_type_flags(
                 &column.name,
                 mysql_stmt_column_type_code(column.column_type),
                 len,
+                column.flags,
             );
             mysql_write_packet(stream, seq, &packet).await?;
             seq = seq.wrapping_add(1);
@@ -8073,7 +8266,21 @@ async fn handle_mysql_connection(
                     .await?;
             }
             0x03 => {
-                let sql = String::from_utf8_lossy(&command_payload[1..]).to_string();
+                let sql = {
+                    let raw = String::from_utf8_lossy(&command_payload[1..]);
+                    let t = raw.trim();
+                    let stripped = t.trim_end_matches(';').trim();
+                    let tl = stripped.to_ascii_lowercase();
+                    if tl.ends_with(" for update") {
+                        stripped[..stripped.len() - " for update".len()].to_string()
+                    } else if tl.ends_with(" for share") {
+                        stripped[..stripped.len() - " for share".len()].to_string()
+                    } else if tl.ends_with(" lock in share mode") {
+                        stripped[..stripped.len() - " lock in share mode".len()].to_string()
+                    } else {
+                        t.to_string()
+                    }
+                };
                 match mysql_execute_sql(&state, &sql, &mut session).await {
                     Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
                         mysql_send_text_result(
@@ -9586,6 +9793,57 @@ pub(crate) async fn handle_rpc(
                         }
                     };
                     cluster_shard_rebalance(state, p)
+                }
+                // --------------------
+                // objects.* (CAS object pull – CR02)
+                // --------------------
+                "objects.need" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        ids: Vec<String>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    objects_need(state, p.ids).await
+                }
+                "objects.missing" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        ids: Vec<String>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    objects_missing(state, p.ids).await
+                }
+                "objects.fetch" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        ids: Vec<String>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    objects_fetch(state, p.ids).await
+                }
+                // --------------------
+                // cluster.route_query (T143 – read-balancing)
+                // --------------------
+                "cluster.route_query" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        #[serde(default)]
+                        db: Option<String>,
+                        #[serde(default)]
+                        table: Option<String>,
+                        #[serde(default)]
+                        read_only: Option<bool>,
+                    }
+                    let p: P = if params.is_some() {
+                        parse_params(params.clone())?
+                    } else {
+                        P {
+                            db: None,
+                            table: None,
+                            read_only: None,
+                        }
+                    };
+                    cluster_route_query(state, p.db, p.table, p.read_only.unwrap_or(true))
                 }
                 // --------------------
                 // schema.*
@@ -11274,6 +11532,173 @@ fn cluster_shard_rebalance(
         "ok": true,
         "dry_run": dry_run,
         "moves": plans,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// CAS object pull protocol (T142 – CR02)
+// ---------------------------------------------------------------------------
+
+fn parse_value_id(hex: &str) -> Option<skeindb_core::valuestore::ValueId> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut id = [0u8; 16];
+    for i in 0..16 {
+        id[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(id)
+}
+
+/// `objects.need`: given a list of ValueIDs, return which ones the local node already has.
+async fn objects_need(state: &AppState, ids: Vec<String>) -> Result<Value, RpcError> {
+    let eng = state.engine.read().await;
+    let vs = eng.value_store_lock();
+    let mut present: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for id_str in &ids {
+        if let Some(id) = parse_value_id(id_str) {
+            if vs.contains(id) {
+                present.push(id_str.clone());
+            } else {
+                missing.push(id_str.clone());
+            }
+        } else {
+            missing.push(id_str.clone());
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "total": ids.len(),
+        "present": present,
+        "missing": missing,
+    }))
+}
+
+/// `objects.missing`: given a list of ValueIDs, return only the ones that are NOT present.
+async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, RpcError> {
+    let eng = state.engine.read().await;
+    let vs = eng.value_store_lock();
+    let mut missing: Vec<String> = Vec::new();
+    for id_str in &ids {
+        match parse_value_id(id_str) {
+            Some(id) if vs.contains(id) => {}
+            _ => missing.push(id_str.clone()),
+        }
+    }
+    Ok(serde_json::json!({ "ok": true, "missing": missing }))
+}
+
+/// `objects.fetch`: given a list of ValueIDs, return the bytes (base64-encoded) for each.
+async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcError> {
+    let eng = state.engine.read().await;
+    let mut vs = eng.value_store_lock();
+    let mut objects: Vec<Value> = Vec::new();
+    for id_str in &ids {
+        let id = match parse_value_id(id_str) {
+            Some(id) => id,
+            None => continue,
+        };
+        if let Some(entry) = vs.get(&id) {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&entry.bytes);
+            let computed = skeindb_core::value_id(&entry.bytes);
+            objects.push(serde_json::json!({
+                "id": id_str,
+                "bytes_b64": b64,
+                "kind": format!("{:?}", entry.kind),
+                "verified": computed == id,
+            }));
+        }
+    }
+    Ok(serde_json::json!({ "ok": true, "objects": objects }))
+}
+
+// ---------------------------------------------------------------------------
+// Read-only replica routing (T143)
+// ---------------------------------------------------------------------------
+
+/// `cluster.route_query`: returns the best node to send a query to.
+fn cluster_route_query(
+    state: &AppState,
+    db: Option<String>,
+    table: Option<String>,
+    read_only: bool,
+) -> Result<Value, RpcError> {
+    let cluster = state.cluster.lock().unwrap();
+    if !cluster.enabled {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "node_id": cluster.local_node_id,
+            "role": cluster.local_role(),
+            "hint": "standalone",
+        }));
+    }
+
+    if !read_only {
+        // Writes must go to the shard primary.
+        let primary_id = cluster.shard_primary_for(db.as_deref(), table.as_deref());
+        let url = cluster
+            .nodes
+            .iter()
+            .find(|n| n.node_id == primary_id)
+            .map(|n| n.rpc_url.clone());
+        return Ok(serde_json::json!({
+            "ok": true,
+            "node_id": primary_id,
+            "role": "primary",
+            "rpc_url": url,
+            "hint": "write_primary",
+        }));
+    }
+
+    // For reads: pick a healthy replica (or the primary) with round-robin hint.
+    let candidates: Vec<&ClusterNode> = cluster
+        .nodes
+        .iter()
+        .filter(|n| n.status == "online")
+        .filter(|n| {
+            match (db.as_deref(), table.as_deref()) {
+                (Some(d), Some(t)) => {
+                    let shard_primary = cluster.shard_primary_for(Some(d), Some(t));
+                    // Accept the shard primary or any replica for that shard.
+                    n.node_id == shard_primary
+                        || cluster.shards.iter().any(|s| {
+                            s.db == d
+                                && s.table.as_deref() == Some(t)
+                                && s.replicas.contains(&n.node_id)
+                        })
+                }
+                _ => true,
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "node_id": cluster.local_node_id,
+            "role": cluster.local_role(),
+            "hint": "no_candidates_fallback",
+        }));
+    }
+
+    // Prefer replicas for read balancing.
+    let replicas: Vec<&&ClusterNode> = candidates.iter().filter(|n| n.role == "replica").collect();
+    let chosen = if replicas.is_empty() {
+        candidates[0]
+    } else {
+        // Simple round-robin via a timestamp-based index.
+        let idx = (now_unix_ms_u64() as usize) % replicas.len();
+        replicas[idx]
+    };
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "node_id": chosen.node_id,
+        "role": chosen.role,
+        "rpc_url": chosen.rpc_url,
+        "hint": if chosen.role == "replica" { "read_replica" } else { "read_primary" },
     }))
 }
 
@@ -14451,11 +14876,17 @@ fn find_matching_parenthesis(input: &str, open_idx: usize) -> Option<usize> {
     }
     let mut depth = 0u32;
     let mut quote = 0u8;
+    let mut skip_next_quote = false;
     for (idx, b) in bytes.iter().enumerate().skip(open_idx) {
         let b = *b;
+        if skip_next_quote {
+            skip_next_quote = false;
+            continue;
+        }
         if quote != 0 {
             if b == quote {
                 if quote == b'\'' && idx + 1 < bytes.len() && bytes[idx + 1] == quote {
+                    skip_next_quote = true;
                     continue;
                 }
                 quote = 0;
@@ -17202,6 +17633,10 @@ fn is_read_only_method(method: &str) -> bool {
             | "plan_cache.status"
             | "stats.coalescing"
             | "security.token.list"
+            | "objects.need"
+            | "objects.missing"
+            | "objects.fetch"
+            | "cluster.route_query"
     )
 }
 
@@ -19813,10 +20248,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "user_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -19842,10 +20279,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -19898,10 +20337,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "post_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -19924,10 +20365,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "post_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "author_name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -19950,18 +20393,22 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "user_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -19984,14 +20431,17 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "user_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20035,14 +20485,17 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "user_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32800,
                 },
                 MySqlStmtPrepareColumn {
                     name: "name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20065,14 +20518,17 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "name_len".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "chosen_name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "hit_pos".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
             ]
         );
@@ -20095,10 +20551,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "user_id_text".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "chosen_name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20121,14 +20579,17 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "next_user_id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "half_post_id".to_string(),
                     column_type: MySqlStmtColumnType::Double,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "post_mod".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
             ]
         );
@@ -20167,18 +20628,22 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_day".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_year".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_ts".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "now_value".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20204,18 +20669,22 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_fmt".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_from_ts".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "id_rank".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_is_null".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
             ]
         );
@@ -20241,10 +20710,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_day_diff".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_hour_diff".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
             ]
         );
@@ -20270,22 +20741,27 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_weekday".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_day_of_week".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_day_of_year".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_month_name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_day_name".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20311,18 +20787,22 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_quarter".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_last_day".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_extract_year".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_extract_hour".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32768,
                 },
             ]
         );
@@ -20348,14 +20828,17 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "created_plus_two_days".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_minus_three_hours".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
                 MySqlStmtPrepareColumn {
                     name: "created_plus_half_hour".to_string(),
                     column_type: MySqlStmtColumnType::VarString,
+                    flags: 0,
                 },
             ]
         );
@@ -20399,6 +20882,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "total_users".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32769,
             }]
         );
 
@@ -20413,6 +20897,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "total_users".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32769,
             }]
         );
 
@@ -20428,10 +20913,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32803,
                 },
                 MySqlStmtPrepareColumn {
                     name: "avg_score".to_string(),
                     column_type: MySqlStmtColumnType::Double,
+                    flags: 32769,
                 },
             ]
         );
@@ -20448,10 +20935,12 @@ mod tests {
                 MySqlStmtPrepareColumn {
                     name: "id".to_string(),
                     column_type: MySqlStmtColumnType::LongLong,
+                    flags: 32803,
                 },
                 MySqlStmtPrepareColumn {
                     name: "avg_score".to_string(),
                     column_type: MySqlStmtColumnType::Double,
+                    flags: 32769,
                 },
             ]
         );
@@ -20498,6 +20987,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "id".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32803,
             }]
         );
 
@@ -20512,6 +21002,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "id".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32803,
             }]
         );
 
@@ -20526,6 +21017,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "id".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32803,
             }]
         );
 
@@ -20540,6 +21032,7 @@ mod tests {
             vec![MySqlStmtPrepareColumn {
                 name: "id".to_string(),
                 column_type: MySqlStmtColumnType::LongLong,
+                flags: 32803,
             }]
         );
 
@@ -24227,6 +24720,205 @@ mod tests {
             seen_header.lock().unwrap().as_slice(),
             &[Some("1".to_string())]
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T142: CAS object pull protocol tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn objects_need_returns_present_and_missing() -> anyhow::Result<()> {
+        let dir = temp_dir("objects_need");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Insert a row to populate the value store.
+        let resp = call_rpc(&state, "schema.create_database", json!({"db":"app"})).await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "schema.create_table",
+            json!({
+                "db":"app", "table":"items",
+                "columns":[{"name":"id","type":{"kind":"u64"},"nullable":false},
+                            {"name":"val","type":{"kind":"str"},"nullable":false}],
+                "primary_key":["id"]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into":{"db":"app","table":"items"},
+                "rows":[{"id":{"t":"u64","v":1},"val":{"t":"str","v":"hello"}}]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // Use a made-up hex id that won't exist.
+        let fake_id = "00000000000000000000000000000001";
+        let resp = call_rpc(&state, "objects.need", json!({"ids": [fake_id]})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap();
+        let missing = result["missing"].as_array().unwrap();
+        assert!(missing.iter().any(|v| v.as_str() == Some(fake_id)));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn objects_missing_and_fetch_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("objects_fetch");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Compute the value id for "hello".
+        let hello_id = skeindb_core::value_id(b"hello");
+        let hello_hex = hello_id
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+
+        // Before inserting, the value should be missing.
+        let resp = call_rpc(&state, "objects.missing", json!({"ids": [hello_hex]})).await;
+        assert!(resp.ok);
+        let missing = resp.result.unwrap()["missing"].as_array().unwrap().clone();
+        assert_eq!(missing.len(), 1);
+
+        // Store the value via the engine's value store.
+        {
+            let eng = state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            vs.put(skeindb_core::ValueKind::Cell, b"hello".to_vec());
+        }
+
+        // Now it should not be missing.
+        let resp = call_rpc(&state, "objects.missing", json!({"ids": [hello_hex]})).await;
+        assert!(resp.ok);
+        let missing = resp.result.unwrap()["missing"].as_array().unwrap().clone();
+        assert_eq!(missing.len(), 0);
+
+        // Fetch should return the bytes.
+        let resp = call_rpc(&state, "objects.fetch", json!({"ids": [hello_hex]})).await;
+        assert!(resp.ok);
+        let objects = resp.result.unwrap()["objects"].as_array().unwrap().clone();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0]["id"].as_str().unwrap(), hello_hex);
+        assert_eq!(objects[0]["verified"].as_bool().unwrap(), true);
+        assert_eq!(objects[0]["kind"].as_str().unwrap(), "Cell");
+
+        // Decode the base64 bytes and verify content.
+        use base64::Engine as _;
+        let b64 = objects[0]["bytes_b64"].as_str().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        assert_eq!(bytes, b"hello");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T143: Read-only replica routing tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cluster_route_query_standalone() -> anyhow::Result<()> {
+        let dir = temp_dir("route_query_standalone");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "cluster.route_query", json!({"read_only": true})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap();
+        assert_eq!(result["hint"].as_str().unwrap(), "standalone");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_route_query_with_replicas() -> anyhow::Result<()> {
+        let dir = temp_dir("route_query_replicas");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Enable clustering and add a replica.
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            cluster.enabled = true;
+            cluster.nodes.push(ClusterNode {
+                node_id: "replica-1".to_string(),
+                rpc_url: "http://replica1:8080".to_string(),
+                role: "replica".to_string(),
+                status: "online".to_string(),
+                joined_at_ms: now_unix_ms_u64(),
+                last_seen_ms: now_unix_ms_u64(),
+            });
+        }
+
+        // Read-only query should prefer a replica.
+        let resp = call_rpc(&state, "cluster.route_query", json!({"read_only": true})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap();
+        let hint = result["hint"].as_str().unwrap();
+        assert!(hint == "read_replica" || hint == "read_primary");
+
+        // Write query should go to primary.
+        let resp = call_rpc(&state, "cluster.route_query", json!({"read_only": false})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap();
+        assert_eq!(result["hint"].as_str().unwrap(), "write_primary");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replica_rejects_writes() -> anyhow::Result<()> {
+        let dir = temp_dir("replica_rejects_writes");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Make the local node a replica in an active cluster.
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            cluster.enabled = true;
+            cluster.local_node_id = "replica-local".to_string();
+            cluster.primary_node_id = "primary-remote".to_string();
+            cluster.nodes[0].node_id = "replica-local".to_string();
+            cluster.nodes[0].role = "replica".to_string();
+            cluster.nodes.push(ClusterNode {
+                node_id: "primary-remote".to_string(),
+                rpc_url: "http://primary:8080".to_string(),
+                role: "primary".to_string(),
+                status: "online".to_string(),
+                joined_at_ms: now_unix_ms_u64(),
+                last_seen_ms: now_unix_ms_u64(),
+            });
+        }
+
+        // Attempt to create a database should be rejected.
+        let resp = call_rpc(&state, "schema.create_database", json!({"db": "nope"})).await;
+        assert!(!resp.ok, "replica should reject writes");
+        let err_code = resp.error.as_ref().map(|e| e.code.as_str());
+        assert_eq!(err_code, Some("forbidden"));
+
+        // Reads should still work.
+        let resp = call_rpc(&state, "cluster.status", json!({})).await;
+        assert!(resp.ok);
+
+        // Read-only RPC should also work.
+        let resp = call_rpc(&state, "schema.list_databases", json!({})).await;
+        assert!(resp.ok);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
