@@ -29,7 +29,7 @@ use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
-use skeindb_core::{encode_varu, value_id, ValueKind};
+use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
     AdvisorHistoryEntry, AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams,
     AdvisorIndexApplyResult, AdvisorIndexDismissParams, AdvisorIndexDismissResult,
@@ -281,6 +281,9 @@ pub struct Engine {
     /// Research: forensic hash chain (prototype).
     forensic_chain: Vec<ForensicRecord>,
     forensic_next_id: u64,
+    /// Research: checkpoint anchors for audit verification (T091).
+    checkpoint_anchors: Vec<CheckpointAnchor>,
+    audit_last_verified_ms: u64,
 
     /// Research: merge policies for optimistic concurrency.
     merge_policies: HashMap<TableKey, MergePolicySpec>,
@@ -305,6 +308,9 @@ pub struct Engine {
     /// API tokens for security (T122).
     api_tokens: HashMap<String, ApiToken>,
     api_token_next_id: u64,
+
+    /// Database users (T044).
+    db_users: HashMap<String, DbUser>,
 }
 
 #[derive(Debug, Clone)]
@@ -555,7 +561,7 @@ struct ObliviousPolicyDisk {
 // forensic.* (research)
 // -----------------------------
 
-const FORENSIC_CHAIN_FORMAT_VERSION: u32 = 1;
+const FORENSIC_CHAIN_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ForensicRecord {
@@ -576,6 +582,18 @@ struct ForensicChainDisk {
     format_version: u32,
     next_id: u64,
     records: Vec<ForensicRecord>,
+    #[serde(default)]
+    checkpoint_anchors: Vec<CheckpointAnchor>,
+}
+
+/// A checkpoint anchor snapshot of the forensic chain head at checkpoint time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckpointAnchor {
+    checkpoint_id: String,
+    ts_ms: u64,
+    chain_len: u64,
+    chain_head_hash: String,
+    change_seq: u64,
 }
 
 // -----------------------------
@@ -1037,6 +1055,16 @@ pub struct ApiToken {
     pub expires_at_ms: u64,
 }
 
+/// A database user with role and per-database grants (T044).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbUser {
+    pub username: String,
+    pub role: String,
+    pub created_at_ms: u64,
+    /// Per-database privilege list: db_name → [privilege, ...]
+    pub grants: HashMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcPollResult {
     pub events: Vec<ChangeEvent>,
@@ -1120,6 +1148,8 @@ impl Engine {
             oblivious_policies: HashMap::new(),
             forensic_chain: Vec::new(),
             forensic_next_id: 1,
+            checkpoint_anchors: Vec::new(),
+            audit_last_verified_ms: 0,
             merge_policies: HashMap::new(),
             merge_wasm_registry: HashMap::new(),
             views: HashMap::new(),
@@ -1130,6 +1160,7 @@ impl Engine {
             schema_changes_next_id: 1,
             api_tokens: HashMap::new(),
             api_token_next_id: 1,
+            db_users: HashMap::new(),
         };
 
         engine.load_tables_best_effort();
@@ -2444,6 +2475,52 @@ impl Engine {
 
     pub fn revoke_api_token(&mut self, token_id: &str) -> bool {
         self.api_tokens.remove(token_id).is_some()
+    }
+
+    // ── T044: User management ───────────────────────────────────────────────
+    pub fn user_create(&mut self, username: &str, role: &str) -> DbUser {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let user = DbUser {
+            username: username.to_string(),
+            role: role.to_string(),
+            created_at_ms: now,
+            grants: HashMap::new(),
+        };
+        self.db_users.insert(username.to_string(), user.clone());
+        user
+    }
+
+    pub fn user_list(&self) -> Vec<DbUser> {
+        self.db_users.values().cloned().collect()
+    }
+
+    pub fn user_drop(&mut self, username: &str) -> bool {
+        self.db_users.remove(username).is_some()
+    }
+
+    pub fn user_grant(
+        &mut self,
+        username: &str,
+        db: &str,
+        privileges: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let user = self
+            .db_users
+            .get_mut(username)
+            .ok_or_else(|| anyhow::anyhow!("user not found: {username}"))?;
+        user.grants.insert(db.to_string(), privileges);
+        Ok(())
+    }
+
+    pub fn user_revoke(&mut self, username: &str, db: &str) -> anyhow::Result<bool> {
+        let user = self
+            .db_users
+            .get_mut(username)
+            .ok_or_else(|| anyhow::anyhow!("user not found: {username}"))?;
+        Ok(user.grants.remove(db).is_some())
     }
 
     pub fn build_column_snapshot(
@@ -4893,6 +4970,80 @@ impl Engine {
     }
 
     // -----------------------------
+    // maintenance.audit_* (T091)
+    // -----------------------------
+
+    pub fn maintenance_audit_status(&self) -> serde_json::Value {
+        let chain_head_hash = self
+            .forensic_chain
+            .last()
+            .map(|r| r.hash.as_str())
+            .unwrap_or("genesis");
+        let last_anchor = self.checkpoint_anchors.last();
+        serde_json::json!({
+            "chain_length": self.forensic_chain.len(),
+            "chain_head_hash": chain_head_hash,
+            "last_verified_ms": self.audit_last_verified_ms,
+            "anchor_count": self.checkpoint_anchors.len(),
+            "last_anchor": last_anchor.map(|a| serde_json::json!({
+                "checkpoint_id": a.checkpoint_id,
+                "ts_ms": a.ts_ms,
+                "chain_len": a.chain_len,
+                "chain_head_hash": a.chain_head_hash,
+                "change_seq": a.change_seq,
+            })),
+        })
+    }
+
+    pub fn maintenance_audit_verify(&mut self) -> serde_json::Value {
+        let start = std::time::Instant::now();
+        let chain = &self.forensic_chain;
+        let mut ok = true;
+        let mut bad_index: Option<u64> = None;
+        let mut reason: Option<String> = None;
+
+        let mut prev_hash = forensic_genesis_hash();
+        for (idx, rec) in chain.iter().enumerate() {
+            if rec.prev_hash != prev_hash {
+                ok = false;
+                bad_index = Some(idx as u64);
+                reason = Some("prev_hash_mismatch".to_string());
+                break;
+            }
+            let computed = forensic_record_hash(
+                &rec.prev_hash,
+                rec.id,
+                rec.ts_ms,
+                &rec.db,
+                &rec.table,
+                &rec.op,
+                rec.pk.as_ref(),
+                rec.change_seq,
+            );
+            if computed != rec.hash {
+                ok = false;
+                bad_index = Some(idx as u64);
+                reason = Some("hash_mismatch".to_string());
+                break;
+            }
+            prev_hash = rec.hash.clone();
+        }
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        if ok {
+            self.audit_last_verified_ms = now_millis();
+        }
+
+        serde_json::json!({
+            "ok": ok,
+            "records_checked": chain.len(),
+            "bad_index": bad_index,
+            "reason": reason,
+            "elapsed_ms": elapsed_ms,
+            "chain_head_hash": chain.last().map(|r| r.hash.as_str()).unwrap_or("genesis"),
+        })
+    }
+
+    // -----------------------------
     // edge.* (research)
     // -----------------------------
 
@@ -6535,6 +6686,21 @@ impl Engine {
             self.persist_table(&db, &table)?;
         }
 
+        // Write a checkpoint anchor capturing the forensic chain head (T091).
+        let chain_head_hash = self
+            .forensic_chain
+            .last()
+            .map(|r| r.hash.clone())
+            .unwrap_or_else(forensic_genesis_hash);
+        let anchor = CheckpointAnchor {
+            checkpoint_id: format!("ckpt_{:x}", now_millis()),
+            ts_ms: now_millis(),
+            chain_len: self.forensic_chain.len() as u64,
+            chain_head_hash,
+            change_seq: self.change_seq,
+        };
+        self.checkpoint_anchors.push(anchor);
+
         self.persist_changes_best_effort();
         self.persist_prepared_best_effort();
         self.persist_snapshots_best_effort();
@@ -6841,9 +7007,10 @@ impl Engine {
 
     fn load_forensic_best_effort(&mut self) {
         if let Some(disk) = load_json::<ForensicChainDisk>(&self.forensic_chain_path()) {
-            if disk.format_version == FORENSIC_CHAIN_FORMAT_VERSION {
+            if disk.format_version <= FORENSIC_CHAIN_FORMAT_VERSION {
                 self.forensic_next_id = disk.next_id.max(1);
                 self.forensic_chain = disk.records;
+                self.checkpoint_anchors = disk.checkpoint_anchors;
             }
         }
     }
@@ -6855,6 +7022,7 @@ impl Engine {
                 format_version: FORENSIC_CHAIN_FORMAT_VERSION,
                 next_id: self.forensic_next_id,
                 records: self.forensic_chain.clone(),
+                checkpoint_anchors: self.checkpoint_anchors.clone(),
             },
         );
     }
@@ -14303,8 +14471,8 @@ fn forensic_record_hash(
         "change_seq": change_seq
     });
     let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    let id = value_id(&bytes);
-    hex16(&id)
+    let hash = audit_hash256(&bytes);
+    hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 /// Compute a Merkle tree root over a sequence of forensic records.

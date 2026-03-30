@@ -116,6 +116,7 @@ pub struct ServeOpts {
     pub storage_mode: String,
     pub bind: String,
     pub mysql_port: u16,
+    pub pg_port: u16,
     pub http_port: u16,
     pub cluster_port: u16,
     pub quic_port: Option<u16>,
@@ -322,6 +323,8 @@ struct Counters {
     query_log: VecDeque<QuerySample>,
     // Feature flag telemetry (T110)
     feature_flags: HashMap<String, FeatureFlagCounter>,
+    // Workload feature extraction (T170)
+    workload_features: HashMap<WorkloadFeatureKey, WorkloadFeatureCounter>,
     // Coalescing metrics (T160)
     coalesce_leader: u64,
     coalesce_follower: u64,
@@ -335,6 +338,20 @@ struct Counters {
 struct FeatureFlagCounter {
     category: String,
     hit_count: u64,
+    last_seen_ms: u64,
+}
+
+/// Privacy-safe workload feature key: only structural info, never literal values (T170).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkloadFeatureKey {
+    feature_type: String, // "predicate", "order_by", "group_by", "join_key"
+    table: String,
+    column: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkloadFeatureCounter {
+    frequency: u64,
     last_seen_ms: u64,
 }
 
@@ -8576,6 +8593,286 @@ async fn handle_mysql_connection(
     }
 }
 
+// ---------------------------------------------------------------------------
+// PostgreSQL v3 wire protocol listener
+// ---------------------------------------------------------------------------
+
+async fn handle_pg_connection(
+    state: AppState,
+    mut stream: TcpStream,
+    connection_id: u32,
+) -> anyhow::Result<()> {
+    use crate::pg_wire::{self, frontend, TxStatus};
+
+    // SSL negotiation loop: reject SSL and wait for real startup.
+    let startup = loop {
+        match pg_wire::read_startup_message(&mut stream).await? {
+            Some(msg) => break msg,
+            None => {
+                // SSLRequest — reject with 'N'.
+                stream.write_u8(b'N').await?;
+                stream.flush().await?;
+            }
+        }
+    };
+
+    if startup.protocol_version != pg_wire::PG_PROTOCOL_V3 {
+        pg_wire::write_error_response(
+            &mut stream,
+            "FATAL",
+            "08P01",
+            &format!("unsupported protocol version: {}", startup.protocol_version),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let username = startup.user().unwrap_or("skein").to_string();
+    let database = startup
+        .database()
+        .or(Some(&username))
+        .map(|s| s.to_string());
+
+    // Authentication: trust when SKEINDB_TOKEN is unset, cleartext password otherwise.
+    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
+        pg_wire::write_auth_cleartext_password(&mut stream).await?;
+        let msg = pg_wire::read_message(&mut stream).await?;
+        if msg.tag != frontend::PASSWORD_MESSAGE {
+            pg_wire::write_error_response(&mut stream, "FATAL", "28000", "expected password")
+                .await?;
+            return Ok(());
+        }
+        let supplied = pg_wire::parse_query(&msg.payload); // password is C-string
+        if supplied != expected_password {
+            pg_wire::write_error_response(
+                &mut stream,
+                "FATAL",
+                "28P01",
+                "password authentication failed",
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    pg_wire::write_auth_ok(&mut stream).await?;
+
+    // Send initial ParameterStatus messages (matches what psql expects).
+    pg_wire::write_parameter_status(&mut stream, "server_version", pg_wire::PG_SERVER_VERSION)
+        .await?;
+    pg_wire::write_parameter_status(&mut stream, "server_encoding", "UTF8").await?;
+    pg_wire::write_parameter_status(&mut stream, "client_encoding", "UTF8").await?;
+    pg_wire::write_parameter_status(&mut stream, "DateStyle", "ISO, MDY").await?;
+    pg_wire::write_parameter_status(&mut stream, "TimeZone", "UTC").await?;
+    pg_wire::write_parameter_status(&mut stream, "standard_conforming_strings", "on").await?;
+    pg_wire::write_parameter_status(&mut stream, "integer_datetimes", "on").await?;
+    pg_wire::write_parameter_status(&mut stream, "is_superuser", "on").await?;
+
+    pg_wire::write_backend_key_data(&mut stream, connection_id as i32, 0).await?;
+    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+
+    let mut default_db = database;
+
+    // Command loop.
+    loop {
+        let msg = match pg_wire::read_message(&mut stream).await {
+            Ok(m) => m,
+            Err(err) => {
+                let disconnect = err
+                    .downcast_ref::<std::io::Error>()
+                    .map(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::BrokenPipe
+                        )
+                    })
+                    .unwrap_or(false);
+                if disconnect {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
+
+        match msg.tag {
+            frontend::TERMINATE => {
+                return Ok(());
+            }
+            frontend::QUERY => {
+                let sql_raw = pg_wire::parse_query(&msg.payload);
+                let sql = sql_raw.trim().trim_end_matches(';').trim();
+
+                if sql.is_empty() {
+                    pg_wire::write_empty_query_response(&mut stream).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    continue;
+                }
+
+                let sql_lower = sql.to_ascii_lowercase();
+
+                // Handle SET / session bootstrap queries as no-ops.
+                if sql_lower.starts_with("set ") || sql_lower.starts_with("reset ") {
+                    pg_wire::write_command_complete(&mut stream, "SET").await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    continue;
+                }
+
+                if sql_lower == "begin" || sql_lower == "start transaction" {
+                    pg_wire::write_command_complete(&mut stream, "BEGIN").await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::InTransaction).await?;
+                    continue;
+                }
+
+                if sql_lower == "commit" || sql_lower == "end" {
+                    pg_wire::write_command_complete(&mut stream, "COMMIT").await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    continue;
+                }
+
+                if sql_lower == "rollback" {
+                    pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    continue;
+                }
+
+                // SELECT version()
+                if sql_lower == "select version()" {
+                    let ver = format!("PostgreSQL {}", pg_wire::PG_SERVER_VERSION);
+                    let cols = vec![pg_wire::PgColumn::text("version", pg_wire::oid::TEXT, -1)];
+                    pg_wire::write_row_description(&mut stream, &cols).await?;
+                    let val = ver.as_bytes();
+                    pg_wire::write_data_row(&mut stream, &[Some(val)]).await?;
+                    pg_wire::write_command_complete(&mut stream, "SELECT 1").await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    continue;
+                }
+
+                // Delegate to the shared SQL execution engine.
+                let exec_sql = sql.to_string();
+                let mut session = MySqlSessionState::new(default_db.clone(), connection_id);
+                match mysql_execute_sql(&state, &exec_sql, &mut session).await {
+                    Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+                        let pg_cols: Vec<pg_wire::PgColumn> = columns
+                            .iter()
+                            .map(|c| pg_wire::PgColumn::text(c, pg_wire::oid::TEXT, -1))
+                            .collect();
+                        pg_wire::write_row_description(&mut stream, &pg_cols).await?;
+                        for row in &rows {
+                            let vals: Vec<Option<&[u8]>> = row
+                                .iter()
+                                .map(|v| v.as_deref().map(|s| s.as_bytes()))
+                                .collect();
+                            pg_wire::write_data_row(&mut stream, &vals).await?;
+                        }
+                        let tag = format!("SELECT {}", rows.len());
+                        pg_wire::write_command_complete(&mut stream, &tag).await?;
+                    }
+                    Ok(MySqlQueryOutcome::Ok {
+                        affected_rows,
+                        last_insert_id: _,
+                    }) => {
+                        let tag = if sql_lower.starts_with("insert") {
+                            format!("INSERT 0 {affected_rows}")
+                        } else if sql_lower.starts_with("update") {
+                            format!("UPDATE {affected_rows}")
+                        } else if sql_lower.starts_with("delete") {
+                            format!("DELETE {affected_rows}")
+                        } else if sql_lower.starts_with("create") {
+                            "CREATE TABLE".to_string()
+                        } else if sql_lower.starts_with("drop") {
+                            "DROP TABLE".to_string()
+                        } else if sql_lower.starts_with("alter") {
+                            "ALTER TABLE".to_string()
+                        } else {
+                            "OK".to_string()
+                        };
+                        pg_wire::write_command_complete(&mut stream, &tag).await?;
+                    }
+                    Err((_code, _state, message)) => {
+                        pg_wire::write_error_response(&mut stream, "ERROR", "42000", &message)
+                            .await?;
+                    }
+                }
+                // Update default_db if session changed it
+                default_db = session.default_db;
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+            }
+            frontend::SYNC => {
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+            }
+            frontend::PARSE | frontend::BIND | frontend::DESCRIBE | frontend::EXECUTE => {
+                // Extended query protocol stubs — enough to not crash drivers
+                // that probe these during connection setup. Full implementation
+                // is T411.
+                if msg.tag == frontend::PARSE {
+                    pg_wire::write_parse_complete(&mut stream).await?;
+                } else if msg.tag == frontend::BIND {
+                    pg_wire::write_bind_complete(&mut stream).await?;
+                } else if msg.tag == frontend::DESCRIBE {
+                    pg_wire::write_no_data(&mut stream).await?;
+                } else {
+                    pg_wire::write_command_complete(&mut stream, "OK").await?;
+                }
+            }
+            frontend::CLOSE => {
+                pg_wire::write_close_complete(&mut stream).await?;
+            }
+            _ => {
+                pg_wire::write_error_response(
+                    &mut stream,
+                    "ERROR",
+                    "0A000",
+                    &format!("unsupported message type: {}", char::from(msg.tag)),
+                )
+                .await?;
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+            }
+        }
+    }
+}
+
+async fn run_pg_listener(
+    state: AppState,
+    bind: String,
+    pg_port: u16,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    if pg_port == 0 {
+        return Ok(());
+    }
+    let addr = format!("{}:{}", bind, pg_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!(pg_addr = %addr, "PostgreSQL listening");
+    let mut connection_id: u32 = 100_000; // offset from MySQL connection IDs
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                break;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = match accepted {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(?err, "PG accept failed");
+                        continue;
+                    }
+                };
+                let cid = connection_id;
+                connection_id = connection_id.wrapping_add(1).max(100_000);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_pg_connection(state, stream, cid).await {
+                        tracing::debug!(%peer_addr, ?err, "PG connection failed");
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_mysql_listener(
     state: AppState,
     bind: String,
@@ -8725,11 +9022,25 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             }
         }))
     };
+    let pg_handle = if opts.pg_port == 0 {
+        None
+    } else {
+        let state = app_state.clone();
+        let bind = opts.bind.clone();
+        let pg_port = opts.pg_port;
+        let shutdown_rx = app_state.shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            if let Err(err) = run_pg_listener(state, bind, pg_port, shutdown_rx).await {
+                tracing::error!(?err, "PostgreSQL listener failed");
+            }
+        }))
+    };
 
     tracing::info!(
         bind = %opts.bind,
         http_port = %opts.http_port,
         mysql_port = %opts.mysql_port,
+        pg_port = %opts.pg_port,
         cluster_port = %opts.cluster_port,
         storage_mode = %opts.storage_mode,
         "SkeinDB server starting"
@@ -8739,6 +9050,13 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
     } else {
         tracing::info!(
             "MySQL listener enabled (handshake/auth + COM_QUERY plus baseline COM_STMT_* compatibility via sql.exec translator)"
+        );
+    }
+    if opts.pg_port == 0 {
+        tracing::info!("PostgreSQL listener disabled (--pg 0)");
+    } else {
+        tracing::info!(
+            "PostgreSQL v3 listener enabled (simple query protocol + trust/cleartext auth)"
         );
     }
 
@@ -8765,6 +9083,9 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         handle.abort();
     }
     if let Some(handle) = mysql_handle {
+        handle.abort();
+    }
+    if let Some(handle) = pg_handle {
         handle.abort();
     }
 
@@ -9365,6 +9686,187 @@ fn observe_mysql_sql_features(state: &AppState, sql: &str) {
     if lower.contains("?") {
         observe_mysql_feature(state, "PREPARED_STMT", "prepared");
     }
+
+    // T170: extract workload features (predicate/order/group/join columns).
+    observe_workload_features(state, &lower);
+}
+
+/// Extract structural workload features from SQL for privacy-safe telemetry (T170).
+/// Only stores (table, column, feature_type) — never literal values.
+fn observe_workload_features(state: &AppState, lower: &str) {
+    let now_ms = now_unix_ms_u64();
+    let mut features: Vec<WorkloadFeatureKey> = Vec::new();
+
+    // Determine the table name from FROM clause (simplified: first table after FROM).
+    let table = extract_table_from_sql(lower).unwrap_or_default();
+
+    // WHERE predicates: look for column comparisons.
+    if let Some(where_start) = lower.find(" where ") {
+        let where_clause = &lower[where_start + 7..];
+        // Trim at GROUP BY / ORDER BY / LIMIT / HAVING if present.
+        let end = where_clause
+            .find(" group by ")
+            .or_else(|| where_clause.find(" order by "))
+            .or_else(|| where_clause.find(" having "))
+            .or_else(|| where_clause.find(" limit "))
+            .unwrap_or(where_clause.len());
+        let where_clause = &where_clause[..end];
+        for col in extract_columns_from_predicates(where_clause) {
+            features.push(WorkloadFeatureKey {
+                feature_type: "predicate".to_string(),
+                table: table.clone(),
+                column: col,
+            });
+        }
+    }
+
+    // ORDER BY columns.
+    if let Some(order_start) = lower.find(" order by ") {
+        let order_clause = &lower[order_start + 10..];
+        let end = order_clause
+            .find(" limit ")
+            .or_else(|| order_clause.find(" for "))
+            .unwrap_or(order_clause.len());
+        let order_clause = &order_clause[..end];
+        for col in extract_column_list(order_clause) {
+            features.push(WorkloadFeatureKey {
+                feature_type: "order_by".to_string(),
+                table: table.clone(),
+                column: col,
+            });
+        }
+    }
+
+    // GROUP BY columns.
+    if let Some(group_start) = lower.find(" group by ") {
+        let group_clause = &lower[group_start + 10..];
+        let end = group_clause
+            .find(" having ")
+            .or_else(|| group_clause.find(" order by "))
+            .or_else(|| group_clause.find(" limit "))
+            .unwrap_or(group_clause.len());
+        let group_clause = &group_clause[..end];
+        for col in extract_column_list(group_clause) {
+            features.push(WorkloadFeatureKey {
+                feature_type: "group_by".to_string(),
+                table: table.clone(),
+                column: col,
+            });
+        }
+    }
+
+    // JOIN ON columns.
+    if let Some(join_start) = lower.find(" join ") {
+        let after_join = &lower[join_start + 6..];
+        // The join table is right after JOIN.
+        let join_table = after_join
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        if let Some(on_start) = after_join.find(" on ") {
+            let on_clause = &after_join[on_start + 4..];
+            let end = on_clause
+                .find(" where ")
+                .or_else(|| on_clause.find(" join "))
+                .or_else(|| on_clause.find(" group by "))
+                .or_else(|| on_clause.find(" order by "))
+                .unwrap_or(on_clause.len());
+            let on_clause = &on_clause[..end];
+            for col in extract_columns_from_predicates(on_clause) {
+                let (tbl, col_name) = if col.contains('.') {
+                    let parts: Vec<&str> = col.splitn(2, '.').collect();
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    (join_table.to_string(), col)
+                };
+                features.push(WorkloadFeatureKey {
+                    feature_type: "join_key".to_string(),
+                    table: tbl,
+                    column: col_name,
+                });
+            }
+        }
+    }
+
+    if features.is_empty() {
+        return;
+    }
+    let mut counters = state.counters.lock().unwrap();
+    for key in features {
+        let entry = counters
+            .workload_features
+            .entry(key)
+            .or_insert_with(WorkloadFeatureCounter::default);
+        entry.frequency += 1;
+        entry.last_seen_ms = now_ms;
+    }
+}
+
+/// Extract the first table name from a FROM clause.
+fn extract_table_from_sql(lower: &str) -> Option<String> {
+    let from_start = lower.find(" from ")?;
+    let after_from = &lower[from_start + 6..];
+    let table_ref = after_from.split_whitespace().next()?;
+    let cleaned = table_ref.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+    if cleaned.is_empty() {
+        return None;
+    }
+    // If db.table, take the table part only.
+    let table_part = cleaned.rsplit('.').next().unwrap_or(cleaned);
+    Some(table_part.to_string())
+}
+
+/// Extract column names from predicate expressions like "col1 = ? AND col2 > 5".
+fn extract_columns_from_predicates(clause: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    for part in clause.split(|c: char| c == '=' || c == '<' || c == '>') {
+        let trimmed = part.trim();
+        // Take last token before operator which is the column reference.
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        // The column is typically the last token before the operator or the first token of the part.
+        if let Some(token) = tokens.last() {
+            let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+            if !clean.is_empty()
+                && !clean.parse::<f64>().is_ok()
+                && clean != "and"
+                && clean != "or"
+                && clean != "not"
+                && clean != "is"
+                && clean != "null"
+                && clean != "in"
+                && clean != "like"
+                && clean != "between"
+                && !clean.starts_with('\'')
+                && !clean.starts_with('?')
+            {
+                cols.push(clean.to_string());
+            }
+        }
+    }
+    cols
+}
+
+/// Extract column names from a comma-separated list (ORDER BY, GROUP BY).
+fn extract_column_list(clause: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    for part in clause.split(',') {
+        let cleaned = part.trim();
+        // Remove ASC/DESC suffix.
+        let cleaned = cleaned
+            .trim_end_matches(" asc")
+            .trim_end_matches(" desc")
+            .trim();
+        // Take just the column reference (handle "table.col").
+        let token = cleaned.split_whitespace().next().unwrap_or("");
+        let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+        if !clean.is_empty() && !clean.parse::<f64>().is_ok() {
+            // If table.col, take just the column part.
+            let col_part = clean.rsplit('.').next().unwrap_or(clean);
+            cols.push(col_part.to_string());
+        }
+    }
+    cols
 }
 
 fn observe_rpc_call(
@@ -10051,6 +10553,51 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "telemetry.workload_features" => {
+                    let counters = state.counters.lock().unwrap();
+                    let limit = params
+                        .as_ref()
+                        .and_then(|p| p.get("limit"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(100) as usize;
+                    let filter_table = params
+                        .as_ref()
+                        .and_then(|p| p.get("table"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let filter_type = params
+                        .as_ref()
+                        .and_then(|p| p.get("feature_type"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let mut features: Vec<serde_json::Value> = counters
+                        .workload_features
+                        .iter()
+                        .filter(|(k, _)| {
+                            filter_table.as_ref().map_or(true, |t| &k.table == t)
+                                && filter_type
+                                    .as_ref()
+                                    .map_or(true, |ft| &k.feature_type == ft)
+                        })
+                        .map(|(k, v)| {
+                            serde_json::json!({
+                                "feature_type": k.feature_type,
+                                "table": k.table,
+                                "column": k.column,
+                                "frequency": v.frequency,
+                                "last_seen_ms": v.last_seen_ms,
+                            })
+                        })
+                        .collect();
+                    features.sort_by(|a, b| {
+                        b["frequency"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .cmp(&a["frequency"].as_u64().unwrap_or(0))
+                    });
+                    features.truncate(limit);
+                    Ok(serde_json::json!({ "features": features }))
+                }
 
                 // --------------------
                 // plan_cache.* (Phase 22)
@@ -10452,6 +10999,73 @@ pub(crate) async fn handle_rpc(
                 }
 
                 // --------------------
+                // admin.user.* (T044)
+                // --------------------
+                "admin.user.create" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        username: String,
+                        #[serde(default = "default_admin_role")]
+                        role: String,
+                    }
+                    fn default_admin_role() -> String {
+                        "read_write".to_string()
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let user = eng.user_create(&p.username, &p.role);
+                    Ok(serde_json::to_value(&user)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "admin.user.list" => {
+                    let eng = state.engine.read().await;
+                    let users = eng.user_list();
+                    Ok(serde_json::json!({ "users": users }))
+                }
+                "admin.user.drop" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        username: String,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let dropped = eng.user_drop(&p.username);
+                    Ok(serde_json::json!({ "dropped": dropped }))
+                }
+                "admin.user.grant" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        username: String,
+                        db: String,
+                        #[serde(default)]
+                        privileges: Vec<String>,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let privs = if p.privileges.is_empty() {
+                        vec!["SELECT".to_string()]
+                    } else {
+                        p.privileges
+                    };
+                    let mut eng = state.engine.write().await;
+                    eng.user_grant(&p.username, &p.db, privs)
+                        .map_err(|e| RpcError::new("not_found", e.to_string()))?;
+                    Ok(serde_json::json!({ "granted": true }))
+                }
+                "admin.user.revoke" => {
+                    #[derive(serde::Deserialize)]
+                    struct P {
+                        username: String,
+                        db: String,
+                    }
+                    let p: P = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let revoked = eng
+                        .user_revoke(&p.username, &p.db)
+                        .map_err(|e| RpcError::new("not_found", e.to_string()))?;
+                    Ok(serde_json::json!({ "revoked": revoked }))
+                }
+
+                // --------------------
                 // vector.* (research)
                 // --------------------
                 "vector.insert" => {
@@ -10595,6 +11209,20 @@ pub(crate) async fn handle_rpc(
                     let r = eng.forensic_export(p).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // maintenance.audit_* (T091)
+                // --------------------
+                "maintenance.audit_status" => {
+                    let eng = state.engine.read().await;
+                    let r = eng.maintenance_audit_status();
+                    Ok(r)
+                }
+                "maintenance.audit_verify" => {
+                    let mut eng = state.engine.write().await;
+                    let r = eng.maintenance_audit_verify();
+                    Ok(r)
                 }
 
                 // --------------------
@@ -17620,6 +18248,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "forensic.query"
             | "forensic.verify"
             | "forensic.export"
+            | "maintenance.audit_status"
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
@@ -17630,9 +18259,11 @@ fn is_read_only_method(method: &str) -> bool {
             | "telemetry.feature_flags"
             | "telemetry.compat_summary"
             | "telemetry.migration_hints"
+            | "telemetry.workload_features"
             | "plan_cache.status"
             | "stats.coalescing"
             | "security.token.list"
+            | "admin.user.list"
             | "objects.need"
             | "objects.missing"
             | "objects.fetch"
@@ -17743,6 +18374,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "telemetry.feature_flags",
         "telemetry.compat_summary",
         "telemetry.migration_hints",
+        "telemetry.workload_features",
         "plan_cache.status",
         "plan_cache.clear",
         "stats.coalescing",
@@ -17774,6 +18406,8 @@ fn system_capabilities(state: &AppState) -> Value {
         "forensic.query",
         "forensic.verify",
         "forensic.export",
+        "maintenance.audit_status",
+        "maintenance.audit_verify",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",
@@ -17795,6 +18429,11 @@ fn system_capabilities(state: &AppState) -> Value {
         "security.token.create",
         "security.token.list",
         "security.token.revoke",
+        "admin.user.create",
+        "admin.user.list",
+        "admin.user.drop",
+        "admin.user.grant",
+        "admin.user.revoke",
     ];
     serde_json::json!({
         "mysql_compat": false,
@@ -24919,6 +25558,266 @@ mod tests {
         // Read-only RPC should also work.
         let resp = call_rpc(&state, "schema.list_databases", json!({})).await;
         assert!(resp.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T044: User management tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn admin_user_create_list_drop() -> anyhow::Result<()> {
+        let dir = temp_dir("admin_user_crud");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Create two users.
+        let resp = call_rpc(
+            &state,
+            "admin.user.create",
+            json!({ "username": "alice", "role": "admin" }),
+        )
+        .await;
+        assert!(resp.ok);
+        let user = resp.result.expect("missing result");
+        assert_eq!(user["username"].as_str(), Some("alice"));
+        assert_eq!(user["role"].as_str(), Some("admin"));
+
+        let resp = call_rpc(
+            &state,
+            "admin.user.create",
+            json!({ "username": "bob", "role": "read_only" }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // List should return both.
+        let resp = call_rpc(&state, "admin.user.list", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        let users = result["users"].as_array().unwrap();
+        assert_eq!(users.len(), 2);
+
+        // Drop alice.
+        let resp = call_rpc(&state, "admin.user.drop", json!({ "username": "alice" })).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["dropped"], true);
+
+        // List should return only bob.
+        let resp = call_rpc(&state, "admin.user.list", json!({})).await;
+        let result = resp.result.expect("missing result");
+        let users = result["users"].as_array().unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"].as_str(), Some("bob"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_user_grant_and_revoke() -> anyhow::Result<()> {
+        let dir = temp_dir("admin_user_grant");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Create user.
+        let resp = call_rpc(
+            &state,
+            "admin.user.create",
+            json!({ "username": "eve", "role": "read_write" }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // Grant privileges.
+        let resp = call_rpc(
+            &state,
+            "admin.user.grant",
+            json!({ "username": "eve", "db": "mydb", "privileges": ["SELECT", "INSERT"] }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["granted"], true);
+
+        // Verify grants in user listing.
+        let resp = call_rpc(&state, "admin.user.list", json!({})).await;
+        let result = resp.result.expect("missing result");
+        let users = result["users"].as_array().unwrap();
+        let eve = &users[0];
+        let grants = eve["grants"]["mydb"].as_array().unwrap();
+        assert_eq!(grants.len(), 2);
+
+        // Revoke.
+        let resp = call_rpc(
+            &state,
+            "admin.user.revoke",
+            json!({ "username": "eve", "db": "mydb" }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["revoked"], true);
+
+        // Grant on non-existent user should fail.
+        let resp = call_rpc(
+            &state,
+            "admin.user.grant",
+            json!({ "username": "ghost", "db": "x", "privileges": ["SELECT"] }),
+        )
+        .await;
+        assert!(!resp.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maintenance_audit_status_and_verify() -> anyhow::Result<()> {
+        let dir = temp_dir("audit_status");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Create a table and insert a row to generate forensic records.
+        let resp = call_rpc(&state, "schema.create_database", json!({"db":"auditdb"})).await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "schema.create_table",
+            json!({
+                "db": "auditdb",
+                "table": "logs",
+                "columns": [
+                    { "name": "id", "type": {"kind":"u64"}, "nullable": false },
+                    { "name": "msg", "type": {"kind":"str"}, "nullable": false }
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": { "db": "auditdb", "table": "logs" },
+                "rows": [{ "id": { "t": "u64", "v": 1 }, "msg": { "t": "str", "v": "hello" } }]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // audit_status should report chain length.
+        let resp = call_rpc(&state, "maintenance.audit_status", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        let chain_len = result["chain_length"].as_u64().unwrap();
+        assert!(chain_len >= 1, "expected at least 1 forensic record");
+
+        // audit_verify should pass on a valid chain.
+        let resp = call_rpc(&state, "maintenance.audit_verify", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["ok"], true);
+        assert!(result["records_checked"].as_u64().unwrap() >= 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writes_anchor() -> anyhow::Result<()> {
+        let dir = temp_dir("ckpt_anchor");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Insert some data so forensic chain has entries.
+        let resp = call_rpc(&state, "schema.create_database", json!({"db":"ckptdb"})).await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "schema.create_table",
+            json!({
+                "db": "ckptdb",
+                "table": "t",
+                "columns": [
+                    { "name": "id", "type": {"kind":"u64"}, "nullable": false }
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": { "db": "ckptdb", "table": "t" },
+                "rows": [{ "id": { "t": "u64", "v": 1 } }]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // Trigger checkpoint.
+        {
+            let mut eng = state.engine.write().await;
+            eng.checkpoint_for_shutdown()?;
+        }
+
+        // Status should show at least 1 anchor.
+        let resp = call_rpc(&state, "maintenance.audit_status", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        let anchor_count = result["anchor_count"].as_u64().unwrap();
+        assert!(anchor_count >= 1, "expected at least 1 checkpoint anchor");
+        assert!(result["last_anchor"].is_object());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telemetry_workload_features_extraction() -> anyhow::Result<()> {
+        let dir = temp_dir("workload_features");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Execute SQL through the MySQL path to trigger feature extraction.
+        let sql = "SELECT * FROM orders WHERE customer_id = 42 ORDER BY amount DESC";
+        observe_mysql_sql_features(&state, sql);
+
+        // Check workload_features RPC.
+        let resp = call_rpc(&state, "telemetry.workload_features", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        let features = result["features"].as_array().unwrap();
+        assert!(!features.is_empty(), "expected workload features");
+
+        // Should have at least a predicate for customer_id and order_by for amount.
+        let has_predicate = features
+            .iter()
+            .any(|f| f["feature_type"] == "predicate" && f["column"] == "customer_id");
+        let has_order = features
+            .iter()
+            .any(|f| f["feature_type"] == "order_by" && f["column"] == "amount");
+        assert!(has_predicate, "expected predicate feature for customer_id");
+        assert!(has_order, "expected order_by feature for amount");
+
+        // Test filtering by feature_type.
+        let resp = call_rpc(
+            &state,
+            "telemetry.workload_features",
+            json!({ "feature_type": "predicate" }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        let filtered = result["features"].as_array().unwrap();
+        assert!(filtered.iter().all(|f| f["feature_type"] == "predicate"));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

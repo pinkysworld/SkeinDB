@@ -4245,23 +4245,33 @@ struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,
     mysql_port: u16,
+    pg_port: u16,
 }
 
 impl HttpHarness {
     fn start(label: &str) -> anyhow::Result<Self> {
-        Self::start_with_mysql_port(label, 0)
+        Self::start_with_ports(label, 0, 0)
     }
 
     fn start_with_mysql(label: &str) -> anyhow::Result<Self> {
         let mysql_port = free_tcp_port();
-        Self::start_with_mysql_port(label, mysql_port)
+        Self::start_with_ports(label, mysql_port, 0)
+    }
+
+    fn start_with_pg(label: &str) -> anyhow::Result<Self> {
+        let pg_port = free_tcp_port();
+        Self::start_with_ports(label, 0, pg_port)
     }
 
     fn start_with_mysql_port(label: &str, mysql_port: u16) -> anyhow::Result<Self> {
+        Self::start_with_ports(label, mysql_port, 0)
+    }
+
+    fn start_with_ports(label: &str, mysql_port: u16, pg_port: u16) -> anyhow::Result<Self> {
         let dir = temp_dir(label);
         let http_port = free_tcp_port();
         let cluster_port = free_tcp_port();
-        let child = spawn_server(&dir, http_port, cluster_port, mysql_port)?;
+        let child = spawn_server_with_pg(&dir, http_port, cluster_port, mysql_port, pg_port)?;
         let _guard = ChildGuard::new(child);
 
         wait_for_health(http_port)?;
@@ -4270,6 +4280,7 @@ impl HttpHarness {
             _guard,
             http_port,
             mysql_port,
+            pg_port,
         })
     }
 
@@ -4279,6 +4290,10 @@ impl HttpHarness {
 
     fn mysql_port(&self) -> u16 {
         self.mysql_port
+    }
+
+    fn pg_port(&self) -> u16 {
+        self.pg_port
     }
 }
 
@@ -5023,6 +5038,16 @@ fn spawn_server(
     cluster_port: u16,
     mysql_port: u16,
 ) -> anyhow::Result<Child> {
+    spawn_server_with_pg(dir, http_port, cluster_port, mysql_port, 0)
+}
+
+fn spawn_server_with_pg(
+    dir: &PathBuf,
+    http_port: u16,
+    cluster_port: u16,
+    mysql_port: u16,
+    pg_port: u16,
+) -> anyhow::Result<Child> {
     let bin = env!("CARGO_BIN_EXE_skeindb");
     Command::new(bin)
         .arg("serve")
@@ -5034,6 +5059,8 @@ fn spawn_server(
         .arg(http_port.to_string())
         .arg("--mysql")
         .arg(mysql_port.to_string())
+        .arg("--pg")
+        .arg(pg_port.to_string())
         .arg("--cluster-port")
         .arg(cluster_port.to_string())
         .stdout(Stdio::null())
@@ -5073,4 +5100,245 @@ impl Drop for ChildGuard {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+// ---------------------------------------------------------------------------
+// PostgreSQL wire protocol integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a PG startup message from scratch.
+fn build_pg_startup(user: &str, database: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&196608i32.to_be_bytes()); // protocol 3.0
+    payload.extend_from_slice(b"user\0");
+    payload.extend_from_slice(user.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(b"database\0");
+    payload.extend_from_slice(database.as_bytes());
+    payload.push(0);
+    payload.push(0); // parameter list terminator
+    let len = (payload.len() + 4) as i32;
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&len.to_be_bytes());
+    msg.extend_from_slice(&payload);
+    msg
+}
+
+/// Read a PG backend message: tag(1) + length(4) + payload.
+async fn read_pg_message(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
+    let tag = stream.read_u8().await?;
+    let len = stream.read_i32().await? as usize;
+    let payload_len = if len >= 4 { len - 4 } else { 0 };
+    let mut payload = vec![0u8; payload_len];
+    if payload_len > 0 {
+        stream.read_exact(&mut payload).await?;
+    }
+    Ok((tag, payload))
+}
+
+/// Connect to the PG listener, perform startup handshake, consume all
+/// ParameterStatus messages until ReadyForQuery.
+async fn pg_connect_and_startup(port: u16) -> anyhow::Result<TcpStream> {
+    wait_for_tcp(port)?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    let startup = build_pg_startup("skein", "testdb");
+    stream.write_all(&startup).await?;
+    stream.flush().await?;
+
+    // Read messages until ReadyForQuery ('Z')
+    loop {
+        let (tag, payload) = read_pg_message(&mut stream).await?;
+        match tag {
+            b'R' => {
+                // AuthenticationOk: first 4 bytes should be 0
+                let auth_type =
+                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                assert_eq!(auth_type, 0, "expected AuthenticationOk");
+            }
+            b'S' => {
+                // ParameterStatus — skip
+            }
+            b'K' => {
+                // BackendKeyData — skip
+            }
+            b'Z' => {
+                // ReadyForQuery
+                assert_eq!(payload[0], b'I', "expected idle transaction status");
+                break;
+            }
+            _ => {
+                anyhow::bail!("unexpected message tag during startup: {}", tag as char);
+            }
+        }
+    }
+
+    Ok(stream)
+}
+
+/// Send a simple Query message and return the (tag, payload) pairs until
+/// ReadyForQuery.
+async fn pg_simple_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<Vec<(u8, Vec<u8>)>> {
+    // Build Query message: 'Q' + len + sql\0
+    let mut payload = Vec::new();
+    payload.extend_from_slice(sql.as_bytes());
+    payload.push(0);
+    let len = (payload.len() + 4) as i32;
+    stream.write_u8(b'Q').await?;
+    stream.write_i32(len).await?;
+    stream.write_all(&payload).await?;
+    stream.flush().await?;
+
+    let mut messages = Vec::new();
+    loop {
+        let (tag, payload) = read_pg_message(stream).await?;
+        let done = tag == b'Z';
+        messages.push((tag, payload));
+        if done {
+            break;
+        }
+    }
+    Ok(messages)
+}
+
+#[tokio::test]
+async fn pg_handshake_and_ready_for_query() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_handshake")?;
+    let _stream = pg_connect_and_startup(server.pg_port()).await?;
+    // If we get here, handshake succeeded
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_select_literal() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_select_literal")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(&mut stream, "SELECT 1 AS num").await?;
+
+    // Expect: RowDescription, DataRow, CommandComplete, ReadyForQuery
+    let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
+    assert!(
+        tags.contains(&b'T'),
+        "expected RowDescription in response, got: {:?}",
+        tags.iter().map(|t| *t as char).collect::<Vec<_>>()
+    );
+    assert!(
+        tags.contains(&b'D'),
+        "expected DataRow in response, got: {:?}",
+        tags.iter().map(|t| *t as char).collect::<Vec<_>>()
+    );
+    assert!(tags.contains(&b'C'), "expected CommandComplete in response");
+    assert_eq!(
+        *tags.last().unwrap(),
+        b'Z',
+        "last message should be ReadyForQuery"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_version() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_version")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(&mut stream, "SELECT version()").await?;
+
+    // Find the DataRow and check it contains "SkeinDB"
+    let data_rows: Vec<&Vec<u8>> = msgs
+        .iter()
+        .filter(|(t, _)| *t == b'D')
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(data_rows.len(), 1, "expected exactly 1 data row");
+
+    let row = &data_rows[0];
+    // Parse: 2 bytes column count, then for each: 4 bytes len + data
+    let col_count = i16::from_be_bytes([row[0], row[1]]);
+    assert_eq!(col_count, 1);
+    let data_len = i32::from_be_bytes([row[2], row[3], row[4], row[5]]) as usize;
+    let data = String::from_utf8_lossy(&row[6..6 + data_len]);
+    assert!(
+        data.contains("SkeinDB"),
+        "version string should contain SkeinDB: {data}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_empty_query_returns_empty_response() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_empty_query")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(&mut stream, "").await?;
+
+    let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
+    assert!(
+        tags.contains(&b'I'),
+        "expected EmptyQueryResponse for empty query"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_terminate_closes_connection() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_terminate")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    // Send Terminate message: 'X' + length=4
+    stream.write_u8(b'X').await?;
+    stream.write_i32(4).await?;
+    stream.flush().await?;
+
+    // Connection should close — reading should return EOF or error
+    let mut buf = [0u8; 1];
+    let result = stream.read(&mut buf).await;
+    match result {
+        Ok(0) => {}  // EOF — expected
+        Err(_) => {} // Connection reset — also expected
+        Ok(n) => {
+            anyhow::bail!("expected connection close after Terminate, got {n} bytes");
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_ssl_negotiation_is_rejected() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_ssl_reject")?;
+    wait_for_tcp(server.pg_port())?;
+    let mut stream = TcpStream::connect(("127.0.0.1", server.pg_port())).await?;
+
+    // Send SSLRequest: length=8, code=80877103
+    stream.write_i32(8).await?;
+    stream.write_i32(80877103).await?;
+    stream.flush().await?;
+
+    // Server should respond with 'N' (SSL not supported)
+    let response = stream.read_u8().await?;
+    assert_eq!(response, b'N', "expected SSL rejection 'N'");
+
+    // Now send a real startup message and proceed normally
+    let startup = build_pg_startup("skein", "testdb");
+    stream.write_all(&startup).await?;
+    stream.flush().await?;
+
+    // Should get AuthenticationOk and eventually ReadyForQuery
+    loop {
+        let (tag, _) = read_pg_message(&mut stream).await?;
+        if tag == b'Z' {
+            break;
+        }
+    }
+
+    Ok(())
 }

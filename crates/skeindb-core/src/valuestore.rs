@@ -273,6 +273,75 @@ impl ValueIdHistogram {
     }
 }
 
+/// Bloom filter for probabilistic ValueID existence checks (T165).
+#[derive(Debug, Clone)]
+pub struct BloomFilter {
+    bits: Vec<u64>,
+    m_bits: usize,
+    k_hashes: u32,
+    count: usize,
+}
+
+impl BloomFilter {
+    /// Create a new Bloom filter sized for `expected` items with target FPR ~1%.
+    pub fn new(expected: usize) -> Self {
+        let m_bits = (expected.max(64) * 10).next_power_of_two();
+        Self {
+            bits: vec![0u64; m_bits / 64],
+            m_bits,
+            k_hashes: 7,
+            count: 0,
+        }
+    }
+
+    fn hashes(&self, id: &ValueId) -> [usize; 7] {
+        // ValueId is 16 bytes (128 bits). Use different byte slices as hash seeds.
+        let h1 = u64::from_le_bytes([id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]]);
+        let h2 = u64::from_le_bytes([id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]]);
+        let m = self.m_bits as u64;
+        let mut out = [0usize; 7];
+        for i in 0..7 {
+            let h = h1
+                .wrapping_add((i as u64).wrapping_mul(h2))
+                .wrapping_add(i as u64);
+            out[i] = (h % m) as usize;
+        }
+        out
+    }
+
+    pub fn insert(&mut self, id: &ValueId) {
+        for pos in self.hashes(id) {
+            self.bits[pos / 64] |= 1u64 << (pos % 64);
+        }
+        self.count += 1;
+    }
+
+    /// Returns true if the item *might* exist, false if it definitely does not.
+    pub fn maybe_contains(&self, id: &ValueId) -> bool {
+        for pos in self.hashes(id) {
+            if self.bits[pos / 64] & (1u64 << (pos % 64)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.bits.len() * 8
+    }
+
+    /// Estimated false positive rate.
+    pub fn estimated_fpr(&self) -> f64 {
+        let set_bits: u32 = self.bits.iter().map(|w| w.count_ones()).sum();
+        let fill = set_bits as f64 / self.m_bits as f64;
+        fill.powi(self.k_hashes as i32)
+    }
+}
+
 #[derive(Debug)]
 pub struct ValueStore {
     entries: Vec<ValueEntry>,
@@ -280,6 +349,7 @@ pub struct ValueStore {
     sorted_keys: Vec<ValueId>,
     sorted_entries: Vec<usize>,
     learned: Option<LearnedIndex>,
+    bloom: BloomFilter,
     config: ValueStoreConfig,
     lookup_hist: ValueIdHistogram,
     model_hist: Option<ValueIdHistogram>,
@@ -296,6 +366,7 @@ impl ValueStore {
             sorted_keys: Vec::new(),
             sorted_entries: Vec::new(),
             learned: None,
+            bloom: BloomFilter::new(1024),
             config,
             lookup_hist: ValueIdHistogram::default(),
             model_hist: None,
@@ -316,6 +387,20 @@ impl ValueStore {
     /// Check whether a ValueId exists in the store without mutating state.
     pub fn contains(&self, id: ValueId) -> bool {
         self.index.contains_key(&id)
+    }
+
+    /// Fast probabilistic check: returns false if definitely missing.
+    pub fn bloom_maybe_contains(&self, id: &ValueId) -> bool {
+        self.bloom.maybe_contains(id)
+    }
+
+    /// Bloom filter statistics for replication metrics.
+    pub fn bloom_stats(&self) -> (usize, usize, f64) {
+        (
+            self.bloom.count(),
+            self.bloom.size_bytes(),
+            self.bloom.estimated_fpr(),
+        )
     }
 
     pub fn stats(&self) -> ValueStoreStats {
@@ -365,6 +450,7 @@ impl ValueStore {
             delta: None,
         });
         self.index.insert(id, idx);
+        self.bloom.insert(&id);
         self.inserts_since_refresh = self.inserts_since_refresh.saturating_add(1);
 
         if self.config.enable_learned_index {
@@ -450,6 +536,7 @@ impl ValueStore {
         let idx = self.entries.len();
         self.entries.push(entry);
         self.index.insert(id, idx);
+        self.bloom.insert(&id);
         self.inserts_since_refresh = self.inserts_since_refresh.saturating_add(1);
 
         self.delta_stats.values_written = self.delta_stats.values_written.saturating_add(1);
