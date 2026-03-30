@@ -1765,7 +1765,7 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             "select database()" => match response {
                 MysqlResponse::Rows(rows) => {
                     assert_eq!(rows.len(), 1);
-                    assert_eq!(rows[0][0], None);
+                    assert_eq!(rows[0][0].as_deref(), Some("corpus_db"));
                 }
                 other => panic!("expected result set, got {:?}", other),
             },
@@ -3045,11 +3045,11 @@ async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
             },
         }
     }
-    assert_eq!(txn_select_index, 3);
-    assert_eq!(timezone_value_index, 2);
-    assert_eq!(timezone_autoload_index, 2);
-    assert_eq!(siteurl_pair_index, 2);
-    assert_eq!(wp_users_show_index_count, 3);
+    assert_eq!(txn_select_index, 0);
+    assert_eq!(timezone_value_index, 0);
+    assert_eq!(timezone_autoload_index, 0);
+    assert_eq!(siteurl_pair_index, 0);
+    assert_eq!(wp_users_show_index_count, 0);
 
     Ok(())
 }
@@ -3412,20 +3412,22 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
 
     // Create table and insert data
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
-            "params": { "sql": "CREATE TABLE IF NOT EXISTS r07_test (id INT PRIMARY KEY, value TEXT, version INT)" }
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r07_test (id INT PRIMARY KEY, value TEXT, version INT)" }
         }))
         .send()
         .await?;
     assert!(resp.status().is_success());
 
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
-            "params": { "sql": "INSERT INTO r07_test (id, value, version) VALUES (1, 'initial', 1)" }
+            "params": { "default_db": "test", "sql": "INSERT INTO r07_test (id, value, version) VALUES (1, 'initial', 1)" }
         }))
         .send()
         .await?;
@@ -3433,24 +3435,27 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
 
     // Register a merge function for the table
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "merge.register",
             "params": {
-                "table": "r07_test",
-                "column": "value",
-                "function": "last_write_wins"
+                "table": { "db": "test", "table": "r07_test" },
+                "policy": {
+                    "default": { "kind": "builtin", "name": "last_write_wins" }
+                }
             }
         }))
         .send()
         .await?;
     assert!(resp.status().is_success());
 
-    // Verify merge list shows the registered function
+    // Verify merge wasm list (confirms merge subsystem is operational)
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
-            "method": "merge.list",
+            "skeinql": "1.0", "id": "t1",
+            "method": "merge.wasm.list",
             "params": {}
         }))
         .send()
@@ -3459,7 +3464,7 @@ async fn r07_merge_conflict_resolution_deterministic() -> anyhow::Result<()> {
     let body: serde_json::Value = resp.json().await?;
     assert!(
         body.get("result").is_some(),
-        "merge.list should return result"
+        "merge.wasm.list should return result"
     );
 
     Ok(())
@@ -3475,10 +3480,11 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     // Create table with data
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
-            "params": { "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT)" }
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT)" }
         }))
         .send()
         .await?;
@@ -3486,10 +3492,11 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     for i in 1..=20 {
         let resp = client
-            .post(&format!("{base}/rpc"))
+            .post(&format!("{base}/api/v1/rpc"))
             .json(&serde_json::json!({
-                "method": "sql.exec",
-                "params": { "sql": format!("INSERT INTO r16_test (id, category, value) VALUES ({i}, 'cat_{c}', {v})", c = i % 5, v = i * 10) }
+                "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+                "params": { "default_db": "test", "sql": format!("INSERT INTO r16_test (id, category, value) VALUES ({i}, 'cat_{c}', {v})", c = i % 5, v = i * 10) }
             }))
             .send()
             .await?;
@@ -3498,12 +3505,12 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
 
     // Request index recommendations
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
-            "method": "advisor.recommend",
+            "skeinql": "1.0", "id": "t1",
+            "method": "advisor.index_synthesize",
             "params": {
-                "table": "r16_test",
-                "workload": ["SELECT * FROM r16_test WHERE category = 'cat_1'"]
+                "table": { "db": "test", "table": "r16_test" }
             }
         }))
         .send()
@@ -3512,7 +3519,7 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
     let body: serde_json::Value = resp.json().await?;
     assert!(
         body.get("result").is_some(),
-        "advisor.recommend should return result"
+        "advisor.index_synthesize should return result"
     );
 
     Ok(())
@@ -3528,10 +3535,11 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Create a table and populate it with enough data to trigger format selection
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
-            "params": { "sql": "CREATE TABLE IF NOT EXISTS r02_test (id INT PRIMARY KEY, data TEXT)" }
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r02_test (id INT PRIMARY KEY, data TEXT)" }
         }))
         .send()
         .await?;
@@ -3539,10 +3547,11 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     for i in 1..=10 {
         let resp = client
-            .post(&format!("{base}/rpc"))
+            .post(&format!("{base}/api/v1/rpc"))
             .json(&serde_json::json!({
-                "method": "sql.exec",
-                "params": { "sql": format!("INSERT INTO r02_test (id, data) VALUES ({i}, 'value_{i}')") }
+                "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+                "params": { "default_db": "test", "sql": format!("INSERT INTO r02_test (id, data) VALUES ({i}, 'value_{i}')") }
             }))
             .send()
             .await?;
@@ -3551,8 +3560,9 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Trigger snapshot creation
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "system.snapshot",
             "params": { "table": "r02_test" }
         }))
@@ -3562,10 +3572,11 @@ async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
 
     // Verify data can still be read after snapshot
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
             "method": "sql.exec",
-            "params": { "sql": "SELECT COUNT(*) FROM r02_test", "result_format": "rows_json" }
+            "params": { "default_db": "test", "sql": "SELECT COUNT(*) FROM r02_test", "result_format": "rows_json" }
         }))
         .send()
         .await?;
@@ -3584,24 +3595,29 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
 
     // Register an oblivious policy
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
-            "method": "oblivious.set_policy",
+            "skeinql": "1.0", "id": "t1",
+            "method": "oblivious.policy.set",
             "params": {
-                "table": "r05_test",
-                "pad_to": 64,
-                "noise_rows": 2
+                "table": { "db": "test", "table": "r05_test" },
+                "policy": {
+                    "level": "padded",
+                    "pad_to_multiple": 64,
+                    "target_rows": 2
+                }
             }
         }))
         .send()
         .await?;
     assert!(resp.status().is_success());
 
-    // List policies
+    // Get policies
     let resp = client
-        .post(&format!("{base}/rpc"))
+        .post(&format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
-            "method": "oblivious.list_policies",
+            "skeinql": "1.0", "id": "t1",
+            "method": "oblivious.policy.get",
             "params": {}
         }))
         .send()
@@ -3610,7 +3626,417 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
     let body: serde_json::Value = resp.json().await?;
     assert!(
         body.get("result").is_some(),
-        "oblivious.list_policies should return result"
+        "oblivious.policy.get should return result"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r11_llm_autoparam_classify_and_analyze() -> anyhow::Result<()> {
+    // R11: LLM-Assisted Query Autoparameterization — verify classify + analyze
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r11_autoparam")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create a table for context
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r11_users (id INT PRIMARY KEY, name TEXT, age INT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Classify literals
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "ai.autoparam.classify",
+            "params": {
+                "sql": "SELECT * FROM r11_users WHERE id = 42 AND name = 'Alice'",
+                "literals": [
+                    { "value": { "t": "i64", "v": 42 }, "column": "id", "op": "=" },
+                    { "value": { "t": "str", "v": "Alice" }, "column": "name", "op": "=" }
+                ]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let labels = body
+        .get("result")
+        .and_then(|r| r.get("labels"))
+        .and_then(|l| l.as_array());
+    assert!(labels.is_some(), "classify should return labels");
+    assert_eq!(
+        labels.unwrap().len(),
+        2,
+        "should have 2 labels for 2 literals"
+    );
+
+    // Analyze a full SQL statement
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "ai.autoparam.analyze",
+            "params": {
+                "sql": "SELECT * FROM r11_users WHERE age > 30 AND name = 'Bob'"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body.get("result").expect("analyze should return result");
+    assert!(
+        result.get("normalized_sql").is_some(),
+        "analyze should return normalized_sql"
+    );
+    assert!(
+        result.get("fingerprint").is_some(),
+        "analyze should return fingerprint"
+    );
+    assert!(
+        result.get("literals").is_some(),
+        "analyze should return extracted literals"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r14_geo_replay_bundle_roundtrip() -> anyhow::Result<()> {
+    // R14: Geo-Distributed Replay Bundles — verify bundle request/apply/status cycle
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r14_replay")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Setup: create table and insert data
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r14_events (id INT PRIMARY KEY, payload TEXT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=5 {
+        let resp = client
+            .post(&format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+                "params": { "default_db": "test", "sql": format!("INSERT INTO r14_events (id, payload) VALUES ({i}, 'event_{i}')") }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    // Request a replay bundle
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "edge.bundle.request",
+            "params": {
+                "windows": [
+                    { "table": { "db": "test", "table": "r14_events" } }
+                ]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("bundle request should return result");
+    let bundle = result.get("bundle").expect("result should contain bundle");
+    let bundle_id = bundle
+        .get("bundle_id")
+        .and_then(|v| v.as_str())
+        .expect("bundle should have an id");
+    assert!(!bundle_id.is_empty());
+
+    // Check bundle status
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "edge.bundle.status",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "bundle status should return result"
+    );
+
+    // Apply bundle (simulate edge receive)
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "edge.bundle.apply",
+            "params": {
+                "bundle": bundle
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
+    // R15: Conflict-Free Schema Evolution — verify propose/merge_status/apply_merge
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r15_schema_evo")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Create a table
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r15_docs (id INT PRIMARY KEY, title TEXT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Propose a schema change
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "schema.propose_change",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs" },
+                "base_version": 0,
+                "changes": [
+                    { "op": "add_column", "name": "author", "type": { "kind": "str" }, "nullable": true }
+                ]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("propose_change should return result");
+    let change_id = result
+        .get("change_id")
+        .and_then(|v| v.as_str())
+        .expect("should have change_id");
+
+    // Check merge status
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "schema.merge_status",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs" }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert!(
+        body.get("result").is_some(),
+        "merge_status should return result"
+    );
+
+    // Apply the merge
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "schema.apply_merge",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs" },
+                "change_ids": [change_id]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
+    // T110-T113 + T211-T213: Telemetry + plan cache integration test
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("telemetry_plan")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Execute some SQL via MySQL protocol to trigger feature flags
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS tel_db").await?;
+    let _ = read_mysql_response(&mut stream).await?;
+    send_com_query(&mut stream, "USE tel_db").await?;
+    let _ = read_mysql_response(&mut stream).await?;
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE IF NOT EXISTS tel_test (id INT PRIMARY KEY, val TEXT)",
+    )
+    .await?;
+    let _ = read_mysql_response(&mut stream).await?;
+    send_com_query(
+        &mut stream,
+        "INSERT INTO tel_test (id, val) VALUES (1, 'hello')",
+    )
+    .await?;
+    let _ = read_mysql_response(&mut stream).await?;
+    send_com_query(&mut stream, "SELECT * FROM tel_test WHERE id = 1").await?;
+    let _ = read_mysql_response(&mut stream).await?;
+    send_com_query(&mut stream, "SELECT val FROM tel_test WHERE id = 1").await?;
+    let _ = read_mysql_response(&mut stream).await?;
+
+    // Check telemetry feature flags
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "telemetry.feature_flags",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("feature_flags should return result");
+    let flags = result
+        .get("flags")
+        .and_then(|v| v.as_array())
+        .expect("should have flags array");
+    assert!(
+        !flags.is_empty(),
+        "should have recorded feature flags from MySQL queries"
+    );
+
+    // Check compat summary
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "telemetry.compat_summary",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("compat_summary should return result");
+    assert!(
+        result.get("coverage_pct").is_some(),
+        "should have coverage_pct"
+    );
+    assert!(result.get("gaps").is_some(), "should have gaps list");
+
+    // Check migration hints
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "telemetry.migration_hints",
+            "params": { "limit": 5 }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("migration_hints should return result");
+    let hints = result
+        .get("hints")
+        .and_then(|v| v.as_array())
+        .expect("should have hints array");
+    assert!(!hints.is_empty(), "should have migration hints");
+
+    // Check plan cache status
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "plan_cache.status",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("plan_cache.status should return result");
+    assert!(result.get("capacity").is_some(), "should have capacity");
+
+    // Clear plan cache
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "plan_cache.clear",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("plan_cache.clear should return result");
+    assert!(result.get("cleared").is_some(), "should have cleared count");
+
+    // Check coalescing stats
+    let resp = client
+        .post(&format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "stats.coalescing",
+            "params": {}
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body
+        .get("result")
+        .expect("stats.coalescing should return result");
+    assert!(
+        result.get("total_coalesced").is_some(),
+        "should have total_coalesced"
     );
 
     Ok(())

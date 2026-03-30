@@ -32,7 +32,10 @@ const STATE = {
   easyGridInsertActive: false,
   easyGridInsertDraft: {},
   easyGridCheckedRows: {},
-  easySubTab: 'browse'
+  easySubTab: 'browse',
+  easySortColumn: '',
+  easySortDir: 'asc',
+  qbConditions: []
 };
 
 // ---------------------------------------------------------------------------
@@ -76,11 +79,11 @@ const RESEARCH_TRACKS = [
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], status: 'hardened' },
   { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index_status'], panel: 'vectors', status: 'hardened' },
-  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['autoparam.analyze', 'autoparam.classify'], panel: 'nl', status: 'prototype' },
+  { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'prototype' },
   { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'], status: 'hardened' },
-  { id: 'R14', title: 'Edge Bundles', desc: 'Offline write queue with sync-on-reconnect.', methods: ['settings.get'], status: 'prototype' },
-  { id: 'R15', title: 'Schema Evolution', desc: 'Online schema changes with merge-based migration.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], status: 'prototype' },
+  { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'rpc', status: 'hardened' },
+  { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with propose/merge/apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
   { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.synthesize', 'advisor.history', 'advisor.apply', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['system.capabilities'], status: 'prototype' },
@@ -113,7 +116,10 @@ const FEATURE_CENTER = [
   { title: 'QUIC Transport', desc: 'HTTP/3 native transport.', panel: 'cluster' },
   { title: 'Import/Export', desc: 'Bulk data operations.', panel: 'import' },
   { title: 'Window Functions', desc: 'ROW_NUMBER, RANK, DENSE_RANK + OVER.', panel: 'workspace' },
-  { title: 'User Variables', desc: 'SET @var / SELECT @var session state.', panel: 'workspace' }
+  { title: 'User Variables', desc: 'SET @var / SELECT @var session state.', panel: 'workspace' },
+  { title: 'Telemetry', desc: 'Feature flags, compat summary, migration hints.', panel: 'telemetry' },
+  { title: 'Plan Cache', desc: 'Query plan cache with fingerprinting.', panel: 'telemetry' },
+  { title: 'Query Coalescing', desc: 'Thundering herd protection with metrics.', panel: 'telemetry' }
 ];
 
 // ---------------------------------------------------------------------------
@@ -159,6 +165,12 @@ const RPC_TEMPLATES = [
   { label: 'ai.nl.translate', method: 'ai.nl.translate', params: { db:'app', request:'list users who signed up this week' } },
   { label: 'migration.rewrite_preview', method: 'migration.rewrite_preview', params: {} },
   { label: 'migration.intent_report', method: 'migration.intent_report', params: {} },
+  { label: 'telemetry.feature_flags', method: 'telemetry.feature_flags', params: {} },
+  { label: 'telemetry.compat_summary', method: 'telemetry.compat_summary', params: {} },
+  { label: 'telemetry.migration_hints', method: 'telemetry.migration_hints', params: { limit: 10 } },
+  { label: 'plan_cache.status', method: 'plan_cache.status', params: {} },
+  { label: 'plan_cache.clear', method: 'plan_cache.clear', params: {} },
+  { label: 'stats.coalescing', method: 'stats.coalescing', params: {} },
   { label: 'transport.capabilities', method: 'transport.capabilities', params: {} }
 ];
 
@@ -961,7 +973,8 @@ async function schemaCreateTable() {
 
 async function schemaDropDb() {
   const db = $('schemaDb') ? $('schemaDb').value.trim() : ''; if (!db) return;
-  if (!confirm('Drop database "' + db + '"? This cannot be undone.')) return;
+  const ok = await skeinModal('⚠️', 'Drop Database', 'Drop database "' + db + '"? This cannot be undone.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
+  if (!ok) return;
   await call('schema.drop_database', { db }, 'schemaOut');
   await loadDbTree();
 }
@@ -969,7 +982,8 @@ async function schemaDropDb() {
 async function schemaDropTable() {
   const db = $('schemaDb') ? $('schemaDb').value.trim() : '', table = $('schemaTable') ? $('schemaTable').value.trim() : '';
   if (!db || !table) return;
-  if (!confirm('Drop table "' + db + '.' + table + '"?')) return;
+  const ok = await skeinModal('⚠️', 'Drop Table', 'Drop table "' + db + '.' + table + '"?', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
+  if (!ok) return;
   await call('schema.drop_table', { db, table }, 'schemaOut');
   await loadDbTree();
 }
@@ -1282,6 +1296,7 @@ function easySetSubTab(tab) {
     if ($('easyCreateDb') && !$('easyCreateDb').value.trim()) $('easyCreateDb').value = db || '';
   }
   if (tab === 'search') easyPopulateSearchCols();
+  if (tab === 'query' && db && table) qbInit();
 }
 
 function easyShowToast(msg, type) {
@@ -1291,6 +1306,36 @@ function easyShowToast(msg, type) {
   el.className = 'easy-toast ' + (type || 'info');
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.className = 'easy-toast'; }, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Modal confirmation dialog (replaces window.confirm)
+// ---------------------------------------------------------------------------
+
+function skeinModal(icon, title, body, buttons) {
+  return new Promise(resolve => {
+    const overlay = $('modalOverlay');
+    if (!overlay) { resolve(false); return; }
+    const iconEl = $('modalIcon');
+    const titleEl = $('modalTitle');
+    const bodyEl = $('modalBody');
+    const actionsEl = $('modalActions');
+    if (iconEl) iconEl.textContent = icon || '\u26A0\uFE0F';
+    if (titleEl) titleEl.textContent = title || 'Confirm';
+    if (bodyEl) bodyEl.textContent = body || '';
+    if (actionsEl) {
+      actionsEl.textContent = '';
+      (buttons || [{ label: 'Cancel', value: false }, { label: 'OK', value: true, cls: 'primary' }]).forEach(btn => {
+        const b = document.createElement('button');
+        b.textContent = btn.label;
+        b.className = btn.cls || 'ghost';
+        b.addEventListener('click', () => { overlay.classList.remove('active'); resolve(btn.value); });
+        actionsEl.appendChild(b);
+      });
+    }
+    overlay.classList.add('active');
+    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.classList.remove('active'); resolve(false); } }, { once: true });
+  });
 }
 
 function easyUpdateBreadcrumb() {
@@ -1577,9 +1622,13 @@ function easyRenderDataGrid() {
     const th = document.createElement('th');
     const colMeta = easyColumnSchema(col);
     th.textContent = col;
-    th.title = col + ' (' + (colMeta.kind || 'string') + ')' + (colMeta.primary ? ' \uD83D\uDD11' : '') + (colMeta.nullable ? ', nullable' : '');
+    th.title = col + ' (' + (colMeta.kind || 'string') + ')' + (colMeta.primary ? ' \uD83D\uDD11' : '') + (colMeta.nullable ? ', nullable' : '') + ' \u2014 click to sort';
     if (colMeta.primary) th.style.borderBottom = '2px solid var(--accent)';
     if (easyIsNumericType(colMeta.kind)) th.style.textAlign = 'right';
+    th.classList.add('sortable');
+    if (STATE.easySortColumn === col) th.classList.add(STATE.easySortDir === 'desc' ? 'sort-desc' : 'sort-asc');
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => easySetSort(col));
     hr.appendChild(th);
   });
   thead.appendChild(hr); table.appendChild(thead);
@@ -1743,7 +1792,8 @@ async function easyDeleteRow(idx) {
   const row = STATE.easyBrowseRows[idx];
   if (!row) return;
   const pkDisplay = easyPkColumns().map(c => c + '=' + formatLit(row[c])).join(', ');
-  if (!confirm('Delete row where ' + pkDisplay + '?')) return;
+  const ok = await skeinModal('\uD83D\uDDD1\uFE0F', 'Delete Row', 'Delete row where ' + pkDisplay + '?', [{ label: 'Cancel', value: false }, { label: 'Delete', value: true, cls: 'primary' }]);
+  if (!ok) return;
   try {
     const tableRef = easyReadTableRef();
     const pk = easyRowObjectToPk(row);
@@ -1762,7 +1812,8 @@ async function easyDeleteRow(idx) {
 async function easyDeleteCheckedRows() {
   const count = easyGridCheckedCount();
   if (!count) { easyShowToast('No rows selected.', 'info'); return; }
-  if (!confirm('Delete ' + count + ' selected row(s)? This cannot be undone.')) return;
+  const ok = await skeinModal('\uD83D\uDDD1\uFE0F', 'Delete Selected', 'Delete ' + count + ' selected row(s)? This cannot be undone.', [{ label: 'Cancel', value: false }, { label: 'Delete All', value: true, cls: 'primary' }]);
+  if (!ok) return;
   try {
     const tableRef = easyReadTableRef();
     let deleted = 0;
@@ -1795,6 +1846,16 @@ function easyToggleCheckAll() {
   easyRenderDataGrid();
 }
 
+function easySetSort(col) {
+  if (STATE.easySortColumn === col) {
+    STATE.easySortDir = STATE.easySortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    STATE.easySortColumn = col;
+    STATE.easySortDir = 'asc';
+  }
+  easyBrowseRows();
+}
+
 // ---------------------------------------------------------------------------
 // Browse – Pagination & Loading
 // ---------------------------------------------------------------------------
@@ -1816,7 +1877,8 @@ async function easyBrowseRows() {
     const tableRef = easyReadTableRef();
     const limit = parseInt($('easyPerPage')?.value || '', 10) || 25;
     const offset = STATE.easyBrowseOffset || 0;
-    const orderCol = $('easyOrderCol')?.value.trim() || '';
+    const orderCol = STATE.easySortColumn || $('easyOrderCol')?.value.trim() || '';
+    const orderDir = STATE.easySortColumn ? STATE.easySortDir : 'asc';
     const desc = await call('schema.describe_table', tableRef, 'easyInsertOut');
     const descResult = unwrapRpcResult(desc, 'schema.describe_table');
     if (!STATE.easyRowColumns.length) {
@@ -1827,7 +1889,7 @@ async function easyBrowseRows() {
     const query = {
       with: [],
       body: { select: { projection, from: [tableRef] } },
-      order_by: orderCol ? [{ expr: { col: orderCol }, dir: 'asc' }] : [],
+      order_by: orderCol ? [{ expr: { col: orderCol }, dir: orderDir }] : [],
       limit: { limit, offset }
     };
     const res = await call('query.select', { query, result_format: 'rows_json' }, 'easyInsertOut');
@@ -2017,19 +2079,43 @@ async function easyDoSearch() {
     const tableRef = easyReadTableRef();
     const searchVal = $('easySearchValue')?.value.trim() || '';
     const searchCol = $('easySearchCol')?.value || '';
-    if (!searchVal) throw new Error('Enter a search value');
+    const searchOp = $('easySearchOp')?.value || 'LIKE';
+    if (!searchVal && searchOp !== 'IS NULL' && searchOp !== 'IS NOT NULL') throw new Error('Enter a search value');
     const desc = await call('schema.describe_table', tableRef, 'easyInsertOut');
     const descResult = unwrapRpcResult(desc, 'schema.describe_table');
     const cols = (descResult.columns || []).map(c => c.name);
     const projection = cols.map(name => ({ expr: { col: name }, as: null }));
     let where;
+    function buildCondition(col) {
+      const colExpr = { col };
+      switch (searchOp) {
+        case '=': return { op: 'eq', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case '!=': return { op: 'neq', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case '>': return { op: 'gt', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case '<': return { op: 'lt', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case '>=': return { op: 'gte', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case '<=': return { op: 'lte', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case 'IS NULL': return { op: 'is_null', a: colExpr };
+        case 'IS NOT NULL': return { op: 'is_not_null', a: colExpr };
+        case 'REGEXP': return { op: 'regexp', a: colExpr, b: { lit: { t: 'str', v: searchVal } } };
+        case 'BETWEEN': {
+          const parts = searchVal.split(',').map(s => s.trim());
+          if (parts.length !== 2) throw new Error('BETWEEN requires two comma-separated values');
+          return { op: 'between', a: colExpr, b: { lit: { t: 'str', v: parts[0] } }, c: { lit: { t: 'str', v: parts[1] } } };
+        }
+        default: return { op: 'like', a: colExpr, b: { lit: { t: 'str', v: '%' + searchVal + '%' } } };
+      }
+    }
     if (searchCol) {
-      where = { op: 'like', a: { col: searchCol }, b: { lit: { t: 'str', v: '%' + searchVal + '%' } } };
+      where = buildCondition(searchCol);
     } else {
-      const conditions = cols.map(col => ({
-        op: 'like', a: { fn: 'cast', args: [{ col }, { lit: { t: 'str', v: 'string' } }] }, b: { lit: { t: 'str', v: '%' + searchVal + '%' } }
-      }));
-      where = conditions.length === 1 ? conditions[0] : { op: 'or', args: conditions };
+      if (searchOp === 'IS NULL' || searchOp === 'IS NOT NULL') {
+        const conditions = cols.map(col => buildCondition(col));
+        where = conditions.length === 1 ? conditions[0] : { op: 'or', args: conditions };
+      } else {
+        const conditions = cols.map(col => buildCondition(col));
+        where = conditions.length === 1 ? conditions[0] : { op: 'or', args: conditions };
+      }
     }
     const query = {
       with: [],
@@ -2049,6 +2135,183 @@ async function easyDoSearch() {
   } catch (e) {
     easyShowToast('Search failed: ' + e.message, 'error');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Query Builder tab
+// ---------------------------------------------------------------------------
+
+function qbInit() {
+  const colsAvail = STATE.easyBrowseColumns.length ? STATE.easyBrowseColumns : STATE.easyRowColumns.map(c => c.name);
+  qbRenderColumnPicker(colsAvail);
+  qbPopulateOrderCol(colsAvail);
+  STATE.qbConditions = [];
+  qbUpdatePreview();
+}
+
+function qbRenderColumnPicker(cols) {
+  const container = $('qbColumnPicker');
+  if (!container) return;
+  container.textContent = '';
+  cols.forEach(col => {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:12px';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true; cb.value = col;
+    cb.addEventListener('change', () => qbUpdatePreview());
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(col));
+    container.appendChild(label);
+  });
+}
+
+function qbPopulateOrderCol(cols) {
+  const sel = $('qbOrderCol');
+  if (!sel) return;
+  const current = sel.value;
+  sel.textContent = '';
+  const none = document.createElement('option'); none.value = ''; none.textContent = '\u2014'; sel.appendChild(none);
+  cols.forEach(col => {
+    const opt = document.createElement('option'); opt.value = col; opt.textContent = col; sel.appendChild(opt);
+  });
+  if (current) sel.value = current;
+}
+
+function qbAddCondition() {
+  const cols = STATE.easyBrowseColumns.length ? STATE.easyBrowseColumns : STATE.easyRowColumns.map(c => c.name);
+  STATE.qbConditions.push({ col: cols[0] || '', op: '=', value: '' });
+  qbRenderConditions();
+  qbUpdatePreview();
+}
+
+function qbRemoveCondition(idx) {
+  STATE.qbConditions.splice(idx, 1);
+  qbRenderConditions();
+  qbUpdatePreview();
+}
+
+function qbClearConditions() {
+  STATE.qbConditions = [];
+  qbRenderConditions();
+  qbUpdatePreview();
+}
+
+function qbRenderConditions() {
+  const container = $('qbConditions');
+  if (!container) return;
+  container.textContent = '';
+  const cols = STATE.easyBrowseColumns.length ? STATE.easyBrowseColumns : STATE.easyRowColumns.map(c => c.name);
+  const ops = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'IS NULL', 'IS NOT NULL', 'REGEXP'];
+  STATE.qbConditions.forEach((cond, i) => {
+    const row = document.createElement('div');
+    row.className = 'qb-row';
+    if (i > 0) {
+      const logic = document.createElement('button');
+      logic.className = 'qb-logic-btn';
+      logic.textContent = 'AND';
+      row.appendChild(logic);
+    }
+    const colSel = document.createElement('select');
+    cols.forEach(c => { const o = document.createElement('option'); o.value = c; o.textContent = c; colSel.appendChild(o); });
+    colSel.value = cond.col;
+    colSel.addEventListener('change', () => { cond.col = colSel.value; qbUpdatePreview(); });
+    row.appendChild(colSel);
+    const opSel = document.createElement('select');
+    ops.forEach(o => { const opt = document.createElement('option'); opt.value = o; opt.textContent = o; opSel.appendChild(opt); });
+    opSel.value = cond.op;
+    opSel.addEventListener('change', () => { cond.op = opSel.value; qbUpdatePreview(); });
+    row.appendChild(opSel);
+    if (cond.op !== 'IS NULL' && cond.op !== 'IS NOT NULL') {
+      const input = document.createElement('input');
+      input.value = cond.value; input.placeholder = 'value';
+      input.addEventListener('input', () => { cond.value = input.value; qbUpdatePreview(); });
+      row.appendChild(input);
+    }
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'qb-remove';
+    removeBtn.textContent = '\u2715';
+    removeBtn.addEventListener('click', () => qbRemoveCondition(i));
+    row.appendChild(removeBtn);
+    container.appendChild(row);
+  });
+}
+
+function qbGetSelectedColumns() {
+  const picks = [];
+  const container = $('qbColumnPicker');
+  if (!container) return [];
+  container.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => picks.push(cb.value));
+  return picks.length ? picks : (STATE.easyBrowseColumns.length ? STATE.easyBrowseColumns : STATE.easyRowColumns.map(c => c.name));
+}
+
+function qbBuildSQL() {
+  const tableRef = easyReadTableRef();
+  const tableName = tableRef.db + '.' + tableRef.table;
+  const selectedCols = qbGetSelectedColumns();
+  const colStr = selectedCols.length ? selectedCols.join(', ') : '*';
+  let sql = 'SELECT ' + colStr + ' FROM ' + tableName;
+  if (STATE.qbConditions.length) {
+    const parts = STATE.qbConditions.map(c => {
+      if (c.op === 'IS NULL') return c.col + ' IS NULL';
+      if (c.op === 'IS NOT NULL') return c.col + ' IS NOT NULL';
+      if (c.op === 'LIKE') return c.col + " LIKE '%" + c.value.replace(/'/g, "''") + "%'";
+      return c.col + ' ' + c.op + " '" + c.value.replace(/'/g, "''") + "'";
+    });
+    sql += ' WHERE ' + parts.join(' AND ');
+  }
+  const orderCol = $('qbOrderCol')?.value || '';
+  const orderDir = $('qbOrderDir')?.value || 'ASC';
+  if (orderCol) sql += ' ORDER BY ' + orderCol + ' ' + orderDir;
+  const limit = parseInt($('qbLimit')?.value || '', 10) || 50;
+  sql += ' LIMIT ' + limit;
+  return sql + ';';
+}
+
+function qbUpdatePreview() {
+  try {
+    const sql = qbBuildSQL();
+    const el = $('qbPreview');
+    if (el) el.textContent = sql;
+  } catch (e) {
+    const el = $('qbPreview');
+    if (el) el.textContent = 'SELECT * FROM ...';
+  }
+}
+
+async function qbExecute() {
+  try {
+    const sql = qbBuildSQL();
+    const res = await call('sql.exec', { sql, default_db: easyGetSelectedDb() }, 'qbOut');
+    if (!res || !res.json) throw new Error('No response');
+    const r = res.json.result || res.json;
+    const tbl = extractSqlTable(r);
+    if (tbl) {
+      renderTable('qbResultGrid', tbl.columns, tbl.rows);
+      setOut({ rows: (tbl.rows || []).length }, 'qbOut');
+    } else {
+      setOut(r, 'qbOut');
+    }
+    easyShowToast('\u2713 Query executed.', 'success');
+  } catch (e) {
+    easyShowToast('Query Builder: ' + e.message, 'error');
+    setOut({ error: e.message }, 'qbOut');
+  }
+}
+
+function qbCopySQL() {
+  try {
+    const sql = qbBuildSQL();
+    navigator.clipboard.writeText(sql);
+    easyShowToast('SQL copied to clipboard.', 'info');
+  } catch (e) { easyShowToast('Copy failed.', 'error'); }
+}
+
+function qbSendToSQL() {
+  try {
+    const sql = qbBuildSQL();
+    if ($('sqlText')) $('sqlText').value = sql;
+    easyShowToast('SQL sent to SQL workspace tab.', 'info');
+  } catch (e) { easyShowToast('Send failed.', 'error'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -2182,7 +2445,8 @@ async function easyDoExportStruct() {
 async function easyTruncateTable() {
   try {
     const tableRef = easyReadTableRef();
-    if (!confirm('Truncate all rows from "' + tableRef.db + '.' + tableRef.table + '"? This cannot be undone.')) return;
+    const ok = await skeinModal('\u26A0\uFE0F', 'Truncate Table', 'Truncate all rows from "' + tableRef.db + '.' + tableRef.table + '"? This cannot be undone.', [{ label: 'Cancel', value: false }, { label: 'Truncate', value: true, cls: 'primary' }]);
+    if (!ok) return;
     const res = await call('sql.exec', { sql: 'DELETE FROM ' + tableRef.db + '.' + tableRef.table + ';' }, 'easyOpsOut');
     easyShowToast('\u2713 Table truncated.', 'success');
     setOut(res, 'easyOpsOut');
@@ -2196,7 +2460,8 @@ async function easyTruncateTable() {
 async function easyDropTableOp() {
   try {
     const tableRef = easyReadTableRef();
-    if (!confirm('DROP TABLE "' + tableRef.db + '.' + tableRef.table + '"? This permanently deletes the table and all data.')) return;
+    const okDrop = await skeinModal('\u26A0\uFE0F', 'Drop Table', 'DROP TABLE "' + tableRef.db + '.' + tableRef.table + '"? This permanently deletes the table and all data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
+    if (!okDrop) return;
     const res = await call('schema.drop_table', tableRef, 'easyOpsOut');
     easyShowToast('\u2713 Table "' + tableRef.table + '" dropped.', 'success');
     setOut(res, 'easyOpsOut');
@@ -2215,7 +2480,8 @@ async function easyDropDbOp() {
   try {
     const db = easyGetSelectedDb();
     if (!db) throw new Error('Select a database first');
-    if (!confirm('DROP DATABASE "' + db + '"? This permanently deletes ALL tables and data.')) return;
+    const okDropDb = await skeinModal('\u26A0\uFE0F', 'Drop Database', 'DROP DATABASE "' + db + '"? This permanently deletes ALL tables and data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
+    if (!okDropDb) return;
     const res = await call('schema.drop_database', { db }, 'easyOpsOut');
     easyShowToast('\u2713 Database "' + db + '" dropped.', 'success');
     setOut(res, 'easyOpsOut');
@@ -2580,6 +2846,79 @@ function renderFeatureCenterGrid() {
     const btn = document.createElement('button'); btn.className = 'sm'; btn.textContent = 'Open';
     btn.addEventListener('click', () => setActivePanel(f.panel, true));
     card.appendChild(btn); grid.appendChild(card);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard cards – Top Tables, Slow Queries, Sessions, Index Health, Research
+// ---------------------------------------------------------------------------
+
+async function refreshTopTables() {
+  try {
+    const tree = STATE.dbTree || {};
+    const rows = [];
+    for (const db of Object.keys(tree)) {
+      for (const table of (tree[db] || [])) {
+        rows.push([db + '.' + table, '\u2014']);
+      }
+    }
+    rows.sort((a, b) => a[0].localeCompare(b[0]));
+    renderTable('topTablesGrid', ['Table', 'Rows (est.)'], rows.slice(0, 10));
+  } catch (e) { easyShowToast('Top tables: ' + e.message, 'error'); }
+}
+
+async function refreshSlowQueries() {
+  try {
+    const history = STATE.sqlHistory || [];
+    const rows = history.slice(-10).reverse().map(entry => [
+      typeof entry === 'string' ? entry : (entry.sql || ''),
+      typeof entry === 'string' ? '\u2014' : (entry.ms || '\u2014')
+    ]);
+    renderTable('slowQueryGrid', ['Query', 'Time (ms)'], rows.length ? rows : [['No queries recorded', '\u2014']]);
+  } catch (e) { easyShowToast('Slow queries: ' + e.message, 'error'); }
+}
+
+async function refreshActiveSessions() {
+  try {
+    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+    el('statActiveSessions', '1');
+    el('statIdleSessions', '0');
+    el('statLongestQuery', '<1s');
+  } catch (e) { easyShowToast('Sessions: ' + e.message, 'error'); }
+}
+
+async function refreshIndexHealth() {
+  try {
+    const res = await call('advisor.history', {}, 'out');
+    const result = res?.json?.result;
+    const recs = Array.isArray(result?.recommendations) ? result.recommendations : [];
+    const applied = recs.filter(r => r.status === 'applied').length;
+    const dismissed = recs.filter(r => r.status === 'dismissed').length;
+    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+    el('statIndexRecs', String(recs.length));
+    el('statIndexApplied', String(applied));
+    el('statIndexDismissed', String(dismissed));
+  } catch (e) {
+    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+    el('statIndexRecs', '0');
+    el('statIndexApplied', '0');
+    el('statIndexDismissed', '0');
+  }
+}
+
+function renderResearchStatusGrid() {
+  const grid = $('researchStatusGrid'); if (!grid) return;
+  grid.textContent = '';
+  RESEARCH_TRACKS.forEach(track => {
+    const card = document.createElement('div');
+    card.className = 'feature-card';
+    const badge = track.status === 'hardened' ? '<span class="tag secondary" style="font-size:9px">\u2705 hardened</span>' : '<span class="tag" style="font-size:9px">\uD83D\uDEA7 proto</span>';
+    card.innerHTML = '<div class="feature-title" style="font-size:11px">' + escapeHtml(track.id) + ' ' + badge + '</div><div class="hint" style="font-size:10px">' + escapeHtml(track.title) + '</div>';
+    if (track.panel) {
+      card.style.cursor = 'pointer';
+      card.addEventListener('click', () => setActivePanel(track.panel, true));
+    }
+    grid.appendChild(card);
   });
 }
 
@@ -3285,6 +3624,22 @@ wire('easyBtnDropTable', easyDropTableOp);
 wire('easyBtnDropDb', easyDropDbOp);
 wire('easyBtnRunSql', easyRunSql);
 wire('easyBtnClearSql', () => { if ($('easySqlText')) $('easySqlText').value = ''; renderTable('easySqlGrid', [], []); setOut('', 'easySqlOut'); });
+
+// Query Builder
+wire('qbBtnAddCondition', qbAddCondition);
+wire('qbBtnClearConditions', qbClearConditions);
+wire('qbBtnExecute', qbExecute);
+wire('qbBtnCopySQL', qbCopySQL);
+wire('qbBtnSendToSQL', qbSendToSQL);
+if ($('qbOrderCol')) $('qbOrderCol').addEventListener('change', () => qbUpdatePreview());
+if ($('qbOrderDir')) $('qbOrderDir').addEventListener('change', () => qbUpdatePreview());
+if ($('qbLimit')) $('qbLimit').addEventListener('change', () => qbUpdatePreview());
+
+// Dashboard cards
+wire('btnRefreshTopTables', refreshTopTables);
+wire('btnRefreshSlowQueries', refreshSlowQueries);
+wire('btnRefreshSessions', refreshActiveSessions);
+wire('btnRefreshIndexHealth', refreshIndexHealth);
 if ($('easySqlText')) $('easySqlText').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); easyRunSql(); } });
 if ($('easyTreeFilter')) $('easyTreeFilter').addEventListener('input', () => easyRenderTree());
 if ($('easyPerPage')) $('easyPerPage').addEventListener('change', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
@@ -3465,6 +3820,7 @@ initKeyboardShortcuts();
 loadSqlHistory();
 renderResearchDashboard();
 renderFeatureCenterGrid();
+renderResearchStatusGrid();
 renderResearchSettings();
 schemaBuilderSeedDefaults();
 easySetBuilderRows(defaultEasyBuilderRows());

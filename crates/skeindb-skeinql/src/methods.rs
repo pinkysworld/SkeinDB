@@ -1052,6 +1052,125 @@ pub struct AdvisorHistoryResult {
 }
 
 // --------------------------------
+// telemetry.* (Phase 11)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryFeatureFlagsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureFlagEntry {
+    pub name: String,
+    pub category: String,
+    pub hit_count: u64,
+    pub last_seen_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryFeatureFlagsResult {
+    pub flags: Vec<FeatureFlagEntry>,
+    pub total_queries: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryCompatSummaryParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompatGap {
+    pub feature: String,
+    pub category: String,
+    pub severity: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryCompatSummaryResult {
+    pub supported_features: u64,
+    pub total_features: u64,
+    pub coverage_pct: f64,
+    pub gaps: Vec<CompatGap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryMigrationHintsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationHint {
+    pub pattern: String,
+    pub mysql_form: String,
+    pub skeinql_form: String,
+    pub confidence: f64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryMigrationHintsResult {
+    pub hints: Vec<MigrationHint>,
+}
+
+// --------------------------------
+// plan_cache.* (Phase 22)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheStatusParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheEntry {
+    pub fingerprint: String,
+    pub normalized_sql: String,
+    pub hit_count: u64,
+    pub created_ms: u64,
+    pub last_hit_ms: u64,
+    pub schema_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheStatusResult {
+    pub entries: Vec<PlanCacheEntry>,
+    pub total_hits: u64,
+    pub total_misses: u64,
+    pub evictions: u64,
+    pub capacity: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheClearParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanCacheClearResult {
+    pub cleared: u64,
+}
+
+// --------------------------------
+// stats.coalescing (Phase 16)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsCoalescingParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsCoalescingResult {
+    pub total_coalesced: u64,
+    pub total_leader: u64,
+    pub total_follower: u64,
+    pub in_flight_now: u64,
+    pub saved_executions: u64,
+}
+
+// --------------------------------
 // migration.* (research / experimental)
 // --------------------------------
 

@@ -308,6 +308,12 @@ struct CachedSelect {
     columns: Vec<ColumnMeta>,
     rows: Vec<Vec<Lit>>,
     keys: Option<Vec<Vec<Lit>>>,
+    // Plan cache metadata (T211)
+    query: Option<String>,
+    hits: u64,
+    created_ms: u64,
+    last_hit_ms: u64,
+    schema_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2743,6 +2749,11 @@ impl Engine {
                             columns: c.clone(),
                             rows: r.clone(),
                             keys,
+                            query: Some(format!("{:?}", query)),
+                            hits: 0,
+                            created_ms: now_millis(),
+                            last_hit_ms: now_millis(),
+                            schema_version: 0,
                         },
                     );
                 }
@@ -3394,9 +3405,13 @@ impl Engine {
         args: &[Lit],
     ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
         // Try cache first.
-        if let Some(hit) = self.cached_select.lock().unwrap().get(etag).cloned() {
-            if let Some(keys) = hit.keys {
-                return Ok((hit.columns, hit.rows, keys));
+        if let Some(hit) = self.cached_select.lock().unwrap().get_mut(etag) {
+            if let Some(keys) = hit.keys.clone() {
+                hit.hits += 1;
+                hit.last_hit_ms = now_millis();
+                let columns = hit.columns.clone();
+                let rows = hit.rows.clone();
+                return Ok((columns, rows, keys));
             }
         }
 
@@ -3408,6 +3423,11 @@ impl Engine {
                 columns: c.clone(),
                 rows: r.clone(),
                 keys: Some(keys.clone()),
+                query: Some(format!("{:?}", query)),
+                hits: 0,
+                created_ms: now_millis(),
+                last_hit_ms: now_millis(),
+                schema_version: 0,
             },
         );
         Ok((c, r, keys))
@@ -3806,6 +3826,202 @@ impl Engine {
             min_bucket,
             max_bucket,
         })
+    }
+
+    // -----------------------------
+    // telemetry.* (Phase 11)
+    // -----------------------------
+
+    pub fn telemetry_compat_summary(
+        &self,
+        params: skeindb_skeinql::methods::TelemetryCompatSummaryParams,
+    ) -> anyhow::Result<skeindb_skeinql::methods::TelemetryCompatSummaryResult> {
+        let limit = params.limit.unwrap_or(50).clamp(1, 200) as usize;
+        // Define known MySQL features and their implementation status
+        let features: Vec<(&str, &str, bool)> = vec![
+            ("SELECT", "dml", true),
+            ("INSERT", "dml", true),
+            ("UPDATE", "dml", true),
+            ("DELETE", "dml", true),
+            ("CREATE TABLE", "ddl", true),
+            ("ALTER TABLE", "ddl", true),
+            ("DROP TABLE", "ddl", true),
+            ("CREATE INDEX", "ddl", true),
+            ("DROP INDEX", "ddl", true),
+            ("TRUNCATE TABLE", "ddl", true),
+            ("RENAME TABLE", "ddl", true),
+            ("CREATE DATABASE", "ddl", true),
+            ("DROP DATABASE", "ddl", true),
+            ("INNER JOIN", "join", true),
+            ("LEFT JOIN", "join", true),
+            ("RIGHT JOIN", "join", true),
+            ("CROSS JOIN", "join", true),
+            ("NATURAL JOIN", "join", true),
+            ("FULL OUTER JOIN", "join", true),
+            ("COUNT/SUM/AVG/MIN/MAX", "aggregate", true),
+            ("GROUP_CONCAT", "aggregate", true),
+            ("BIT_AND/BIT_OR/BIT_XOR", "aggregate", true),
+            ("GROUP BY / HAVING", "aggregate", true),
+            ("ROW_NUMBER/RANK/DENSE_RANK", "window", true),
+            ("NTILE/LEAD/LAG", "window", false),
+            ("FIRST_VALUE/LAST_VALUE", "window", false),
+            ("UNION / UNION ALL", "set_op", true),
+            ("INTERSECT / EXCEPT", "set_op", false),
+            ("Subqueries", "subquery", true),
+            ("CTE (WITH ... AS)", "cte", true),
+            ("Recursive CTE", "cte", false),
+            ("JSON functions", "json", true),
+            ("Prepared statements", "prepared", true),
+            ("User variables (@var)", "session", true),
+            ("Transactions", "transaction", true),
+            ("INFORMATION_SCHEMA", "schema", true),
+            ("SHOW commands", "admin", true),
+            ("LOCK/UNLOCK TABLES", "admin", true),
+            ("CREATE VIEW", "view", true),
+            ("Stored procedures", "procedure", false),
+            ("Triggers", "trigger", false),
+            ("Events", "event", false),
+            ("Cursors (server-side)", "cursor", false),
+            ("LOAD DATA INFILE", "import", false),
+            ("SELECT INTO OUTFILE", "export", false),
+            ("Spatial types/functions", "spatial", false),
+            ("Full-text search", "fts", false),
+            ("Partitioning", "partition", false),
+            ("Foreign key constraints", "constraint", false),
+            ("CHECK constraints", "constraint", false),
+            ("Generated columns", "generated", false),
+        ];
+
+        let supported = features.iter().filter(|(_, _, s)| *s).count() as u64;
+        let total = features.len() as u64;
+        let coverage_pct = if total > 0 {
+            (supported as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let mut gaps: Vec<skeindb_skeinql::methods::CompatGap> = features
+            .iter()
+            .filter(|(_, _, s)| !*s)
+            .map(|(name, cat, _)| skeindb_skeinql::methods::CompatGap {
+                feature: name.to_string(),
+                category: cat.to_string(),
+                severity: if matches!(*cat, "window" | "cte") {
+                    "medium".to_string()
+                } else {
+                    "low".to_string()
+                },
+                description: format!("{} is not yet implemented", name),
+            })
+            .collect();
+        gaps.truncate(limit);
+
+        Ok(skeindb_skeinql::methods::TelemetryCompatSummaryResult {
+            supported_features: supported,
+            total_features: total,
+            coverage_pct,
+            gaps,
+        })
+    }
+
+    pub fn telemetry_migration_hints(
+        &self,
+        params: skeindb_skeinql::methods::TelemetryMigrationHintsParams,
+    ) -> anyhow::Result<skeindb_skeinql::methods::TelemetryMigrationHintsResult> {
+        let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+        let min_confidence = params.min_confidence.unwrap_or(0.0);
+
+        let hints = vec![
+            skeindb_skeinql::methods::MigrationHint {
+                pattern: "SELECT ... FROM ... WHERE".to_string(),
+                mysql_form: "SELECT * FROM users WHERE id = 1".to_string(),
+                skeinql_form: "query.select({\"query\":{\"from\":{\"db\":\"default\",\"table\":\"users\"},\"where\":\"id = ?\"},\"args\":[{\"t\":\"u64\",\"v\":1}]})".to_string(),
+                confidence: 0.95,
+                description: "Simple queries can use query.select with parameterized args for better caching".to_string(),
+            },
+            skeindb_skeinql::methods::MigrationHint {
+                pattern: "INSERT INTO ... VALUES".to_string(),
+                mysql_form: "INSERT INTO users (name) VALUES ('Alice')".to_string(),
+                skeinql_form: "data.insert({\"into\":{\"db\":\"default\",\"table\":\"users\"},\"rows\":[{\"name\":{\"t\":\"str\",\"v\":\"Alice\"}}]})".to_string(),
+                confidence: 0.92,
+                description: "Inserts map directly to data.insert with typed literals".to_string(),
+            },
+            skeindb_skeinql::methods::MigrationHint {
+                pattern: "UPDATE ... SET ... WHERE".to_string(),
+                mysql_form: "UPDATE users SET name = 'Bob' WHERE id = 1".to_string(),
+                skeinql_form: "data.update({\"table\":{\"db\":\"default\",\"table\":\"users\"},\"where\":\"id = ?\",\"set\":{\"name\":\"Bob\"},\"args\":[{\"t\":\"u64\",\"v\":1}]})".to_string(),
+                confidence: 0.90,
+                description: "Updates map to data.update with ETag support for optimistic concurrency".to_string(),
+            },
+            skeindb_skeinql::methods::MigrationHint {
+                pattern: "Aggregate with GROUP BY".to_string(),
+                mysql_form: "SELECT dept, COUNT(*) FROM users GROUP BY dept".to_string(),
+                skeinql_form: "query.select with GROUP BY preserved in SQL translation".to_string(),
+                confidence: 0.85,
+                description: "Aggregates work through SQL translation; consider SkeinQL dp.aggregate for privacy-safe alternatives".to_string(),
+            },
+            skeindb_skeinql::methods::MigrationHint {
+                pattern: "Schema migration".to_string(),
+                mysql_form: "ALTER TABLE users ADD COLUMN active BOOLEAN".to_string(),
+                skeinql_form: "schema.propose_change({\"table\":{\"db\":\"default\",\"table\":\"users\"},\"changes\":[{\"add_column\":{\"name\":\"active\",\"type\":{\"kind\":\"bool\"}}}]})".to_string(),
+                confidence: 0.88,
+                description: "SkeinQL schema evolution supports conflict-free merges across replicas".to_string(),
+            },
+        ];
+
+        let filtered: Vec<_> = hints
+            .into_iter()
+            .filter(|h| h.confidence >= min_confidence)
+            .take(limit)
+            .collect();
+
+        Ok(skeindb_skeinql::methods::TelemetryMigrationHintsResult { hints: filtered })
+    }
+
+    // -----------------------------
+    // plan_cache.* (Phase 22)
+    // -----------------------------
+
+    pub fn plan_cache_status(
+        &self,
+        hits: u64,
+        misses: u64,
+        evictions: u64,
+    ) -> skeindb_skeinql::methods::PlanCacheStatusResult {
+        let cache = self.cached_select.lock().unwrap();
+        let entries: Vec<skeindb_skeinql::methods::PlanCacheEntry> = cache
+            .iter()
+            .take(100)
+            .map(|(fp, cs)| skeindb_skeinql::methods::PlanCacheEntry {
+                fingerprint: fp.clone(),
+                normalized_sql: cs
+                    .query
+                    .as_ref()
+                    .map(|q| format!("{:?}", q))
+                    .unwrap_or_default(),
+                hit_count: cs.hits,
+                created_ms: cs.created_ms,
+                last_hit_ms: cs.last_hit_ms,
+                schema_version: cs.schema_version,
+            })
+            .collect();
+        let capacity = 4096u64;
+        skeindb_skeinql::methods::PlanCacheStatusResult {
+            entries,
+            total_hits: hits,
+            total_misses: misses,
+            evictions,
+            capacity,
+        }
+    }
+
+    pub fn plan_cache_clear(&mut self) -> skeindb_skeinql::methods::PlanCacheClearResult {
+        let mut cache = self.cached_select.lock().unwrap();
+        let cleared = cache.len() as u64;
+        cache.clear();
+        let mut patch_cache = self.cached_patch.lock().unwrap();
+        patch_cache.clear();
+        skeindb_skeinql::methods::PlanCacheClearResult { cleared }
     }
 
     // -----------------------------
