@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R10 — Vector Embeddings as First-Class ValueIDs · SkeinDB</title>
+  <meta name="description" content="LSH-extended ValueID scheme for unified structured data and vector embedding storage. SkeinDB Research Track R10.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="area-ai">
+
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../docs.html">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<section class="hero">
+  <a class="hero-back" href="../index.html#research">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    All Research Tracks
+  </a>
+  <div class="hero-badge">R10 · AI/ML Integration</div>
+  <h1>Vector Embeddings as First-Class ValueIDs</h1>
+  <p class="abstract">SkeinDB's content-addressed ValueStore naturally extends to vector embeddings. By incorporating locality-sensitive hashing (LSH) into ValueIDs, similar vectors receive related IDs — enabling deduplication of similar (not just identical) content. This creates a unified storage model where text, embeddings, and structured data share infrastructure, with hybrid queries combining SQL predicates and approximate nearest neighbor search.</p>
+</section>
+
+<div class="content">
+
+  <div class="status-bar">
+    <span class="status-dot proposal"></span>
+    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+  </div>
+
+  <div class="novelty-card">
+    <h2>🔬 What's Novel</h2>
+    <ul>
+      <li><strong>LSH-extended ValueID scheme</strong> for approximate content addressing in a unified storage model</li>
+      <li>Unified storage where structured data and embeddings share the same ValueStore infrastructure</li>
+      <li>Hybrid query execution combining SQL predicates with approximate nearest neighbor search</li>
+      <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔧</span> Technical Approach</h2>
+    <div class="phase">
+      <h3>Phase 1 — LSH-ValueID Design</h3>
+      <p>ValueID = (LSH_bucket, content_hash). Similar embeddings share LSH buckets, enabling approximate lookup via bucket enumeration while preserving exact-match deduplication.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 2 — Unified Storage</h3>
+      <p>Extend ValueStore for embedding-type values: automatic LSH computation on insert, approximate nearest neighbor via LSH bucket filtering, and exact distance refinement.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3 — Hybrid Queries</h3>
+      <p>SkeinQL extensions combining SQL predicates with vector similarity: <code>SELECT * FROM docs WHERE category = 'tech' ORDER BY embedding &lt;-&gt; query_vector LIMIT 10</code>.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 4 — Dependency Tracking</h3>
+      <p>Extend dependency tracking to embedding relationships. If document D has embedding E, queries on E are invalidated when D changes — ensuring embedding freshness automatically.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🧪</span> Hypotheses</h2>
+    <div class="hypo">
+      <span class="hypo-id">H1</span>
+      <p>LSH extends ValueID semantics to support "similar" lookups while preserving exact-match deduplication for identical vectors.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H2</span>
+      <p>Co-locating embeddings with source data in unified ValueStore reduces the impedance mismatch of separate vector databases.</p>
+    </div>
+    <div class="hypo">
+      <span class="hypo-id">H3</span>
+      <p>Dependency tracking extends to embedding-based queries for cache invalidation when source data changes.</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔗</span> SkeinDB Integration</h2>
+    <div class="integration">
+      <div class="int-chip">ValueID Store</div>
+      <div class="int-chip">LSH Hashing</div>
+      <div class="int-chip">SkeinQL RPC</div>
+      <div class="int-chip">Dependency Tracking</div>
+      <div class="int-chip">LSM / Compaction</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">📚</span> Key References</h2>
+    <ul class="ref-list">
+      <li>Johnson et al. — <em>"Billion-Scale Similarity Search with GPUs (FAISS)"</em> (2019)</li>
+      <li>Malkov &amp; Yashunin — <em>"Efficient and Robust Approximate Nearest Neighbor using Hierarchical Navigable Small World Graphs (HNSW)"</em> (2018)</li>
+      <li>Wang et al. — <em>"Milvus: A Purpose-Built Vector Data Management System"</em> (2021)</li>
+    </ul>
+  </div>
+
+  <div class="nav-tracks">
+    <a class="nav-track" href="r09.html">← R09 — QUIC-Native Protocol</a>
+    <a class="nav-track next" href="r11.html">R11 — Autoparameterization →</a>
+  </div>
+</div>
+
+<footer>
+  <p>SkeinDB — Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Michél Nguyen</a> · <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a></p>
+</footer>
+
+</body>
+</html>

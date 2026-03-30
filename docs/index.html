@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC</title>
+  <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL &amp; PostgreSQL compatibility, and web-native administration.">
+  <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <meta property="og:title" content="SkeinDB — Single-Binary Database">
+  <meta property="og:description" content="Cell-interned MVCC · 74 RPC methods · 20 research tracks (14 hardened) · MySQL &amp; PostgreSQL compatible · One binary">
+  <meta property="og:type" content="website">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #09090b;
+      --bg-card: #18181b;
+      --bg-card-hover: #1f1f23;
+      --border: #27272a;
+      --border-accent: #3f3f46;
+      --text: #fafafa;
+      --text-secondary: #a1a1aa;
+      --text-dim: #71717a;
+      --accent: #6366f1;
+      --accent-light: #818cf8;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --cyan: #06b6d4;
+      --rose: #f43f5e;
+      --purple: #a855f7;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* --- NAV --- */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(9,9,11,.85);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 56px;
+    }
+    .nav-logo {
+      font-size: 1.1rem; font-weight: 800; letter-spacing: -.02em;
+      background: linear-gradient(135deg, var(--accent-light), var(--cyan));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      text-decoration: none;
+    }
+    .nav-links { display: flex; gap: 1.5rem; align-items: center; }
+    .nav-links a {
+      color: var(--text-secondary); text-decoration: none; font-size: .85rem; font-weight: 500;
+      transition: color .2s;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-links a.nav-docs-cta {
+      color: var(--accent-light); font-weight: 600;
+      padding: 4px 12px; border-radius: 6px;
+      background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.2);
+      transition: background .2s, border-color .2s;
+    }
+    .nav-links a.nav-docs-cta:hover { background: rgba(99,102,241,.15); border-color: rgba(99,102,241,.4); }
+    .nav-gh {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      padding: 6px 14px; border-radius: 20px;
+      color: var(--text); text-decoration: none; font-size: .82rem; font-weight: 500;
+      transition: border-color .2s, background .2s;
+    }
+    .nav-gh:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+    .nav-gh svg { width: 16px; height: 16px; fill: currentColor; }
+
+    /* --- MOBILE MENU --- */
+    .nav-hamburger {
+      display: none; background: none; border: none; cursor: pointer;
+      color: var(--text-secondary); padding: 4px;
+    }
+    .nav-hamburger svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; }
+    .mobile-menu {
+      display: none; position: fixed; inset: 0; z-index: 200;
+      background: rgba(9,9,11,.95); backdrop-filter: blur(20px);
+      flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem;
+    }
+    .mobile-menu.open { display: flex; }
+    .mobile-menu a {
+      color: var(--text); text-decoration: none; font-size: 1.2rem; font-weight: 600;
+      padding: 8px 24px; border-radius: 8px; transition: background .2s;
+    }
+    .mobile-menu a:hover { background: var(--bg-card); }
+    .mobile-menu-close {
+      position: absolute; top: 1rem; right: 1.5rem;
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+    }
+    .mobile-menu-close svg { width: 24px; height: 24px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+    /* --- HERO --- */
+    .hero {
+      max-width: 1200px; margin: 0 auto;
+      padding: 6rem 2rem 4rem;
+      text-align: center;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute; top: -200px; left: 50%; transform: translateX(-50%);
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(99,102,241,.12) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.25);
+      padding: 6px 16px; border-radius: 20px;
+      font-size: .78rem; font-weight: 500; color: var(--accent-light);
+      margin-bottom: 1.5rem;
+    }
+    .hero-badge .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s ease infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .hero h1 {
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
+      font-weight: 900; letter-spacing: -.03em;
+      line-height: 1.1; margin-bottom: 1.2rem;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(135deg, var(--accent-light), var(--cyan), var(--green));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      max-width: 680px; margin: 0 auto 2rem;
+      font-size: 1.1rem; color: var(--text-secondary); line-height: 1.7;
+    }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 24px; border-radius: 10px;
+      font-size: .9rem; font-weight: 600; text-decoration: none;
+      transition: transform .15s, box-shadow .2s;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #4f46e5);
+      color: #fff; box-shadow: 0 4px 20px rgba(99,102,241,.3);
+    }
+    .btn-primary:hover { box-shadow: 0 6px 30px rgba(99,102,241,.45); }
+    .btn-secondary {
+      background: var(--bg-card); border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn-secondary:hover { border-color: var(--accent); }
+    .btn-ghost {
+      background: transparent; border: 1px solid transparent;
+      color: var(--accent-light);
+    }
+    .btn-ghost:hover { background: rgba(99,102,241,.08); border-color: rgba(99,102,241,.2); }
+
+    /* --- STATS --- */
+    .stats {
+      max-width: 1200px; margin: 0 auto;
+      padding: 0 2rem 3rem;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 1rem;
+    }
+    .stat {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.5rem; text-align: center;
+      transition: border-color .2s;
+    }
+    .stat:hover { border-color: var(--accent); }
+    .stat-num {
+      font-size: 1.8rem; font-weight: 800; letter-spacing: -.02em;
+      background: linear-gradient(135deg, var(--accent-light), var(--cyan));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .stat-label { font-size: .78rem; color: var(--text-dim); margin-top: 4px; font-weight: 500; }
+
+    /* --- SECTIONS --- */
+    section { max-width: 1200px; margin: 0 auto; padding: 4rem 2rem; }
+    .section-header { text-align: center; margin-bottom: 3rem; }
+    .section-header h2 {
+      font-size: 2rem; font-weight: 800; letter-spacing: -.02em;
+      margin-bottom: .5rem;
+    }
+    .section-header p { color: var(--text-secondary); max-width: 600px; margin: 0 auto; font-size: .95rem; }
+
+    /* --- FEATURES --- */
+    .features-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 1.25rem;
+    }
+    .feature-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.75rem;
+      transition: border-color .2s, transform .15s;
+      position: relative;
+    }
+    .feature-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .feature-icon {
+      width: 40px; height: 40px; border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.2rem; margin-bottom: 1rem;
+    }
+    .feature-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: .5rem; }
+    .feature-card p { font-size: .85rem; color: var(--text-secondary); line-height: 1.6; }
+    .status-badge {
+      position: absolute; top: 1rem; right: 1rem;
+      font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+      padding: 3px 8px; border-radius: 4px;
+    }
+    .status-implemented { background: rgba(16,185,129,.12); color: var(--green); }
+    .status-prototype  { background: rgba(245,158,11,.12); color: var(--amber); }
+    .status-planned     { background: rgba(99,102,241,.12); color: var(--accent-light); }
+
+    /* --- ARCHITECTURE --- */
+    .arch-wrapper {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 2rem; overflow-x: auto;
+    }
+    .arch-wrapper img {
+      width: 100%; max-width: 900px; display: block; margin: 0 auto;
+    }
+    .arch-fallback {
+      text-align: center; padding: 3rem 2rem; color: var(--text-secondary); font-size: .9rem;
+    }
+    .arch-fallback code {
+      background: var(--bg); padding: 3px 8px; border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace; font-size: .82rem;
+    }
+
+    /* --- RESEARCH TRACKS --- */
+    .tracks-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+      gap: .75rem;
+    }
+    .track {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: .75rem 1rem;
+      transition: border-color .2s, transform .15s;
+      text-decoration: none; color: inherit;
+    }
+    .track:hover { border-color: var(--green); transform: translateY(-1px); }
+    .track-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .72rem; font-weight: 600; color: var(--green);
+      background: rgba(16,185,129,.1); border-radius: 4px;
+      padding: 2px 6px; white-space: nowrap;
+    }
+    .track-name { font-size: .82rem; font-weight: 500; }
+
+    /* --- QUICK START --- */
+    .quickstart {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .quickstart-header {
+      padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .quickstart-header .dots { display: flex; gap: 6px; }
+    .quickstart-header .dots span { width: 10px; height: 10px; border-radius: 50%; }
+    .quickstart-header .dots span:nth-child(1) { background: #ef4444; }
+    .quickstart-header .dots span:nth-child(2) { background: #f59e0b; }
+    .quickstart-header .dots span:nth-child(3) { background: #22c55e; }
+    .quickstart-header span.title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .78rem; color: var(--text-dim); margin-left: 8px;
+    }
+    .quickstart pre {
+      padding: 1.5rem; overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .82rem; line-height: 1.8; color: var(--text-secondary);
+    }
+    .quickstart pre .comment { color: var(--text-dim); }
+    .quickstart pre .cmd { color: var(--green); }
+    .quickstart pre .flag { color: var(--amber); }
+    .quickstart pre .url { color: var(--cyan); }
+
+    /* --- PAPER --- */
+    .paper-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 2.5rem;
+      display: flex; gap: 2.5rem; align-items: flex-start; flex-wrap: wrap;
+    }
+    .paper-info { flex: 1; min-width: 280px; }
+    .paper-info h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: .75rem; line-height: 1.4; }
+    .paper-meta { margin-bottom: 1rem; }
+    .paper-meta span {
+      display: inline-block; padding: 3px 10px; border-radius: 6px; margin: 2px 4px 2px 0;
+      font-size: .72rem; font-weight: 600;
+    }
+    .paper-abstract { font-size: .85rem; color: var(--text-secondary); line-height: 1.7; }
+    .paper-stats { display: flex; flex-direction: column; gap: .75rem; min-width: 180px; }
+    .paper-stat {
+      background: rgba(99,102,241,.06); border: 1px solid rgba(99,102,241,.15);
+      border-radius: var(--radius-sm); padding: .75rem 1rem;
+      text-align: center;
+    }
+    .paper-stat-num { font-size: 1.3rem; font-weight: 800; color: var(--accent-light); }
+    .paper-stat-label { font-size: .7rem; color: var(--text-dim); }
+
+    /* --- FOOTER --- */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 3rem 2rem 2rem;
+    }
+    .footer-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; justify-content: space-between; align-items: start;
+      flex-wrap: wrap; gap: 2rem;
+    }
+    .footer-brand { max-width: 280px; }
+    .footer-brand .nav-logo { font-size: 1rem; display: inline-block; margin-bottom: .5rem; }
+    .footer-brand p { font-size: .78rem; color: var(--text-dim); line-height: 1.6; }
+    .footer-col h4 { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); margin-bottom: .75rem; }
+    .footer-col a { display: block; color: var(--text-dim); text-decoration: none; font-size: .82rem; padding: 3px 0; transition: color .2s; }
+    .footer-col a:hover { color: var(--accent-light); }
+    .footer-bottom {
+      max-width: 1200px; margin: 2rem auto 0;
+      padding-top: 1.5rem; border-top: 1px solid var(--border);
+      text-align: center;
+    }
+    .footer-bottom p { color: var(--text-dim); font-size: .78rem; }
+    .footer-bottom a { color: var(--accent-light); text-decoration: none; }
+    .footer-bottom a:hover { text-decoration: underline; }
+
+    /* --- RESPONSIVE --- */
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .nav-hamburger { display: block; }
+      .features-grid { grid-template-columns: 1fr; }
+      .paper-card { flex-direction: column; }
+      .footer-inner { flex-direction: column; gap: 1.5rem; }
+      .hero { padding: 4rem 1.5rem 3rem; }
+      .hero h1 { font-size: 2rem; }
+      .tracks-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#research">Research</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="#paper">Paper</a>
+      <a href="docs.html" class="nav-docs-cta">Docs</a>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <button class="nav-hamburger" onclick="document.getElementById('mobileMenu').classList.add('open')" aria-label="Open menu">
+        <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- MOBILE MENU -->
+<div class="mobile-menu" id="mobileMenu">
+  <button class="mobile-menu-close" onclick="document.getElementById('mobileMenu').classList.remove('open')" aria-label="Close menu">
+    <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+  </button>
+  <a href="#features" onclick="document.getElementById('mobileMenu').classList.remove('open')">Features</a>
+  <a href="#architecture" onclick="document.getElementById('mobileMenu').classList.remove('open')">Architecture</a>
+  <a href="#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research</a>
+  <a href="#quickstart" onclick="document.getElementById('mobileMenu').classList.remove('open')">Quick Start</a>
+  <a href="#paper" onclick="document.getElementById('mobileMenu').classList.remove('open')">Paper</a>
+  <a href="docs.html">Documentation</a>
+  <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+</div>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">
+    <span class="dot"></span>
+    Rust · Single Binary · Open Source
+  </div>
+  <h1>
+    The Database That<br>
+    <span class="grad">Researches Itself</span>
+  </h1>
+  <p>
+    SkeinDB is a single-binary database combining cell-interned MVCC storage,
+    MySQL &amp; PostgreSQL compatibility, 20 opt-in research features (14 hardened), and a full web admin —
+    all in one Rust executable.
+  </p>
+  <div class="hero-actions">
+    <a href="#quickstart" class="btn btn-primary">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      Get Started
+    </a>
+    <a href="docs.html" class="btn btn-secondary">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      Read the Docs
+    </a>
+    <a href="https://github.com/pinkysworld/SkeinDB" class="btn btn-ghost" target="_blank" rel="noopener">
+      View on GitHub →
+    </a>
+  </div>
+</section>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-num">74</div>
+    <div class="stat-label">RPC Methods</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">15</div>
+    <div class="stat-label">Method Families</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">20</div>
+    <div class="stat-label">Research Tracks</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">25</div>
+    <div class="stat-label">Admin Panels</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">285</div>
+    <div class="stat-label">Automated Tests</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">&lt;25s</div>
+    <div class="stat-label">Full Test Suite</div>
+  </div>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="section-header">
+    <h2>Core Capabilities</h2>
+    <p>Everything ships in one binary. No external dependencies, no cluster of services.</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
+      <h3>Cell-Interned MVCC</h3>
+      <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔌</div>
+      <h3>MySQL Wire Protocol</h3>
+      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with a 670+ statement compatibility corpus, window functions, user variables, prepared statements, and broad COM_QUERY coverage.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-prototype">Partial</span>
+      <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
+      <h3>PostgreSQL Wire Protocol</h3>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, SSL rejection, simple queries, transaction stubs, and extended-protocol scaffolding backed by the shared engine.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(6,182,212,.1);color:var(--cyan)">⚡</div>
+      <h3>HTTP + QUIC Dual Transport</h3>
+      <p>SkeinQL RPC runs over HTTP/1.1, HTTP/2, and QUIC from the same binary, with dedicated integration tests for transport parity and reconnect behavior.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Implemented</span>
+      <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
+      <h3>Web Admin (SkeinAdmin)</h3>
+      <p>25 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, and dedicated panels for all 20 research features.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-prototype">Prototype</span>
+      <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</div>
+      <h3>20 Research Tracks (14 Hardened)</h3>
+      <p>From differential privacy and HNSW vector search to Merkle forensic proofs and causal ETags — 14 tracks are hardened with real algorithms and integration tests; all 20 have RPC stubs, admin panels, and test coverage.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-prototype">Prototype</span>
+      <div class="feature-icon" style="background:rgba(244,63,94,.1);color:var(--rose)">🌐</div>
+      <h3>Cluster Control-Plane</h3>
+      <p>9 typed cluster methods for topology lifecycle: join tokens, node admission, shard placement, replica promotion, and RPC fanout replication with recursion suppression.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="section-header">
+    <h2>Architecture</h2>
+    <p>Five layers from client interface to persistence, unified by typed SkeinQL method dispatch.</p>
+  </div>
+  <div class="arch-wrapper">
+    <img src="../figures/architecture.png" alt="SkeinDB layered architecture" loading="lazy"
+         onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+    <div class="arch-fallback" style="display:none">
+      <p>Architecture diagram available at <code>docs/figures/architecture.png</code></p>
+    </div>
+  </div>
+</section>
+
+<!-- RESEARCH TRACKS -->
+<section id="research">
+  <div class="section-header">
+    <h2>20 Research Tracks</h2>
+    <p>Each track has RPC methods, a dedicated admin panel, and automated test coverage. Click any track for details.</p>
+  </div>
+  <div class="tracks-grid">
+    <a class="track" href="research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
+    <a class="track" href="research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
+    <a class="track" href="research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
+    <a class="track" href="research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
+    <a class="track" href="research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
+    <a class="track" href="research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
+    <a class="track" href="research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
+    <a class="track" href="research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
+    <a class="track" href="research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
+    <a class="track" href="research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
+    <a class="track" href="research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
+    <a class="track" href="research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
+    <a class="track" href="research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
+    <a class="track" href="research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
+    <a class="track" href="research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
+    <a class="track" href="research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
+    <a class="track" href="research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
+    <a class="track" href="research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
+    <a class="track" href="research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
+    <a class="track" href="research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
+  </div>
+</section>
+
+<!-- QUICK START -->
+<section id="quickstart">
+  <div class="section-header">
+    <h2>Quick Start</h2>
+    <p>From zero to running in four commands.</p>
+  </div>
+  <div class="quickstart">
+    <div class="quickstart-header">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <span class="title">terminal</span>
+    </div>
+    <pre>
+<span class="comment"># Clone the repository</span>
+<span class="cmd">git clone</span> <span class="url">https://github.com/pinkysworld/SkeinDB.git</span>
+<span class="cmd">cd</span> SkeinDB
+
+<span class="comment"># Build</span>
+<span class="cmd">cargo build</span> <span class="flag">--release</span>
+
+<span class="comment"># Run all tests</span>
+<span class="cmd">cargo test</span>
+
+<span class="comment"># Start the server</span>
+<span class="cmd">./target/release/skeindb serve</span> <span class="flag">--data ./data --http 8080</span>
+
+<span class="comment"># Open the admin panel</span>
+<span class="url">http://127.0.0.1:8080/admin</span>
+
+<span class="comment"># Send your first SkeinQL RPC request</span>
+<span class="cmd">curl</span> <span class="flag">-s -X POST</span> <span class="url">http://127.0.0.1:8080/api/v1/rpc</span> \
+  <span class="flag">-H</span> "Content-Type: application/json" \
+  <span class="flag">-d</span> '{"jsonrpc":"2.0","id":1,"method":"system.ping","params":{}}'
+</pre>
+  </div>
+</section>
+
+<!-- PAPER -->
+<section id="paper">
+  <div class="section-header">
+    <h2>Research Paper</h2>
+    <p>Systems contribution covering architecture, cluster control, and 20 research tracks.</p>
+  </div>
+  <div class="paper-card">
+    <div class="paper-info">
+      <h3>SkeinDB: A Single-Binary Database with Cell-Interned MVCC, a 20-Track Research Agenda, and a Web-Native Administration Stack</h3>
+      <div class="paper-meta">
+        <span style="background:rgba(99,102,241,.1);color:var(--accent-light)">IJRCOM 2026</span>
+        <span style="background:rgba(16,185,129,.1);color:var(--green)">Systems Research</span>
+        <span style="background:rgba(245,158,11,.1);color:var(--amber)">Camera-Ready v5</span>
+      </div>
+      <p class="paper-abstract">
+        <strong>Michél Nguyen</strong> · University of the People
+        <br><br>
+        SkeinDB addresses the divide between production database systems and research prototypes through a novel single-binary architecture that co-hosts a MySQL-compatible SQL layer, a typed RPC control surface (SkeinQL), and 20 experimental research features within one executable process. The paper presents four dimensions of contribution: cell-interned MVCC storage, persistent cluster control-plane, 20 research tracks with working implementations, and comprehensive web administration.
+      </p>
+      <br>
+      <a href="https://orcid.org/0000-0001-6834-4422" class="btn btn-secondary" style="display:inline-flex" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+        Author Profile (ORCID)
+      </a>
+    </div>
+    <div class="paper-stats">
+      <div class="paper-stat">
+        <div class="paper-stat-num">6</div>
+        <div class="paper-stat-label">Professional Figures</div>
+      </div>
+      <div class="paper-stat">
+        <div class="paper-stat-num">18</div>
+        <div class="paper-stat-label">IEEE References</div>
+      </div>
+      <div class="paper-stat">
+        <div class="paper-stat-num">6</div>
+        <div class="paper-stat-label">Research Questions</div>
+      </div>
+      <div class="paper-stat">
+        <div class="paper-stat-num">7</div>
+        <div class="paper-stat-label">Contributions</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TECH STACK -->
+<section>
+  <div class="section-header">
+    <h2>Built With</h2>
+  </div>
+  <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap">
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🦀</div><div class="stat-label">Rust</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">⚙️</div><div class="stat-label">Axum</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🔒</div><div class="stat-label">Quinn (QUIC)</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐬</div><div class="stat-label">MySQL Protocol</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">🐘</div><div class="stat-label">PostgreSQL (partial)</div></div>
+    <div class="stat" style="min-width:120px"><div class="stat-num" style="font-size:1.2rem">📦</div><div class="stat-label">Single Binary</div></div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <span class="nav-logo">SkeinDB</span>
+      <p>A single-binary database engine with cell-interned MVCC, 20 research tracks, and a web-native admin stack.</p>
+    </div>
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="#features">Features</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#research">Research Tracks</a>
+    </div>
+    <div class="footer-col">
+      <h4>Documentation</h4>
+      <a href="docs.html">All Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">MySQL Compat</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PG_COMPAT.md" target="_blank">PostgreSQL Compat</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank">GitHub</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank">Issues</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" target="_blank">Author (ORCID)</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <p>SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a> · Open Source</p>
+  </div>
+</footer>
+
+</body>
+</html>
