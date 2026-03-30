@@ -4042,6 +4042,205 @@ async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// T062: Verify query.prepare → GET /api/v1/q/{query_id} with ETag → 304 roundtrip.
+#[tokio::test]
+async fn t062_prepared_get_etag_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("t062_etag")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+    let base = server.base_url();
+
+    // Setup: create db + table + insert data
+    rpc.rpc("schema.create_database", json!({"db": "etag_db"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "etag_db",
+            "table": "items",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "name", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "etag_db", "table": "items"},
+            "rows": [
+                {"id": {"t":"u64","v":1}, "name": {"t":"str","v":"Alpha"}},
+                {"id": {"t":"u64","v":2}, "name": {"t":"str","v":"Beta"}}
+            ]
+        }),
+    )
+    .await?;
+
+    // Step 1: Prepare query
+    let resp = rpc
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": {
+                    "body": {
+                        "select": {
+                            "from": [{"db": "etag_db", "table": "items"}],
+                            "projection": [{"expr": {"col": "id"}}, {"expr": {"col": "name"}}]
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+    let query_id = resp
+        .result
+        .as_ref()
+        .and_then(|r| r["query_id"].as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    // Step 2: GET /api/v1/q/{query_id} — should return 200 + ETag
+    let get_url = format!("{}/api/v1/q/{}", base, query_id);
+    let resp = http.get(&get_url).send().await?;
+    assert_eq!(resp.status(), 200);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing ETag header"))?
+        .to_string();
+    assert!(!etag.is_empty());
+
+    // Step 3: GET with If-None-Match — should return 304
+    let resp = http
+        .get(&get_url)
+        .header("If-None-Match", &etag)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 304, "expected 304 Not Modified");
+
+    // Step 4: Mutate data, GET without If-None-Match should return new ETag
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "etag_db", "table": "items"},
+            "rows": [
+                {"id": {"t":"u64","v":3}, "name": {"t":"str","v":"Gamma"}}
+            ]
+        }),
+    )
+    .await?;
+    let resp = http.get(&get_url).send().await?;
+    assert_eq!(resp.status(), 200);
+    let new_etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // ETags should differ after mutation
+    assert_ne!(etag, new_etag, "ETag should change after insert");
+
+    Ok(())
+}
+
+/// T063 + T122: Verify query.subscribe RPC + security token CRUD.
+#[tokio::test]
+async fn t063_t122_subscribe_and_security_tokens() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("t063_t122")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    // Setup: create db + table + prepare query
+    rpc.rpc("schema.create_database", json!({"db": "sub_db"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "sub_db",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+    let resp = rpc
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": {
+                    "body": {
+                        "select": {
+                            "from": [{"db": "sub_db", "table": "events"}],
+                            "projection": [{"expr": {"col": "id"}}, {"expr": {"col": "data"}}]
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+    let query_id = resp
+        .result
+        .as_ref()
+        .and_then(|r| r["query_id"].as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    // T063: query.subscribe should return sse_url
+    let resp = rpc
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    let result = resp.result.as_ref().expect("should have result");
+    assert!(result["sse_url"].as_str().is_some(), "should have sse_url");
+    assert_eq!(result["query_id"].as_str().unwrap(), query_id);
+
+    // T122: security.token.create
+    let resp = rpc
+        .rpc(
+            "security.token.create",
+            json!({"role": "admin", "label": "test token"}),
+        )
+        .await?;
+    let result = resp.result.as_ref().expect("should have result");
+    let token_id = result["token_id"]
+        .as_str()
+        .expect("should have token_id")
+        .to_string();
+    assert!(result["secret"].as_str().is_some(), "should have secret");
+    assert_eq!(result["role"].as_str().unwrap(), "admin");
+
+    // T122: security.token.list
+    let resp = rpc.rpc("security.token.list", json!({})).await?;
+    let result = resp.result.as_ref().expect("should have result");
+    let tokens = result["tokens"]
+        .as_array()
+        .expect("should have tokens array");
+    assert_eq!(tokens.len(), 1);
+
+    // T122: security.token.revoke
+    let resp = rpc
+        .rpc("security.token.revoke", json!({"token_id": token_id}))
+        .await?;
+    let result = resp.result.as_ref().expect("should have result");
+    assert_eq!(result["revoked"].as_bool(), Some(true));
+
+    // Verify token is gone
+    let resp = rpc.rpc("security.token.list", json!({})).await?;
+    let result = resp.result.as_ref().expect("should have result");
+    let tokens = result["tokens"]
+        .as_array()
+        .expect("should have tokens array");
+    assert_eq!(tokens.len(), 0);
+
+    Ok(())
+}
+
 struct HttpHarness {
     _guard: ChildGuard,
     http_port: u16,

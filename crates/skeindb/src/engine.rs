@@ -301,6 +301,10 @@ pub struct Engine {
     schema_versions: HashMap<TableKey, u64>,
     schema_changes: Vec<SchemaChangeEntry>,
     schema_changes_next_id: u64,
+
+    /// API tokens for security (T122).
+    api_tokens: HashMap<String, ApiToken>,
+    api_token_next_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1024,6 +1028,16 @@ pub struct CdcSubscribeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub token_id: String,
+    pub secret: String,
+    pub role: String,
+    pub label: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcPollResult {
     pub events: Vec<ChangeEvent>,
     pub next_offset: u64,
@@ -1114,6 +1128,8 @@ impl Engine {
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
+            api_tokens: HashMap::new(),
+            api_token_next_id: 1,
         };
 
         engine.load_tables_best_effort();
@@ -2383,6 +2399,46 @@ impl Engine {
 
     pub fn get_prepared(&self, id: &str) -> Option<PreparedQuery> {
         self.prepared.get(id).cloned()
+    }
+
+    pub fn create_api_token(&mut self, role: &str, label: &str, ttl_ms: u64) -> ApiToken {
+        let id = format!("tok_{:016x}", self.api_token_next_id);
+        self.api_token_next_id += 1;
+        let secret = format!("sk_{:032x}", {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            id.hash(&mut h);
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .hash(&mut h);
+            h.finish()
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let expires = if ttl_ms > 0 { now + ttl_ms } else { 0 };
+        let token = ApiToken {
+            token_id: id.clone(),
+            secret,
+            role: role.to_string(),
+            label: label.to_string(),
+            created_at_ms: now,
+            expires_at_ms: expires,
+        };
+        self.api_tokens.insert(id, token.clone());
+        token
+    }
+
+    pub fn list_api_tokens(&self) -> Vec<ApiToken> {
+        self.api_tokens.values().cloned().collect()
+    }
+
+    pub fn revoke_api_token(&mut self, token_id: &str) -> bool {
+        self.api_tokens.remove(token_id).is_some()
     }
 
     pub fn build_column_snapshot(

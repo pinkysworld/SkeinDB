@@ -66,8 +66,8 @@ Phase 0 verification checklist:
 ## Phase 6 - Cache-coherent HTTP queries (ETags)
 - [x] T060: Row ETags for data.get and If-Match support for data.update
 - [x] T061: Planner dependency sets for simple indexed queries
-- [ ] T062: query.prepare + GET /api/v1/q/{query_id} with ETag/If-None-Match
-- [ ] T063: SSE subscription to ETag changes (query.subscribe)
+- [x] T062: query.prepare + GET /api/v1/q/{query_id} with ETag/If-None-Match
+- [x] T063: SSE subscription to ETag changes (query.subscribe)
 
 ## Phase 7 - Delta-chained values
 - [x] T070: Add ValueEntry kind DELTA + patch codec (docs/DELTA_VALUES.md)
@@ -99,7 +99,7 @@ Phase 0 verification checklist:
 ## Phase 12 - Standalone management console (SkeinAdmin)
 - [x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
 - [x] T121: SkeinAdmin pages: schema/data/sql workspace
-- [ ] T122: SkeinAdmin security: token UI + role-aware navigation
+- [x] T122: SkeinAdmin security: token UI + role-aware navigation
 - [x] T123: SkeinAdmin cluster page (cluster.*) + actions
 - [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
 - [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/>/</BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)
@@ -167,8 +167,8 @@ Phase 0 verification checklist:
 - [x] T210: SQL normalization (fingerprints) + parameter extraction (docs/AUTOPARAMETERIZATION.md)
 - [x] T211: Plan cache keyed by fingerprint + schema version + session flags
 - [x] T212: Integrate autoparam with query coalescing, ETag caching, and telemetry
-- [ ] T213: SQL session variable: `SET @@skein.autoparameterize = 1` + safety rules
-- [ ] T214: SkeinAdmin top queries grouped by fingerprint + suggested parameter schemas
+- [x] T213: SQL session variable: `SET @@skein.autoparameterize = 1` + safety rules
+- [x] T214: SkeinAdmin top queries grouped by fingerprint + suggested parameter schemas
 
 ## Phase 23 - CDC and dependency-driven changefeeds
 - [ ] T220: WAL-to-change-event translator (table-level insert/update/delete) (docs/CDC_CHANGEFEED.md)

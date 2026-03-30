@@ -397,6 +397,7 @@
           <button class="tab-btn" data-panel="data">Browse</button>
           <button class="tab-btn" data-panel="cluster">Cluster</button>
           <button class="tab-btn" data-panel="settings">Settings</button>
+          <button class="tab-btn" data-panel="security" data-scope="admin">Security</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
         </nav>
@@ -910,6 +911,27 @@
             <div class="row"><div class="field"><label>Grant DB</label><input id="userGrantDb" /></div><div class="field"><label>Privileges</label><input id="userGrantPrivs" placeholder="SELECT,INSERT,UPDATE,DELETE" /></div></div>
             <pre id="usersOut">User management via settings.</pre>
           </div></div>
+        </section>
+
+        <!-- SECURITY --><section class="panel" data-panel="security">
+          <div class="panel-grid">
+            <div class="card wide"><h2>API Tokens</h2>
+              <div class="callout">Create and manage API tokens for programmatic access. Tokens can have roles (admin, read_write, read_only) and optional expiration.</div>
+              <div class="row">
+                <div class="field"><label>Label</label><input id="secTokenLabel" placeholder="My integration" /></div>
+                <div class="field"><label>Role</label><select id="secTokenRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div>
+                <div class="field"><label>TTL (hours)</label><input id="secTokenTtl" type="number" value="0" min="0" style="width:80px" /><span class="hint"> 0 = no expiry</span></div>
+              </div>
+              <div class="actions"><button id="btnSecCreateToken" class="primary sm">Create Token</button><button id="btnSecRefreshTokens" class="sm">Refresh</button></div>
+              <div id="secTokenGrid" style="margin-top:12px"></div>
+              <pre id="secTokenOut">Create tokens for API access.</pre>
+            </div>
+            <div class="card wide"><h2>Top Queries by Fingerprint</h2>
+              <div class="callout">View frequently executed queries grouped by their parameterized fingerprint. Useful for identifying candidates for autoparameterization or plan cache optimization.</div>
+              <div class="actions"><button id="btnSecTopQueries" class="sm">Refresh</button></div>
+              <div id="secTopQueryGrid" style="margin-top:12px"></div>
+            </div>
+          </div>
         </section>
 
         <!-- IMPORT/EXPORT --><section class="panel" data-panel="import">
