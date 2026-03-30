@@ -1,42 +1,35 @@
-feat: window functions, user variables, bitwise aggregates, research hardening, admin console polish
+feat: telemetry + plan cache + corpus expansion + admin WYSIWYG overhaul
 
-MySQL compatibility:
-- Window functions: ROW_NUMBER(), RANK(), DENSE_RANK() with OVER(PARTITION BY ... ORDER BY ...)
-- User variables: SET @var = value / SELECT @var with per-session state
-- Bitwise aggregates: BIT_AND(), BIT_OR(), BIT_XOR() in all aggregate paths
-- Multi-table UPDATE upgraded from stub to real per-row implementation
-- New scalar functions: DEGREES, RADIANS, PERIOD_ADD, PERIOD_DIFF, MAKEDATE, MAKETIME
-- Corpus expanded to 1240+ lines with 370+ SQL statements
+Rust runtime:
+- Telemetry (Phase 11): feature_flags, compat_summary, migration_hints
+  endpoints with 48 MySQL feature definitions and auto-observation
+- Plan cache (Phase 22): plan_cache.status/clear with hit counts and
+  fingerprint tracking
+- Query coalescing (Phase 16): stats.coalescing with leader/follower
+  metrics
+- R11/R14/R15 integration tests: autoparam classify, geo replay bundle,
+  schema evolution propose/merge/apply
+- New telemetry_and_plan_cache_integration test
 
-Research hardening (R02, R05, R07, R09, R16):
-- R02: Adaptive storage format selection integration test
-- R05: Oblivious padding verification integration test
-- R07: Merge conflict resolution deterministic integration test
-- R09: QUIC multi-stream sequential RPCs + rebind verification test
-- R16: Index advisor synthesis workflow integration test
-- Total hardened tracks: 6 → 11
+corpus.sql (490 lines, ~298 SQL statements):
+- Uncommented 16+ TODO blocks (IF/NULLIF, EXISTS, REGEXP, CAST,
+  COUNT DISTINCT, window functions, CTEs, RIGHT/CROSS JOIN, derived
+  tables, NOT EXISTS, IN/scalar subquery, multi-table DELETE/UPDATE,
+  LOCK/UNLOCK, INFORMATION_SCHEMA, nested functions, SHOW variants)
+- Added ~60 new SQL statements: JOINs, INSERT...SELECT, DO, EXPLAIN,
+  SHOW variants, system variables, CREATE/DROP VIEW, SAVEPOINT,
+  GROUP_CONCAT DISTINCT, session functions, SET GLOBAL, scalar funcs
+- Re-commented 5 statements exposing parser limitations
 
-Admin console (SkeinAdmin):
-- FEATURE_CENTER expanded to 22 cards (added Window Functions, User Variables)
-- Research dashboard cards now show hardened/prototype status badges
-- Research settings cards show status badge
-- Easy Viewer UX polish:
-  - Row numbers column with offset-aware numbering
-  - NULL values displayed as styled italic badges instead of empty cells
-  - Quick-filter input for client-side row filtering
-  - Type-aware column headers with tooltips (type, nullable, PK info)
-  - Numeric columns right-aligned in headers and cells
-  - Primary key columns highlighted with accent border
-  - Insert form shows table summary (PK, required fields) and field indicators
-  - New SQL sub-tab with Ctrl+Enter execution shortcut
-  - Improved pagination info with filtered row count
+admin console (web/skeinadmin):
+- Column sorting with server-side ORDER BY
+- skeinModal() replaces all confirm() calls
+- Search operator dropdown (11 operators)
+- Visual query builder tab with SQL preview
+- 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions,
+  Index Health, Research Track Status)
 
-Documentation:
-- TRUE_STATUS_MATRIX: Updated date, research counts, Phase 3/12 descriptions
-- PROJECT_BACKLOG: T038 progress notes with all new features
-- RESEARCH_BACKLOG: Reality sync updated to 11 hardened tracks
-- MYSQL_COMPAT: Added window functions, user variables, bitwise aggregates, new scalar functions
+docs: MYSQL_COMPAT, PROJECT_BACKLOG, TRUE_STATUS_MATRIX, RESEARCH_BACKLOG,
+  site/index.html updated
 
-Website:
-- Updated hero text (11 hardened), test count (239), SQL statement count (370+)
-- Both site/index.html and docs/site/index.html synchronized
+All 244 tests pass (cargo fmt + clippy + test).

@@ -6,11 +6,11 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
-## Reality sync (2026-03-29)
+## Reality sync (2026-03-30)
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- **11 tracks are now hardened** with real algorithms and dedicated tests:
+- **14 tracks are now hardened** with real algorithms and dedicated tests:
   - **R02** — Adaptive row/column storage (snapshot + readback integration test)
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
   - **R04** — Differential privacy (Laplace noise, RDP composition, budget tracking)
@@ -20,10 +20,13 @@ Runtime status and checklist status intentionally differ:
   - **R08** — Incremental view maintenance (dependency graphs, cascading invalidation)
   - **R09** — QUIC-native protocol (multi-stream RPCs + rebind verification test)
   - **R10** — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
+  - **R11** — LLM-assisted autoparameterization (classify + analyze integration test)
   - **R13** — Causal vector-clock ETags (V2 clocks, dependency tracking, stale detection)
-- **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
+  - **R14** — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
+  - **R15** — Conflict-free schema evolution (propose/merge/apply integration test)
+  - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R02/R05/R07/R09/R16 to hardened (in addition to previous R03/R04/R06/R08/R10/R13); 9 tracks remain at prototype level.
+- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`

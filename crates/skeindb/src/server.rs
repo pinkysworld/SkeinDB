@@ -38,12 +38,13 @@ use skeindb_skeinql::{
         ForensicExportParams, ForensicQueryParams, ForensicVerifyParams, MergeApplyParams,
         MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams, MergeWasmRegisterParams,
         MigrationIntentReportParams, MigrationRewritePreviewParams, ObliviousExplainParams,
-        ObliviousPolicyGetParams, ObliviousPolicySetParams, QueryExecutePreparedParams,
-        QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo,
-        SchemaMergeStatusParams, SchemaProposeChangeParams, VectorIndexStatusParams,
-        VectorInsertParams, VectorSearchParams, ViewCreateParams, ViewDropParams,
-        ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams,
-        WasmPlanRunParams,
+        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
+        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
+        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
+        TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
+        VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
+        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -318,6 +319,22 @@ struct Counters {
     per_method: HashMap<String, u64>,
     query_stats: HashMap<String, QueryStatsAgg>,
     query_log: VecDeque<QuerySample>,
+    // Feature flag telemetry (T110)
+    feature_flags: HashMap<String, FeatureFlagCounter>,
+    // Coalescing metrics (T160)
+    coalesce_leader: u64,
+    coalesce_follower: u64,
+    // Plan cache metrics (T211)
+    plan_cache_hits: u64,
+    plan_cache_misses: u64,
+    plan_cache_evictions: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FeatureFlagCounter {
+    category: String,
+    hit_count: u64,
+    last_seen_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -6840,6 +6857,9 @@ async fn mysql_execute_sql(
     sql: &str,
     session: &mut MySqlSessionState,
 ) -> Result<MySqlQueryOutcome, MySqlWireError> {
+    // Telemetry: observe feature flags (T110)
+    observe_mysql_sql_features(state, sql);
+
     if let Some(enabled) = mysql_parse_set_autocommit(sql) {
         session.autocommit = enabled;
         if session.autocommit {
@@ -8762,6 +8782,7 @@ async fn prepared_get_handler(
     let (inflight, is_leader) = state.coalesce.get_or_create(&query_id);
 
     let res: Result<crate::engine::QuerySelectResult, String> = if is_leader {
+        state.counters.lock().unwrap().coalesce_leader += 1;
         let eng = state.engine.read().await;
         let out = eng
             .query_select(
@@ -8781,6 +8802,7 @@ async fn prepared_get_handler(
         out
     } else {
         // Joiner: wait for leader (or return immediately if already completed).
+        state.counters.lock().unwrap().coalesce_follower += 1;
         loop {
             if let Some(r) = inflight.result.lock().unwrap().as_ref() {
                 break r.clone();
@@ -8962,6 +8984,110 @@ fn percentile_ms(samples: &VecDeque<u64>, percentile: f64) -> u64 {
     let max_idx = sorted.len().saturating_sub(1);
     let rank = ((percentile.clamp(0.0, 100.0) / 100.0) * max_idx as f64).round() as usize;
     sorted[rank.min(max_idx)]
+}
+
+/// Record a MySQL feature flag hit for telemetry (T110).
+fn observe_mysql_feature(state: &AppState, feature: &str, category: &str) {
+    let now_ms = now_unix_ms_u64();
+    let mut counters = state.counters.lock().unwrap();
+    let entry = counters
+        .feature_flags
+        .entry(feature.to_string())
+        .or_insert_with(|| FeatureFlagCounter {
+            category: category.to_string(),
+            ..Default::default()
+        });
+    entry.hit_count += 1;
+    entry.last_seen_ms = now_ms;
+}
+
+/// Detect and record MySQL feature flags from a SQL statement.
+fn observe_mysql_sql_features(state: &AppState, sql: &str) {
+    let lower = sql.to_ascii_lowercase();
+    // DML
+    if lower.contains("insert") {
+        observe_mysql_feature(state, "INSERT", "dml");
+    }
+    if lower.contains("update") {
+        observe_mysql_feature(state, "UPDATE", "dml");
+    }
+    if lower.contains("delete") {
+        observe_mysql_feature(state, "DELETE", "dml");
+    }
+    if lower.contains("select") {
+        observe_mysql_feature(state, "SELECT", "dml");
+    }
+    // Joins
+    if lower.contains(" join ") {
+        observe_mysql_feature(state, "JOIN", "join");
+    }
+    if lower.contains("left join") {
+        observe_mysql_feature(state, "LEFT_JOIN", "join");
+    }
+    if lower.contains("right join") {
+        observe_mysql_feature(state, "RIGHT_JOIN", "join");
+    }
+    if lower.contains("cross join") {
+        observe_mysql_feature(state, "CROSS_JOIN", "join");
+    }
+    // Aggregates
+    if lower.contains("group by") {
+        observe_mysql_feature(state, "GROUP_BY", "aggregate");
+    }
+    if lower.contains("having") {
+        observe_mysql_feature(state, "HAVING", "aggregate");
+    }
+    if lower.contains("count(") {
+        observe_mysql_feature(state, "COUNT", "aggregate");
+    }
+    if lower.contains("sum(") {
+        observe_mysql_feature(state, "SUM", "aggregate");
+    }
+    if lower.contains("avg(") {
+        observe_mysql_feature(state, "AVG", "aggregate");
+    }
+    // Window functions
+    if lower.contains("over(") || lower.contains("over (") {
+        observe_mysql_feature(state, "WINDOW_FUNCTION", "window");
+    }
+    // Subqueries
+    if lower.contains("(select ") || lower.contains("( select ") {
+        observe_mysql_feature(state, "SUBQUERY", "subquery");
+    }
+    // CTE
+    if lower.starts_with("with ") && lower.contains(" as ") {
+        observe_mysql_feature(state, "CTE", "cte");
+    }
+    // UNION
+    if lower.contains(" union ") {
+        observe_mysql_feature(state, "UNION", "set_op");
+    }
+    // JSON
+    if lower.contains("json_") {
+        observe_mysql_feature(state, "JSON_FUNCTION", "json");
+    }
+    // Transactions
+    if lower.starts_with("begin") || lower.starts_with("start transaction") {
+        observe_mysql_feature(state, "TRANSACTION", "transaction");
+    }
+    // DDL
+    if lower.starts_with("create table") {
+        observe_mysql_feature(state, "CREATE_TABLE", "ddl");
+    }
+    if lower.starts_with("alter table") {
+        observe_mysql_feature(state, "ALTER_TABLE", "ddl");
+    }
+    if lower.starts_with("create index") || lower.contains("add index") {
+        observe_mysql_feature(state, "CREATE_INDEX", "ddl");
+    }
+    // User variables
+    if lower.starts_with("set @") {
+        observe_mysql_feature(state, "USER_VARIABLE", "session");
+    }
+    // Prepared statements
+    if lower.contains("?") {
+        observe_mysql_feature(state, "PREPARED_STMT", "prepared");
+    }
 }
 
 fn observe_rpc_call(
@@ -9557,6 +9683,88 @@ pub(crate) async fn handle_rpc(
                 }
 
                 // --------------------
+                // telemetry.* (Phase 11)
+                // --------------------
+                "telemetry.feature_flags" => {
+                    let p: TelemetryFeatureFlagsParams = parse_params(params.clone())?;
+                    let counters = state.counters.lock().unwrap();
+                    let mut flags: Vec<skeindb_skeinql::methods::FeatureFlagEntry> = counters
+                        .feature_flags
+                        .iter()
+                        .filter(|(_, v)| p.category.as_ref().map_or(true, |c| c == &v.category))
+                        .map(|(name, v)| skeindb_skeinql::methods::FeatureFlagEntry {
+                            name: name.clone(),
+                            category: v.category.clone(),
+                            hit_count: v.hit_count,
+                            last_seen_ms: v.last_seen_ms,
+                        })
+                        .collect();
+                    flags.sort_by(|a, b| b.hit_count.cmp(&a.hit_count));
+                    let total_queries = counters.total_rpc;
+                    Ok(serde_json::to_value(
+                        skeindb_skeinql::methods::TelemetryFeatureFlagsResult {
+                            flags,
+                            total_queries,
+                        },
+                    )
+                    .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "telemetry.compat_summary" => {
+                    let p: TelemetryCompatSummaryParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.telemetry_compat_summary(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "telemetry.migration_hints" => {
+                    let p: TelemetryMigrationHintsParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.telemetry_migration_hints(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // plan_cache.* (Phase 22)
+                // --------------------
+                "plan_cache.status" => {
+                    let _p: PlanCacheStatusParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let counters = state.counters.lock().unwrap();
+                    let r = eng.plan_cache_status(
+                        counters.plan_cache_hits,
+                        counters.plan_cache_misses,
+                        counters.plan_cache_evictions,
+                    );
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "plan_cache.clear" => {
+                    let _p: PlanCacheClearParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.plan_cache_clear();
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
+                // stats.coalescing (Phase 16)
+                // --------------------
+                "stats.coalescing" => {
+                    let counters = state.counters.lock().unwrap();
+                    let in_flight_now = state.coalesce.inflight.lock().unwrap().len() as u64;
+                    let r = skeindb_skeinql::methods::StatsCoalescingResult {
+                        total_coalesced: counters.coalesce_leader + counters.coalesce_follower,
+                        total_leader: counters.coalesce_leader,
+                        total_follower: counters.coalesce_follower,
+                        in_flight_now,
+                        saved_executions: counters.coalesce_follower,
+                    };
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
                 // data.*
                 // --------------------
                 "data.get" => {
@@ -9781,6 +9989,7 @@ pub(crate) async fn handle_rpc(
                         let (in_flight, is_leader) = state.coalesce.get_or_create(&key);
 
                         if !is_leader {
+                            state.counters.lock().unwrap().coalesce_follower += 1;
                             let res = loop {
                                 if let Some(res) = in_flight.result.lock().unwrap().clone() {
                                     break res;
@@ -9791,6 +10000,7 @@ pub(crate) async fn handle_rpc(
                             Ok(serde_json::to_value(r)
                                 .map_err(|e| RpcError::new("internal", e.to_string()))?)
                         } else {
+                            state.counters.lock().unwrap().coalesce_leader += 1;
                             let res: Result<crate::engine::QuerySelectResult, String> = {
                                 let eng = state.engine.read().await;
                                 eng.query_patch(
@@ -13958,6 +14168,7 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         let unsigned = toks.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
         let nullable = !p_lower.contains("not null");
         let auto_increment = p_lower.contains("auto_increment");
+        let inline_pk = p_lower.contains("primary key");
         let default = parse_column_default_clause(p)?;
         columns.push(SchemaColumnInfo {
             name: name.clone(),
@@ -13965,6 +14176,9 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
             nullable,
             auto_increment,
         });
+        if inline_pk && !primary_key.contains(&name) {
+            primary_key.push(name.clone());
+        }
         if let Some(default) = default {
             mysql_defaults.insert(name, serde_json::to_value(default).unwrap_or(Value::Null));
         }
@@ -16832,6 +17046,11 @@ fn is_read_only_method(method: &str) -> bool {
             | "view.status"
             | "view.explain_deps"
             | "cdc.poll"
+            | "telemetry.feature_flags"
+            | "telemetry.compat_summary"
+            | "telemetry.migration_hints"
+            | "plan_cache.status"
+            | "stats.coalescing"
     )
 }
 
@@ -16935,6 +17154,12 @@ fn system_capabilities(state: &AppState) -> Value {
         "advisor.history",
         "migration.intent_report",
         "migration.rewrite_preview",
+        "telemetry.feature_flags",
+        "telemetry.compat_summary",
+        "telemetry.migration_hints",
+        "plan_cache.status",
+        "plan_cache.clear",
+        "stats.coalescing",
         "sql.exec",
         "data.get",
         "data.insert",

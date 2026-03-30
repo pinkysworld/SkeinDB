@@ -289,10 +289,44 @@
       th.sortable::after{content:'';display:inline-block;margin-left:4px;opacity:0.3;font-size:10px}
       th.sort-asc::after{content:'▲';opacity:1}
       th.sort-desc::after{content:'▼';opacity:1}
+      /* Column resize */
+      th.resizable{resize:horizontal;overflow:hidden;min-width:60px}
+      /* Inline cell validation */
+      .inline-edit-input.cell-error{border-color:var(--danger)!important;box-shadow:0 0 0 2px rgba(197,48,48,.15)}
+      .cell-error-tip{position:absolute;bottom:calc(100% + 4px);left:0;background:var(--danger);color:#fff;font-size:10px;padding:3px 8px;border-radius:5px;white-space:nowrap;z-index:10;pointer-events:none;animation:fadeUp .2s ease}
+      html.dark .cell-error-tip{background:#fc8181;color:#1a1a1a}
+      td{position:relative}
+      /* Modal dialog */
+      .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10001;display:flex;justify-content:center;align-items:center;opacity:0;transition:opacity .15s;pointer-events:none}
+      .modal-overlay.open{opacity:1;pointer-events:auto}
+      html.dark .modal-overlay{background:rgba(0,0,0,.65)}
+      .modal-dialog{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px 28px;min-width:340px;max-width:480px;box-shadow:0 24px 64px rgba(0,0,0,.2);transform:scale(.95);transition:transform .15s}
+      .modal-overlay.open .modal-dialog{transform:scale(1)}
+      .modal-title{font-size:15px;font-weight:600;margin:0 0 8px}
+      .modal-body{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5}
+      .modal-actions{display:flex;gap:8px;justify-content:flex-end}
+      .modal-icon{font-size:28px;margin-bottom:8px}
+      /* Visual Query Builder */
+      .qb-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px;border:1px dashed var(--line);border-radius:8px;background:#fff;margin-bottom:6px}
+      html.dark .qb-row{background:var(--panel-2)}
+      .qb-row select,.qb-row input{font-size:11px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);width:auto}
+      .qb-row select{min-width:100px}.qb-row input{min-width:120px;flex:1}
+      .qb-logic-btn{padding:3px 8px;font-size:10px;border-radius:4px;cursor:pointer;font-weight:600;border:1px solid var(--line);background:var(--panel-2);color:var(--muted)}
+      .qb-logic-btn.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+      .qb-remove{color:var(--danger);cursor:pointer;font-size:14px;border:none;background:transparent;padding:2px 6px}
+      .qb-preview{font-family:"IBM Plex Mono",monospace;font-size:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:8px;white-space:pre-wrap;min-height:40px}
+      /* Search enhancements */
+      .search-cond-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+      .search-cond-row select,.search-cond-row input{font-size:11px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);width:auto}
+      .search-cond-row input{flex:1;min-width:120px}
+      .search-cond-row select{min-width:100px}
+      .search-highlight{background:rgba(43,108,176,.15);border-radius:2px;padding:0 2px}
+      html.dark .search-highlight{background:rgba(91,155,213,.2)}
     </style>
   </head>
   <body data-app="skeinadmin" data-mode="admin">
     <div class="toast-container" id="toastContainer"></div>
+    <div class="modal-overlay" id="modalOverlay"><div class="modal-dialog"><div class="modal-icon" id="modalIcon"></div><div class="modal-title" id="modalTitle"></div><div class="modal-body" id="modalBody"></div><div class="modal-actions" id="modalActions"></div></div></div>
     <div class="cmd-palette-overlay" id="cmdPalette"><div class="cmd-palette"><input class="cmd-palette-input" id="cmdInput" placeholder="Search actions, panels, methods…" autocomplete="off" /><div class="cmd-palette-results" id="cmdResults"></div></div></div>
     <div class="app-shell">
       <aside class="sidebar">
@@ -462,6 +496,48 @@
 
             <!-- Feature Center -->
             <div class="card wide"><h2>&#x1F3AF; Feature Center</h2><div class="feature-grid" id="featureCenterGrid"></div></div>
+
+            <!-- Top Tables -->
+            <div class="card"><h2>&#x1F4CA; Top Tables</h2>
+              <div class="hint" style="margin-bottom:6px">Tables ranked by row count.</div>
+              <div class="table-wrap" style="max-height:200px"><table id="topTablesGrid"></table></div>
+              <div class="actions" style="margin-top:6px"><button id="btnRefreshTopTables" class="ghost sm">&#x21bb; Refresh</button></div>
+            </div>
+
+            <!-- Slow Query Log -->
+            <div class="card"><h2>&#x1F422; Slow Query Log</h2>
+              <div class="hint" style="margin-bottom:6px">Recent queries exceeding latency threshold.</div>
+              <div class="table-wrap" style="max-height:200px"><table id="slowQueryGrid"></table></div>
+              <div class="actions" style="margin-top:6px"><button id="btnRefreshSlowQueries" class="ghost sm">&#x21bb; Refresh</button></div>
+            </div>
+
+            <!-- Active Sessions -->
+            <div class="card"><h2>&#x1F465; Active Sessions</h2>
+              <div class="hint" style="margin-bottom:6px">Current client connections.</div>
+              <div class="stat-grid" id="activeSessionsStats">
+                <div class="stat"><div class="stat-label">Active</div><div class="stat-value" id="statActiveSessions">--</div></div>
+                <div class="stat"><div class="stat-label">Idle</div><div class="stat-value" id="statIdleSessions">--</div></div>
+                <div class="stat"><div class="stat-label">Longest Query</div><div class="stat-value" id="statLongestQuery">--</div></div>
+              </div>
+              <div class="actions" style="margin-top:6px"><button id="btnRefreshSessions" class="ghost sm">&#x21bb; Refresh</button></div>
+            </div>
+
+            <!-- Index Health -->
+            <div class="card"><h2>&#x1F9E0; Index Health</h2>
+              <div class="hint" style="margin-bottom:6px">Index recommendations from the advisor.</div>
+              <div class="stat-grid" id="indexHealthStats">
+                <div class="stat"><div class="stat-label">Recommendations</div><div class="stat-value" id="statIndexRecs">--</div></div>
+                <div class="stat"><div class="stat-label">Applied</div><div class="stat-value" id="statIndexApplied">--</div></div>
+                <div class="stat"><div class="stat-label">Dismissed</div><div class="stat-value" id="statIndexDismissed">--</div></div>
+              </div>
+              <div class="actions" style="margin-top:6px"><button id="btnRefreshIndexHealth" class="ghost sm">&#x21bb; Refresh</button></div>
+            </div>
+
+            <!-- Compact Research Status -->
+            <div class="card wide"><h2>&#x1F52C; Research Track Status</h2>
+              <div class="hint" style="margin-bottom:6px">Compact view of all 20 research tracks.</div>
+              <div class="feature-grid" id="researchStatusGrid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))"></div>
+            </div>
             <div class="card wide"><h2>Capabilities</h2><pre id="capabilitiesOut">Run Capabilities to load.</pre></div>
             <div class="card wide"><h2>Latest Response</h2><pre id="out">Ready.</pre></div>
           </div>
@@ -492,6 +568,7 @@
                 <button class="easy-tab" data-etab="structure">Structure</button>
                 <button class="easy-tab" data-etab="insert">Insert</button>
                 <button class="easy-tab" data-etab="search">Search</button>
+                <button class="easy-tab" data-etab="query">Query Builder</button>
                 <button class="easy-tab" data-etab="create">New Table</button>
                 <button class="easy-tab" data-etab="export">Export</button>
                 <button class="easy-tab" data-etab="operations">Operations</button>
@@ -542,9 +619,24 @@
               </div>
               <!-- Search Tab -->
               <div class="easy-tab-pane" data-etab="search">
-                <div class="row" style="margin-bottom:10px">
-                  <div class="field"><label>Search value</label><input id="easySearchValue" placeholder="Type to search…" /></div>
-                  <div class="field"><label>Column</label><select id="easySearchCol"><option value="">All columns</option></select></div>
+                <div id="easySearchConditions">
+                  <div class="search-cond-row">
+                    <select id="easySearchCol"><option value="">All columns</option></select>
+                    <select id="easySearchOp">
+                      <option value="LIKE">LIKE</option>
+                      <option value="=">=</option>
+                      <option value="!=">!=</option>
+                      <option value=">">&gt;</option>
+                      <option value="<">&lt;</option>
+                      <option value=">=">&gt;=</option>
+                      <option value="<=">&lt;=</option>
+                      <option value="BETWEEN">BETWEEN</option>
+                      <option value="IS NULL">IS NULL</option>
+                      <option value="IS NOT NULL">IS NOT NULL</option>
+                      <option value="REGEXP">REGEXP</option>
+                    </select>
+                    <input id="easySearchValue" placeholder="Search value…" />
+                  </div>
                 </div>
                 <div class="actions" style="margin-bottom:10px">
                   <button id="easyBtnDoSearch" class="primary sm">&#x1F50D; Search</button>
@@ -552,6 +644,33 @@
                 </div>
                 <div class="table-wrap"><table id="easySearchGrid"></table></div>
                 <div class="hint" id="easySearchInfo"></div>
+              </div>
+              <!-- Query Builder Tab -->
+              <div class="easy-tab-pane" data-etab="query">
+                <div class="callout">Build a query visually — select columns, add WHERE conditions, set ordering and limits. No SQL needed.</div>
+                <div class="field"><label>Columns (check to include)</label></div>
+                <div id="qbColumnPicker" class="easy-edit-fields-grid" style="margin-bottom:12px"></div>
+                <div class="field"><label>WHERE conditions</label></div>
+                <div id="qbConditions"></div>
+                <div class="actions" style="margin-bottom:8px">
+                  <button id="qbBtnAddCondition" class="sm">+ Add condition</button>
+                  <button id="qbBtnClearConditions" class="ghost sm">Clear all</button>
+                </div>
+                <div class="row" style="margin-bottom:10px">
+                  <div class="field"><label>ORDER BY</label>
+                    <div class="row" style="gap:6px"><select id="qbOrderCol"><option value="">—</option></select><select id="qbOrderDir"><option value="ASC">ASC</option><option value="DESC">DESC</option></select></div>
+                  </div>
+                  <div class="field"><label>LIMIT</label><input id="qbLimit" type="number" value="50" style="width:80px" /></div>
+                </div>
+                <div class="field"><label>Generated SQL preview</label></div>
+                <div class="qb-preview" id="qbPreview">SELECT * FROM ...</div>
+                <div class="actions" style="margin-top:10px">
+                  <button id="qbBtnExecute" class="primary sm">&#x25B6; Execute</button>
+                  <button id="qbBtnCopySQL" class="sm">Copy SQL</button>
+                  <button id="qbBtnSendToSQL" class="sm">Open in SQL tab</button>
+                </div>
+                <div class="table-wrap" style="margin-top:10px"><table id="qbResultGrid"></table></div>
+                <pre id="qbOut" class="hint" style="margin-top:8px"></pre>
               </div>
               <!-- Create Table Tab -->
               <div class="easy-tab-pane" data-etab="create">
