@@ -1052,6 +1052,7 @@ SELECT * FROM information_schema.table_constraints WHERE TABLE_SCHEMA = 'default
 SELECT * FROM information_schema.character_sets;
 SELECT * FROM information_schema.collations;
 SELECT * FROM information_schema.engines;
+SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'default' GROUP BY TABLE_NAME;
 
 -- ============================================================
 -- EXPLAIN with table extraction

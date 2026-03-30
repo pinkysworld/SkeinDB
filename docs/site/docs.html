@@ -231,7 +231,7 @@
     <div class="doc-grid">
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank" data-keywords="skeinql reference rpc protocol methods families request response schemas json-rpc batch api">
         <h3>SkeinQL Reference</h3>
-        <p>Complete reference for the native typed RPC protocol: 74 methods across 15 families, request/response schemas, JSON-RPC envelope, and batch requests.</p>
+        <p>Complete reference for the native typed RPC protocol: 76 methods across 15 families, request/response schemas, JSON-RPC envelope, and batch requests.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Core API</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank" data-keywords="mysql compatibility sql wire protocol statements deviations dialect bridging">
@@ -290,7 +290,7 @@
     <div class="doc-grid">
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINADMIN.md" target="_blank" data-keywords="skeinadmin web console admin panel schema browser data editor sql cluster dashboard research">
         <h3>SkeinAdmin (Web Console)</h3>
-        <p>19-panel web admin: schema browser, data editor, SQL console, cluster dashboard, and dedicated panels for all research features.</p>
+        <p>19-panel web admin: schema browser, data editor, SQL console, cluster dashboard, and dedicated panels for all research features, including a live Index Advisor page.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Admin</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CLUSTERING.md" target="_blank" data-keywords="clustering multi-node deployment join tokens topology lifecycle shard placement replica promotion rpc fanout">
@@ -332,12 +332,12 @@
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ETAG_VALIDATORS.md" target="_blank" data-keywords="etag validators cache-coherent reads http etag chains causal consistency conditional requests invalidation">
         <h3>ETag Validators</h3>
-        <p>Cache-coherent reads via HTTP ETag chains: causal consistency, conditional requests, and invalidation.</p>
+        <p>Cache-coherent reads via HTTP ETag chains: row/query validators, cacheable prepared-query GETs, and <code>304 Not Modified</code> responses.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Web-Native</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CDC_CHANGEFEED.md" target="_blank" data-keywords="cdc changefeed change data capture subscribe row-level changes filter query predicates stream consumers">
         <h3>CDC Changefeed</h3>
-        <p>Query-scoped change data capture: subscribe to row-level changes, filter by query predicates, and stream to consumers.</p>
+        <p>Baseline CDC today: table subscriptions with long-poll delivery, acked cursors, and close semantics; query-scoped streaming remains planned.</p>
         <span class="tag" style="background:rgba(6,182,212,.1);color:var(--cyan)">Streaming</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRAFFIC_REDUCTION.md" target="_blank" data-keywords="traffic reduction encoding network efficiency delta patches column projection pushdown result compression">
@@ -395,7 +395,7 @@
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INDEX_ADVISOR.md" target="_blank" data-keywords="index advisor automatic recommendations workload analysis candidate generation cost modeling adaptation">
         <h3>Index Advisor</h3>
-        <p>Automatic index recommendations from workload analysis: candidate generation, cost modeling, and online adaptation.</p>
+        <p>Automatic index recommendations from workload analysis, including the live SkeinAdmin advisor page with ranked suggestions, action history, and observed-before/expected-after reports.</p>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/LEARNED_INDEXES.md" target="_blank" data-keywords="learned indexes machine-learned models valueid lookup training serving fallback strategies">
         <h3>Learned Indexes</h3>
@@ -415,7 +415,7 @@
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_COALESCING.md" target="_blank" data-keywords="query coalescing merging concurrent identical queries single execution shared result broadcast">
         <h3>Query Coalescing</h3>
-        <p>Merging concurrent identical queries into a single execution with shared result broadcast.</p>
+        <p>Merging concurrent identical queries into a single execution with shared result broadcast, including cacheable prepared-query GETs and <code>query.patch</code>.</p>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/QUERY_PATCH.md" target="_blank" data-keywords="query patch query result patches diff generation client reconciliation">
         <h3>Query Patch</h3>

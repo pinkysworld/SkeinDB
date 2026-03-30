@@ -1,7 +1,13 @@
 # Self-tuning Index Advisor (Telemetry-driven)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Partial implementation
+Last updated: 2026-03-27
+
+Current runtime baseline:
+- Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
+- `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, and `advisor.history` are live.
+- SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
+- Online build progress, rollback-on-failure orchestration, and measured latency deltas are still open work.
 
 Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.
@@ -98,12 +104,16 @@ Default posture:
 
 Workflow:
 1) SkeinAdmin shows suggestions with:
-   - CREATE INDEX statement (MySQL-compatible)
-   - estimated benefit
-   - expected build cost
+   - candidate key columns (+ INCLUDE columns when available)
+   - observed scan pressure from recent workload telemetry
+   - an expected-after access-path summary
 2) Admin clicks "Apply"
-3) Engine builds index online (if possible) and reports progress
-4) Telemetry compares performance before/after
+3) Engine builds and registers the prototype secondary index
+4) History records the action for later review
+
+Note:
+- The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
+- Online build progress remains backlog work.
 
 An optional "auto-apply" mode can exist for development environments.
 
@@ -160,11 +170,11 @@ Note: `advisor_estimated_saved_ms_total` is a placeholder in the prototype.
 
 ## 7) Backlog
 
-- IA01: Telemetry query fingerprint + column feature extraction
-- IA02: Candidate generation + duplication checks
-- IA03: Benefit estimation level 0
-- IA04: SkeinQL endpoints + SkeinAdmin UI page
-- IA05: Online index build progress + before/after reporting
+- [x] IA01: Telemetry query fingerprint + column feature extraction
+- [x] IA02: Candidate generation + duplication checks
+- [x] IA03: Benefit estimation level 0
+- [x] IA04: SkeinQL endpoints + SkeinAdmin UI page
+- [ ] IA05: Online index build progress + measured before/after reporting
 
 ---
 

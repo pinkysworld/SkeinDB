@@ -35,7 +35,10 @@ const STATE = {
   easySubTab: 'browse',
   easySortColumn: '',
   easySortDir: 'asc',
-  qbConditions: []
+  qbConditions: [],
+  advisorSuggestions: [],
+  advisorHistory: [],
+  advisorSelection: null
 };
 
 // ---------------------------------------------------------------------------
@@ -84,7 +87,7 @@ const RESEARCH_TRACKS = [
   { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'], status: 'hardened' },
   { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'rpc', status: 'hardened' },
   { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with propose/merge/apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
-  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.synthesize', 'advisor.history', 'advisor.apply', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
+  { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['system.capabilities'], status: 'prototype' },
   { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
@@ -152,11 +155,14 @@ const RPC_TEMPLATES = [
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
   { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { name:'merge_sum', wasm_b64:'AA==' } },
   { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { wasm_b64:'AA==', schema:{columns:[{name:'x',type:'i64'}]} } },
-  { label: 'advisor.synthesize', method: 'advisor.synthesize', params: { db:'demo', table:'users' } },
-  { label: 'advisor.history', method: 'advisor.history', params: { db:'demo' } },
-  { label: 'autoparam.analyze', method: 'autoparam.analyze', params: { sql:'SELECT * FROM users WHERE id = 42' } },
+  { label: 'advisor.index_synthesize', method: 'advisor.index_synthesize', params: { table:{db:'demo',table:'users'}, limit:5, min_queries:1, min_rows:1 } },
+  { label: 'advisor.apply_index', method: 'advisor.apply_index', params: { table:{db:'demo',table:'users'}, columns:['city'], include:['name'] } },
+  { label: 'advisor.history', method: 'advisor.history', params: { table:{db:'demo',table:'users'}, limit:10 } },
+  { label: 'ai.autoparam.analyze', method: 'ai.autoparam.analyze', params: { sql:'SELECT * FROM users WHERE id = 42' } },
   { label: 'cdc.subscribe_table', method: 'cdc.subscribe_table', params: { db:'demo', table:'users' } },
   { label: 'cdc.poll', method: 'cdc.poll', params: { sub_id:'sub_1', from_offset:0, limit:200 } },
+  { label: 'cdc.ack', method: 'cdc.ack', params: { sub_id:'sub_1', offset:42 } },
+  { label: 'cdc.close', method: 'cdc.close', params: { sub_id:'sub_1' } },
   { label: 'settings.get', method: 'settings.get', params: { keys:['cluster.state.v1'] } },
   { label: 'cluster.status', method: 'cluster.status', params: {} },
   { label: 'cluster.join_token.create', method: 'cluster.join_token.create', params: { ttl_ms:600000, role:'replica' } },
@@ -467,6 +473,144 @@ function formatNumber(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(n);
+}
+
+function advisorSelectionKey(columns, include) {
+  return JSON.stringify({
+    columns: Array.isArray(columns) ? columns : [],
+    include: Array.isArray(include) ? include : []
+  });
+}
+
+function advisorLabel(columns, include) {
+  const key = Array.isArray(columns) ? columns.filter(Boolean).join(', ') : '';
+  const extras = Array.isArray(include) ? include.filter(Boolean).join(', ') : '';
+  return extras ? key + ' INCLUDE ' + extras : key;
+}
+
+function advisorExpectedAccess(columns) {
+  if (!Array.isArray(columns) || !columns.length) return 'indexed lookup';
+  if (columns.length === 1) return 'indexed lookup on ' + columns[0];
+  return 'composite index scan on ' + columns.join(' -> ');
+}
+
+function formatAdvisorTime(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '--';
+  return new Date(ms).toLocaleString();
+}
+
+function findAdvisorHistoryEntry(selection) {
+  if (!selection) return null;
+  const key = advisorSelectionKey(selection.columns, selection.include);
+  return (STATE.advisorHistory || []).find((entry) => advisorSelectionKey(entry.columns, entry.include) === key) || null;
+}
+
+function setAdvisorSelection(selection, options = {}) {
+  if (!selection || !Array.isArray(selection.columns) || !selection.columns.length) {
+    STATE.advisorSelection = null;
+    const input = $('advSelection');
+    if (input) input.value = '';
+    return;
+  }
+  const override = options.tableRef || (options.table && typeof options.table === 'object' ? options.table : null);
+  const db = override?.db || options.db || $('advDb')?.value.trim() || '';
+  const table = override?.table || options.tableName || $('advTable')?.value.trim() || '';
+  STATE.advisorSelection = {
+    table: tableRef(db, table),
+    columns: [...selection.columns],
+    include: Array.isArray(selection.include) ? [...selection.include] : [],
+    id: selection.id || selection.suggestion_id || null,
+    action: selection.action || null
+  };
+  const input = $('advSelection');
+  if (input) input.value = advisorLabel(STATE.advisorSelection.columns, STATE.advisorSelection.include);
+}
+
+function buildAdvisorReportCard(title, meta, tags, beforeText, afterText, buttonLabel, source, index) {
+  const card = document.createElement('div');
+  card.className = 'rewrite-item';
+  const tagHtml = tags.map((tag, idx) => '<span class="tag' + (idx % 2 ? ' secondary' : '') + '">' + escapeHtml(tag) + '</span>').join('');
+  card.innerHTML =
+    '<div class="rewrite-head"><div class="rewrite-title">' + escapeHtml(title) + '</div><div class="rewrite-meta">' + escapeHtml(meta) + '</div></div>' +
+    '<div class="rewrite-tags">' + tagHtml + '</div>' +
+    '<div class="rewrite-grid"><div class="rewrite-block">' + escapeHtml(beforeText) + '</div><div class="rewrite-block">' + escapeHtml(afterText) + '</div></div>' +
+    '<div class="actions" style="margin-top:8px"><button class="secondary sm" type="button" data-adv-source="' + source + '" data-adv-index="' + index + '">' + escapeHtml(buttonLabel) + '</button></div>';
+  return card;
+}
+
+function renderAdvisorReport() {
+  const target = $('advisorReport');
+  if (!target) return;
+  target.textContent = '';
+
+  const suggestions = Array.isArray(STATE.advisorSuggestions) ? STATE.advisorSuggestions : [];
+  const history = Array.isArray(STATE.advisorHistory) ? STATE.advisorHistory : [];
+
+  if (!suggestions.length && !history.length) {
+    target.textContent = 'Run Synthesize to see ranked index suggestions and an observed-before/expected-after report.';
+    return;
+  }
+
+  if (suggestions.length) {
+    const header = document.createElement('div');
+    header.className = 'builder-muted';
+    header.textContent = 'Top suggestions';
+    target.appendChild(header);
+    suggestions.forEach((item, idx) => {
+      const avgRows = item.count ? Math.round(item.rows_scanned / item.count) : 0;
+      const historyEntry = findAdvisorHistoryEntry(item);
+      const afterBits = [
+        'After (expected)',
+        advisorExpectedAccess(item.columns),
+        'scan opportunity: up to ' + formatNumber(item.rows_scanned) + ' historical rows avoided',
+        historyEntry ? ('latest action: ' + historyEntry.action + ' at ' + formatAdvisorTime(historyEntry.created_at_ms)) : 'latest action: not yet applied'
+      ];
+      target.appendChild(buildAdvisorReportCard(
+        advisorLabel(item.columns, item.include),
+        'score ' + formatNumber(item.score),
+        [
+          formatNumber(item.count) + ' query observations',
+          formatNumber(item.rows_scanned) + ' rows scanned',
+          formatNumber(avgRows) + ' rows/query'
+        ],
+        'Before\n' +
+          'observed workload rows scanned: ' + formatNumber(item.rows_scanned) + '\n' +
+          'observed queries matched: ' + formatNumber(item.count) + '\n' +
+          'average scan pressure: ' + formatNumber(avgRows) + ' rows/query',
+        afterBits.join('\n'),
+        'Select suggestion',
+        'suggestion',
+        idx
+      ));
+    });
+  }
+
+  if (history.length) {
+    const header = document.createElement('div');
+    header.className = 'builder-muted';
+    header.style.marginTop = suggestions.length ? '10px' : '0';
+    header.textContent = 'Recent advisor history';
+    target.appendChild(header);
+    history.forEach((entry, idx) => {
+      target.appendChild(buildAdvisorReportCard(
+        advisorLabel(entry.columns, entry.include),
+        entry.action + ' at ' + formatAdvisorTime(entry.created_at_ms),
+        [
+          entry.table && entry.table.db ? (entry.table.db + '.' + entry.table.table) : 'unknown table',
+          entry.note || 'no note'
+        ],
+        'Before\n' +
+          'suggestion id: ' + (entry.suggestion_id || 'n/a') + '\n' +
+          'action id: ' + (entry.id || 'n/a'),
+        'After\n' +
+          'recorded action: ' + entry.action + '\n' +
+          'selection: ' + advisorLabel(entry.columns, entry.include),
+        'Load selection',
+        'history',
+        idx
+      ));
+    });
+  }
 }
 
 function updateStats(s) {
@@ -3261,19 +3405,89 @@ async function wasmRun() {
 // Index Advisor (R16)
 // ---------------------------------------------------------------------------
 async function advSynthesize() {
-  try { const db = $('advDb')?.value.trim(), table = $('advTable')?.value.trim(); if (!db) throw new Error('DB required'); await call('advisor.synthesize', cleanParams({db,table:table||undefined}), 'advOut'); } catch (e) { setOut({error:String(e)},'advOut'); }
+  try {
+    const table = readDbTable('advDb', 'advTable');
+    const res = await call('advisor.index_synthesize', { table }, 'advOut');
+    const result = unwrapRpcResult(res, 'advisor.index_synthesize');
+    STATE.advisorSuggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
+    if (STATE.advisorSuggestions.length) setAdvisorSelection(STATE.advisorSuggestions[0], { tableRef: table });
+    else setAdvisorSelection(null);
+    renderAdvisorReport();
+    showToast('Index suggestions refreshed.', 'success');
+  } catch (e) { setOut({error:String(e)},'advOut'); }
 }
 
 async function advHistory() {
-  try { const db = $('advDb')?.value.trim(); if (!db) throw new Error('DB required'); await call('advisor.history',{db},'advOut'); } catch (e) { setOut({error:String(e)},'advOut'); }
+  try {
+    const db = $('advDb')?.value.trim();
+    const table = $('advTable')?.value.trim();
+    const params = db && table ? { table: tableRef(db, table), limit: 20 } : { limit: 20 };
+    const res = await call('advisor.history', params, 'advOut');
+    const result = unwrapRpcResult(res, 'advisor.history');
+    STATE.advisorHistory = Array.isArray(result.entries) ? result.entries : [];
+    if (!STATE.advisorSelection && STATE.advisorHistory.length) {
+      const first = STATE.advisorHistory[0];
+      setAdvisorSelection(first, { tableRef: first.table || null });
+    }
+    renderAdvisorReport();
+    showToast('Advisor history loaded.', 'info');
+  } catch (e) { setOut({error:String(e)},'advOut'); }
 }
 
 async function advApply() {
-  try { const name = $('advIndexName')?.value.trim(); if (!name) throw new Error('Index name required'); const db = $('advDb')?.value.trim(); await call('advisor.apply', cleanParams({db,index_name:name}), 'advOut'); } catch (e) { setOut({error:String(e)},'advOut'); }
+  try {
+    const selection = STATE.advisorSelection;
+    if (!selection) throw new Error('Select a suggestion first');
+    const res = await call('advisor.apply_index', cleanParams({
+      table: selection.table,
+      columns: selection.columns,
+      include: selection.include,
+      note: $('advNote')?.value.trim() || undefined
+    }), 'advOut');
+    const result = unwrapRpcResult(res, 'advisor.apply_index');
+    STATE.advisorHistory.unshift({
+      id: result.action_id,
+      suggestion_id: selection.id || advisorSelectionKey(selection.columns, selection.include),
+      table: selection.table,
+      columns: [...selection.columns],
+      include: [...selection.include],
+      action: 'apply',
+      created_at_ms: Date.now(),
+      note: $('advNote')?.value.trim() || null
+    });
+    const selectionKey = advisorSelectionKey(selection.columns, selection.include);
+    STATE.advisorSuggestions = STATE.advisorSuggestions.filter((item) => advisorSelectionKey(item.columns, item.include) !== selectionKey);
+    renderAdvisorReport();
+    showToast('Advisor suggestion applied (' + (result.status || 'ok') + ').', 'success');
+  } catch (e) { setOut({error:String(e)},'advOut'); }
 }
 
 async function advDismiss() {
-  try { const name = $('advIndexName')?.value.trim(); if (!name) throw new Error('Index name required'); const db = $('advDb')?.value.trim(); await call('advisor.dismiss', cleanParams({db,index_name:name}), 'advOut'); } catch (e) { setOut({error:String(e)},'advOut'); }
+  try {
+    const selection = STATE.advisorSelection;
+    if (!selection) throw new Error('Select a suggestion first');
+    const res = await call('advisor.dismiss', cleanParams({
+      table: selection.table,
+      columns: selection.columns,
+      include: selection.include,
+      note: $('advNote')?.value.trim() || undefined
+    }), 'advOut');
+    const result = unwrapRpcResult(res, 'advisor.dismiss');
+    STATE.advisorHistory.unshift({
+      id: result.action_id,
+      suggestion_id: selection.id || advisorSelectionKey(selection.columns, selection.include),
+      table: selection.table,
+      columns: [...selection.columns],
+      include: [...selection.include],
+      action: 'dismiss',
+      created_at_ms: Date.now(),
+      note: $('advNote')?.value.trim() || null
+    });
+    const selectionKey = advisorSelectionKey(selection.columns, selection.include);
+    STATE.advisorSuggestions = STATE.advisorSuggestions.filter((item) => advisorSelectionKey(item.columns, item.include) !== selectionKey);
+    renderAdvisorReport();
+    showToast('Advisor suggestion dismissed.', 'info');
+  } catch (e) { setOut({error:String(e)},'advOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3308,11 +3522,11 @@ async function nlExecute() {
 }
 
 async function autoparamAnalyze() {
-  try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('autoparam.analyze',{sql},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
+  try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('ai.autoparam.analyze',{sql},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
 }
 
 async function autoparamClassify() {
-  try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('autoparam.classify',{sql},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
+  try { const sql = $('autoparamSql')?.value.trim(); if (!sql) throw new Error('SQL required'); await call('ai.autoparam.classify',{sql},'autoparamOut'); } catch (e) { setOut({error:String(e)},'autoparamOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3891,6 +4105,24 @@ wire('btnAdvSynthesize', advSynthesize);
 wire('btnAdvHistory', advHistory);
 wire('btnAdvApply', advApply);
 wire('btnAdvDismiss', advDismiss);
+if ($('advisorReport')) $('advisorReport').addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-adv-source][data-adv-index]');
+  if (!btn) return;
+  const idx = Number.parseInt(btn.dataset.advIndex || '', 10);
+  const source = btn.dataset.advSource;
+  if (Number.isNaN(idx)) return;
+  if (source === 'suggestion' && STATE.advisorSuggestions[idx]) {
+    setAdvisorSelection(STATE.advisorSuggestions[idx], { tableRef: readDbTable('advDb', 'advTable') });
+    renderAdvisorReport();
+    showToast('Advisor suggestion selected.', 'info');
+  }
+  if (source === 'history' && STATE.advisorHistory[idx]) {
+    const entry = STATE.advisorHistory[idx];
+    setAdvisorSelection(entry, { tableRef: entry.table || null });
+    renderAdvisorReport();
+    showToast('Advisor history entry loaded.', 'info');
+  }
+});
 
 // NL
 wire('btnNlTranslate', nlTranslate);

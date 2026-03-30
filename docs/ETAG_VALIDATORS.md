@@ -1,7 +1,14 @@
 # Cache-coherent Queries with HTTP Validators (ETags)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Partial implementation
+Last updated: 2026-03-27
+
+Current runtime baseline:
+- `data.get` returns row ETags and `data.update` honors `expected_etag` / `If-Match`-style optimistic writes.
+- `query.select` and `query.execute_prepared` can return query ETags and honor `if_none_match`.
+- `query.prepare` plus `GET /api/v1/q/{query_id}` is live and returns HTTP ETag headers with `304 Not Modified` on matches.
+- `query.patch` reuses the same query-level ETag surface for delta refreshes.
+- `query.subscribe` / push invalidation is still planned.
 
 Goal:
 Make SkeinDB a web-native database by supporting cache-coherent reads using HTTP validators.

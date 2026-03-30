@@ -157,7 +157,7 @@ scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, 
 (`tables`/`columns`/`schemata`/`statistics`/`key_column_usage`/`table_constraints`/
 `character_sets`/`collations`/`engines`), `SHOW ENGINES`, `GROUP_CONCAT` with `SEPARATOR` stripping,
 and `EXPLAIN` with real table name extraction.
-The corpus has expanded to 1657 lines with about 672 semicolon-terminated SQL statements.
+The corpus has expanded to 1657 lines with about 678 semicolon-terminated SQL statements.
 
 ---
 

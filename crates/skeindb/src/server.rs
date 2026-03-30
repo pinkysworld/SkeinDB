@@ -19053,6 +19053,8 @@ fn system_capabilities(state: &AppState) -> Value {
         "view.explain_deps",
         "cdc.subscribe_table",
         "cdc.poll",
+        "cdc.ack",
+        "cdc.close",
         "security.token.create",
         "security.token.list",
         "security.token.revoke",
@@ -19330,11 +19332,18 @@ mod tests {
         let js = admin_main_js();
         assert!(js.contains("system.shutdown"));
         assert!(js.contains("system.capabilities"));
+        assert!(js.contains("cdc.ack"));
+        assert!(js.contains("cdc.close"));
+        assert!(js.contains("advisor.index_synthesize"));
+        assert!(js.contains("advisor.apply_index"));
+        assert!(js.contains("advisorReport"));
         assert!(js.contains("easyDoCreateTable"));
         assert!(js.contains("easyRenderDataGrid"));
         assert!(js.contains("easyDeleteCheckedRows"));
         assert!(js.contains("securityRefreshTokens"));
         assert!(js.contains("securityCreateToken"));
+        assert!(!js.contains("advisor.synthesize"));
+        assert!(!js.contains("call('advisor.apply'"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {

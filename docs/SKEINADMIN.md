@@ -214,10 +214,11 @@ Security note:
 
 ### 4.13 Index Advisor
 (See docs/INDEX_ADVISOR.md)
-- Suggested indexes (ranked)
-- One-click apply (with progress)
-- Dismiss / snooze suggestions
-- Before/after metrics for impacted queries
+- Ranked index suggestions from live advisor telemetry
+- Apply / dismiss actions wired to `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, and `advisor.history`
+- Embedded history log for prior advisor actions
+- Observed-before and expected-after scan report for each suggestion
+- Online build progress remains backlog work
 
 
 
@@ -303,7 +304,7 @@ SkeinAdmin should support:
 - SA06: Users UI (admin.*)
 - SA07: Stats dashboard (stats.*)
 - SA08: Cluster dashboard (cluster.*)
-- SA09: Index Advisor page (advisor.*)
+- SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog
 - SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*)
 - SA11: Encryption + key rotation UI (settings.encryption + status/progress)
 - SA12: CDC subscriptions UI (cdc.*) + lag visualization

@@ -8,6 +8,9 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use serde_json::json;
+use skeindb_skeinql::types::{
+    BaseTableRef, Expr, Query, QueryBody, SelectBody, SelectItem, TableRef,
+};
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::{
@@ -16,6 +19,38 @@ use tokio::{
 };
 
 static CLUSTER_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn select_query(db: &str, table: &str, projection: &[&str]) -> Query {
+    Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection: projection
+                    .iter()
+                    .map(|col| SelectItem {
+                        expr: Expr::Col {
+                            col: (*col).to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    })
+                    .collect(),
+                from: Some(vec![TableRef::Base(BaseTableRef {
+                    db: db.to_string(),
+                    table: table.to_string(),
+                    r#as: None,
+                })]),
+                r#where: None,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    }
+}
 
 async fn cluster_test_guard() -> OwnedSemaphorePermit {
     let sem = CLUSTER_TEST_SEMAPHORE
@@ -228,6 +263,129 @@ async fn sql_http_exec_endpoint_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn prepared_query_get_endpoint_honors_etag_validators() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("prepared_query_get_endpoint")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let prepare = client
+        .rpc(
+            "query.prepare",
+            json!({"query": select_query("app", "users", &["id", "name"])}),
+        )
+        .await?;
+    assert!(prepare.ok);
+    let query_id = prepare.result.expect("missing query.prepare result")["query_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let url = format!(
+        "{}/api/v1/q/{}",
+        client.base_url.trim_end_matches('/'),
+        query_id
+    );
+    let first = client.client.get(&url).send().await?;
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first_etag = first
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing etag header"))?
+        .to_string();
+    let first_body: serde_json::Value = first.json().await?;
+    let first_rows = first_body["data"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(first_rows.len(), 1);
+    assert_eq!(first_rows[0][0]["v"].as_u64(), Some(1));
+    assert_eq!(first_rows[0][1]["v"].as_str(), Some("Ada"));
+
+    let not_modified = client
+        .client
+        .get(&url)
+        .header(reqwest::header::IF_NONE_MATCH, first_etag.clone())
+        .send()
+        .await?;
+    assert_eq!(not_modified.status(), reqwest::StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok()),
+        Some(first_etag.as_str())
+    );
+    assert!((not_modified.bytes().await?).is_empty());
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let refreshed = client
+        .client
+        .get(&url)
+        .header(reqwest::header::IF_NONE_MATCH, first_etag.clone())
+        .send()
+        .await?;
+    assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
+    let refreshed_etag = refreshed
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing refreshed etag"))?
+        .to_string();
+    assert_ne!(refreshed_etag, first_etag);
+    let refreshed_body: serde_json::Value = refreshed.json().await?;
+    let refreshed_rows = refreshed_body["data"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(refreshed_rows.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("tx_rpc_roundtrip")?;
@@ -255,6 +413,190 @@ async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
         rollback.error.as_ref().map(|e| e.code.as_str()),
         Some("not_found")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn admin_main_js_exposes_live_index_advisor_methods() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("admin_index_advisor_js")?;
+    let body = reqwest::Client::new()
+        .get(format!("{}/admin/src/main.js", server.base_url()))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    assert!(body.contains("advisor.index_synthesize"));
+    assert!(body.contains("advisor.apply_index"));
+    assert!(body.contains("advisorReport"));
+    assert!(!body.contains("advisor.synthesize"));
+    assert!(!body.contains("call('advisor.apply'"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_ack_and_close_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_ack_and_close")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let subscribe = client
+        .rpc("cdc.subscribe_table", json!({"db":"app","table":"users"}))
+        .await?;
+    assert!(subscribe.ok);
+    let subscribe_result = subscribe
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing subscribe result"))?;
+    let sub_id = subscribe_result["sub_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|v| v.get("offset"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let first_poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(first_poll.ok);
+    let first_events = first_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(first_events.len(), 1);
+    assert_eq!(first_events[0]["op"].as_str(), Some("insert"));
+    let next_offset = first_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("next_offset"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("missing next_offset"))?;
+
+    let ack = client
+        .rpc(
+            "cdc.ack",
+            json!({"sub_id": sub_id.clone(), "offset": next_offset}),
+        )
+        .await?;
+    assert!(ack.ok);
+    assert_eq!(
+        ack.result
+            .as_ref()
+            .and_then(|v| v.get("acked_offset"))
+            .and_then(|v| v.as_u64()),
+        Some(next_offset)
+    );
+
+    let resp = client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let second_poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(second_poll.ok);
+    let second_events = second_poll
+        .result
+        .as_ref()
+        .and_then(|v| v.get("events"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(second_events.len(), 1);
+    assert_eq!(second_events[0]["pk"][0]["v"].as_u64(), Some(2));
+
+    let close = client
+        .rpc("cdc.close", json!({"sub_id": sub_id.clone()}))
+        .await?;
+    assert!(close.ok);
+    assert_eq!(
+        close
+            .result
+            .as_ref()
+            .and_then(|v| v.get("closed"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    let after_close = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": 0, "limit": 10}),
+        )
+        .await?;
+    assert!(!after_close.ok);
+    assert_eq!(
+        after_close.error.as_ref().map(|e| e.code.as_str()),
+        Some("not_found")
+    );
+
+    let caps = client.rpc("system.capabilities", json!({})).await?;
+    assert!(caps.ok);
+    let methods = caps
+        .result
+        .as_ref()
+        .and_then(|v| v.get("methods"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(methods.iter().any(|method| method == "cdc.ack"));
+    assert!(methods.iter().any(|method| method == "cdc.close"));
+
     Ok(())
 }
 
@@ -3066,6 +3408,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "USE wp",
         "CREATE TABLE wp_users (id BIGINT NOT NULL, status VARCHAR(20) NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_posts (id BIGINT NOT NULL, post_author BIGINT NOT NULL, post_status VARCHAR(20) NOT NULL, PRIMARY KEY (id))",
+        "CREATE TABLE wp_options (id BIGINT NOT NULL, option_name VARCHAR(191) NOT NULL, PRIMARY KEY (id))",
         "CREATE TABLE wp_profiles (user_id BIGINT NOT NULL, display_name VARCHAR(64) NOT NULL, PRIMARY KEY (user_id))",
         "ALTER TABLE wp_posts ADD COLUMN post_title VARCHAR(64) NOT NULL DEFAULT 'untitled'",
         "ALTER TABLE wp_posts ADD COLUMN post_name VARCHAR(200) NOT NULL DEFAULT '' AFTER post_title",
@@ -3073,6 +3416,7 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
         "INSERT INTO wp_users (id, status, name) VALUES (1, 'active', 'Ada'), (2, 'active', 'Grace')",
         "INSERT IGNORE INTO wp_users (id, status, name) VALUES (1, 'inactive', 'Ignored'), (3, 'active', 'Linus')",
         "REPLACE INTO wp_users (id, status, name) VALUES (2, 'active', 'Grace Hopper')",
+        "INSERT INTO wp_options (id, option_name) VALUES (1, 'siteurl')",
         "INSERT INTO wp_profiles (user_id, display_name) VALUES (1, 'Ada Lovelace'), (3, 'Linus Torvalds')",
         "INSERT INTO wp_posts (id, post_author, post_status) VALUES (10, 1, 'publish'), (11, 1, 'draft'), (12, 3, 'publish')",
     ] {
@@ -3149,6 +3493,28 @@ async fn mysql_supports_wordpress_style_insert_variants_and_join() -> anyhow::Re
                     Some("Ada".to_string()),
                 ]
             );
+        }
+        other => panic!("expected result set, got {:?}", other),
+    }
+
+    send_com_query(
+        &mut stream,
+        "SELECT TABLE_NAME AS 'table', TABLE_ROWS AS 'rows', SUM(data_length + index_length) AS 'bytes' FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'wp' AND TABLE_NAME IN ('wp_options','wp_posts','wp_users') GROUP BY TABLE_NAME",
+    )
+    .await?;
+    match read_mysql_response(&mut stream).await? {
+        MysqlResponse::Rows(rows) => {
+            assert_eq!(rows.len(), 3);
+            let mut table_names = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.as_deref()))
+                .collect::<Vec<_>>();
+            table_names.sort_unstable();
+            assert_eq!(table_names, vec!["wp_options", "wp_posts", "wp_users"]);
+            for row in rows {
+                assert_eq!(row.get(1).and_then(|value| value.as_deref()), Some("0"));
+                assert_eq!(row.get(2).and_then(|value| value.as_deref()), Some("0"));
+            }
         }
         other => panic!("expected result set, got {:?}", other),
     }

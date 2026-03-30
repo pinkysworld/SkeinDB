@@ -1,7 +1,12 @@
 # Query Coalescing (In-flight Deduplication)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Partial implementation
+Last updated: 2026-03-27
+
+Current runtime baseline:
+- `GET /api/v1/q/{query_id}` coalesces unconditional prepared-query reads by `query_id`.
+- `query.patch` coalesces strict JSON patch requests sharing the same `base_etag -> current_etag` transition.
+- Metrics, auth-scoped fingerprints, cancellation semantics, and broader entry-point coverage remain follow-on work.
 
 Goal:
 Reduce server load and tail latency under bursty traffic by preventing the "thundering herd" problem:

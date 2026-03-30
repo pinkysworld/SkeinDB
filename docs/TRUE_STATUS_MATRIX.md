@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-06-06
-Latest changes: MySQL compatibility deepening (T038) — correlated subqueries in projection, binary comparison operators in scalar expression parser, multi-aggregate GROUP BY with ORDER BY over JOINs, embedded subquery pre-evaluation in arithmetic, expression-based UPDATE SET with per-row evaluation (`data_update_exprs`). 285 tests (204 unit + 29 integration + 52 other).
+Last updated: 2026-03-30
+Latest changes: main now includes the live SkeinAdmin Index Advisor page (T174) plus CDC table-subscription `cdc.ack` / `cdc.close` lifecycle support (T221), on top of the existing MySQL compatibility baseline.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -12,7 +12,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **75 done / 60 open** (135 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T418 complete and the remaining PG tasks still open)
+- `docs/PROJECT_BACKLOG.md`: **77 done / 58 open** (135 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T418 complete and the remaining PG tasks still open)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -40,12 +40,12 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 15 Perf improvements | Planned | Interned-column/late-mat/vectorized pipeline items remain backlog work. |
 | Phase 16 Query coalescing | Implemented (baseline) | `QueryCoalescer` with leader/follower pattern; coalescing active for GET /api/v1/q/{query_id} and `query.patch` (conditional); `stats.coalescing` endpoint with leader/follower counters, in-flight count, saved_executions metric; fingerprint canonicalization via `query_fingerprint()`. |
 | Phase 17 CAS-aware replication | Implemented (baseline) | `objects.need`/`objects.missing`/`objects.fetch` RPCs implemented; `ValueStore::contains()` for O(1) existence check; hex-encoded ValueID wire format; base64-encoded object bytes with end-to-end integrity verification. `BloomFilter` struct with BLAKE3 double-hashing for ValueID membership; `bloom_maybe_contains()`/`bloom_stats()` on `ValueStore`. |
-| Phase 18 Index advisor | Partial (advanced) | `advisor.*` methods and prototype workflow exist; `telemetry.workload_features` RPC extracts predicate/order_by/group_by/join_key columns from SQL workload; privacy-safe storage (no literals); full lifecycle/reporting remains open. |
+| Phase 18 Index advisor | Partial (advanced) | `advisor.index_synthesize/apply_index/history/dismiss` are live, `telemetry.workload_features` extracts predicate/order_by/group_by/join_key columns from SQL workload, and SkeinAdmin now renders ranked suggestions/history with observed-before/expected-after scan reports; online build progress and rollback remain open. |
 | Phase 19 Time travel + replay | Partial | Replay/time-travel prototype surfaces/docs exist; full SQL+UI coverage remains open. |
 | Phase 20 Encryption | Planned | Dedup-preserving encryption backlog remains open. |
 | Phase 21 Compaction scheduler | Partial | Policy scaffolding/docs exist; full constrained scheduler/evaluation remains open. |
 | Phase 22 Autoparam + plan cache | Implemented (baseline) | `ai.autoparam.classify/analyze` with rule-based literal classification; `plan_cache.status` returns cache entries with hit counts, fingerprints, creation/last-hit timestamps; `plan_cache.clear` clears select + patch caches; `CachedSelect` enriched with query/hits/created_ms/last_hit_ms/schema_version; `SET @@skein.autoparameterize = 1` MySQL session variable support; SkeinAdmin top queries by fingerprint display; integration test in `cluster_rpc.rs::telemetry_and_plan_cache_integration`. |
-| Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table` + `cdc.poll` are implemented; query subscriptions/streaming/ack remain open. |
+| Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close` are implemented for table subscriptions with in-memory ack cursors; query subscriptions, streaming transports, and retention/resnapshot remain open. |
 | Phase 25 PostgreSQL compat | Partial | PG v3 wire protocol primitives (`pg_wire.rs`) with message framing (1-byte tag + 4-byte BE length), StartupMessage/SSLRequest parsing, ParameterStatus/BackendKeyData/ReadyForQuery/RowDescription/DataRow/CommandComplete/ErrorResponse encode/write, common PG type OIDs. Connection handler in `server.rs` with trust/cleartext auth, SSL rejection, simple query protocol delegating to the shared SQL engine, transaction stubs (BEGIN/COMMIT/ROLLBACK), `SELECT version()`, extended query protocol stubs (Parse/Bind/Describe/Execute/Close). Listener on port 5432 (configurable via `--pg` flag). T400/T403 complete; SCRAM-SHA-256 auth (T401), PG session state (T402), PG SQL dialect parser (T404), and remaining tasks still open. |
 
 ## 3) Research tracks (R01-R20)
@@ -67,7 +67,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R13 Causal ETag consistency | Hardened | ETag/min-causality controls; V2 vector-clock format (`CAUSALITY_FORMAT_V2`); `merge_causality_tokens()` (component-wise max); `causality_dominates()` (partial order); `ensure_min_causality()` accepts V1+V2. |
 | R14 Replay bundles | Hardened | `edge.bundle.request/apply/status`; integration test creates table, inserts 5 rows, requests replay bundle, checks status by bundle_id, applies bundle to simulate edge receive (`cluster_rpc.rs::r14_geo_replay_bundle_roundtrip`). |
 | R15 Schema evolution | Hardened | `schema.propose_change/merge_status/apply_merge`; integration test creates table, proposes add_column change, checks merge_status by change_id, applies merge (`cluster_rpc.rs::r15_schema_evolution_propose_merge_apply`). |
-| R16 Auto index synthesis | Hardened | `advisor.index_synthesize/apply_index/history`; integration test creates table with 20 rows, requests `advisor.recommend` with workload SQL, verifies result (`cluster_rpc.rs::r16_index_advisor_synthesis_workflow`). |
+| R16 Auto index synthesis | Hardened | `advisor.index_synthesize/apply_index/history/dismiss` plus the SkeinAdmin Index Advisor page with ranked suggestions/history and observed-before/expected-after reports; integration test creates table with 20 rows, requests advisor synthesis with workload SQL, and verifies the result (`cluster_rpc.rs::r16_index_advisor_synthesis_workflow`). |
 | R17 Intent inference | Prototype implemented | `migration.intent_report/rewrite_preview`. |
 | R18 Perf regression replay | Prototype implemented | Replay/perf scaffolds and harness direction. |
 | R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/run` + batch ABI scaffolds. |

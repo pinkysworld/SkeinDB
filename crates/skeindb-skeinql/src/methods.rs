@@ -1988,8 +1988,20 @@ pub struct CdcAckParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcAckResult {
+    pub sub_id: String,
+    pub acked_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcCloseParams {
     pub sub_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcCloseResult {
+    pub sub_id: String,
+    pub closed: bool,
 }
 
 // --------------------------------
