@@ -1195,8 +1195,8 @@ SELECT u.name, COUNT(o.id) AS order_count FROM users u LEFT JOIN orders o ON u.i
 
 -- ── Subqueries ───────────────────────────────────────────
 SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE status = 'completed');
--- TODO: correlated subquery in projection not yet supported
--- SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) AS order_count FROM users;
+-- correlated subquery in projection
+SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) AS order_count FROM users;
 
 -- ── UNION ────────────────────────────────────────────────
 SELECT name FROM users WHERE department = 'Engineering' UNION ALL SELECT name FROM users WHERE department = 'Marketing';
@@ -1217,7 +1217,7 @@ SELECT name, CASE WHEN age < 30 THEN 'young' WHEN age < 35 THEN 'mid' ELSE 'seni
 SELECT COALESCE(NULL, NULL, 'default');
 SELECT IFNULL(NULL, 'fallback');
 SELECT IF(1, 'yes', 'no');
--- TODO: SELECT IF(1 > 0, 'yes', 'no');  -- expression-args in IF() not yet supported
+SELECT IF(1 > 0, 'yes', 'no');
 SELECT NULLIF(1, 1);
 SELECT NULLIF(1, 2);
 
@@ -1305,14 +1305,14 @@ SELECT * FROM dept_stats WHERE cnt > 1;
 SELECT u.name, o.product, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE o.status = 'completed';
 SELECT u.name, o.product FROM users u RIGHT JOIN orders o ON u.id = o.user_id;
 SELECT u.name, c.name AS category FROM users u CROSS JOIN categories c LIMIT 10;
--- TODO: SELECT u.name, COUNT(o.id) AS total_orders, SUM(o.amount) AS total_amount FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total_amount DESC;  -- GROUP BY with mixed aggregates over JOIN not yet supported
+SELECT u.name, COUNT(o.id) AS total_orders, SUM(o.amount) AS total_amount FROM users u LEFT JOIN orders o ON u.id = o.user_id GROUP BY u.name ORDER BY total_amount DESC;
 
 -- ── UNION / UNION ALL ────────────────────────────────────
 SELECT name, 'user' AS type FROM users UNION ALL SELECT name, 'category' AS type FROM categories;
 SELECT department FROM users UNION SELECT name FROM categories;
 
 -- ── Derived tables (FROM subqueries) ─────────────────────
--- TODO: SELECT dept, avg_sal FROM (SELECT department AS dept, AVG(salary) AS avg_sal FROM users GROUP BY department) sub WHERE avg_sal > 70000;  -- numeric aggregate in derived table not yet supported
+SELECT dept, avg_sal FROM (SELECT department AS dept, AVG(salary) AS avg_sal FROM users GROUP BY department) sub WHERE avg_sal > 70000;
 SELECT sub.name FROM (SELECT name FROM users LIMIT 5) sub;
 
 -- ── EXISTS / NOT EXISTS ──────────────────────────────────
@@ -1322,7 +1322,7 @@ SELECT name FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_i
 SELECT name FROM users WHERE department IN (SELECT DISTINCT department FROM users WHERE salary > 80000);
 
 -- ── Scalar subquery ──────────────────────────────────────
--- TODO: SELECT name, salary, salary - (SELECT AVG(salary) FROM users) AS diff_from_avg FROM users;  -- scalar subquery in arithmetic not yet supported
+SELECT name, salary, salary - (SELECT AVG(salary) FROM users) AS diff_from_avg FROM users;
 
 -- ── Multi-table DELETE ───────────────────────────────────
 DELETE o FROM orders o JOIN users u ON o.user_id = u.id WHERE u.department = 'Test';
@@ -1448,7 +1448,7 @@ SELECT @@tx_isolation;
 SELECT @@sql_mode;
 SELECT @@time_zone;
 SELECT @@character_set_client;
--- TODO: SELECT @@max_allowed_packet;  -- not yet in session var map
+SELECT @@max_allowed_packet;
 
 -- ── Maintenance no-ops ───────────────────────────────────
 FLUSH TABLES;
@@ -1580,10 +1580,10 @@ SELECT JSON_KEYS('{"a":1, "b":2}');
 SELECT JSON_MERGE_PRESERVE('{"a":1}', '{"b":2}');
 
 -- ── Window functions ─────────────────────────────────────
--- TODO: window function evaluation over tables
--- SELECT id, name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM users;
--- SELECT id, name, RANK() OVER (ORDER BY name) AS rnk FROM users;
--- SELECT id, name, DENSE_RANK() OVER (ORDER BY name) AS drnk FROM users;
+-- window function evaluation over tables
+SELECT id, name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM users;
+SELECT id, name, RANK() OVER (ORDER BY name) AS rnk FROM users;
+SELECT id, name, DENSE_RANK() OVER (ORDER BY name) AS drnk FROM users;
 
 -- ── CTE (WITH ... AS) ───────────────────────────────────
 WITH active AS (SELECT * FROM users WHERE id > 0) SELECT * FROM active;
@@ -1591,18 +1591,18 @@ WITH active AS (SELECT * FROM users WHERE id > 0) SELECT * FROM active;
 -- ── Subqueries (broadened) ───────────────────────────────
 SELECT * FROM users WHERE id IN (SELECT id FROM users WHERE id < 10);
 SELECT * FROM users WHERE EXISTS (SELECT 1 FROM users WHERE id = 1);
--- TODO: scalar subquery in WHERE
--- SELECT * FROM users WHERE id = (SELECT MIN(id) FROM users);
--- TODO: scalar subquery in projection
--- SELECT (SELECT COUNT(*) FROM users) AS total;
+-- scalar subquery in WHERE
+SELECT * FROM users WHERE id = (SELECT MIN(id) FROM users);
+-- scalar subquery in projection
+SELECT (SELECT COUNT(*) FROM users) AS total;
 
 -- ── Multi-table operations ───────────────────────────────
 DELETE u FROM users u WHERE u.id = 999;
 
 -- ── Advanced JOIN variants ───────────────────────────────
--- TODO: NATURAL JOIN / CROSS JOIN support
--- SELECT * FROM users NATURAL JOIN users AS u2;
--- SELECT * FROM users u1 CROSS JOIN users u2;
+-- NATURAL JOIN / CROSS JOIN support
+SELECT * FROM users u1 CROSS JOIN categories c1 LIMIT 5;
+SELECT * FROM categories NATURAL JOIN categories AS c2;
 
 -- ── INSERT ... SELECT ────────────────────────────────────
 INSERT INTO users (id, name) SELECT id + 1000, name FROM users WHERE id < 3;

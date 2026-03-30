@@ -2247,6 +2247,22 @@ impl Engine {
         if_match: Option<&str>,
         args: &[Lit],
     ) -> anyhow::Result<WriteResult> {
+        let expr_set: std::collections::BTreeMap<String, Expr> = set
+            .iter()
+            .map(|(k, v)| (k.clone(), Expr::Lit { lit: v.clone() }))
+            .collect();
+        self.data_update_exprs(table, predicate, &expr_set, limit, if_match, args)
+    }
+
+    pub fn data_update_exprs(
+        &mut self,
+        table: &BaseTableRef,
+        predicate: &Expr,
+        set: &std::collections::BTreeMap<String, Expr>,
+        limit: Option<u64>,
+        if_match: Option<&str>,
+        args: &[Lit],
+    ) -> anyhow::Result<WriteResult> {
         let mut affected = 0u64;
         let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
@@ -2274,7 +2290,8 @@ impl Engine {
 
                 let mut new_row = current_row.clone();
                 for (k, v) in set.iter() {
-                    new_row.insert(k.clone(), v.clone());
+                    let lit = eval_expr(v, &current_row, None, args)?;
+                    new_row.insert(k.clone(), lit);
                 }
                 if let Some(col) = not_null_violation(schema, &new_row) {
                     anyhow::bail!("invalid_request: null value for non-null column {col}");

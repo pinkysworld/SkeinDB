@@ -1,26 +1,21 @@
-feat: column flags, corpus expansion, CSV, CAS pull, replica router (T037/T038/T043/T142/T143)
+feat(mysql): deepen COM_QUERY compat — correlated subqueries, comparison ops, multi-aggregate GROUP BY, expression-based UPDATE SET
 
-Phase 3 — MySQL protocol:
-- T037: COM_STMT column flags — NOT_NULL/PRIMARY_KEY/UNIQUE_KEY/UNSIGNED/BINARY/
-  AUTO_INCREMENT/NUM constants, mysql_stmt_expr_flags() with ~30 scalar function
-  mappings, mysql_stmt_resolve_column_flags() for table descriptors, grouped
-  aggregate flag pass-through
-- T038: corpus.sql expanded from ~298 to ~400 statements — numeric/math, string
-  extended, bit/hash, date/time extended, JSON, CTE, subqueries, UNION, derived
-  tables, NULL-safe equality, REGEXP/RLIKE, EXPLAIN, maintenance no-ops, SHOW
-  variants, system variables, SET GLOBAL. COM_QUERY FOR UPDATE/FOR SHARE/LOCK IN
-  SHARE MODE stripping. SOUNDEX() scalar function. @@max_allowed_packet variable.
-  Fixed doubled-quote ('') handling in find_matching_parenthesis.
+T038 progress: five new MySQL compatibility features implemented.
 
-Phase 4 — Web console:
-- T043: CSV export/import — resultToCSV() with escaping, parseCSV() with quoted
-  fields, wired into admin console exportData()/importData() handlers
+Engine:
+- Add data_update_exprs() for per-row expression evaluation in UPDATE SET
+  (salary = salary * 1.1 now evaluates the expression against each matching row)
+- Existing data_update() delegates to data_update_exprs() via Expr::Lit wrapping
 
-Phase 14 — Cluster management:
-- T142: CAS object pull — objects.need/missing/fetch RPCs, parse_value_id(),
-  ValueStore::contains() O(1) check, base64-encoded fetch with integrity verify
-- T143: Read-only replica router — cluster.route_query RPC with read balancing
-  hints (standalone/write_primary/read_replica/read_primary), round-robin replica
-  selection, write rejection enforcement
+Server (MySQL compat layer):
+- Correlated subquery in projection: detect outer table refs in subquery,
+  add extra columns to outer projection for correlated values, substitute per row
+- Binary comparison operators (>, <, >=, <=, =, !=, <>) in parse_sql_scalar_expr
+- Multi-aggregate GROUP BY with ORDER BY: track per-aggregate column indices,
+  include aggregate input columns in source SQL, add ORDER BY sorting
+- Embedded subquery pre-evaluation in arithmetic expressions
+  (salary - (SELECT AVG(salary) FROM users) pre-evaluates the subquery)
+- SqlPlan::Update.set changed from BTreeMap<String, Lit> to BTreeMap<String, Expr>
 
-All 251 tests pass (177 unit + 23 integration + 51 other).
+Tests: 285 passing (204 unit + 29 integration + 52 other)
+Corpus: 1657 lines, 677 statements — all TODO blocks resolved

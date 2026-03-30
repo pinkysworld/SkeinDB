@@ -2094,7 +2094,9 @@ struct MySqlCompatMultiGroupedAggregateQuery {
     group_aliases: Vec<String>,
     aggregate_aliases: Vec<String>,
     aggregate_ops: Vec<MySqlCompatAggregateOp>,
+    agg_col_indices: Vec<Option<usize>>, // source-result column index per aggregate
     source_sql: String,
+    order_by: Vec<(String, bool)>, // (alias_or_col, desc)
     limit: Option<LimitClause>,
 }
 
@@ -2341,7 +2343,10 @@ fn mysql_parse_numeric_aggregate_value(raw: &str) -> Result<(f64, bool), RpcErro
     }
     Err(RpcError::new(
         "not_supported",
-        "numeric aggregate compatibility currently supports only numeric result values",
+        format!(
+            "numeric aggregate compatibility currently supports only numeric result values (got '{}')",
+            raw.chars().take(80).collect::<String>()
+        ),
     ))
 }
 
@@ -3138,12 +3143,22 @@ fn mysql_parse_multi_grouped_aggregate_query(
 
     let mut limit_sql = None::<String>;
     let mut offset_sql = None::<String>;
-    // We skip HAVING / ORDER BY for multi-column — only parse LIMIT/OFFSET
+    let mut order_sql = None::<String>;
     while !group_tail.is_empty() {
         let gl = group_tail.to_ascii_lowercase();
-        if gl.starts_with("having ") || gl.starts_with("order by ") {
-            // These require the single-column handler's matching logic — bail
+        if gl.starts_with("having ") {
             return None;
+        }
+        if gl.starts_with("order by ") {
+            let tail = group_tail[8..].trim_start();
+            let next = ["limit", "offset"]
+                .iter()
+                .filter_map(|keyword| find_keyword_top_level(tail, keyword))
+                .min()
+                .unwrap_or(tail.len());
+            order_sql = Some(tail[..next].trim().to_string());
+            group_tail = tail[next..].trim();
+            continue;
         }
         if gl.starts_with("limit ") {
             let tail = group_tail[5..].trim_start();
@@ -3179,10 +3194,11 @@ fn mysql_parse_multi_grouped_aggregate_query(
     let mut group_aliases = Vec::new();
     let mut aggregate_aliases = Vec::new();
     let mut aggregate_ops = Vec::new();
+    let mut agg_select_exprs = Vec::new(); // aggregate input columns (e.g. "o.id", "o.amount")
     let mut source_exprs = Vec::new();
 
     for (expr, alias_opt) in &projection_items {
-        if let Some((_select_expr, default_alias, op)) = mysql_parse_aggregate_projection_expr(expr)
+        if let Some((select_expr, default_alias, op)) = mysql_parse_aggregate_projection_expr(expr)
         {
             let alias = alias_opt
                 .clone()
@@ -3190,6 +3206,7 @@ fn mysql_parse_multi_grouped_aggregate_query(
                 .unwrap_or(default_alias);
             aggregate_aliases.push(alias);
             aggregate_ops.push(op);
+            agg_select_exprs.push(select_expr);
         } else if let Some((col, table)) = parse_sql_column_ref(expr) {
             let select_expr = table
                 .as_ref()
@@ -3234,13 +3251,54 @@ fn mysql_parse_multi_grouped_aggregate_query(
         }
     }
 
+    // Append aggregate input columns to source_exprs and track their indices
+    let num_groups = source_exprs.len();
+    let mut agg_col_indices = Vec::with_capacity(agg_select_exprs.len());
+    for agg_expr in &agg_select_exprs {
+        if let Some(expr) = agg_expr {
+            // Check if already in source_exprs
+            let existing = source_exprs
+                .iter()
+                .position(|e| e.eq_ignore_ascii_case(expr));
+            if let Some(idx) = existing {
+                agg_col_indices.push(Some(idx));
+            } else {
+                let idx = source_exprs.len();
+                source_exprs.push(expr.clone());
+                agg_col_indices.push(Some(idx));
+            }
+        } else {
+            agg_col_indices.push(None); // COUNT(*) - no column needed
+        }
+    }
+
     let source_sql = format!("SELECT {} {}", source_exprs.join(", "), source_from_tail);
+
+    // Parse ORDER BY
+    let mut order_by = Vec::new();
+    if let Some(order_str) = order_sql {
+        for part in split_csv_top_level(&order_str) {
+            let part = part.trim();
+            let desc = part.to_ascii_lowercase().ends_with(" desc");
+            let asc = part.to_ascii_lowercase().ends_with(" asc");
+            let col = if desc {
+                part[..part.len() - 5].trim()
+            } else if asc {
+                part[..part.len() - 4].trim()
+            } else {
+                part
+            };
+            order_by.push((col.to_string(), desc));
+        }
+    }
 
     Some(MySqlCompatMultiGroupedAggregateQuery {
         group_aliases,
         aggregate_aliases,
         aggregate_ops,
+        agg_col_indices,
         source_sql,
+        order_by,
         limit: parse_limit_clause(limit_sql.as_deref(), offset_sql.as_deref()).ok()?,
     })
 }
@@ -3287,18 +3345,23 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
         for (agg_idx, op) in query.aggregate_ops.iter().enumerate() {
             let agg_state = &mut states[agg_idx];
             agg_state.row_count = agg_state.row_count.saturating_add(1);
+            let agg_val = query.agg_col_indices[agg_idx]
+                .and_then(|ci| row.get(ci))
+                .and_then(|v| v.as_deref());
             match op {
                 MySqlCompatAggregateOp::CountRows => {}
                 MySqlCompatAggregateOp::CountNonNull => {
-                    agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                    if agg_val.is_some() {
+                        agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
+                    }
                 }
                 MySqlCompatAggregateOp::CountDistinct => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
-                        agg_state.distinct_values.insert(raw.clone());
+                    if let Some(raw) = agg_val {
+                        agg_state.distinct_values.insert(raw.to_string());
                     }
                 }
                 MySqlCompatAggregateOp::Sum | MySqlCompatAggregateOp::Avg => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         if let Ok((value, is_i64)) = mysql_parse_numeric_aggregate_value(raw) {
                             agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
                             agg_state.numeric_saw_value = true;
@@ -3308,7 +3371,7 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                     }
                 }
                 MySqlCompatAggregateOp::Min => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
                         if agg_state
                             .min_value
@@ -3316,12 +3379,12 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                             .map(|current| mysql_aggregate_value_ordering(raw, current).is_lt())
                             .unwrap_or(true)
                         {
-                            agg_state.min_value = Some(raw.clone());
+                            agg_state.min_value = Some(raw.to_string());
                         }
                     }
                 }
                 MySqlCompatAggregateOp::Max => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         agg_state.non_null_count = agg_state.non_null_count.saturating_add(1);
                         if agg_state
                             .max_value
@@ -3329,17 +3392,17 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                             .map(|current| mysql_aggregate_value_ordering(raw, current).is_gt())
                             .unwrap_or(true)
                         {
-                            agg_state.max_value = Some(raw.clone());
+                            agg_state.max_value = Some(raw.to_string());
                         }
                     }
                 }
                 MySqlCompatAggregateOp::GroupConcat => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
-                        agg_state.concat_values.push(raw.clone());
+                    if let Some(raw) = agg_val {
+                        agg_state.concat_values.push(raw.to_string());
                     }
                 }
                 MySqlCompatAggregateOp::BitAnd => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         if let Ok(v) = raw.parse::<u64>() {
                             if !agg_state.bitwise_initialized {
                                 agg_state.bitwise_acc = u64::MAX;
@@ -3350,7 +3413,7 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                     }
                 }
                 MySqlCompatAggregateOp::BitOr => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         if let Ok(v) = raw.parse::<u64>() {
                             agg_state.bitwise_initialized = true;
                             agg_state.bitwise_acc |= v;
@@ -3358,7 +3421,7 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                     }
                 }
                 MySqlCompatAggregateOp::BitXor => {
-                    if let Some(Some(raw)) = row.get(num_groups) {
+                    if let Some(raw) = agg_val {
                         if let Ok(v) = raw.parse::<u64>() {
                             agg_state.bitwise_initialized = true;
                             agg_state.bitwise_acc ^= v;
@@ -3420,6 +3483,37 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
         })
         .collect();
 
+    let mut columns = query.group_aliases;
+    columns.extend(query.aggregate_aliases);
+
+    // Apply ORDER BY
+    if !query.order_by.is_empty() {
+        let col_indices: Vec<(usize, bool)> = query
+            .order_by
+            .iter()
+            .filter_map(|(col, desc)| {
+                columns
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(col))
+                    .map(|idx| (idx, *desc))
+            })
+            .collect();
+        if !col_indices.is_empty() {
+            out_rows.sort_by(|a, b| {
+                for &(ci, desc) in &col_indices {
+                    let va = a.get(ci).and_then(|v| v.as_deref()).unwrap_or("");
+                    let vb = b.get(ci).and_then(|v| v.as_deref()).unwrap_or("");
+                    let ord = mysql_aggregate_value_ordering(va, vb);
+                    let ord = if desc { ord.reverse() } else { ord };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+    }
+
     if let Some(limit) = query.limit {
         let offset = limit.offset.unwrap_or(0) as usize;
         if offset > 0 {
@@ -3430,8 +3524,6 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
         }
     }
 
-    let mut columns = query.group_aliases;
-    columns.extend(query.aggregate_aliases);
     Ok(Some(MySqlQueryOutcome::ResultSet {
         columns,
         rows: out_rows,
@@ -4920,6 +5012,446 @@ async fn mysql_exec_subquery_query_outcome(
     )
     .await?;
     mysql_query_outcome_from_sql_exec_result(&result)
+}
+
+/// Handle SELECT queries that contain `(SELECT ...)` subqueries in the projection.
+/// Supports both non-correlated (`SELECT (SELECT COUNT(*) FROM t) AS total`)
+/// and correlated (`SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) ...`)
+/// projection subqueries.
+async fn mysql_try_projection_subquery(
+    state: &AppState,
+    sql: &str,
+    session: &mut MySqlSessionState,
+) -> Result<Option<MySqlQueryOutcome>, MySqlWireError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return Ok(None);
+    }
+    // Must contain a parenthesized SELECT in the projection area
+    if !lower.contains("(select ") {
+        return Ok(None);
+    }
+
+    let rest = &trimmed[7..]; // after "SELECT "
+    let from_pos = match find_keyword_top_level(rest, "from") {
+        Some(pos) => pos,
+        None => {
+            // No FROM — standalone projection subquery like `SELECT (SELECT COUNT(*) FROM t) AS a`
+            let items = split_csv_top_level(rest.trim().trim_end_matches(';').trim());
+            let mut columns = Vec::new();
+            let mut row = Vec::new();
+            let mut saw_subquery = false;
+            for (idx, item) in items.iter().enumerate() {
+                let (expr_raw, alias) = mysql_parse_projection_expr_alias(item);
+                if let Some(sub_sql) = mysql_parse_scalar_subquery_select(&expr_raw) {
+                    saw_subquery = true;
+                    let col_name = alias.unwrap_or_else(|| {
+                        format!("({})", sub_sql.chars().take(40).collect::<String>())
+                    });
+                    let sub_result = mysql_exec_subquery_query_outcome(
+                        state,
+                        &sub_sql,
+                        session.default_db.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| mysql_error_from_rpc(&e))?;
+                    let scalar = mysql_extract_scalar_subquery_lit(&sub_result)
+                        .map_err(|e| mysql_error_from_rpc(&e))?;
+                    columns.push(col_name);
+                    row.push(mysql_literal_text_from_lit(&scalar));
+                } else {
+                    columns.push(alias.unwrap_or_else(|| format!("expr{}", idx + 1)));
+                    // Try to parse as a literal
+                    let text = expr_raw.trim().trim_matches('\'');
+                    row.push(Some(text.to_string()));
+                }
+            }
+            if !saw_subquery {
+                return Ok(None);
+            }
+            return Ok(Some(MySqlQueryOutcome::ResultSet {
+                columns,
+                rows: vec![row],
+            }));
+        }
+    };
+
+    let projection_str = rest[..from_pos].trim();
+    let from_tail = rest[from_pos..].trim();
+
+    // Check if any projection item contains a subquery
+    let proj_items = split_csv_top_level(projection_str);
+    let mut subquery_indices = Vec::new();
+    for (idx, item) in proj_items.iter().enumerate() {
+        let (expr_raw, _) = mysql_parse_projection_expr_alias(item);
+        if mysql_parse_scalar_subquery_select(&expr_raw).is_some() {
+            subquery_indices.push(idx);
+        }
+    }
+    if subquery_indices.is_empty() {
+        // No pure scalar-subquery projection items, but check for embedded subqueries
+        // in arithmetic expressions like `salary - (SELECT AVG(salary) FROM users)`
+        let mut has_embedded = false;
+        for item in &proj_items {
+            let (expr_raw, _) = mysql_parse_projection_expr_alias(item);
+            if expr_raw.to_ascii_lowercase().contains("(select ") {
+                has_embedded = true;
+                break;
+            }
+        }
+        if !has_embedded {
+            return Ok(None);
+        }
+        // Pre-evaluate embedded subqueries and replace with literal values
+        let mut new_proj_items = Vec::new();
+        for item in &proj_items {
+            let mut expr_str = item.clone();
+            loop {
+                let lower = expr_str.to_ascii_lowercase();
+                let Some(sel_pos) = lower.find("(select ") else {
+                    break;
+                };
+                let close = find_matching_parenthesis(&expr_str, sel_pos);
+                let Some(close_pos) = close else { break };
+                let sub_sql = expr_str[sel_pos + 1..close_pos].trim();
+                let sub_result = mysql_exec_subquery_query_outcome(
+                    state,
+                    sub_sql,
+                    session.default_db.as_deref(),
+                )
+                .await
+                .map_err(|e| mysql_error_from_rpc(&e))?;
+                let scalar = mysql_extract_scalar_subquery_lit(&sub_result)
+                    .map_err(|e| mysql_error_from_rpc(&e))?;
+                let replacement = match &scalar {
+                    Lit::Null => "NULL".to_string(),
+                    Lit::I64 { v } => v.to_string(),
+                    Lit::U64 { v } => v.to_string(),
+                    Lit::F64 { v } => v.to_string(),
+                    Lit::Dec { v } | Lit::Str { v } => {
+                        if v.parse::<f64>().is_ok() {
+                            v.clone()
+                        } else {
+                            format!("'{}'", v.replace('\'', "''"))
+                        }
+                    }
+                    Lit::Bool { v } => if *v { "1" } else { "0" }.to_string(),
+                    _ => "NULL".to_string(),
+                };
+                expr_str = format!(
+                    "{}{}{}",
+                    &expr_str[..sel_pos],
+                    replacement,
+                    &expr_str[close_pos + 1..]
+                );
+            }
+            new_proj_items.push(expr_str);
+        }
+        let rewritten_sql = format!("SELECT {} {}", new_proj_items.join(", "), from_tail);
+        return Box::pin(mysql_execute_sql(state, &rewritten_sql, session))
+            .await
+            .map(Some);
+    }
+
+    // Extract outer table info from FROM clause for correlated ref detection
+    let from_table_info = mysql_extract_from_table_info(from_tail);
+
+    // Collect subquery specs and detect correlated outer refs
+    struct ProjSubquery {
+        insert_pos: usize,
+        alias: String,
+        sub_sql: String,
+        outer_refs: Vec<String>, // e.g. ["users.id"]
+    }
+    let mut subquery_specs = Vec::new();
+    let mut outer_proj_items = Vec::new();
+    let mut extra_cols: Vec<String> = Vec::new();
+    let mut non_sub_count = 0usize;
+
+    for (idx, item) in proj_items.iter().enumerate() {
+        let (expr_raw, alias) = mysql_parse_projection_expr_alias(item);
+        if subquery_indices.contains(&idx) {
+            let sub_sql = mysql_parse_scalar_subquery_select(&expr_raw).unwrap();
+            let col_name = alias.unwrap_or_else(|| format!("subq{}", subquery_specs.len() + 1));
+            let outer_refs = mysql_find_outer_refs_in_subquery(&sub_sql, &from_table_info);
+            // Add referenced columns to the outer projection if not already present
+            for oref in &outer_refs {
+                if let Some((_tbl, col)) = oref.split_once('.') {
+                    let col_lower = col.to_ascii_lowercase();
+                    let already = outer_proj_items.iter().any(|p: &String| {
+                        let (pe, _) = mysql_parse_projection_expr_alias(p);
+                        let pe_l = pe.to_ascii_lowercase();
+                        pe_l == col_lower || pe_l.ends_with(&format!(".{}", col_lower))
+                    }) || extra_cols.iter().any(|e| e.eq_ignore_ascii_case(oref));
+                    if !already {
+                        extra_cols.push(oref.clone());
+                    }
+                }
+            }
+            subquery_specs.push(ProjSubquery {
+                insert_pos: non_sub_count,
+                alias: col_name,
+                sub_sql,
+                outer_refs,
+            });
+        } else {
+            outer_proj_items.push(item.clone());
+            non_sub_count += 1;
+        }
+    }
+
+    // Add extra columns needed for correlated ref lookup
+    for ec in &extra_cols {
+        outer_proj_items.push(ec.clone());
+    }
+
+    if outer_proj_items.is_empty() {
+        outer_proj_items.push("1 AS _dummy".to_string());
+    }
+
+    let outer_sql = format!("SELECT {} {}", outer_proj_items.join(", "), from_tail);
+
+    // Execute the outer query
+    let outer_result = Box::pin(mysql_execute_sql(state, &outer_sql, session)).await?;
+    let (mut columns, mut rows) = match outer_result {
+        MySqlQueryOutcome::ResultSet { columns, rows } => (columns, rows),
+        _ => return Ok(None),
+    };
+
+    // Remove _dummy column if we added one
+    if outer_proj_items.first().map(|s| s.as_str()) == Some("1 AS _dummy") {
+        columns.clear();
+        for row in &mut rows {
+            row.clear();
+        }
+    }
+
+    // For each subquery spec, compute values and insert into the result
+    for spec in &subquery_specs {
+        if spec.outer_refs.is_empty() {
+            // Non-correlated: execute once
+            let sub_result = mysql_exec_subquery_query_outcome(
+                state,
+                &spec.sub_sql,
+                session.default_db.as_deref(),
+            )
+            .await
+            .map_err(|e| mysql_error_from_rpc(&e))?;
+            let scalar = mysql_extract_scalar_subquery_lit(&sub_result)
+                .map_err(|e| mysql_error_from_rpc(&e))?;
+            let text = mysql_literal_text_from_lit(&scalar);
+            columns.insert(spec.insert_pos, spec.alias.clone());
+            for row in rows.iter_mut() {
+                row.insert(spec.insert_pos, text.clone());
+            }
+        } else {
+            // Correlated: execute per row with substituted values
+            let mut sub_values = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let mut subquery = spec.sub_sql.clone();
+                for oref in &spec.outer_refs {
+                    // Find column index in the result set
+                    let col_idx = columns.iter().position(|c| {
+                        c.eq_ignore_ascii_case(oref)
+                            || oref
+                                .split_once('.')
+                                .map(|(_, col)| c.eq_ignore_ascii_case(col))
+                                .unwrap_or(false)
+                    });
+                    let val = col_idx.and_then(|i| row.get(i)).and_then(|v| v.as_deref());
+                    let replacement = match val {
+                        None | Some("NULL") => "NULL".to_string(),
+                        Some(v) if v.parse::<f64>().is_ok() => v.to_string(),
+                        Some(v) => format!("'{}'", v.replace('\'', "''")),
+                    };
+                    // Case-insensitive replacement of outer ref in subquery
+                    let sub_lower = subquery.to_ascii_lowercase();
+                    let oref_lower = oref.to_ascii_lowercase();
+                    if let Some(pos) = sub_lower.find(&oref_lower) {
+                        subquery = format!(
+                            "{}{}{}",
+                            &subquery[..pos],
+                            replacement,
+                            &subquery[pos + oref.len()..]
+                        );
+                    }
+                }
+                let sub_result = mysql_exec_subquery_query_outcome(
+                    state,
+                    &subquery,
+                    session.default_db.as_deref(),
+                )
+                .await
+                .map_err(|e| mysql_error_from_rpc(&e))?;
+                let scalar = mysql_extract_scalar_subquery_lit(&sub_result)
+                    .map_err(|e| mysql_error_from_rpc(&e))?;
+                sub_values.push(mysql_literal_text_from_lit(&scalar));
+            }
+            columns.insert(spec.insert_pos, spec.alias.clone());
+            for (ri, row) in rows.iter_mut().enumerate() {
+                row.insert(spec.insert_pos, sub_values[ri].clone());
+            }
+        }
+    }
+
+    // Strip extra columns that were added only for correlated ref lookup
+    if !extra_cols.is_empty() {
+        let final_col_count = columns.len() - extra_cols.len();
+        columns.truncate(final_col_count);
+        for row in rows.iter_mut() {
+            row.truncate(final_col_count);
+        }
+    }
+
+    Ok(Some(MySqlQueryOutcome::ResultSet { columns, rows }))
+}
+
+/// Extract table name and alias from a FROM clause like `FROM users` or `FROM users u`.
+fn mysql_extract_from_table_info(from_tail: &str) -> Vec<(String, Option<String>)> {
+    let lower = from_tail.to_ascii_lowercase();
+    let rest = lower.strip_prefix("from").unwrap_or(&lower).trim();
+    let end = [
+        "where",
+        "order by",
+        "group by",
+        "limit",
+        "having",
+        "join",
+        "left join",
+        "right join",
+        "inner join",
+        "cross join",
+        "natural join",
+    ]
+    .iter()
+    .filter_map(|kw| find_keyword_top_level(rest, kw))
+    .min()
+    .unwrap_or(rest.len());
+    let table_part = rest[..end].trim().trim_end_matches(';');
+
+    let orig_rest = from_tail
+        .strip_prefix("from")
+        .or_else(|| from_tail.strip_prefix("FROM"))
+        .or_else(|| from_tail.strip_prefix("From"))
+        .unwrap_or(from_tail)
+        .trim();
+    let orig_table_part = orig_rest[..end.min(orig_rest.len())]
+        .trim()
+        .trim_end_matches(';');
+
+    let tables = split_csv_top_level(orig_table_part);
+    let mut result = Vec::new();
+    for table_str in &tables {
+        let parts: Vec<&str> = table_str.split_ascii_whitespace().collect();
+        match parts.as_slice() {
+            [table] => result.push((clean_sql_ident(table), None)),
+            [table, alias] if !alias.eq_ignore_ascii_case("as") => {
+                result.push((clean_sql_ident(table), Some(clean_sql_ident(alias))))
+            }
+            [table, _, alias] => {
+                result.push((clean_sql_ident(table), Some(clean_sql_ident(alias))))
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Find references to outer table columns in a subquery.
+/// E.g. for `WHERE user_id = users.id` with outer table `users`,
+/// returns `["users.id"]`.
+fn mysql_find_outer_refs_in_subquery(
+    sub_sql: &str,
+    from_tables: &[(String, Option<String>)],
+) -> Vec<String> {
+    let sub_lower = sub_sql.to_ascii_lowercase();
+    let mut refs = Vec::new();
+
+    // Parse the subquery's own FROM clause to know its own tables
+    let sub_from_pos = find_keyword_top_level(&sub_lower, "from");
+    let sub_tables: Vec<String> = if let Some(pos) = sub_from_pos {
+        let sub_rest = sub_lower[pos + 4..].trim();
+        let end = ["where", "order by", "group by", "limit", "having", "join"]
+            .iter()
+            .filter_map(|kw| find_keyword_top_level(sub_rest, kw))
+            .min()
+            .unwrap_or(sub_rest.len());
+        let table_part = sub_rest[..end].trim().trim_end_matches(';');
+        split_csv_top_level(table_part)
+            .iter()
+            .flat_map(|t| {
+                let parts: Vec<&str> = t.split_ascii_whitespace().collect();
+                match parts.as_slice() {
+                    [table] => vec![clean_sql_ident(table)],
+                    [table, alias] if !alias.eq_ignore_ascii_case("as") => {
+                        vec![clean_sql_ident(table), clean_sql_ident(alias)]
+                    }
+                    [table, _, alias] => {
+                        vec![clean_sql_ident(table), clean_sql_ident(alias)]
+                    }
+                    _ => vec![],
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Look for `table.column` patterns where `table` matches an outer table
+    // but NOT a subquery-internal table
+    for (table_name, alias) in from_tables {
+        let names_to_check: Vec<&str> = {
+            let mut v = vec![table_name.as_str()];
+            if let Some(a) = alias {
+                v.push(a.as_str());
+            }
+            v
+        };
+        for outer_name in &names_to_check {
+            let prefix = format!("{}.", outer_name.to_ascii_lowercase());
+            if sub_tables
+                .iter()
+                .any(|st| st.eq_ignore_ascii_case(outer_name))
+            {
+                continue;
+            }
+            let mut search_from = 0;
+            while let Some(pos) = sub_lower[search_from..].find(&prefix) {
+                let abs_pos = search_from + pos;
+                let after = &sub_sql[abs_pos + prefix.len()..];
+                let col_end = after
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '`')
+                    .unwrap_or(after.len());
+                if col_end > 0 {
+                    let col = clean_sql_ident(&after[..col_end]);
+                    let full_ref = format!("{}.{}", outer_name, col);
+                    if !refs
+                        .iter()
+                        .any(|r: &String| r.eq_ignore_ascii_case(&full_ref))
+                    {
+                        refs.push(full_ref);
+                    }
+                }
+                search_from = abs_pos + prefix.len() + col_end;
+            }
+        }
+    }
+    refs
+}
+
+fn mysql_literal_text_from_lit(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Null => None,
+        Lit::Bool { v } => Some(if *v { "1".to_string() } else { "0".to_string() }),
+        Lit::I64 { v } => Some(v.to_string()),
+        Lit::U64 { v } => Some(v.to_string()),
+        Lit::F64 { v } => Some(v.to_string()),
+        Lit::Dec { v } | Lit::Str { v } => Some(v.clone()),
+        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => Some(iso.clone()),
+        Lit::Uuid { v } => Some(v.clone()),
+        Lit::Bytes { .. } | Lit::Json { .. } | Lit::Embedding { .. } => None,
+    }
 }
 
 async fn mysql_try_select_subquery_compat_outcome(
@@ -7787,6 +8319,14 @@ async fn mysql_execute_sql(
         let trimmed = sql.trim().trim_end_matches(';').trim();
         if let Some(result) = mysql_rewrite_derived_table(trimmed, state, session).await {
             return result;
+        }
+    }
+
+    // ── Projection subquery support: SELECT col, (SELECT ...) AS alias FROM table ──
+    {
+        let trimmed_ps = sql.trim().trim_end_matches(';').trim();
+        if let Some(result) = mysql_try_projection_subquery(state, trimmed_ps, session).await? {
+            return Ok(result);
         }
     }
 
@@ -12510,7 +13050,7 @@ enum SqlPlan {
     },
     Update {
         table: BaseTableRef,
-        set: BTreeMap<String, Lit>,
+        set: BTreeMap<String, Expr>,
         where_expr: Expr,
         limit: Option<u64>,
     },
@@ -13471,6 +14011,92 @@ fn mysql_is_unary_plus_minus(expr: &str, idx: usize) -> bool {
     true
 }
 
+/// Parse a binary comparison expression like `1 > 0`, `a >= b`, `x != y`, `a <> b`.
+fn mysql_parse_binary_comparison_expr(expr: &str) -> Result<Option<Expr>, RpcError> {
+    let bytes = expr.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut best: Option<(usize, usize, &str)> = None; // (start, len, op_name)
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == quote {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            // Check multi-byte operators first
+            if i + 1 < bytes.len() {
+                let two = &expr[i..i + 2];
+                if two == ">=" || two == "<=" || two == "!=" || two == "<>" {
+                    let op_name = match two {
+                        ">=" => "ge",
+                        "<=" => "le",
+                        "!=" | "<>" => "ne",
+                        _ => unreachable!(),
+                    };
+                    best = Some((i, 2, op_name));
+                    i += 2;
+                    continue;
+                }
+            }
+            // Single-byte comparison operators
+            if b == b'>' || b == b'<' || b == b'=' {
+                let op_name = match b {
+                    b'>' => "gt",
+                    b'<' => "lt",
+                    b'=' => "eq",
+                    _ => unreachable!(),
+                };
+                best = Some((i, 1, op_name));
+            }
+        }
+        i += 1;
+    }
+    let Some((pos, len, op_name)) = best else {
+        return Ok(None);
+    };
+    let left = expr[..pos].trim();
+    let right = expr[pos + len..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Op {
+        op: op_name.to_string(),
+        a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+        b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }))
+}
+
 fn mysql_find_top_level_arithmetic_operator(expr: &str, operators: &[u8]) -> Option<(usize, u8)> {
     let bytes = expr.as_bytes();
     let mut quote = 0u8;
@@ -13904,6 +14530,9 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
         return Ok(Expr::Lit {
             lit: parse_sql_lit(s)?,
         });
+    }
+    if let Some(expr) = mysql_parse_binary_comparison_expr(s)? {
+        return Ok(expr);
     }
     if let Some(expr) = mysql_parse_binary_arithmetic_expr(s, b"+-")? {
         return Ok(expr);
@@ -16090,7 +16719,7 @@ fn parse_update_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, Rpc
         };
         let col = clean_sql_ident(assign[..eq_idx].trim());
         let val = assign[eq_idx + 1..].trim();
-        set.insert(col, parse_sql_lit(val)?);
+        set.insert(col, parse_sql_scalar_expr(val)?);
     }
     let mut where_sql = None::<String>;
     let mut limit = None::<u64>;
@@ -18177,7 +18806,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
         } => {
             let mut eng = state.engine.write().await;
             let r = eng
-                .data_update(&table, &where_expr, &set, limit, None, &[])
+                .data_update_exprs(&table, &where_expr, &set, limit, None, &[])
                 .map_err(to_rpc_error)?;
             Ok(serde_json::json!({
                 "statement": "update",
