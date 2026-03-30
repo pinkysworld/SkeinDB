@@ -36,14 +36,14 @@ psql -h 127.0.0.1 -p 5432 -U skein -d app -c "SELECT 1"
 
 | File | Purpose |
 |------|---------|
-| `pg_wire.rs` | PG v3 message framing: 1-byte tag + 4-byte BE length + payload |
-| `pg_auth.rs` | SCRAM-SHA-256 (RFC 5802/7677) + trust authentication |
-| `pg_session.rs` | `PgSessionState`: search_path, DateStyle, TimeZone, tx state (I/T/E) |
-| `pg_connection.rs` | `handle_pg_connection()` + `run_pg_listener()` |
-| `pg_parse.rs` | PG SQL dialect → SqlPlan translation |
-| `pg_types.rs` | TypeDesc ↔ PG OID mapping + text/binary encoding |
-| `pg_catalog.rs` | Virtual `pg_catalog.*` system tables |
-| `pg_functions.rs` | PG-specific scalar/aggregate function implementations |
+| `pg_wire.rs` | **Implemented.** PG v3 message framing: 1-byte tag + 4-byte BE length + payload. StartupMessage/SSLRequest parsing, all backend message builders (RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, ReadyForQuery, etc.), common PG type OIDs, 20 unit tests. |
+| `server.rs` (PG section) | **Implemented.** `handle_pg_connection()` + `run_pg_listener()` — SSL rejection, trust/cleartext auth, ParameterStatus batch, simple query protocol, transaction stubs, extended query protocol stubs. 6 integration tests. |
+| `pg_auth.rs` | Planned. SCRAM-SHA-256 (RFC 5802/7677) |
+| `pg_session.rs` | Planned. `PgSessionState`: search_path, DateStyle, TimeZone, tx state (I/T/E) |
+| `pg_parse.rs` | Planned. PG SQL dialect → SqlPlan translation |
+| `pg_types.rs` | Planned. TypeDesc ↔ PG OID mapping + text/binary encoding |
+| `pg_catalog.rs` | Planned. Virtual `pg_catalog.*` system tables |
+| `pg_functions.rs` | Planned. PG-specific scalar/aggregate function implementations |
 
 ## Configuration
 

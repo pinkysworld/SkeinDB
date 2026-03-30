@@ -54,7 +54,7 @@ Phase 0 verification checklist:
 - [x] T041: Console UI scaffold
 - [x] T042: Schema browser + SQL editor
 - [x] T043: Data browse/edit + import/export (CSV + JSON export/import)
-- [ ] T044: Users/privileges + status dashboard
+- [x] T044: Users/privileges + status dashboard
 
 ## Phase 5 - SkeinQL native API
 - [x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
@@ -81,8 +81,8 @@ Phase 0 verification checklist:
 - [ ] T083: Aggregate and table-function UDFs
 
 ## Phase 9 - Tamper-evident WAL audit
-- [ ] T090: WALHeader v2 with hash chaining (docs/AUDIT_WAL.md)
-- [ ] T091: checkpoint anchors + audit status
+- [x] T090: WALHeader v2 with hash chaining (docs/AUDIT_WAL.md)
+- [x] T091: checkpoint anchors + audit status
 - [ ] T092: audit verify CLI/API + console page
 
 ## Phase 10 - Hybrid row/column snapshots
@@ -132,13 +132,13 @@ Phase 0 verification checklist:
 - [x] T163: Metrics + limits + SkeinAdmin dashboard widget
 
 ## Phase 17 - CAS-aware replication bandwidth bounds (object-aware sync)
-- [ ] T165: Bloom summaries for ValueID existence (per valseg + union)
+- [x] T165: Bloom summaries for ValueID existence (per valseg + union)
 - [ ] T166: Object pull protocol (batch missing ValueIDs, fetch objects, verify hashes)
 - [ ] T167: Replication metrics: object hit-rate, saved bytes, ref-bytes vs obj-bytes
 - [ ] T168: Shard move/rebalance uses object manifests + progress reporting
 
 ## Phase 18 - Self-tuning index advisor
-- [ ] T170: Telemetry feature extraction (predicates/order/group/join keys) + privacy-safe storage
+- [x] T170: Telemetry feature extraction (predicates/order/group/join keys) + privacy-safe storage
 - [ ] T171: Candidate index generator + duplication/prefix checks
 - [x] T172: Benefit estimator (Level 0 rule-based) + SkeinQL advisor.* endpoints
 - [ ] T173: Apply suggestion (CREATE INDEX) + progress + rollback-on-failure
@@ -188,10 +188,10 @@ Phase 0 verification checklist:
 ---
 
 ## Phase 25 — PostgreSQL wire protocol compatibility
-- [ ] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate
+- [x] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/cleartext auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.
 - [ ] T401: SCRAM-SHA-256 authentication (`pg_auth.rs`) — RFC 5802/7677 exchange + trust mode
 - [ ] T402: PG session state (`pg_session.rs`) — search_path, DateStyle, TimeZone, tx state (I/T/E), client_encoding, standard_conforming_strings
-- [ ] T403: PG connection handler + listener (`pg_connection.rs`) — SSL negotiation, startup, auth, ParameterStatus batch, ReadyForQuery, command loop on port 5432
+- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables)
 - [ ] T404: PG SQL dialect parser (`pg_parse.rs`) — double-quoted identifiers, $$dollar quoting$$, :: type casts, RETURNING, ILIKE, IS DISTINCT FROM, FETCH FIRST n ROWS ONLY, ARRAY[...], boolean literals
 - [ ] T405: PG DML extensions — INSERT/UPDATE/DELETE...RETURNING, ON CONFLICT DO NOTHING/UPDATE, basic COPY FROM STDIN / TO STDOUT
 - [ ] T406: PG DDL — SERIAL/BIGSERIAL → auto_increment, CREATE SCHEMA → database, CREATE INDEX CONCURRENTLY (accept/ignore), COMMENT ON

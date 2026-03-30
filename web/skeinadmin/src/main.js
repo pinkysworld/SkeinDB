@@ -2720,28 +2720,29 @@ function engineResetDefaults() {
 }
 
 // ---------------------------------------------------------------------------
-// Users & Grants
+// Users & Grants (T044 – admin.user.* RPCs)
 // ---------------------------------------------------------------------------
 async function userCreate() {
   try {
     const name = $('userName')?.value.trim(), pass = $('userPass')?.value.trim(), role = $('userRole')?.value;
     if (!name) throw new Error('Username required');
-    await call('settings.set', { ['user.' + name]: { password: pass, role, grants: {} } }, 'usersOut');
+    await call('admin.user.create', { username: name, role }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
-async function userList() { await call('settings.get', { keys: ['users'] }, 'usersOut'); }
+async function userList() { await call('admin.user.list', {}, 'usersOut'); }
 
 async function userDrop() {
   const name = $('userName')?.value.trim(); if (!name) return;
-  await call('settings.set', { ['user.' + name]: null }, 'usersOut');
+  if (!confirm('Drop user "' + name + '"?')) return;
+  await call('admin.user.drop', { username: name }, 'usersOut');
 }
 
 async function userGrant() {
   try {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
-    await call('settings.set', { ['grant.' + name + '.' + db]: { privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] } }, 'usersOut');
+    await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 

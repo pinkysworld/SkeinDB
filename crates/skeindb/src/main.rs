@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod engine;
 mod nl_eval;
+mod pg_wire;
 mod quic;
 mod server;
 
@@ -36,6 +37,29 @@ mod tests {
         match cli.command {
             Commands::Serve { storage_mode, .. } => {
                 assert_eq!(storage_mode, StorageModeArg::Segment);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_default_pg_port() {
+        let cli = Cli::try_parse_from(["skeindb", "serve"]).expect("parse serve defaults");
+        match cli.command {
+            Commands::Serve { pg, .. } => {
+                assert_eq!(pg, 5432);
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn serve_disable_pg_port() {
+        let cli = Cli::try_parse_from(["skeindb", "serve", "--pg", "0"])
+            .expect("parse serve with pg disabled");
+        match cli.command {
+            Commands::Serve { pg, .. } => {
+                assert_eq!(pg, 0);
             }
             _ => panic!("expected serve command"),
         }
@@ -80,6 +104,10 @@ enum Commands {
         /// MySQL protocol port (0 disables listener)
         #[arg(long, default_value_t = 3306)]
         mysql: u16,
+
+        /// PostgreSQL protocol port (0 disables listener)
+        #[arg(long, default_value_t = 5432)]
+        pg: u16,
 
         /// HTTP port (SkeinQL + consoles + admin APIs)
         #[arg(long, default_value_t = 8080)]
@@ -157,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
             storage_mode,
             bind,
             mysql,
+            pg,
             http,
             cluster_port,
             quic,
@@ -168,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
                 storage_mode: storage_mode.as_str().to_string(),
                 bind,
                 mysql_port: mysql,
+                pg_port: pg,
                 http_port: http,
                 cluster_port,
                 quic_port: quic,

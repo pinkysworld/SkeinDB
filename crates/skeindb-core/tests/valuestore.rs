@@ -1,4 +1,6 @@
-use skeindb_core::valuestore::{DeltaPolicy, ModelRefreshPolicy, ValueStore, ValueStoreConfig};
+use skeindb_core::valuestore::{
+    BloomFilter, DeltaPolicy, ModelRefreshPolicy, ValueId, ValueStore, ValueStoreConfig,
+};
 use skeindb_core::ValueKind;
 
 fn next_u64(seed: &mut u64) -> u64 {
@@ -292,4 +294,58 @@ fn delta_compaction_rewrites_deep_chains() {
     assert!(report.energy.cpu_units > 0);
     let entry = store.get(&prev).unwrap();
     assert_eq!(entry.kind, ValueKind::Cell);
+}
+
+// ── T165: Bloom filter tests ────────────────────────────────────────────────
+
+#[test]
+fn bloom_filter_basic_membership() {
+    let mut bf = BloomFilter::new(256);
+    let id1: ValueId = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let id2: ValueId = [0; 16];
+    let missing: ValueId = [255; 16];
+
+    bf.insert(&id1);
+    bf.insert(&id2);
+
+    assert!(bf.maybe_contains(&id1));
+    assert!(bf.maybe_contains(&id2));
+    // Probabilistic: might return true, but extremely unlikely for a fresh filter
+    // We just verify the API works correctly without panicking.
+    assert_eq!(bf.count(), 2);
+    assert!(bf.size_bytes() > 0);
+    assert!(bf.estimated_fpr() < 1.0);
+    // Verify missing ID is very likely absent for low-fill filter
+    assert!(!bf.maybe_contains(&missing));
+}
+
+#[test]
+fn bloom_filter_integrated_with_valuestore() {
+    let store_cfg = ValueStoreConfig {
+        enable_learned_index: false,
+        ..Default::default()
+    };
+    let mut store = ValueStore::new(store_cfg);
+
+    let data1 = b"bloom_test_value_1".to_vec();
+    let data2 = b"bloom_test_value_2".to_vec();
+    let id1 = store.put(ValueKind::Cell, data1);
+    let id2 = store.put(ValueKind::Cell, data2);
+
+    // Both should be in Bloom and in HashMap
+    assert!(store.bloom_maybe_contains(&id1));
+    assert!(store.bloom_maybe_contains(&id2));
+    assert!(store.contains(id1));
+    assert!(store.contains(id2));
+
+    // An ID we never inserted should (very likely) not be in Bloom
+    let fake_id: ValueId = [0xAA; 16];
+    assert!(!store.contains(fake_id));
+    // Bloom might say true (false positive) but for a nearly-empty filter it should be false
+    // We don't assert this as it's probabilistic
+
+    let (count, size, fpr) = store.bloom_stats();
+    assert_eq!(count, 2);
+    assert!(size > 0);
+    assert!(fpr < 0.01);
 }
