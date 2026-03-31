@@ -169,7 +169,7 @@ curl -s http://127.0.0.1:8080/api/v1/rpc \
 - Table row encoding uses adaptive ValueID refs: repeated values are emitted as
   `"$skein_ref"` only when that lowers bytes on disk for the current table snapshot.
 
-Optional persistence mode (default is `hybrid`):
+Optional persistence mode (default is `segment`):
 - `--storage-mode json`: write/read `tables/<db>/<table>.json`
 - `--storage-mode segment`: write/read `tables/<db>/<table>.rseg`
 - `--storage-mode hybrid`: write both formats; read prefers `.rseg`

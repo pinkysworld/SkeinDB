@@ -20,11 +20,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serve_defaults_to_hybrid_storage_mode() {
+    fn serve_defaults_to_segment_storage_mode() {
         let cli = Cli::try_parse_from(["skeindb", "serve"]).expect("parse serve defaults");
         match cli.command {
             Commands::Serve { storage_mode, .. } => {
-                assert_eq!(storage_mode, StorageModeArg::Hybrid);
+                assert_eq!(storage_mode, StorageModeArg::Segment);
             }
             _ => panic!("expected serve command"),
         }
@@ -94,7 +94,7 @@ enum Commands {
         data: String,
 
         /// Table row persistence mode (json, segment, hybrid).
-        #[arg(long, value_enum, default_value_t = StorageModeArg::Hybrid)]
+        #[arg(long, value_enum, default_value_t = StorageModeArg::Segment)]
         storage_mode: StorageModeArg,
 
         /// Bind address for listeners

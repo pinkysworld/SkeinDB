@@ -55,6 +55,7 @@ use skeindb_skeinql::{
 };
 
 use crate::engine::{ColumnSchema, Engine, Subscriptions};
+use crate::pg_wire;
 use crate::quic;
 
 use tokio::{
@@ -10089,6 +10090,96 @@ async fn handle_mysql_connection(
 // PostgreSQL v3 wire protocol listener
 // ---------------------------------------------------------------------------
 
+const PG_SERVER_VERSION_NUM: &str = "160000";
+const PG_DEFAULT_SCHEMA: &str = "public";
+const PG_MAX_IDENTIFIER_LENGTH: &str = "63";
+const PG_DEFAULT_TX_ISOLATION: &str = "read committed";
+
+fn pg_bootstrap_setting_value(name: &str, default_db: Option<&str>) -> Option<String> {
+    let normalized = name.trim().trim_matches('"').to_ascii_lowercase();
+    match normalized.as_str() {
+        "server_version" => Some(pg_wire::PG_SERVER_VERSION.to_string()),
+        "server_version_num" => Some(PG_SERVER_VERSION_NUM.to_string()),
+        "server_encoding" | "client_encoding" => Some("UTF8".to_string()),
+        "datestyle" => Some("ISO, MDY".to_string()),
+        "timezone" => Some("UTC".to_string()),
+        "standard_conforming_strings" => Some("on".to_string()),
+        "integer_datetimes" => Some("on".to_string()),
+        "is_superuser" => Some("on".to_string()),
+        "max_identifier_length" => Some(PG_MAX_IDENTIFIER_LENGTH.to_string()),
+        "default_transaction_isolation"
+        | "transaction_isolation"
+        | "transaction isolation level" => Some(PG_DEFAULT_TX_ISOLATION.to_string()),
+        "current_database" => Some(default_db.unwrap_or("skein").to_string()),
+        "current_schema" => Some(PG_DEFAULT_SCHEMA.to_string()),
+        _ => None,
+    }
+}
+
+fn pg_parse_current_setting_name(sql_lower: &str) -> Option<&str> {
+    let inner = sql_lower
+        .strip_prefix("select current_setting(")?
+        .strip_suffix(')')?
+        .trim();
+    inner.strip_prefix('\'')?.strip_suffix('\'')
+}
+
+async fn pg_write_single_text_result(
+    stream: &mut TcpStream,
+    column_name: &str,
+    value: &str,
+    command_tag: &str,
+) -> anyhow::Result<()> {
+    let cols = vec![pg_wire::PgColumn::text(column_name, pg_wire::oid::TEXT, -1)];
+    pg_wire::write_row_description(stream, &cols).await?;
+    pg_wire::write_data_row(stream, &[Some(value.as_bytes())]).await?;
+    pg_wire::write_command_complete(stream, command_tag).await?;
+    Ok(())
+}
+
+async fn pg_try_handle_bootstrap_query(
+    stream: &mut TcpStream,
+    sql: &str,
+    default_db: Option<&str>,
+) -> anyhow::Result<bool> {
+    let sql_lower = sql.to_ascii_lowercase();
+
+    if sql_lower == "select version()" {
+        let ver = format!("PostgreSQL {}", pg_wire::PG_SERVER_VERSION);
+        pg_write_single_text_result(stream, "version", &ver, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select current_database()" {
+        let value = pg_bootstrap_setting_value("current_database", default_db)
+            .unwrap_or_else(|| "skein".to_string());
+        pg_write_single_text_result(stream, "current_database", &value, "SELECT 1").await?;
+        return Ok(true);
+    }
+
+    if sql_lower == "select current_schema()" {
+        pg_write_single_text_result(stream, "current_schema", PG_DEFAULT_SCHEMA, "SELECT 1")
+            .await?;
+        return Ok(true);
+    }
+
+    if let Some(setting) = sql_lower.strip_prefix("show ") {
+        if let Some(value) = pg_bootstrap_setting_value(setting, default_db) {
+            pg_write_single_text_result(stream, setting.trim(), &value, "SHOW").await?;
+            return Ok(true);
+        }
+    }
+
+    if let Some(setting) = pg_parse_current_setting_name(&sql_lower) {
+        if let Some(value) = pg_bootstrap_setting_value(setting, default_db) {
+            pg_write_single_text_result(stream, "current_setting", &value, "SELECT 1").await?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 async fn handle_pg_connection(
     state: AppState,
     mut stream: TcpStream,
@@ -10229,14 +10320,7 @@ async fn handle_pg_connection(
                     continue;
                 }
 
-                // SELECT version()
-                if sql_lower == "select version()" {
-                    let ver = format!("PostgreSQL {}", pg_wire::PG_SERVER_VERSION);
-                    let cols = vec![pg_wire::PgColumn::text("version", pg_wire::oid::TEXT, -1)];
-                    pg_wire::write_row_description(&mut stream, &cols).await?;
-                    let val = ver.as_bytes();
-                    pg_wire::write_data_row(&mut stream, &[Some(val)]).await?;
-                    pg_wire::write_command_complete(&mut stream, "SELECT 1").await?;
+                if pg_try_handle_bootstrap_query(&mut stream, sql, default_db.as_deref()).await? {
                     pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
@@ -27813,5 +27897,33 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[test]
+    fn pg_bootstrap_setting_value_supports_common_probes() {
+        assert_eq!(
+            pg_bootstrap_setting_value("server_version_num", Some("app")).as_deref(),
+            Some("160000")
+        );
+        assert_eq!(
+            pg_bootstrap_setting_value("current_database", Some("app")).as_deref(),
+            Some("app")
+        );
+        assert_eq!(
+            pg_bootstrap_setting_value("transaction isolation level", None).as_deref(),
+            Some("read committed")
+        );
+    }
+
+    #[test]
+    fn pg_parse_current_setting_name_roundtrip() {
+        assert_eq!(
+            pg_parse_current_setting_name("select current_setting('server_version_num')"),
+            Some("server_version_num")
+        );
+        assert_eq!(
+            pg_parse_current_setting_name("select current_setting('timezone')"),
+            Some("timezone")
+        );
     }
 }

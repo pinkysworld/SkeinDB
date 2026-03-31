@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-03-30
+Last updated: 2026-03-31
 
 SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
 
@@ -24,13 +24,13 @@ The repository is written so you can:
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
 - **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility including Users/Site Health query coverage, installer seed-query regressions, and a clean live admin smoke across core screens (theme-owned `nav-menus` / `widgets` limitations aside), plus migration/telemetry tooling.
-- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, SSL rejection, simple query execution, transaction stubs, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
+- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, SSL rejection, simple query execution, common startup/bootstrap probes (`SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `current_setting(...)`), transaction stubs, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators, including cacheable prepared-query GETs.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
 - **MVCC extensions:** delta-chained value versions.
 - **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
-- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
+- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`, now the default), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
 - **Security extensions:** hash-chained WAL for tamper evidence.
 - **14 hardened research tracks:** R02-R11 and R13-R16 are hardened with runtime evidence and integration tests; see `docs/TRUE_STATUS_MATRIX.md`.
 - **Sandboxed compute:** Wasm UDFs with capability-based access.
@@ -74,6 +74,8 @@ Optional storage mode:
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --storage-mode hybrid
 ```
+
+Default row persistence without an explicit flag is `segment`, which stores table rows in `.rseg` files and falls back to `.json` on read when needed.
 
 Open:
 - SkeinAdmin: `http://127.0.0.1:8080/admin`

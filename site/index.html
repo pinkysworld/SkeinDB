@@ -463,7 +463,7 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">🧬</div>
       <h3>Cell-Interned MVCC</h3>
-      <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead.</p>
+      <p>Every value is content-addressed. Identical cells across rows, versions, and tables share one physical representation — automatic deduplication without compression overhead. Segment-backed <code>.rseg</code> row storage is now the default serve mode.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -475,7 +475,7 @@
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, SSL rejection, simple queries, transaction stubs, and extended-protocol scaffolding backed by the shared engine.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, SSL rejection, simple queries, transaction stubs, extended-protocol scaffolding, and common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code> backed by the shared engine.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>

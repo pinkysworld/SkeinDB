@@ -1,7 +1,7 @@
 # SkeinDB On-Disk Format v0.3 (v0.2 compatible)
 
 Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-03-11
+Last updated: 2026-03-31
 
 This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.
@@ -310,7 +310,8 @@ Body:
 Behavior:
 - `--storage-mode json` (or `SKEINDB_STORAGE_MODE=json`): write/read `.json`; fallback read `.rseg`.
 - `--storage-mode segment` (or `SKEINDB_STORAGE_MODE=segment`): write/read `.rseg`; fallback read `.json`.
-- `--storage-mode hybrid` (default, or `SKEINDB_STORAGE_MODE=hybrid|dual`): write both formats; read prefers `.rseg`, then `.json`.
+- `--storage-mode hybrid` (or `SKEINDB_STORAGE_MODE=hybrid|dual`): write both formats; read prefers `.rseg`, then `.json`.
+- default mode (`serve` without `--storage-mode`): `segment`, so new deployments write/read `.rseg` and fall back to `.json`.
 
 Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.

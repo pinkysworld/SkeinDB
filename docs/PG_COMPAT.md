@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-03-30
+Last updated: 2026-03-31
 
 Status: Partial baseline
 
@@ -34,7 +34,7 @@ Notes:
 - cleartext-password auth path when `SKEINDB_TOKEN` is set
 - SSL negotiation rejection (`'N'`)
 - simple query protocol delegated to the shared SQL execution engine
-- special-case `SELECT version()` compatibility response
+- special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - empty-query handling
 - `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
 - `Terminate` handling
@@ -75,7 +75,7 @@ For the common shared SQL subset, responses are encoded as:
 - `CommandComplete`
 - `ReadyForQuery`
 
-`SELECT version()` is also handled explicitly so PG clients get a PostgreSQL-shaped version string.
+`SELECT version()` plus the common startup/bootstrap probes above are handled explicitly so PG clients can complete early compatibility checks before falling through to the shared engine.
 
 ### Extended query protocol
 
@@ -94,6 +94,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - startup handshake reaches `ReadyForQuery`
 - simple query `SELECT 1`
 - simple query `SELECT version()`
+- startup/bootstrap query bundle covering `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - empty query returns the expected empty response flow
 - `Terminate` closes the connection cleanly
 - SSL negotiation is rejected correctly
@@ -103,6 +104,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 ## Claimed version and startup behavior
 
 - `SELECT version()` returns a PostgreSQL-flavored SkeinDB string
+- common startup/bootstrap probes return PostgreSQL-shaped values for `current_database()`, `current_schema()`, `SHOW ...`, and `current_setting(...)`
 - the listener emits startup `ParameterStatus` messages during connection setup
 - the default port is `5432`
 - `--pg 0` disables the listener
@@ -112,7 +114,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - SCRAM-SHA-256 authentication
 - PostgreSQL session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, `standard_conforming_strings`)
 - PG-specific SQL dialect features such as `RETURNING`, `::` casts, dollar-quoting, `ILIKE`, arrays, `FETCH FIRST`, and `ON CONFLICT`
-- `pg_catalog` system tables and PG bootstrap-query compatibility for tools/frameworks
+- `pg_catalog` system tables and broader PG bootstrap-query compatibility for tools/frameworks
 - COPY protocol
 - PostgreSQL SQLSTATE parity
 - richer type encoding and binary format support
@@ -132,7 +134,7 @@ HTTP  (8080) ──┘
 
 Phase 25 in `docs/PROJECT_BACKLOG.md` tracks the remaining PostgreSQL work:
 
-- T400 / T403 / T418 are complete
-- T401-T417 remain open for auth hardening, PG parser work, catalogs, extended protocol, result typing, and driver compatibility
+- T400 / T403 / T410 / T418 are complete
+- T401-T409 and T411-T417 remain open for auth hardening, PG parser work, catalogs, extended protocol, result typing, and driver compatibility
 
 Use `docs/TRUE_STATUS_MATRIX.md` when you want the runtime-backed truth snapshot rather than the aspirational roadmap.

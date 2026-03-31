@@ -198,7 +198,7 @@ Phase 0 verification checklist:
 - [ ] T407: PG type OID mapping + encoding (`pg_types.rs`) — bool→16, i64→20, text→25, jsonb→3802, timestamp→1114, arrays; text + binary format
 - [ ] T408: PG result encoding — RowDescription, DataRow, CommandComplete ("INSERT 0 1"), ErrorResponse with SQLSTATE codes
 - [ ] T409: PG system catalogs (`pg_catalog.rs`) — pg_database, pg_namespace, pg_class, pg_attribute, pg_type, pg_index, pg_constraint, pg_proc (stubs), pg_settings, pg_stat_activity
-- [ ] T410: PG startup query handling — SELECT version() → "PostgreSQL 16.0 (SkeinDB)", current_database(), current_schema(), SHOW server_version, Django/Rails/SQLAlchemy bootstrap queries
+- [x] T410: PG startup query handling — `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `SHOW server_version_num`, `SHOW standard_conforming_strings`, `SHOW max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)` for the common startup/bootstrap probes used by psql/Django/Rails/SQLAlchemy-style clients
 - [ ] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders
 - [ ] T412: PG function mapping (`pg_functions.rs`) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, ->>/#>> operators, || concat, ~/~* regex, ARRAY operations, unnest
 - [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO

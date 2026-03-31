@@ -5849,6 +5849,18 @@ async fn pg_simple_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<Ve
     Ok(messages)
 }
 
+fn pg_first_text_cell(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
+    let row = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'D')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing DataRow"))?;
+    let col_count = i16::from_be_bytes([row[0], row[1]]);
+    anyhow::ensure!(col_count == 1, "expected single-column DataRow");
+    let data_len = i32::from_be_bytes([row[2], row[3], row[4], row[5]]) as usize;
+    Ok(String::from_utf8_lossy(&row[6..6 + data_len]).into_owned())
+}
+
 #[tokio::test]
 async fn pg_handshake_and_ready_for_query() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
@@ -5914,6 +5926,34 @@ async fn pg_simple_query_version() -> anyhow::Result<()> {
         data.contains("SkeinDB"),
         "version string should contain SkeinDB: {data}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_startup_bootstrap_queries() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_bootstrap_queries")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let cases = [
+        ("SELECT current_database()", "testdb"),
+        ("SELECT current_schema()", "public"),
+        ("SHOW server_version", "16.0 (SkeinDB compatibility)"),
+        ("SHOW server_version_num", "160000"),
+        ("SHOW standard_conforming_strings", "on"),
+        ("SHOW max_identifier_length", "63"),
+        ("SHOW transaction isolation level", "read committed"),
+        ("SELECT current_setting('server_version_num')", "160000"),
+        ("SELECT current_setting('client_encoding')", "UTF8"),
+        ("SELECT current_setting('TimeZone')", "UTC"),
+    ];
+
+    for (sql, expected) in cases {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        let actual = pg_first_text_cell(&msgs)?;
+        assert_eq!(actual, expected, "query: {sql}");
+    }
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-03-30
-Latest changes: main now includes the live SkeinAdmin Index Advisor page (T174), CDC table-subscription `cdc.ack` / `cdc.close` lifecycle support (T221), and additional MySQL-wire WordPress regressions for Users-screen role counts plus Site Health storage summaries; a fresh live WordPress admin sweep now runs with an empty `debug.log`, with only the theme-owned `nav-menus` / `widgets` 500s remaining.
+Last updated: 2026-03-31
+Latest changes: `serve` now defaults row persistence to `segment`/`.rseg`, and the PostgreSQL listener now handles common startup/bootstrap probes including `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -12,7 +12,7 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **80 done / 58 open** (138 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T418 complete and the remaining PG tasks still open)
+- `docs/PROJECT_BACKLOG.md`: **81 done / 57 open** (138 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T410/T418 complete and the remaining PG tasks still open)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
@@ -46,7 +46,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 21 Compaction scheduler | Partial | Policy scaffolding/docs exist; full constrained scheduler/evaluation remains open. |
 | Phase 22 Autoparam + plan cache | Implemented (baseline) | `ai.autoparam.classify/analyze` with rule-based literal classification; `plan_cache.status` returns cache entries with hit counts, fingerprints, creation/last-hit timestamps; `plan_cache.clear` clears select + patch caches; `CachedSelect` enriched with query/hits/created_ms/last_hit_ms/schema_version; `SET @@skein.autoparameterize = 1` MySQL session variable support; SkeinAdmin top queries by fingerprint display; integration test in `cluster_rpc.rs::telemetry_and_plan_cache_integration`. |
 | Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close` are implemented for table subscriptions with in-memory ack cursors; query subscriptions, streaming transports, and retention/resnapshot remain open. |
-| Phase 25 PostgreSQL compat | Partial | PG v3 wire protocol primitives (`pg_wire.rs`) with message framing (1-byte tag + 4-byte BE length), StartupMessage/SSLRequest parsing, ParameterStatus/BackendKeyData/ReadyForQuery/RowDescription/DataRow/CommandComplete/ErrorResponse encode/write, common PG type OIDs. Connection handler in `server.rs` with trust/cleartext auth, SSL rejection, simple query protocol delegating to the shared SQL engine, transaction stubs (BEGIN/COMMIT/ROLLBACK), `SELECT version()`, extended query protocol stubs (Parse/Bind/Describe/Execute/Close). Listener on port 5432 (configurable via `--pg` flag). T400/T403 complete; SCRAM-SHA-256 auth (T401), PG session state (T402), PG SQL dialect parser (T404), and remaining tasks still open. |
+| Phase 25 PostgreSQL compat | Partial | PG v3 wire protocol primitives (`pg_wire.rs`) with message framing (1-byte tag + 4-byte BE length), StartupMessage/SSLRequest parsing, ParameterStatus/BackendKeyData/ReadyForQuery/RowDescription/DataRow/CommandComplete/ErrorResponse encode/write, common PG type OIDs. Connection handler in `server.rs` with trust/cleartext auth, SSL rejection, simple query protocol delegating to the shared SQL engine, transaction stubs (BEGIN/COMMIT/ROLLBACK), explicit startup/bootstrap query handling for `SELECT version()`, `SELECT current_database()`, `SELECT current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`, plus extended query protocol stubs (Parse/Bind/Describe/Execute/Close). Listener on port 5432 (configurable via `--pg` flag). T400/T403/T410 complete; SCRAM-SHA-256 auth (T401), PG session state (T402), PG SQL dialect parser (T404), and remaining tasks still open. |
 
 ## 3) Research tracks (R01-R20)
 

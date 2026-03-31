@@ -19,7 +19,7 @@ skeindb serve [OPTIONS]
 
 OPTIONS:
   --data <path>      Data directory (WAL, snapshots, metadata)
-  --storage-mode     Table row persistence mode: json | segment | hybrid (default hybrid)
+  --storage-mode     Table row persistence mode: json | segment | hybrid (default segment)
   --http <port>      HTTP port (SkeinQL + admin console)
   --mysql <port>     MySQL protocol port (compatibility surface)
   --pg <port>        PostgreSQL protocol port (partial v3 baseline, default 5432; 0 = disabled)
@@ -59,7 +59,8 @@ Run HTTP-only:
 `SKEINDB_STORAGE_MODE` controls how per-table row files are persisted:
 - `json`: read/write `tables/<db>/<table>.json`
 - `segment`: read/write `tables/<db>/<table>.rseg`
-- `hybrid` / `dual` (default): write both files; read prefers `.rseg` then `.json`
+- `hybrid` / `dual`: write both files; read prefers `.rseg` then `.json`
+- default `serve` mode: `segment`
 
 Example:
 
