@@ -2,7 +2,7 @@
 
 If SkeinDB is useful to you and you want to help keep it moving, there are two easy ways to support it:
 
-- GitHub Sponsors is the main option. Once GitHub finishes approving the `pinkysworld` sponsor profile, the repo will show a `Sponsor` button.
+- GitHub Sponsors is the main option: <https://github.com/sponsors/pinkysworld>
 - If PayPal is easier, you can use `mip@gmx.biz`.
 
 Support helps pay for things like:
