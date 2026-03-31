@@ -2,54 +2,78 @@
 
 Last updated: 2026-03-31
 
-SkeinDB is a **single-executable** database engine scaffold that targets two goals at once:
+SkeinDB is a single-binary database server that combines:
 
-1) **Adoption:** drop-in **MySQL compatibility** plus an early **PostgreSQL compatibility baseline** so existing applications can connect with minimal change.
-2) **Research extensibility:** a clean, web-native control plane (**SkeinQL**) and a set of novel primitives (ETag-driven cache coherency, query-scoped patches, delta-chained MVCC, hash-chained WAL, sandboxed Wasm extensions) intended to make systems research easier to prototype and evaluate.
+- a MySQL-compatible adoption layer
+- a native HTTP/JSON-RPC control plane called SkeinQL
+- an embedded admin UI at `/admin` and `/console`
+- an early PostgreSQL wire-protocol baseline
+- a large set of research and systems experiments in the same codebase
 
-The repository is written so you can:
-- run SkeinDB as a portable binary (HTTP + admin console)
-- use MySQL tools today and exercise early PostgreSQL clients against the current PG baseline
-- extend the engine via well-scoped crates and specs
-
-> Implementation note
-> The current execution engine is a small in-memory/JSON-backed prototype meant to make the APIs usable today.
-> The paper-aligned ValueID/MVCC/LSM engine is represented as specs + backlog tasks and can be incrementally implemented.
+The short version: SkeinDB already runs as a real server with a usable admin console, a broad MySQL compatibility surface, and a growing PostgreSQL baseline, but it is still honest-to-goodness work in progress rather than a finished production database.
 
 ![SkeinDB architecture](docs/figures/architecture.png)
 
 ---
 
-## Highlights
+## What SkeinDB Is Today
 
-- **Single-binary deployment:** copy one executable; pick ports; run.
-- **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility including Users/Site Health query coverage, installer seed-query regressions, and a clean live admin smoke across core screens (theme-owned `nav-menus` / `widgets` limitations aside), plus migration/telemetry tooling.
-- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, managed DB-user password auth, SSL rejection, simple query execution, common startup/bootstrap probes (`SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `current_setting(...)`), simple-query failed-transaction `ReadyForQuery(E)` handling, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
-- **SkeinQL (native API):** JSON-RPC control plane for modern apps.
-- **Web-native consistency:** ETags + If-None-Match as first-class query validators, including cacheable prepared-query GETs.
-- **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
-- **MVCC extensions:** delta-chained value versions.
-- **Dedup visibility:** live storage dedup metrics in `stats.snapshot` and SkeinAdmin overview.
-- **Configurable row persistence (prototype):** table row files support ValueID-backed JSON (`.json`), binary row segments (`.rseg`, now the default), or hybrid dual-write mode via `--storage-mode json|segment|hybrid`.
-- **Security extensions:** hash-chained WAL for tamper evidence.
-- **14 hardened research tracks:** R02-R11 and R13-R16 are hardened with runtime evidence and integration tests; see `docs/TRUE_STATUS_MATRIX.md`.
-- **Sandboxed compute:** Wasm UDFs with capability-based access.
-- **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
-- **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
-- **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, inline Easy Viewer DB creation + live create-table preview/validation, identifier-safe SQL generation, fail-closed destructive ops, dialect-aware SQL profiles, settings explorer (`settings.list` + capability shortcuts), dedicated telemetry/security panels, password-backed DB-user management, persisted HTTP bearer token management, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
-- **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
+### Working now
+
+- One executable runs the HTTP API, SkeinAdmin, the MySQL listener, and the optional PostgreSQL listener.
+- MySQL compatibility is the most mature adoption path and is exercised by the checked-in compatibility corpus and end-to-end tests.
+- WordPress-class MySQL workloads are a first-class target: the repo covers installer/admin query shapes and live WordPress smoke tests.
+- SkeinAdmin is a real embedded control panel with schema browsing, SQL workspaces, an Easy Viewer, settings management, token/user management, observability views, and index-advisor workflows.
+- SkeinQL is the preferred native API for new apps and is available over HTTP, with QUIC support in the codebase as well.
+- Row persistence now defaults to segment-backed `.rseg` storage.
+
+### Partial / still growing
+
+- PostgreSQL support is real but still partial: startup/auth, common bootstrap probes, simple-query execution, and failed-transaction `ReadyForQuery(E)` handling work, but broader dialect, catalogs, and driver parity are still open.
+- Several research tracks are implemented as usable prototypes or hardened baselines, but not all are production-grade.
+- Clustering, CDC, snapshots, Wasm operators, and advisor flows exist, but some areas still need hardening and broader lifecycle support.
+
+### Not true yet
+
+- SkeinDB is not full MySQL parity.
+- SkeinDB is not full PostgreSQL compatibility.
+- The storage engine and several advanced features are still in prototype or hybrid states rather than fully hardened production implementations.
+
+> Implementation note
+> The current engine is usable and tested, but parts of the storage and research architecture are still evolving. The repo intentionally contains both shipped runtime behavior and forward-looking implementation work.
 
 ---
 
-## Requirements
+## Current Status
 
-- Rust toolchain (stable) for the server, tests, and CLI.
-- Node.js is only needed if you want to rebuild or serve the web assets under `web/`.
+- **MySQL:** broad compatibility layer with prepared statements, wide `COM_QUERY` coverage, compatibility shims for real application workloads, and corpus-backed regression coverage.
+- **WordPress:** install/admin-style compatibility is far enough along to be used as a live smoke target, including Users and Site Health query coverage.
+- **PostgreSQL:** partial PG v3 baseline with trust/cleartext auth, managed DB-user passwords, SSL rejection, startup probes, simple queries, and failed-transaction blocking.
+- **Admin/UI:** SkeinAdmin is no longer a placeholder; it is an active part of the product surface.
+- **Storage:** default row persistence is `segment` mode using `.rseg`, with fallback/hybrid support still present.
+- **Status tracking:** the authoritative runtime truth lives in `docs/TRUE_STATUS_MATRIX.md`, with the roadmap in `docs/PROJECT_BACKLOG.md`.
+
+If you want the most honest snapshot of what is implemented versus planned, start here:
+
+- `docs/TRUE_STATUS_MATRIX.md`
+- `docs/PROJECT_BACKLOG.md`
+- `docs/MYSQL_COMPAT.md`
+- `docs/PG_COMPAT.md`
 
 ---
 
-## Quick start
+## Why Use It
+
+SkeinDB is useful if you want one of these:
+
+- a single local binary for SQL experiments, admin tooling, and protocol testing
+- a MySQL-compatible target for adoption and migration work
+- a controllable environment for research features like ETags, query patches, audit logs, vector search, and Wasm execution
+- a codebase that keeps runtime features, backlog, and docs close together instead of hiding the gap
+
+---
+
+## Quick Start
 
 ### Build
 
@@ -63,13 +87,13 @@ cargo build --release
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306
 ```
 
-With PostgreSQL listener (partial baseline):
+With PostgreSQL enabled:
 
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --pg 5432
 ```
 
-Optional storage mode:
+Optional storage mode override:
 
 ```bash
 ./target/release/skeindb serve --data ./data --http 8080 --mysql 3306 --storage-mode hybrid
@@ -78,65 +102,75 @@ Optional storage mode:
 Default row persistence without an explicit flag is `segment`, which stores table rows in `.rseg` files and falls back to `.json` on read when needed.
 
 Open:
+
 - SkeinAdmin: `http://127.0.0.1:8080/admin`
+- SQL workspace: `http://127.0.0.1:8080/console`
 - SkeinQL JSON-RPC: `http://127.0.0.1:8080/api/v1/rpc`
 
 See `docs/GETTING_STARTED.md` for a fuller walkthrough.
 
 ---
 
-## Key artifacts
+## Main Surfaces
 
-- `./target/release/skeindb`: release build artifact produced by `cargo build --release`
-- `docs/figures/architecture.png`: current architecture diagram used in docs
-- `docs/site/index.html`: generated static docs landing page
-- `site/index.html`: generated project landing page
-- `tests/compat/corpus.sql`: MySQL compatibility regression corpus
-- `samples/sample.sql`: minimal SQL sample file
+### MySQL
+
+- MySQL wire listener on `--mysql`
+- `mysql_native_password` handshake/auth flow
+- broad translated SQL subset
+- prepared-statement support
+- compatibility coverage aimed at real application workloads, especially WordPress-shaped traffic
+
+See `docs/MYSQL_COMPAT.md`.
+
+### PostgreSQL
+
+- PG v3 startup/auth handshake
+- common startup/bootstrap query handling
+- simple query protocol
+- failed transaction state in the simple-query path
+
+See `docs/PG_COMPAT.md`.
+
+### SkeinQL
+
+- JSON-RPC control plane over HTTP
+- schema, query, transaction, admin, telemetry, cluster, and research-oriented surfaces
+
+See `docs/SKEINQL.md`.
+
+### SkeinAdmin
+
+- embedded admin and console routes
+- schema/data/sql workflows
+- Easy Viewer for click-first table work
+- settings, telemetry, security, and advisor panels
+
+See `docs/SKEINADMIN.md`.
 
 ---
 
-## Docs
-
-Start here:
-- `docs/README.md` (documentation index)
-
-Frequently used:
-- `docs/SKEINQL.md`
-- `docs/QUERY_PATCH.md`
-- `docs/ETAG_VALIDATORS.md`
-- `docs/TRAFFIC_REDUCTION.md`
-- `docs/MYSQL_COMPAT.md`
-- `docs/PG_COMPAT.md`
-- `docs/SKEINADMIN.md`
-- `docs/GETTING_STARTED.md`
-
----
-
-## Repo layout
+## Repository Layout
 
 ```text
 crates/
-  skeindb/          # server + prototype execution engine
-  skeindb-core/     # stable primitives (ValueIDs, hashes, canonicalization)
-  skeindb-ir/       # intermediate representation types shared across layers
-  skeindb-skeinql/  # SkeinQL types + JSON-RPC method schemas
+  skeindb/          # server, protocol layers, execution engine
+  skeindb-core/     # stable low-level primitives
+  skeindb-ir/       # shared IR types
+  skeindb-skeinql/  # SkeinQL request/response and method schemas
 web/
   console/          # minimal embedded SQL console sources
-  skeinadmin/       # embedded management UI (admin + console routes)
-openapi/
-  skeinql.yaml      # minimal API sketch
-docs/               # specs, research notes, and operator docs
-samples/            # example SQL inputs
-tests/compat/       # MySQL compatibility corpus and regression inputs
-site/               # generated public landing page artifact
+  skeinadmin/       # embedded admin UI sources
+docs/               # operator docs, specs, compatibility notes, backlog
+tests/compat/       # MySQL compatibility corpus and regressions
+site/               # generated public landing page
 ```
 
 ---
 
 ## Verification
 
-Run the standard repo checks from the workspace root:
+Standard checks from the workspace root:
 
 ```bash
 cargo fmt --all
@@ -144,24 +178,26 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
 ```
 
+Note: strict `clippy -D warnings` is still not clean repo-wide today; use `docs/TRUE_STATUS_MATRIX.md` and current CI/local output as the source of truth for that status.
+
 ---
 
-## Status
+## Documentation
 
-This repo contains both:
-- working prototype code (HTTP, SkeinQL, admin console)
-- research-grade specifications and an implementation backlog
+Start here:
 
-For what is implemented vs planned, see the docs and the backlog:
-- `docs/PROJECT_BACKLOG.md`
-- `docs/RESEARCH_AGENDA.md`
+- `docs/README.md`
+
+Most useful day-to-day docs:
+
+- `docs/GETTING_STARTED.md`
+- `docs/MYSQL_COMPAT.md`
+- `docs/PG_COMPAT.md`
+- `docs/SKEINQL.md`
+- `docs/SKEINADMIN.md`
+- `docs/ON_DISK_FORMAT.md`
 - `docs/TRUE_STATUS_MATRIX.md`
-
-Recent documentation updates (2026-03-30):
-- `docs/PG_COMPAT.md`: rewritten to the current PG v3 baseline and open tasks
-- `docs/PROJECT_BACKLOG.md`: status sync for PostgreSQL docs + current corpus numbers
-- `docs/TRUE_STATUS_MATRIX.md`: refreshed backlog counts and compatibility snapshot
-- `site/index.html` / `docs/site/index.html`: synced public stats and feature badges
+- `docs/PROJECT_BACKLOG.md`
 
 ---
 
