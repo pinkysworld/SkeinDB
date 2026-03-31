@@ -223,6 +223,16 @@ function validateEasyIdentifier(name, label) {
   return value;
 }
 
+function quoteSqlIdentifier(name) {
+  const value = String(name || '').trim();
+  if (!value) throw new Error('Identifier is required');
+  return '`' + value.replace(/`/g, '``') + '`';
+}
+
+function quoteQualifiedTable(tableRef) {
+  return quoteSqlIdentifier(tableRef.db) + '.' + quoteSqlIdentifier(tableRef.table);
+}
+
 function analyzeEasyCreateDraft(db, table, rows) {
   const errors = [];
   const warnings = [];
@@ -2477,22 +2487,23 @@ function qbGetSelectedColumns() {
 
 function qbBuildSQL() {
   const tableRef = easyReadTableRef();
-  const tableName = tableRef.db + '.' + tableRef.table;
+  const tableName = quoteQualifiedTable(tableRef);
   const selectedCols = qbGetSelectedColumns();
-  const colStr = selectedCols.length ? selectedCols.join(', ') : '*';
+  const colStr = selectedCols.length ? selectedCols.map(quoteSqlIdentifier).join(', ') : '*';
   let sql = 'SELECT ' + colStr + ' FROM ' + tableName;
   if (STATE.qbConditions.length) {
     const parts = STATE.qbConditions.map(c => {
-      if (c.op === 'IS NULL') return c.col + ' IS NULL';
-      if (c.op === 'IS NOT NULL') return c.col + ' IS NOT NULL';
-      if (c.op === 'LIKE') return c.col + " LIKE '%" + c.value.replace(/'/g, "''") + "%'";
-      return c.col + ' ' + c.op + " '" + c.value.replace(/'/g, "''") + "'";
+      const col = quoteSqlIdentifier(c.col);
+      if (c.op === 'IS NULL') return col + ' IS NULL';
+      if (c.op === 'IS NOT NULL') return col + ' IS NOT NULL';
+      if (c.op === 'LIKE') return col + " LIKE '%" + c.value.replace(/'/g, "''") + "%'";
+      return col + ' ' + c.op + " '" + c.value.replace(/'/g, "''") + "'";
     });
     sql += ' WHERE ' + parts.join(' AND ');
   }
   const orderCol = $('qbOrderCol')?.value || '';
   const orderDir = $('qbOrderDir')?.value || 'ASC';
-  if (orderCol) sql += ' ORDER BY ' + orderCol + ' ' + orderDir;
+  if (orderCol) sql += ' ORDER BY ' + quoteSqlIdentifier(orderCol) + ' ' + orderDir;
   const limit = parseInt($('qbLimit')?.value || '', 10) || 50;
   sql += ' LIMIT ' + limit;
   return sql + ';';
@@ -2688,7 +2699,7 @@ async function easyDoExport() {
           if (v.t === 'bool') return v.v ? 'TRUE' : 'FALSE';
           return "'" + String(formatLit(v)).replace(/'/g, "''") + "'";
         });
-        return 'INSERT INTO ' + tableRef.db + '.' + tableRef.table + ' (' + columns.join(', ') + ') VALUES (' + vals.join(', ') + ');';
+        return 'INSERT INTO ' + quoteQualifiedTable(tableRef) + ' (' + columns.map(quoteSqlIdentifier).join(', ') + ') VALUES (' + vals.join(', ') + ');';
       });
       downloadBlob(inserts.join('\n'), tableRef.db + '_' + tableRef.table + '.sql', 'text/sql');
     }
@@ -2721,9 +2732,10 @@ async function easyTruncateTable() {
     const tableRef = easyReadTableRef();
     const ok = await skeinModal('\u26A0\uFE0F', 'Truncate Table', 'Truncate all rows from "' + tableRef.db + '.' + tableRef.table + '"? This cannot be undone.', [{ label: 'Cancel', value: false }, { label: 'Truncate', value: true, cls: 'primary' }]);
     if (!ok) return;
-    const res = await call('sql.exec', { sql: 'DELETE FROM ' + tableRef.db + '.' + tableRef.table + ';' }, 'easyOpsOut');
+    const res = await call('sql.exec', { sql: 'DELETE FROM ' + quoteQualifiedTable(tableRef) + ';' }, 'easyOpsOut');
+    const result = unwrapRpcResult(res, 'sql.exec');
     easyShowToast('\u2713 Table truncated.', 'success');
-    setOut(res, 'easyOpsOut');
+    setOut(result, 'easyOpsOut');
     await easyBrowseRows();
   } catch (e) {
     easyShowToast('Truncate failed: ' + e.message, 'error');
@@ -2737,8 +2749,9 @@ async function easyDropTableOp() {
     const okDrop = await skeinModal('\u26A0\uFE0F', 'Drop Table', 'DROP TABLE "' + tableRef.db + '.' + tableRef.table + '"? This permanently deletes the table and all data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
     if (!okDrop) return;
     const res = await call('schema.drop_table', tableRef, 'easyOpsOut');
+    const result = unwrapRpcResult(res, 'schema.drop_table');
     easyShowToast('\u2713 Table "' + tableRef.table + '" dropped.', 'success');
-    setOut(res, 'easyOpsOut');
+    setOut(result, 'easyOpsOut');
     setSelectedTable('');
     await loadDbTree();
     easyRefreshTargetsFromTree();
@@ -2757,8 +2770,9 @@ async function easyDropDbOp() {
     const okDropDb = await skeinModal('\u26A0\uFE0F', 'Drop Database', 'DROP DATABASE "' + db + '"? This permanently deletes ALL tables and data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
     if (!okDropDb) return;
     const res = await call('schema.drop_database', { db }, 'easyOpsOut');
+    const result = unwrapRpcResult(res, 'schema.drop_database');
     easyShowToast('\u2713 Database "' + db + '" dropped.', 'success');
-    setOut(res, 'easyOpsOut');
+    setOut(result, 'easyOpsOut');
     setSelectedDb(''); setSelectedTable('');
     await loadDbTree();
     easyRefreshTargetsFromTree();
@@ -3041,7 +3055,10 @@ async function userCreate() {
   try {
     const name = $('userName')?.value.trim(), pass = $('userPass')?.value.trim(), role = $('userRole')?.value;
     if (!name) throw new Error('Username required');
-    await call('admin.user.create', { username: name, role }, 'usersOut');
+    if (!pass) throw new Error('Password required');
+    const res = await call('admin.user.create', { username: name, password: pass, role }, 'usersOut');
+    const result = unwrapRpcResult(res, 'admin.user.create');
+    easyShowToast('\u2713 User "' + result.username + '" created.', 'success');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3061,7 +3078,9 @@ async function userGrant() {
   try {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
-    await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
+    const res = await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
+    unwrapRpcResult(res, 'admin.user.grant');
+    easyShowToast('\u2713 Grants updated for "' + name + '".', 'success');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3069,7 +3088,9 @@ async function userRevoke() {
   try {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
-    await call('admin.user.revoke', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
+    const res = await call('admin.user.revoke', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : [] }, 'usersOut');
+    unwrapRpcResult(res, 'admin.user.revoke');
+    easyShowToast('\u2713 Grants revoked for "' + name + '".', 'success');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3325,20 +3346,25 @@ async function securityCreateToken() {
   const ttlHrs = parseInt($('secTokenTtl')?.value, 10) || 0;
   const ttlMs = ttlHrs > 0 ? ttlHrs * 3600000 : 0;
   try {
-    const r = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
-    if (r?.secret) {
+    const res = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
+    const result = unwrapRpcResult(res, 'security.token.create');
+    if (result?.secret) {
+      if ($('token')) $('token').value = result.secret;
+      persistInputs();
       const el = $('secTokenOut');
-      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + r.secret;
+      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + result.secret;
     }
+    easyShowToast('\u2713 API token created.', 'success');
     await securityRefreshTokens();
   } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
 }
 
 async function securityRefreshTokens() {
   try {
-    const r = await call('security.token.list', {}, 'secTokenOut');
+    const res = await call('security.token.list', {}, 'secTokenOut');
+    const result = unwrapRpcResult(res, 'security.token.list');
     const grid = $('secTokenGrid'); if (!grid) return;
-    const tokens = r?.tokens || [];
+    const tokens = Array.isArray(result?.tokens) ? result.tokens : [];
     if (!tokens.length) { grid.innerHTML = '<div class="hint">No tokens created yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>ID</th><th>Role</th><th>Label</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody>';
     tokens.forEach(t => {
@@ -3359,7 +3385,9 @@ async function securityRevokeToken(tokenId) {
   ]);
   if (!ok) return;
   try {
-    await call('security.token.revoke', { token_id: tokenId }, 'secTokenOut');
+    const res = await call('security.token.revoke', { token_id: tokenId }, 'secTokenOut');
+    unwrapRpcResult(res, 'security.token.revoke');
+    easyShowToast('\u2713 Token revoked.', 'success');
     await securityRefreshTokens();
   } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
 }
@@ -3369,9 +3397,10 @@ async function securityRevokeToken(tokenId) {
 // ---------------------------------------------------------------------------
 async function securityTopQueries() {
   try {
-    const r = await call('stats.top_queries', { limit: 20 }, null);
+    const res = await call('stats.top_queries', { limit: 20 }, null);
+    const result = unwrapRpcResult(res, 'stats.top_queries');
     const grid = $('secTopQueryGrid'); if (!grid) return;
-    const queries = r?.queries || [];
+    const queries = Array.isArray(result?.queries) ? result.queries : [];
     if (!queries.length) { grid.innerHTML = '<div class="hint">No query statistics available yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>#</th><th>Fingerprint</th><th>Count</th><th>Avg (ms)</th><th>Last Seen</th></tr></thead><tbody>';
     queries.forEach((q, i) => {

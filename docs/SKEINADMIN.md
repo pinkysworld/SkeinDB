@@ -21,7 +21,9 @@ Recent UI updates:
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.
 - `/admin` now includes a **phpMyAdmin-inspired Easy Viewer** with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
 - Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
-- Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop).
+- Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop). Destructive flows now unwrap RPC errors before showing success, and generated SQL/export statements quote identifiers so non-simple names do not break the “easy” path.
+- The Security panel now uses the live token RPC payloads correctly, auto-populates the active Bearer token when you create one, and reflects the server’s persisted token inventory instead of stale in-memory UI assumptions.
+- User creation now requires a real password and provisions a stored DB login that MySQL and PostgreSQL wire clients can authenticate with.
 - `/console` remains workspace-first, while `/admin` keeps full control-plane navigation.
 
 ---
@@ -68,7 +70,7 @@ Recent UI updates:
 
 Requirements:
 - SkeinDB must enable CORS for allowed origins.
-- Authentication uses Bearer tokens (recommended).
+- Authentication uses Bearer tokens (recommended). Persisted API tokens created in the Security panel now protect the HTTP RPC/API surface as soon as at least one active token exists.
 
 ### 2.2 Reverse-proxy hosted
 
@@ -109,6 +111,7 @@ A profile stores:
 Security note:
 - Do not store raw tokens unencrypted in local storage.
 - Prefer short-lived tokens with refresh or manual paste.
+- API token secrets are only returned once at creation time; list responses no longer echo the raw secret.
 
 ---
 
@@ -212,7 +215,9 @@ Security note:
 - Rebalance
 
 ### 4.11 Security and Encryption
-- API token create/list/revoke panel with modal confirmations
+- API token create/list/revoke panel with modal confirmations, secret-once display, and real HTTP bearer enforcement
+- Token roles: `admin`, `read_write`, and `read_only`; read-only tokens are blocked from mutating RPC methods
+- DB-user management panel with password-backed user creation, partial per-database revoke, and MySQL/PG login compatibility
 - Dedicated Security panel entry in the main navigation and top tab bar
 - Encryption mode (ENC_OFF / ENC_RANDOM / ENC_MLE_DB)
 - Key rotation and re-encryption progress

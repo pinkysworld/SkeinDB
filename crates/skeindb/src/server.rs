@@ -542,6 +542,7 @@ struct MySqlPreparedStatement {
 #[derive(Debug)]
 struct MySqlSessionState {
     default_db: Option<String>,
+    username: String,
     last_found_rows: u64,
     last_insert_id: u64,
     connection_id: u32,
@@ -567,9 +568,10 @@ impl MySqlPreparedStatement {
 }
 
 impl MySqlSessionState {
-    fn new(default_db: Option<String>, connection_id: u32) -> Self {
+    fn new(default_db: Option<String>, connection_id: u32, username: String) -> Self {
         Self {
             default_db,
+            username,
             last_found_rows: 0,
             last_insert_id: 0,
             connection_id,
@@ -1665,6 +1667,7 @@ fn mysql_literal_current_date_time_parts() -> ((i32, u8, u8), (u8, u8, u8)) {
 fn parse_select_literal_query(
     sql: &str,
     default_db: Option<&str>,
+    username: Option<&str>,
 ) -> Option<(Vec<(String, MySqlLiteral)>, bool)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
@@ -1707,7 +1710,13 @@ fn parse_select_literal_query(
             || value_src.eq_ignore_ascii_case("session_user()")
             || value_src.eq_ignore_ascii_case("system_user()")
         {
-            MySqlLiteral::Str("skeindb@localhost".to_string())
+            let account = username.unwrap_or("skeindb").trim();
+            let account = if account.is_empty() {
+                "skeindb"
+            } else {
+                account
+            };
+            MySqlLiteral::Str(format!("{account}@localhost"))
         } else if value_src.eq_ignore_ascii_case("now()")
             || value_src.eq_ignore_ascii_case("current_timestamp()")
             || value_src.eq_ignore_ascii_case("localtimestamp()")
@@ -7706,7 +7715,7 @@ async fn mysql_stmt_prepare_columns(
     sql: &str,
     default_db: Option<&str>,
 ) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
+    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db, Some("skeindb")) {
         return cols
             .into_iter()
             .map(|(name, lit)| MySqlStmtPrepareColumn {
@@ -9324,9 +9333,11 @@ async fn mysql_execute_sql(
                 }
             }
         }
-        if let Some((cols, emit_row)) =
-            parse_select_literal_query(&exec_sql, session.default_db.as_deref())
-        {
+        if let Some((cols, emit_row)) = parse_select_literal_query(
+            &exec_sql,
+            session.default_db.as_deref(),
+            Some(&session.username),
+        ) {
             let columns = cols
                 .iter()
                 .map(|(name, _)| name.clone())
@@ -9728,16 +9739,38 @@ async fn handle_mysql_connection(
         }
     }
 
-    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
-        if !mysql_validate_native_password(&expected_password, &seed, &response.auth_response) {
-            let packet = mysql_err_packet(1045, "28000", "access denied");
-            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
-            return Ok(());
-        }
+    let username = response.username;
+    let env_password = std::env::var("SKEINDB_TOKEN").ok();
+    let (has_db_users, matched_user) = {
+        let eng = state.engine.read().await;
+        let matched_user =
+            eng.authenticate_db_user_mysql_native(&username, &seed, &response.auth_response);
+        (eng.has_db_users(), matched_user)
+    };
+    let env_auth_ok = env_password
+        .as_ref()
+        .map(|expected_password| {
+            mysql_validate_native_password(expected_password, &seed, &response.auth_response)
+        })
+        .unwrap_or(false);
+    if (env_password.is_some() || has_db_users) && !env_auth_ok && matched_user.is_none() {
+        let packet = mysql_err_packet(1045, "28000", "access denied");
+        mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+        return Ok(());
     }
 
-    let username = response.username;
-    let mut session = MySqlSessionState::new(response.database, connection_id);
+    let session_username = matched_user
+        .as_ref()
+        .map(|user| user.username.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            if username.trim().is_empty() {
+                "skeindb".to_string()
+            } else {
+                username.clone()
+            }
+        });
+    let mut session = MySqlSessionState::new(response.database, connection_id, session_username);
     let mut prepared_statements = HashMap::<u32, MySqlPreparedStatement>::new();
     let mut next_statement_id = 1u32;
     let ok = mysql_ok_packet();
@@ -10216,8 +10249,13 @@ async fn handle_pg_connection(
         .or(Some(&username))
         .map(|s| s.to_string());
 
-    // Authentication: trust when SKEINDB_TOKEN is unset, cleartext password otherwise.
-    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
+    let env_password = std::env::var("SKEINDB_TOKEN").ok();
+    let has_db_users = {
+        let eng = state.engine.read().await;
+        eng.has_db_users()
+    };
+    // Authentication: trust when no bootstrap admin token or DB users exist.
+    if env_password.is_some() || has_db_users {
         pg_wire::write_auth_cleartext_password(&mut stream).await?;
         let msg = pg_wire::read_message(&mut stream).await?;
         if msg.tag != frontend::PASSWORD_MESSAGE {
@@ -10226,7 +10264,15 @@ async fn handle_pg_connection(
             return Ok(());
         }
         let supplied = pg_wire::parse_query(&msg.payload); // password is C-string
-        if supplied != expected_password {
+        let matched_user = {
+            let eng = state.engine.read().await;
+            eng.authenticate_db_user_password(&username, &supplied)
+        };
+        let env_auth_ok = env_password
+            .as_ref()
+            .map(|expected_password| supplied == *expected_password)
+            .unwrap_or(false);
+        if !env_auth_ok && matched_user.is_none() {
             pg_wire::write_error_response(
                 &mut stream,
                 "FATAL",
@@ -10255,6 +10301,7 @@ async fn handle_pg_connection(
     pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
 
     let mut default_db = database;
+    let mut tx_status = TxStatus::Idle;
 
     // Command loop.
     loop {
@@ -10289,45 +10336,73 @@ async fn handle_pg_connection(
 
                 if sql.is_empty() {
                     pg_wire::write_empty_query_response(&mut stream).await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 let sql_lower = sql.to_ascii_lowercase();
 
+                if tx_status == TxStatus::Failed {
+                    if sql_lower == "rollback" {
+                        pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
+                        tx_status = TxStatus::Idle;
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                        continue;
+                    }
+                    if sql_lower == "commit" || sql_lower == "end" {
+                        pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
+                        tx_status = TxStatus::Idle;
+                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                        continue;
+                    }
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "25P02",
+                        "current transaction is aborted, commands ignored until end of transaction block",
+                    )
+                    .await?;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    continue;
+                }
+
                 // Handle SET / session bootstrap queries as no-ops.
                 if sql_lower.starts_with("set ") || sql_lower.starts_with("reset ") {
                     pg_wire::write_command_complete(&mut stream, "SET").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 if sql_lower == "begin" || sql_lower == "start transaction" {
                     pg_wire::write_command_complete(&mut stream, "BEGIN").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::InTransaction).await?;
+                    tx_status = TxStatus::InTransaction;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 if sql_lower == "commit" || sql_lower == "end" {
                     pg_wire::write_command_complete(&mut stream, "COMMIT").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    tx_status = TxStatus::Idle;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 if sql_lower == "rollback" {
                     pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    tx_status = TxStatus::Idle;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 if pg_try_handle_bootstrap_query(&mut stream, sql, default_db.as_deref()).await? {
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
                     continue;
                 }
 
                 // Delegate to the shared SQL execution engine.
                 let exec_sql = sql.to_string();
-                let mut session = MySqlSessionState::new(default_db.clone(), connection_id);
+                let mut session =
+                    MySqlSessionState::new(default_db.clone(), connection_id, username.clone());
                 match mysql_execute_sql(&state, &exec_sql, &mut session).await {
                     Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
                         let pg_cols: Vec<pg_wire::PgColumn> = columns
@@ -10369,14 +10444,17 @@ async fn handle_pg_connection(
                     Err((_code, _state, message)) => {
                         pg_wire::write_error_response(&mut stream, "ERROR", "42000", &message)
                             .await?;
+                        if tx_status == TxStatus::InTransaction {
+                            tx_status = TxStatus::Failed;
+                        }
                     }
                 }
                 // Update default_db if session changed it
                 default_db = session.default_db;
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
             frontend::SYNC => {
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
             frontend::PARSE | frontend::BIND | frontend::DESCRIBE | frontend::EXECUTE => {
                 // Extended query protocol stubs — enough to not crash drivers
@@ -10403,7 +10481,10 @@ async fn handle_pg_connection(
                     &format!("unsupported message type: {}", char::from(msg.tag)),
                 )
                 .await?;
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                if tx_status == TxStatus::InTransaction {
+                    tx_status = TxStatus::Failed;
+                }
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
         }
     }
@@ -11631,6 +11712,28 @@ impl RpcOutcome {
     }
 }
 
+fn rpc_method_requires_admin(method: &str) -> bool {
+    method == "system.shutdown"
+        || method.starts_with("admin.")
+        || method.starts_with("security.token.")
+        || method.starts_with("settings.")
+}
+
+fn rpc_token_role_allows_method(role: &str, method: &str, is_read_only: bool) -> bool {
+    let normalized = role.trim().to_ascii_lowercase();
+    if normalized == "admin" {
+        return true;
+    }
+    if rpc_method_requires_admin(method) {
+        return false;
+    }
+    match normalized.as_str() {
+        "read_only" => is_read_only,
+        "read_write" => true,
+        _ => false,
+    }
+}
+
 pub(crate) async fn handle_rpc(
     state: &AppState,
     headers: Option<&HeaderMap>,
@@ -11646,31 +11749,49 @@ pub(crate) async fn handle_rpc(
         *c.per_method.entry(req.method.clone()).or_insert(0) += 1;
     }
 
-    // Very small auth placeholder: if SKEINDB_TOKEN is set, require matching bearer.
-    if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
-        let auth_ok = headers
-            .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
-            .map(|v| v == format!("Bearer {}", expected))
-            .unwrap_or(false);
-        if !auth_ok {
-            let resp: RpcResponse = RpcResponse::err(
-                req.id.clone(),
-                RpcError::new("unauthorized", "Missing/invalid bearer token"),
-            );
-            observe_rpc_call(
-                state,
-                &req.method,
-                req.params.as_ref(),
-                StatusCode::UNAUTHORIZED,
-                false,
-                None,
-                started_at.elapsed(),
-            );
-            return RpcOutcome {
-                status: StatusCode::UNAUTHORIZED,
-                response: Some(resp),
-            };
-        }
+    let method = req.method.clone();
+    let params = req.params.clone();
+    let sql_read_only = method.as_str() == "sql.exec" && sql_exec_is_read_only(params.as_ref());
+
+    // HTTP RPC auth: env token remains an admin override; created API tokens are
+    // now persisted and enforced on the same bearer path.
+    let bearer = headers
+        .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let env_token = std::env::var("SKEINDB_TOKEN").ok();
+    let (has_api_tokens, token_role) = {
+        let eng = state.engine.read().await;
+        let role = bearer
+            .as_deref()
+            .and_then(|secret| eng.authenticate_api_token(secret));
+        (eng.has_api_tokens(), role)
+    };
+    let env_auth_ok = env_token
+        .as_ref()
+        .zip(bearer.as_ref())
+        .map(|(expected, supplied)| supplied == expected)
+        .unwrap_or(false);
+    if (env_token.is_some() || has_api_tokens) && !env_auth_ok && token_role.is_none() {
+        let resp: RpcResponse = RpcResponse::err(
+            req.id.clone(),
+            RpcError::new("unauthorized", "Missing/invalid bearer token"),
+        );
+        observe_rpc_call(
+            state,
+            &req.method,
+            req.params.as_ref(),
+            StatusCode::UNAUTHORIZED,
+            false,
+            None,
+            started_at.elapsed(),
+        );
+        return RpcOutcome {
+            status: StatusCode::UNAUTHORIZED,
+            response: Some(resp),
+        };
     }
 
     // Version check
@@ -11699,10 +11820,28 @@ pub(crate) async fn handle_rpc(
             response: Some(resp),
         };
     }
-
-    let method = req.method.clone();
-    let params = req.params.clone();
-    let sql_read_only = method.as_str() == "sql.exec" && sql_exec_is_read_only(params.as_ref());
+    let effective_read_only = is_read_only_method(&method) || sql_read_only;
+    if let Some(role) = token_role.as_deref() {
+        if !rpc_token_role_allows_method(role, &method, effective_read_only) {
+            let resp: RpcResponse = RpcResponse::err(
+                req.id.clone(),
+                RpcError::new("forbidden", "Bearer token does not allow this method"),
+            );
+            observe_rpc_call(
+                state,
+                &method,
+                params.as_ref(),
+                StatusCode::FORBIDDEN,
+                false,
+                None,
+                started_at.elapsed(),
+            );
+            return RpcOutcome {
+                status: StatusCode::FORBIDDEN,
+                response: Some(resp),
+            };
+        }
+    }
     let is_replication_request = headers
         .and_then(|map| map.get(REPLICATION_HEADER).and_then(|v| v.to_str().ok()))
         .map(|v| v == "1")
@@ -12580,6 +12719,7 @@ pub(crate) async fn handle_rpc(
                     #[derive(serde::Deserialize)]
                     struct P {
                         username: String,
+                        password: String,
                         #[serde(default = "default_admin_role")]
                         role: String,
                     }
@@ -12588,7 +12728,9 @@ pub(crate) async fn handle_rpc(
                     }
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
-                    let user = eng.user_create(&p.username, &p.role);
+                    let user = eng
+                        .user_create(&p.username, &p.role, &p.password)
+                        .map_err(|e| RpcError::new("invalid_params", e.to_string()))?;
                     Ok(serde_json::to_value(&user)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -12631,11 +12773,13 @@ pub(crate) async fn handle_rpc(
                     struct P {
                         username: String,
                         db: String,
+                        #[serde(default)]
+                        privileges: Vec<String>,
                     }
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
                     let revoked = eng
-                        .user_revoke(&p.username, &p.db)
+                        .user_revoke(&p.username, &p.db, p.privileges)
                         .map_err(|e| RpcError::new("not_found", e.to_string()))?;
                     Ok(serde_json::json!({ "revoked": revoked }))
                 }
@@ -20694,21 +20838,34 @@ mod tests {
     }
 
     async fn call_rpc(state: &AppState, method: &str, params: Value) -> RpcResponse {
+        let (status, response) =
+            call_rpc_with_headers(state, HeaderMap::new(), method, params).await;
+        assert_eq!(status, StatusCode::OK);
+        response
+    }
+
+    async fn call_rpc_with_headers(
+        state: &AppState,
+        headers: HeaderMap,
+        method: &str,
+        params: Value,
+    ) -> (StatusCode, RpcResponse) {
         let req = RpcRequest {
             skeinql: SKEINQL_VERSION.to_string(),
             id: Some(RpcId::Str("t1".to_string())),
             method: method.to_string(),
             params: Some(params),
         };
-        let resp = rpc_handler(State(state.clone()), HeaderMap::new(), Json(req)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = rpc_handler(State(state.clone()), headers, Json(req)).await;
+        let status = resp.status();
         let bytes = resp
             .into_body()
             .collect()
             .await
             .expect("collect body")
             .to_bytes();
-        serde_json::from_slice(&bytes).expect("parse rpc response")
+        let body = serde_json::from_slice(&bytes).expect("parse rpc response");
+        (status, body)
     }
 
     async fn call_sql_exec_http(state: &AppState, payload: Value) -> RpcResponse {
@@ -22732,6 +22889,7 @@ mod tests {
         let (parsed, emit_row) = parse_select_literal_query(
             "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db, @@sql_mode AS mode",
             Some("app"),
+            Some("alice"),
         )
         .expect("parse select literal");
         assert!(emit_row);
@@ -22754,28 +22912,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_select_literal_query_uses_authenticated_username() {
+        let (parsed, emit_row) =
+            parse_select_literal_query("SELECT USER() AS who", Some("app"), Some("alice"))
+                .expect("parse select user()");
+        assert!(emit_row);
+        assert_eq!(parsed[0].0, "who");
+        assert_eq!(
+            parsed[0].1,
+            MySqlLiteral::Str("alice@localhost".to_string())
+        );
+    }
+
+    #[test]
     fn parse_select_literal_query_limit_controls_row_visibility() {
         let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 1", None).expect("limit 1");
-        assert!(emit_row);
-
-        let (_, emit_row) = parse_select_literal_query("SELECT @@version_comment LIMIT 0,1", None)
-            .expect("limit offset,count");
+            parse_select_literal_query("SELECT @@version_comment LIMIT 1", None, Some("skeindb"))
+                .expect("limit 1");
         assert!(emit_row);
 
         let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 0", None).expect("limit 0");
+            parse_select_literal_query("SELECT @@version_comment LIMIT 0,1", None, Some("skeindb"))
+                .expect("limit offset,count");
+        assert!(emit_row);
+
+        let (_, emit_row) =
+            parse_select_literal_query("SELECT @@version_comment LIMIT 0", None, Some("skeindb"))
+                .expect("limit 0");
         assert!(!emit_row);
 
-        let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 1 OFFSET 1", None)
-                .expect("limit with offset");
+        let (_, emit_row) = parse_select_literal_query(
+            "SELECT @@version_comment LIMIT 1 OFFSET 1",
+            None,
+            Some("skeindb"),
+        )
+        .expect("limit with offset");
         assert!(!emit_row);
     }
 
     #[test]
     fn parse_select_literal_query_rejects_from_clause() {
-        assert!(parse_select_literal_query("SELECT 1 FROM app.users", None).is_none());
+        assert!(
+            parse_select_literal_query("SELECT 1 FROM app.users", None, Some("skeindb")).is_none()
+        );
     }
 
     #[test]
@@ -27687,7 +27866,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "alice", "role": "admin" }),
+            json!({ "username": "alice", "password": "secret123", "role": "admin" }),
         )
         .await;
         assert!(resp.ok);
@@ -27698,7 +27877,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "bob", "role": "read_only" }),
+            json!({ "username": "bob", "password": "secret456", "role": "read_only" }),
         )
         .await;
         assert!(resp.ok);
@@ -27737,7 +27916,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "eve", "role": "read_write" }),
+            json!({ "username": "eve", "password": "horsebattery", "role": "read_write" }),
         )
         .await;
         assert!(resp.ok);
@@ -27765,6 +27944,26 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.revoke",
+            json!({ "username": "eve", "db": "mydb", "privileges": ["SELECT"] }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["revoked"], true);
+
+        let resp = call_rpc(&state, "admin.user.list", json!({})).await;
+        let result = resp.result.expect("missing result");
+        let users = result["users"].as_array().unwrap();
+        let eve = users
+            .iter()
+            .find(|user| user["username"].as_str() == Some("eve"))
+            .expect("eve user");
+        let grants = eve["grants"]["mydb"].as_array().unwrap();
+        assert_eq!(grants, &[json!("INSERT")]);
+
+        let resp = call_rpc(
+            &state,
+            "admin.user.revoke",
             json!({ "username": "eve", "db": "mydb" }),
         )
         .await;
@@ -27779,6 +27978,58 @@ mod tests {
             json!({ "username": "ghost", "db": "x", "privileges": ["SELECT"] }),
         )
         .await;
+        assert!(!resp.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_token_auth_requires_bearer_and_enforces_role() -> anyhow::Result<()> {
+        let dir = temp_dir("api_token_auth");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(
+            &state,
+            "security.token.create",
+            json!({ "role": "read_only", "label": "review-token" }),
+        )
+        .await;
+        assert!(resp.ok);
+        let secret = resp
+            .result
+            .as_ref()
+            .and_then(|value| value.get("secret"))
+            .and_then(|value| value.as_str())
+            .expect("token secret")
+            .to_string();
+
+        let (status, resp) =
+            call_rpc_with_headers(&state, HeaderMap::new(), "schema.list_databases", json!({}))
+                .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!resp.ok);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {secret}").parse().expect("bearer header"),
+        );
+        let (status, resp) =
+            call_rpc_with_headers(&state, headers.clone(), "schema.list_databases", json!({}))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.ok);
+
+        let (status, resp) = call_rpc_with_headers(
+            &state,
+            headers,
+            "schema.create_database",
+            json!({ "db": "secure_app" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(!resp.ok);
 
         std::fs::remove_dir_all(&dir).ok();

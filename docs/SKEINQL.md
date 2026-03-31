@@ -94,6 +94,7 @@ Recommended header:
 
 Token issuance is implementation-defined. Minimal single-binary deployments may use:
 - an environment-configured bearer token
+- persisted API bearer tokens created through `security.token.create`
 - loopback-only mode
 
 SkeinQL defines optional `auth.*` methods for deployments that want built-in authentication, but `auth.*` is not required to implement core query semantics.

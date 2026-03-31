@@ -24,7 +24,7 @@ The repository is written so you can:
 
 - **Single-binary deployment:** copy one executable; pick ports; run.
 - **MySQL adoption layer:** MySQL protocol surface, WordPress-class admin compatibility including Users/Site Health query coverage, installer seed-query regressions, and a clean live admin smoke across core screens (theme-owned `nav-menus` / `widgets` limitations aside), plus migration/telemetry tooling.
-- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, SSL rejection, simple query execution, common startup/bootstrap probes (`SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `current_setting(...)`), transaction stubs, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
+- **PostgreSQL adoption layer (partial baseline):** PostgreSQL v3 wire protocol on port 5432 with trust/cleartext auth, managed DB-user password auth, SSL rejection, simple query execution, common startup/bootstrap probes (`SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `current_setting(...)`), simple-query failed-transaction `ReadyForQuery(E)` handling, and extended-protocol stubs. SCRAM, `pg_catalog`, and broader PG dialect parity remain open.
 - **SkeinQL (native API):** JSON-RPC control plane for modern apps.
 - **Web-native consistency:** ETags + If-None-Match as first-class query validators, including cacheable prepared-query GETs.
 - **Traffic reduction:** `query.patch` deltas, patch caching/coalescing, dictionary encoding (`skeinpack_v1`).
@@ -37,7 +37,7 @@ The repository is written so you can:
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, inline Easy Viewer DB creation + live create-table preview/validation, dialect-aware SQL profiles, settings explorer (`settings.list` + capability shortcuts), dedicated telemetry/security panels, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
+- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, inline Easy Viewer DB creation + live create-table preview/validation, identifier-safe SQL generation, fail-closed destructive ops, dialect-aware SQL profiles, settings explorer (`settings.list` + capability shortcuts), dedicated telemetry/security panels, password-backed DB-user management, persisted HTTP bearer token management, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
 - **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
 
 ---

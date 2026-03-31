@@ -925,7 +925,7 @@
 
         <!-- USERS --><section class="panel" data-panel="users">
           <div class="panel-grid"><div class="card wide"><h2>Users &amp; Grants</h2>
-            <div class="callout">User management via settings. Create roles, grant DB-level access.</div>
+            <div class="callout">Create real database login users with passwords and manage DB-level grants. Leave the revoke privileges field empty to remove all grants for the selected database.</div>
             <div class="row"><div class="field"><label>Username</label><input id="userName" /></div><div class="field"><label>Password</label><input id="userPass" type="password" /></div><div class="field"><label>Role</label><select id="userRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div></div>
             <div class="actions"><button id="btnUserCreate" class="primary sm">Create</button><button id="btnUserList" class="sm">List</button><button id="btnUserDrop" class="danger sm">Drop</button><button id="btnUserGrant" class="secondary sm">Grant</button><button id="btnUserRevoke" class="ghost sm">Revoke</button></div>
             <div class="row"><div class="field"><label>Grant DB</label><input id="userGrantDb" /></div><div class="field"><label>Privileges</label><input id="userGrantPrivs" placeholder="SELECT,INSERT,UPDATE,DELETE" /></div></div>
@@ -949,7 +949,7 @@
         <!-- SECURITY --><section class="panel" data-panel="security">
           <div class="panel-grid">
             <div class="card wide"><h2>API Tokens</h2>
-              <div class="callout">Create and manage API tokens for programmatic access. Tokens can have roles (admin, read_write, read_only) and optional expiration.</div>
+              <div class="callout">Create and manage persisted API bearer tokens for programmatic access. Secrets are shown once at creation time, and active tokens protect the HTTP RPC surface until you revoke them.</div>
               <div class="row">
                 <div class="field"><label>Label</label><input id="secTokenLabel" placeholder="My integration" /></div>
                 <div class="field"><label>Role</label><select id="secTokenRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div>

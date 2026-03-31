@@ -54,7 +54,7 @@ Phase 0 verification checklist:
 - [x] T041: Console UI scaffold
 - [x] T042: Schema browser + SQL editor
 - [x] T043: Data browse/edit + import/export (CSV + JSON export/import)
-- [x] T044: Users/privileges + status dashboard
+- [x] T044: Users/privileges + status dashboard. Latest: `admin.user.create` now requires and stores real passwords, DB users persist across restart, MySQL/PG wire auth accepts managed users, and per-database revoke now supports partial privilege removal instead of deleting the whole grant entry.
 
 ## Phase 5 - SkeinQL native API
 - [x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
@@ -99,7 +99,7 @@ Phase 0 verification checklist:
 ## Phase 12 - Standalone management console (SkeinAdmin)
 - [x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
 - [x] T121: SkeinAdmin pages: schema/data/sql workspace
-- [x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation, with create/list/revoke token flows using modal confirmations instead of browser dialogs.
+- [x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation; API tokens are now persisted server-side, hashed at rest, shown once on creation, enforced on the HTTP RPC surface, and reflected correctly in the live token/query stats UI.
 - [x] T123: SkeinAdmin cluster page (cluster.*) + actions. Latest: join/leave/remove/promote controls are all surfaced in the live cluster panel.
 - [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
 - [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: inline New DB flow, live create-table SQL preview, duplicate-column / identifier validation before create, required-field validation before insert, column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/>/</BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)
@@ -191,7 +191,7 @@ Phase 0 verification checklist:
 - [x] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/cleartext auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.
 - [ ] T401: SCRAM-SHA-256 authentication (`pg_auth.rs`) — RFC 5802/7677 exchange + trust mode
 - [ ] T402: PG session state (`pg_session.rs`) — search_path, DateStyle, TimeZone, tx state (I/T/E), client_encoding, standard_conforming_strings
-- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables)
+- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables). Latest: cleartext auth now accepts managed SkeinDB DB users in addition to the legacy `SKEINDB_TOKEN` override.
 - [ ] T404: PG SQL dialect parser (`pg_parse.rs`) — double-quoted identifiers, $$dollar quoting$$, :: type casts, RETURNING, ILIKE, IS DISTINCT FROM, FETCH FIRST n ROWS ONLY, ARRAY[...], boolean literals
 - [ ] T405: PG DML extensions — INSERT/UPDATE/DELETE...RETURNING, ON CONFLICT DO NOTHING/UPDATE, basic COPY FROM STDIN / TO STDOUT
 - [ ] T406: PG DDL — SERIAL/BIGSERIAL → auto_increment, CREATE SCHEMA → database, CREATE INDEX CONCURRENTLY (accept/ignore), COMMENT ON
@@ -201,7 +201,7 @@ Phase 0 verification checklist:
 - [x] T410: PG startup query handling — `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `SHOW server_version_num`, `SHOW standard_conforming_strings`, `SHOW max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)` for the common startup/bootstrap probes used by psql/Django/Rails/SQLAlchemy-style clients
 - [ ] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders
 - [ ] T412: PG function mapping (`pg_functions.rs`) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, ->>/#>> operators, || concat, ~/~* regex, ARRAY operations, unnest
-- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO
+- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO. Latest: the simple-query path now enters `ReadyForQuery(E)` after statement errors inside explicit transactions and rejects subsequent commands until `ROLLBACK`/failed-`COMMIT` cleanup, but SAVEPOINT semantics and broader transaction/session parity remain open.
 - [ ] T414: PG SQLSTATE error codes — 42P01 (undefined table), 42703 (undefined column), 23505 (unique violation), 42601 (syntax error), etc.
 - [ ] T415: PG compatibility test corpus (`tests/compat/pg_corpus.sql`) — mirror MySQL corpus structure for PG dialect
 - [ ] T416: PG unit tests — wire round-trips, SCRAM vectors, SQL parse, type encode/decode, catalog queries

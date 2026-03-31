@@ -658,6 +658,32 @@ async fn mysql_handshake_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn mysql_db_user_password_auth_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_db_user_auth")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let resp = rpc
+        .rpc(
+            "admin.user.create",
+            json!({
+                "username": "alice",
+                "password": "secret123",
+                "role": "read_write"
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let mut stream = mysql_connect_and_auth_as(server.mysql_port(), "alice", "secret123").await?;
+    send_com_query(&mut stream, "SELECT USER() AS who").await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_deref(), Some("alice@localhost"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mysql_com_query_sql_exec_subset_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_mysql("mysql_com_query_sql_exec_subset")?;
@@ -4856,11 +4882,15 @@ async fn t063_t122_subscribe_and_security_tokens() -> anyhow::Result<()> {
         .as_str()
         .expect("should have token_id")
         .to_string();
-    assert!(result["secret"].as_str().is_some(), "should have secret");
+    let secret = result["secret"]
+        .as_str()
+        .expect("should have secret")
+        .to_string();
     assert_eq!(result["role"].as_str().unwrap(), "admin");
+    let authed_rpc = RpcHttpClient::new(server.base_url()).with_token(secret);
 
     // T122: security.token.list
-    let resp = rpc.rpc("security.token.list", json!({})).await?;
+    let resp = authed_rpc.rpc("security.token.list", json!({})).await?;
     let result = resp.result.as_ref().expect("should have result");
     let tokens = result["tokens"]
         .as_array()
@@ -4868,7 +4898,7 @@ async fn t063_t122_subscribe_and_security_tokens() -> anyhow::Result<()> {
     assert_eq!(tokens.len(), 1);
 
     // T122: security.token.revoke
-    let resp = rpc
+    let resp = authed_rpc
         .rpc("security.token.revoke", json!({"token_id": token_id}))
         .await?;
     let result = resp.result.as_ref().expect("should have result");
@@ -4945,6 +4975,7 @@ impl HttpHarness {
 struct RpcHttpClient {
     base_url: String,
     client: reqwest::Client,
+    token: Option<String>,
 }
 
 impl RpcHttpClient {
@@ -4952,7 +4983,13 @@ impl RpcHttpClient {
         Self {
             base_url,
             client: reqwest::Client::new(),
+            token: None,
         }
+    }
+
+    fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
     }
 
     async fn rpc(&self, method: &str, params: serde_json::Value) -> anyhow::Result<RpcResponse> {
@@ -4963,13 +5000,11 @@ impl RpcHttpClient {
             params: Some(params),
         };
         let url = format!("{}/api/v1/rpc", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(url)
-            .json(&req)
-            .send()
-            .await
-            .context("send http rpc")?;
+        let mut request = self.client.post(url).json(&req);
+        if let Some(token) = self.token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let resp = request.send().await.context("send http rpc")?;
         let status = resp.status();
         let bytes = resp.bytes().await.context("read rpc response")?;
         if !status.is_success() {
@@ -4981,13 +5016,11 @@ impl RpcHttpClient {
 
     async fn sql_exec(&self, params: serde_json::Value) -> anyhow::Result<RpcResponse> {
         let url = format!("{}/api/v1/sql/exec", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(url)
-            .json(&params)
-            .send()
-            .await
-            .context("send sql exec request")?;
+        let mut request = self.client.post(url).json(&params);
+        if let Some(token) = self.token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let resp = request.send().await.context("send sql exec request")?;
         let status = resp.status();
         let bytes = resp.bytes().await.context("read sql exec response")?;
         if !status.is_success() {
@@ -5040,6 +5073,108 @@ async fn read_mysql_packet(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8
 }
 
 async fn mysql_connect_and_auth(port: u16) -> anyhow::Result<TcpStream> {
+    mysql_connect_and_auth_as(port, "root", "").await
+}
+
+fn mysql_hash(bytes: &[u8]) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&digest[..20]);
+    out
+}
+
+fn mysql_native_password_scramble(password: &str, seed: &[u8]) -> Vec<u8> {
+    if password.is_empty() {
+        return Vec::new();
+    }
+    let stage1 = mysql_hash(password.as_bytes());
+    let stage2 = mysql_hash(&stage1);
+    let mut combined = Vec::with_capacity(seed.len() + stage2.len());
+    combined.extend_from_slice(seed);
+    combined.extend_from_slice(&stage2);
+    let digest = mysql_hash(&combined);
+    let mut out = vec![0u8; stage1.len()];
+    for idx in 0..stage1.len() {
+        out[idx] = stage1[idx] ^ digest[idx];
+    }
+    out
+}
+
+fn mysql_extract_seed(handshake: &[u8]) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        handshake.first().copied() == Some(0x0a),
+        "unexpected handshake packet"
+    );
+    let mut cursor = 1usize;
+    while cursor < handshake.len() && handshake[cursor] != 0 {
+        cursor += 1;
+    }
+    anyhow::ensure!(cursor < handshake.len(), "unterminated server version");
+    cursor += 1; // version null terminator
+    anyhow::ensure!(cursor + 4 + 8 < handshake.len(), "truncated handshake seed");
+    cursor += 4; // connection id
+    let mut seed = handshake[cursor..cursor + 8].to_vec();
+    cursor += 8;
+    cursor += 1; // filler
+    anyhow::ensure!(
+        cursor + 2 + 1 + 2 + 2 + 1 + 10 <= handshake.len(),
+        "truncated handshake header"
+    );
+    cursor += 2; // lower capabilities
+    cursor += 1; // charset
+    cursor += 2; // status flags
+    cursor += 2; // upper capabilities
+    let auth_plugin_data_len = handshake[cursor] as usize;
+    cursor += 1;
+    cursor += 10; // reserved
+    let second_len = auth_plugin_data_len.saturating_sub(8).max(13);
+    anyhow::ensure!(
+        cursor + second_len <= handshake.len(),
+        "truncated handshake seed tail"
+    );
+    seed.extend_from_slice(&handshake[cursor..cursor + second_len]);
+    while seed.last().copied() == Some(0) {
+        seed.pop();
+    }
+    Ok(seed)
+}
+
+fn mysql_handshake_response_packet_for_user(
+    username: &str,
+    password: &str,
+    seed: &[u8],
+) -> Vec<u8> {
+    const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+
+    let flags =
+        CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
+    let auth_response = mysql_native_password_scramble(password, seed);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&flags.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.push(0x21);
+    payload.extend_from_slice(&[0u8; 23]);
+    payload.extend_from_slice(username.as_bytes());
+    payload.push(0);
+    payload.push(auth_response.len() as u8);
+    payload.extend_from_slice(&auth_response);
+    payload.extend_from_slice(b"mysql_native_password");
+    payload.push(0);
+    payload
+}
+
+async fn mysql_connect_and_auth_as(
+    port: u16,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<TcpStream> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .context("connect mysql port")?;
@@ -5050,10 +5185,14 @@ async fn mysql_connect_and_auth(port: u16) -> anyhow::Result<TcpStream> {
         .windows(b"mysql_native_password".len())
         .any(|w| w == b"mysql_native_password"));
 
-    let response = mysql_handshake_response_packet();
+    let seed = mysql_extract_seed(&handshake)?;
+    let response = mysql_handshake_response_packet_for_user(username, password, &seed);
     write_mysql_packet(&mut stream, 1, &response).await?;
 
     let (_seq, auth_result) = read_mysql_packet(&mut stream).await?;
+    if let Some(err) = decode_mysql_err_packet(&auth_result) {
+        anyhow::bail!("mysql auth failed: {err}");
+    }
     assert_eq!(auth_result.first().copied(), Some(0x00));
     Ok(stream)
 }
@@ -5576,27 +5715,6 @@ fn encode_lenenc_int(buf: &mut Vec<u8>, n: usize) {
     }
 }
 
-fn mysql_handshake_response_packet() -> Vec<u8> {
-    const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
-    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
-    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
-    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
-
-    let flags =
-        CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&flags.to_le_bytes());
-    payload.extend_from_slice(&0u32.to_le_bytes());
-    payload.push(0x21);
-    payload.extend_from_slice(&[0u8; 23]);
-    payload.extend_from_slice(b"root");
-    payload.push(0);
-    payload.push(0);
-    payload.extend_from_slice(b"mysql_native_password");
-    payload.push(0);
-    payload
-}
-
 fn decode_mysql_ok_packet(payload: &[u8]) -> anyhow::Result<(u64, u64)> {
     if payload.first().copied() != Some(0x00) {
         return Err(anyhow!("not an OK packet"));
@@ -5814,9 +5932,27 @@ async fn read_pg_message(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)
 /// Connect to the PG listener, perform startup handshake, consume all
 /// ParameterStatus messages until ReadyForQuery.
 async fn pg_connect_and_startup(port: u16) -> anyhow::Result<TcpStream> {
+    pg_connect_and_startup_as(port, "skein", "testdb", None).await
+}
+
+fn build_pg_password_message(password: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(password.as_bytes());
+    payload.push(0);
+    payload
+}
+
+/// Connect to the PG listener, perform startup handshake, and optionally
+/// answer a cleartext password challenge.
+async fn pg_connect_and_startup_as(
+    port: u16,
+    user: &str,
+    database: &str,
+    password: Option<&str>,
+) -> anyhow::Result<TcpStream> {
     wait_for_tcp(port)?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
-    let startup = build_pg_startup("skein", "testdb");
+    let startup = build_pg_startup(user, database);
     stream.write_all(&startup).await?;
     stream.flush().await?;
 
@@ -5825,10 +5961,22 @@ async fn pg_connect_and_startup(port: u16) -> anyhow::Result<TcpStream> {
         let (tag, payload) = read_pg_message(&mut stream).await?;
         match tag {
             b'R' => {
-                // AuthenticationOk: first 4 bytes should be 0
                 let auth_type =
                     i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                assert_eq!(auth_type, 0, "expected AuthenticationOk");
+                if auth_type == 0 {
+                    continue;
+                }
+                if auth_type == 3 {
+                    let password = password.ok_or_else(|| anyhow!("password required"))?;
+                    let payload = build_pg_password_message(password);
+                    let len = (payload.len() + 4) as i32;
+                    stream.write_u8(b'p').await?;
+                    stream.write_i32(len).await?;
+                    stream.write_all(&payload).await?;
+                    stream.flush().await?;
+                    continue;
+                }
+                anyhow::bail!("unexpected PG auth type: {auth_type}");
             }
             b'S' => {
                 // ParameterStatus — skip
@@ -5887,12 +6035,47 @@ fn pg_first_text_cell(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&row[6..6 + data_len]).into_owned())
 }
 
+fn pg_ready_status(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<u8> {
+    messages
+        .iter()
+        .rev()
+        .find(|(tag, _)| *tag == b'Z')
+        .and_then(|(_, payload)| payload.first().copied())
+        .ok_or_else(|| anyhow!("missing ReadyForQuery"))
+}
+
 #[tokio::test]
 async fn pg_handshake_and_ready_for_query() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_pg("pg_handshake")?;
     let _stream = pg_connect_and_startup(server.pg_port()).await?;
     // If we get here, handshake succeeded
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_db_user_password_auth_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_db_user_auth")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let resp = rpc
+        .rpc(
+            "admin.user.create",
+            json!({
+                "username": "pg_alice",
+                "password": "secret123",
+                "role": "read_write"
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let mut stream =
+        pg_connect_and_startup_as(server.pg_port(), "pg_alice", "testdb", Some("secret123"))
+            .await?;
+    let msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+    assert!(msgs.iter().any(|(tag, _)| *tag == b'D'));
     Ok(())
 }
 
@@ -5980,6 +6163,29 @@ async fn pg_startup_bootstrap_queries() -> anyhow::Result<()> {
         let actual = pg_first_text_cell(&msgs)?;
         assert_eq!(actual, expected, "query: {sql}");
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_failed_transaction_requires_rollback() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_failed_tx")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let begin_msgs = pg_simple_query(&mut stream, "BEGIN").await?;
+    assert_eq!(pg_ready_status(&begin_msgs)?, b'T');
+
+    let error_msgs = pg_simple_query(&mut stream, "SELECT * FROM missing_table").await?;
+    assert!(error_msgs.iter().any(|(tag, _)| *tag == b'E'));
+    assert_eq!(pg_ready_status(&error_msgs)?, b'E');
+
+    let blocked_msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    assert!(blocked_msgs.iter().any(|(tag, _)| *tag == b'E'));
+    assert_eq!(pg_ready_status(&blocked_msgs)?, b'E');
+
+    let rollback_msgs = pg_simple_query(&mut stream, "ROLLBACK").await?;
+    assert_eq!(pg_ready_status(&rollback_msgs)?, b'I');
 
     Ok(())
 }

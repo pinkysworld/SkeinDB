@@ -475,7 +475,7 @@
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, SSL rejection, simple queries, transaction stubs, extended-protocol scaffolding, and common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code> backed by the shared engine.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, managed DB-user password auth, SSL rejection, simple queries, common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code>, and simple-query failed-transaction <code>ReadyForQuery(E)</code> handling backed by the shared engine.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -487,7 +487,7 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
-      <p>26 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation plus live create-table preview/validation, expert control panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.</p>
+      <p>26 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, password-backed DB users, persisted HTTP bearer tokens, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation, live create-table preview/validation, identifier-safe SQL generation, fail-closed destructive actions, expert control panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>

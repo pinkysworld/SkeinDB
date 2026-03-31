@@ -32,6 +32,7 @@ data/
   schema_changes.json         (prototype schema change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v1)
+  security_state.json         (security principals + API tokens, format v1)
   tables/
     <db>/<table>.json         (prototype row store, format v2)
     <db>/<table>.rseg         (prototype row segment container, format v1)
@@ -210,7 +211,48 @@ Commit rule:
 These JSON files are optional and may be ignored by older binaries.
 Each file includes a `format_version` field; unknown versions should be ignored.
 
-### 11.1 merge_wasm_registry.json
+### 11.1 security_state.json
+
+Persisted security principals for the HTTP/API bearer surface and protocol-level DB logins.
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "next_api_token_id": 3,
+  "api_tokens": [
+    {
+      "token_id": "tok_0000000000000001",
+      "secret_sha256": "4a44dc15364204a80fe80e9039455cc1...",
+      "role": "admin",
+      "label": "ci",
+      "created_at_ms": 1730000000000,
+      "expires_at_ms": 0
+    }
+  ],
+  "db_users": [
+    {
+      "username": "alice",
+      "role": "read_write",
+      "created_at_ms": 1730000000000,
+      "grants": {
+        "app": ["SELECT", "INSERT"]
+      },
+      "password_sha1": "cbfdac6008f9cab4083784cbd1874f76618d2a97",
+      "password_sha256": "fcf730b6d95236ecd3c9fc2d92d7b6b2..."
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Added in v0.3 as an optional metadata file.
+- Raw API token secrets are **not** stored on disk; only `secret_sha256` is persisted.
+- Managed DB users persist digests (`password_sha1` for MySQL native-password verification and `password_sha256` for cleartext-password verification), never raw passwords.
+- If the file is missing or has an unknown `format_version`, the server starts with no managed API tokens or DB users.
+
+### 11.2 merge_wasm_registry.json
 
 Format:
 
@@ -241,7 +283,7 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.2 tables/<db>/<table>.json (format v2)
+### 11.3 tables/<db>/<table>.json (format v2)
 
 Prototype row persistence for `tables/<db>/<table>.json` now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.
@@ -292,7 +334,7 @@ Rules:
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 
-### 11.3 tables/<db>/<table>.rseg (prototype segment container v1)
+### 11.4 tables/<db>/<table>.rseg (prototype segment container v1)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
 
@@ -317,7 +359,7 @@ Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
 - If both files are missing or unreadable, the table loads as empty.
 
-### 11.4 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
+### 11.5 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
 
 Optional persisted cache for the engine's reusable secondary-index state.
 
