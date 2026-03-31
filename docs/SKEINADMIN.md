@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-02-25
+Last updated: 2026-03-31
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
