@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-03-30
+Last updated: 2026-03-31
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 

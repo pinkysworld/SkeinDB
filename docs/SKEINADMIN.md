@@ -126,13 +126,14 @@ Security note:
 
 ### 4.2 Easy Viewer
 - **Left sidebar** with collapsible database/table tree, filter input, New DB button, and reload
+- **Inline database creation** from the sidebar with guided validation instead of browser prompts
 - **Breadcrumb navigation** showing Server › Database › Table context
 - **Sub-tabs** per table: Browse, Structure, Insert, Search, New Table, Export, Operations
 - **Browse tab**: paginated data grid with per-row Edit/Copy/Delete buttons, inline editing, check-all bulk delete, configurable rows-per-page
 - **Structure tab**: column listing with type, nullable, and primary-key info
-- **Insert tab**: form-based row insert with labeled fields per column
+- **Insert tab**: form-based row insert with labeled fields per column and required-field validation before RPC submit
 - **Search tab**: condition-based search with column/operator/value fields
-- **New Table tab**: column builder with name, type, nullable, PK checkboxes
+- **New Table tab**: column builder with name, type, nullable, PK checkboxes plus live SQL preview and duplicate/identifier checks before create
 - **Export tab**: export table data as CSV or SQL, plus structure-only SQL export
 - **Operations tab**: truncate table, drop table, and drop database with confirmation dialogs
 - **Toast notifications** for success, error, and info feedback
@@ -158,13 +159,20 @@ Security note:
 - CSV import/export
 
 ### 4.6 Engine Config
-- **Storage Engine**: deduplication on/off, compression, encryption at rest, storage mode (row/column/hybrid)
+- **Storage Engine**: deduplication on/off, compression, encryption at rest, storage mode (`json` / `segment` / `hybrid`)
 - **MVCC & Versioning**: MVCC toggle, delta-chained values, time travel, version retention days
 - **Compaction**: auto compaction, energy-aware scheduling (R20), max L0 files threshold
 - **Cache & Query**: query cache, query coalescing, autoparameterization, cache size (MB)
 - **Audit & Security**: tamper-evident WAL (R06), differential privacy (R04), oblivious execution (R05)
 - **Replication & CDC**: replication toggle, CDC changefeeds, QUIC transport (R09)
 - Load/save/reset controls with immediate feedback via `settings.set`
+
+### 4.6a Settings Manager
+- Live settings editor backed by `settings.get`, `settings.set`, and `settings.list`
+- Preset keys for common runtime knobs (cluster state, research config, storage mode, cache/coalescing/autoparam, CDC, QUIC)
+- Capabilities / method explorer with jump-to-RPC shortcuts
+- Quick pulls for transport status, feature flags, and workload feature telemetry
+- Research config dashboard with toggle + JSON editor for all 20 research tracks
 
 ### 4.7 Users & Privileges
 - Create user
@@ -198,12 +206,14 @@ Security note:
 ### 4.10 Cluster Management
 (See docs/CLUSTERING.md)
 - Node list (health, role, lag)
-- Add node / remove node
+- Add node / leave node / remove node
 - Promote replica
 - Shards and placement
 - Rebalance
 
 ### 4.11 Security and Encryption
+- API token create/list/revoke panel with modal confirmations
+- Dedicated Security panel entry in the main navigation and top tab bar
 - Encryption mode (ENC_OFF / ENC_RANDOM / ENC_MLE_DB)
 - Key rotation and re-encryption progress
 

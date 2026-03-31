@@ -99,11 +99,11 @@ Phase 0 verification checklist:
 ## Phase 12 - Standalone management console (SkeinAdmin)
 - [x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
 - [x] T121: SkeinAdmin pages: schema/data/sql workspace
-- [x] T122: SkeinAdmin security: token UI + role-aware navigation
-- [x] T123: SkeinAdmin cluster page (cluster.*) + actions
+- [x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation, with create/list/revoke token flows using modal confirmations instead of browser dialogs.
+- [x] T123: SkeinAdmin cluster page (cluster.*) + actions. Latest: join/leave/remove/promote controls are all surfaced in the live cluster panel.
 - [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
-- [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/>/</BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)
-- [x] T126: SkeinAdmin Engine Config panel — checkbox toggles for dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC
+- [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: inline New DB flow, live create-table SQL preview, duplicate-column / identifier validation before create, required-field validation before insert, column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/>/</BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)
+- [x] T126: SkeinAdmin Engine Config panel — checkbox toggles for dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC. Latest: storage mode selector is aligned with the real runtime values `json`, `segment`, and `hybrid`.
 
 ## Phase 13 - Observability and server load statistics
 - [x] T130: stats.snapshot and basic counters in server

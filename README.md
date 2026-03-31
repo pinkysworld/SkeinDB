@@ -37,7 +37,7 @@ The repository is written so you can:
 - **Wasm operators (experimental):** plan artifacts + columnar batch ABI (`wasm_batch_v1`).
 - **Hybrid row+column snapshots:** OLTP-first with analytics-friendly snapshots.
 - **Cluster control-plane (experimental):** `cluster.*` endpoints, join tokens, shard placement, and primary->replica write fanout.
-- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, dialect-aware SQL profiles, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
+- **SkeinAdmin control panel:** click-first workspace, inline grid row editing, optional visual row editor, inline Easy Viewer DB creation + live create-table preview/validation, dialect-aware SQL profiles, settings explorer (`settings.list` + capability shortcuts), dedicated telemetry/security panels, expert cluster/settings panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.
 - **Graceful shutdown controls:** `Ctrl+C`, `SIGTERM`, or `system.shutdown` now checkpoint state and update cluster node status.
 
 ---

@@ -11810,6 +11810,7 @@ pub(crate) async fn handle_rpc(
                 "stats.top_queries" => stats_top_queries(state, params.clone()),
                 "stats.slow_queries" => stats_slow_queries(state, params.clone()),
                 "settings.get" => handle_settings_get(state, params.clone()),
+                "settings.list" => handle_settings_list(state),
                 "settings.set" => handle_settings_set(state, params.clone()),
                 // --------------------
                 // cluster.*
@@ -20021,6 +20022,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "stats.top_queries"
             | "stats.slow_queries"
             | "settings.get"
+            | "settings.list"
             | "cluster.status"
             | "cluster.nodes"
             | "schema.list_databases"
@@ -20144,6 +20146,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "stats.top_queries",
         "stats.slow_queries",
         "settings.get",
+        "settings.list",
         "settings.set",
         "cluster.status",
         "cluster.nodes",
@@ -20352,6 +20355,19 @@ fn handle_settings_get(state: &AppState, params: Option<Value>) -> Result<Value,
     Ok(Value::Object(out))
 }
 
+fn handle_settings_list(state: &AppState) -> Result<Value, RpcError> {
+    let settings = state.settings.lock().unwrap();
+    let mut keys: Vec<String> = settings.keys().cloned().collect();
+    keys.sort();
+    let mut out = serde_json::Map::new();
+    for key in keys {
+        if let Some(value) = settings.get(&key) {
+            out.insert(key, value.clone());
+        }
+    }
+    Ok(Value::Object(out))
+}
+
 fn handle_settings_set(state: &AppState, params: Option<Value>) -> Result<Value, RpcError> {
     let obj = params.and_then(|v| v.as_object().cloned()).ok_or_else(|| {
         RpcError::new("invalid_request", "settings.set requires an object params")
@@ -20498,25 +20514,43 @@ mod tests {
         assert!(html.contains("Easy Viewer"));
         assert!(html.contains("data-etab=\"browse\""));
         assert!(html.contains("easyDataGrid"));
+        assert!(html.contains("easyNewDbForm"));
         assert!(html.contains("easyCreateTableName"));
+        assert!(html.contains("easyCreatePreview"));
+        assert!(html.contains("settingsKeyList"));
+        assert!(html.contains("btnClusterLeaveNode"));
+        assert!(html.contains("btnUserRevoke"));
+        assert!(html.contains("data-panel=\"security\""));
         assert!(html.contains("btnShutdown"));
         assert!(!html.to_lowercase().contains("phpmyadmin"));
         assert!(html.contains("src/main.js"));
         let js = admin_main_js();
         assert!(js.contains("system.shutdown"));
         assert!(js.contains("system.capabilities"));
+        assert!(js.contains("settings.list"));
+        assert!(js.contains("cluster.node.leave"));
+        assert!(js.contains("admin.user.revoke"));
         assert!(js.contains("cdc.ack"));
         assert!(js.contains("cdc.close"));
         assert!(js.contains("advisor.index_synthesize"));
         assert!(js.contains("advisor.apply_index"));
+        assert!(js.contains("telemetry.compat_summary"));
+        assert!(js.contains("telemetry.workload_features"));
+        assert!(js.contains("vector.index.status"));
+        assert!(js.contains("dp.audit.log"));
+        assert!(js.contains("security:"));
         assert!(js.contains("advisorReport"));
         assert!(js.contains("easyDoCreateTable"));
         assert!(js.contains("easyRenderDataGrid"));
         assert!(js.contains("easyDeleteCheckedRows"));
         assert!(js.contains("securityRefreshTokens"));
         assert!(js.contains("securityCreateToken"));
+        assert!(js.contains("researchSettingsLoad"));
+        assert!(js.contains("renderSettingsCapabilities"));
         assert!(!js.contains("advisor.synthesize"));
         assert!(!js.contains("call('advisor.apply'"));
+        assert!(!js.contains("dp.audit_log"));
+        assert!(!js.contains("vector.index_status"));
     }
 
     fn type_desc(kind: &str) -> skeindb_skeinql::types::TypeDesc {
@@ -27746,6 +27780,34 @@ mod tests {
         )
         .await;
         assert!(!resp.ok);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn settings_list_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("settings_list");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(
+            &state,
+            "settings.set",
+            json!({
+                "engine.storage_mode": "segment",
+                "research.config": { "R04": { "enabled": true, "epsilon": 0.5 } }
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "settings.list", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["engine.storage_mode"], json!("segment"));
+        assert_eq!(result["research.config"]["R04"]["enabled"], json!(true));
+        assert_eq!(result["research.config"]["R04"]["epsilon"], json!(0.5));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

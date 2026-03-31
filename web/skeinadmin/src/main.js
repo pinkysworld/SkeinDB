@@ -52,6 +52,8 @@ const PANEL_META = {
   data:       { title: 'Browse & Edit',        subtitle: 'Browse rows, insert data, and run table edits.' },
   cluster:    { title: 'Cluster Manager',      subtitle: 'Plan topology, inspect transport, and manage layouts.' },
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
+  telemetry:  { title: 'Telemetry Center',     subtitle: 'Inspect compatibility, feature usage, plan cache, and query pressure.' },
+  security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
   import:     { title: 'Import / Export',      subtitle: 'Bulk import data or export schemas and rows.' },
@@ -75,13 +77,13 @@ const RESEARCH_TRACKS = [
   { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['system.capabilities'], status: 'prototype' },
   { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities'], status: 'hardened' },
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['settings.get'], status: 'hardened' },
-  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit_log'], panel: 'privacy', status: 'hardened' },
+  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], status: 'hardened' },
-  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index_status'], panel: 'vectors', status: 'hardened' },
+  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
   { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'prototype' },
   { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'], status: 'hardened' },
@@ -106,6 +108,7 @@ const FEATURE_CENTER = [
   { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
   { title: 'CDC', desc: 'Change data capture + polling.', panel: 'rpc' },
+  { title: 'Security', desc: 'API tokens, grants, and sensitive controls.', panel: 'security' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
   { title: 'Differential Privacy', desc: 'DP aggregates w/ Laplace noise.', panel: 'privacy' },
   { title: 'Oblivious Exec', desc: 'Access pattern hiding.', panel: 'privacy' },
@@ -123,6 +126,17 @@ const FEATURE_CENTER = [
   { title: 'Telemetry', desc: 'Feature flags, compat summary, migration hints.', panel: 'telemetry' },
   { title: 'Plan Cache', desc: 'Query plan cache with fingerprinting.', panel: 'telemetry' },
   { title: 'Query Coalescing', desc: 'Thundering herd protection with metrics.', panel: 'telemetry' }
+];
+
+const SETTINGS_PRESET_KEYS = [
+  'cluster.state.v1',
+  'research.config',
+  'engine.storage_mode',
+  'engine.cache.enabled',
+  'engine.coalescing.enabled',
+  'engine.autoparameterize.enabled',
+  'engine.cdc.enabled',
+  'engine.quic.enabled'
 ];
 
 // ---------------------------------------------------------------------------
@@ -164,16 +178,20 @@ const RPC_TEMPLATES = [
   { label: 'cdc.ack', method: 'cdc.ack', params: { sub_id:'sub_1', offset:42 } },
   { label: 'cdc.close', method: 'cdc.close', params: { sub_id:'sub_1' } },
   { label: 'settings.get', method: 'settings.get', params: { keys:['cluster.state.v1'] } },
+  { label: 'settings.list', method: 'settings.list', params: {} },
   { label: 'cluster.status', method: 'cluster.status', params: {} },
   { label: 'cluster.join_token.create', method: 'cluster.join_token.create', params: { ttl_ms:600000, role:'replica' } },
   { label: 'cluster.node.join', method: 'cluster.node.join', params: { token:'join_token_here', node_id:'replica-a', rpc_url:'http://127.0.0.1:8081', role:'replica' } },
+  { label: 'cluster.node.leave', method: 'cluster.node.leave', params: { node_id:'replica-a' } },
   { label: 'cluster.shard.create', method: 'cluster.shard.create', params: { db:'app', table:'users', replicas:['replica-a'] } },
+  { label: 'admin.user.revoke', method: 'admin.user.revoke', params: { username:'reader', db:'app', privileges:['SELECT'] } },
   { label: 'ai.nl.translate', method: 'ai.nl.translate', params: { db:'app', request:'list users who signed up this week' } },
   { label: 'migration.rewrite_preview', method: 'migration.rewrite_preview', params: {} },
   { label: 'migration.intent_report', method: 'migration.intent_report', params: {} },
   { label: 'telemetry.feature_flags', method: 'telemetry.feature_flags', params: {} },
   { label: 'telemetry.compat_summary', method: 'telemetry.compat_summary', params: {} },
   { label: 'telemetry.migration_hints', method: 'telemetry.migration_hints', params: { limit: 10 } },
+  { label: 'telemetry.workload_features', method: 'telemetry.workload_features', params: {} },
   { label: 'plan_cache.status', method: 'plan_cache.status', params: {} },
   { label: 'plan_cache.clear', method: 'plan_cache.clear', params: {} },
   { label: 'stats.coalescing', method: 'stats.coalescing', params: {} },
@@ -190,6 +208,44 @@ let easyBuilderNextId = 1;
 function $(id) { return document.getElementById(id); }
 function getBaseUrl() { const v = $('baseUrl'); const raw = v ? v.value.trim() : ''; return raw || DEFAULT_BASE_URL; }
 function getToken() { const v = $('token'); return v ? v.value.trim() : ''; }
+const SIMPLE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function isSimpleIdentifier(name) {
+  return SIMPLE_IDENTIFIER_RE.test((name || '').trim());
+}
+
+function validateEasyIdentifier(name, label) {
+  const value = (name || '').trim();
+  if (!value) throw new Error(label + ' is required');
+  if (!isSimpleIdentifier(value)) {
+    throw new Error(label + ' must use a simple unquoted identifier (letters, numbers, underscore; no spaces).');
+  }
+  return value;
+}
+
+function analyzeEasyCreateDraft(db, table, rows) {
+  const errors = [];
+  const warnings = [];
+  if (db && !isSimpleIdentifier(db)) errors.push('Database name "' + db + '" needs a simple unquoted identifier for Easy Viewer.');
+  if (table && !isSimpleIdentifier(table)) errors.push('Table name "' + table + '" needs a simple unquoted identifier for Easy Viewer.');
+  const duplicates = [];
+  const seen = new Set();
+  const autoIncrement = [];
+  rows.forEach((row) => {
+    const name = String(row.name || '').trim();
+    if (!name) return;
+    if (!isSimpleIdentifier(name)) errors.push('Column "' + name + '" needs a simple unquoted identifier.');
+    const key = name.toLowerCase();
+    if (seen.has(key)) duplicates.push(name);
+    else seen.add(key);
+    if (row.auto_increment) autoIncrement.push(name);
+  });
+  if (duplicates.length) errors.push('Duplicate column names: ' + duplicates.join(', '));
+  if (autoIncrement.length > 1) errors.push('Only one AUTO_INCREMENT column is supported in Easy Viewer.');
+  if (!rows.some((row) => row.primary)) warnings.push('No primary key selected. Inline edit/delete flows work best with one.');
+  if (rows.some((row) => row.auto_increment && row.nullable)) warnings.push('AUTO_INCREMENT columns should be NOT NULL; Easy Viewer will still send your current draft.');
+  return { errors, warnings };
+}
 
 async function rpc(baseUrl, token, method, params) {
   const url = baseUrl.replace(/\/$/, '') + '/api/v1/rpc';
@@ -732,6 +788,7 @@ async function loadCapabilities() {
     if ($('statMethods')) $('statMethods').textContent = methods.length;
     populateMethodSelect(methods);
     renderMethodList(methods, $('methodSearch') ? $('methodSearch').value : '');
+    renderSettingsCapabilities(caps);
   }
 }
 
@@ -759,11 +816,16 @@ function disconnect() {
 
 async function shutdownServer() {
   const baseUrl = getBaseUrl();
-  const confirmText =
-    'Shutdown SkeinDB at ' +
-    baseUrl +
-    ' now? This closes active sessions and marks this node offline in cluster state.';
-  if (!window.confirm(confirmText)) return;
+  const ok = await skeinModal(
+    '\u26A0\uFE0F',
+    'Shutdown Server',
+    'Shutdown SkeinDB at ' + baseUrl + '? This closes active sessions and marks this node offline in cluster state.',
+    [
+      { label: 'Cancel', value: false, cls: 'ghost' },
+      { label: 'Shutdown', value: true, cls: 'danger' }
+    ]
+  );
+  if (!ok) return;
   setConnStatus('warn', 'Shutting down', 'Sending shutdown request to ' + baseUrl);
   try {
     const res = await call('system.shutdown', {}, 'out');
@@ -1587,6 +1649,7 @@ function easySetBuilderRows(rows) {
     }))
     .filter(row => row.name);
   easyRenderColBuilder();
+  easyUpdateCreatePreview();
 }
 
 function renderEasyBuilderRows() { easyRenderColBuilder(); }
@@ -1609,6 +1672,23 @@ function easyRenderColBuilder() {
     tr.querySelector('[data-role="remove"]')?.addEventListener('click', () => {
       STATE.easyTableBuilderRows = STATE.easyTableBuilderRows.filter(item => item.id !== row.id);
       easyRenderColBuilder();
+      easyUpdateCreatePreview();
+    });
+    const nullable = tr.querySelector('[data-role="nullable"]');
+    const autoIncrement = tr.querySelector('[data-role="auto_increment"]');
+    const primary = tr.querySelector('[data-role="primary"]');
+    const syncNullability = () => {
+      if ((autoIncrement && autoIncrement.checked) || (primary && primary.checked)) {
+        nullable.checked = false;
+      }
+      easyUpdateCreatePreview();
+    };
+    autoIncrement?.addEventListener('change', syncNullability);
+    primary?.addEventListener('change', syncNullability);
+    tr.querySelectorAll('input,select').forEach((el) => {
+      if (el.dataset.role === 'remove') return;
+      el.addEventListener('input', () => easyUpdateCreatePreview());
+      el.addEventListener('change', () => easyUpdateCreatePreview());
     });
     target.appendChild(tr);
   });
@@ -2162,15 +2242,22 @@ function easyCollectInsertRow() {
   const target = $('easyInsertFields');
   if (!target) throw new Error('Load a table first');
   const row = {};
+  const missing = [];
   target.querySelectorAll('.easy-field-item').forEach(item => {
     const name = item.dataset.colName || '';
     const kind = item.dataset.colKind || 'string';
+    const isPrimary = item.dataset.colPrimary === 'true';
+    const colMeta = easyColumnSchema(name);
     if (!name) return;
     const raw = item.querySelector('[data-role="value"]')?.value || '';
     const value = String(raw).trim();
-    if (!value.length) return;
+    if (!value.length) {
+      if (!colMeta.nullable && !colMeta.auto_increment) missing.push(name + (isPrimary ? ' (primary key)' : ''));
+      return;
+    }
     row[name] = literalFromInput(kind, raw, false);
   });
+  if (missing.length) throw new Error('Missing required fields: ' + missing.join(', '));
   return row;
 }
 
@@ -2462,13 +2549,43 @@ function qbSendToSQL() {
 // Create Table tab
 // ---------------------------------------------------------------------------
 
+function easyUpdateCreatePreview() {
+  const el = $('easyCreatePreview');
+  if (!el) return;
+  const db = $('easyCreateDb')?.value.trim() || easyGetSelectedDb() || 'demo';
+  const table = $('easyCreateTableName')?.value.trim() || 'my_table';
+  const rows = easyCollectBuilderRows();
+  const analysis = analyzeEasyCreateDraft(db, table, rows);
+  if (!rows.length) {
+    const intro = analysis.errors.length
+      ? '-- Add at least one valid column below.\n'
+      : '';
+    el.textContent = intro + 'CREATE TABLE ' + db + '.' + table + ' (...);';
+    return;
+  }
+  const defs = rows.map((row) => {
+    let out = row.name + ' ' + row.type.toUpperCase();
+    if (!row.nullable) out += ' NOT NULL';
+    if (row.auto_increment) out += ' AUTO_INCREMENT';
+    return out;
+  });
+  const primaryKey = rows.filter((row) => row.primary).map((row) => row.name);
+  if (primaryKey.length) defs.push('PRIMARY KEY (' + primaryKey.join(', ') + ')');
+  const notes = [];
+  analysis.errors.forEach((msg) => notes.push('-- ERROR: ' + msg));
+  analysis.warnings.forEach((msg) => notes.push('-- NOTE: ' + msg));
+  const sql = 'CREATE TABLE ' + db + '.' + table + ' (\n  ' + defs.join(',\n  ') + '\n);';
+  el.textContent = (notes.length ? notes.join('\n') + '\n\n' : '') + sql;
+}
+
 async function easyDoCreateTable() {
   try {
-    const db = $('easyCreateDb')?.value.trim() || easyGetSelectedDb();
-    const table = $('easyCreateTableName')?.value.trim();
-    if (!db || !table) throw new Error('Database and table name are required');
+    const db = validateEasyIdentifier($('easyCreateDb')?.value.trim() || easyGetSelectedDb(), 'Database name');
+    const table = validateEasyIdentifier($('easyCreateTableName')?.value.trim(), 'Table name');
     const rows = easyCollectBuilderRows();
     if (!rows.length) throw new Error('Define at least one column');
+    const analysis = analyzeEasyCreateDraft(db, table, rows);
+    if (analysis.errors.length) throw new Error(analysis.errors.join(' '));
     const columns = rows.map(row => cleanParams({
       name: row.name, type: { kind: row.type }, nullable: row.nullable, auto_increment: row.auto_increment
     }));
@@ -2488,8 +2605,7 @@ async function easyDoCreateTable() {
 
 async function easyDoCreateDb() {
   try {
-    const db = $('easyCreateDb')?.value.trim();
-    if (!db) throw new Error('Enter a database name');
+    const db = validateEasyIdentifier($('easyCreateDb')?.value.trim(), 'Database name');
     const res = await call('schema.create_database', { db }, 'easyCreateOut');
     unwrapRpcResult(res, 'schema.create_database');
     setSelectedDb(db);
@@ -2503,17 +2619,31 @@ async function easyDoCreateDb() {
   }
 }
 
-async function easyNewDbPrompt() {
-  const name = prompt('New database name:');
-  if (!name || !name.trim()) return;
+function easyToggleNewDbForm(show) {
+  const form = $('easyNewDbForm');
+  if (!form) return;
+  form.classList.toggle('active', !!show);
+  if (show) $('easyNewDbName')?.focus();
+}
+
+async function easyCreateDbInline() {
+  const input = $('easyNewDbName');
+  const raw = input?.value.trim() || '';
+  if (!raw) {
+    easyShowToast('Enter a database name first.', 'info');
+    return;
+  }
   try {
-    const res = await call('schema.create_database', { db: name.trim() }, 'easyCreateOut');
+    const name = validateEasyIdentifier(raw, 'Database name');
+    const res = await call('schema.create_database', { db: name }, 'easyCreateOut');
     unwrapRpcResult(res, 'schema.create_database');
-    setSelectedDb(name.trim());
-    easyShowToast('\u2713 Database "' + name.trim() + '" created!', 'success');
+    if (input) input.value = '';
+    setSelectedDb(name);
+    easyToggleNewDbForm(false);
+    easyShowToast('\u2713 Database "' + name + '" created!', 'success');
     await loadDbTree();
     easyRefreshTargetsFromTree();
-    easySelectDatabase(name.trim());
+    easySelectDatabase(name);
   } catch (e) {
     easyShowToast('Create failed: ' + e.message, 'error');
   }
@@ -2726,6 +2856,14 @@ async function clusterJoinNode() {
   } catch (e) { setOut({error:String(e)},'clusterOut'); }
 }
 
+async function clusterLeaveNode() {
+  try {
+    const id = $('clusterNodeId')?.value.trim();
+    if (!id) throw new Error('Node id required');
+    await call('cluster.node.leave', { node_id: id }, 'clusterOut');
+  } catch (e) { setOut({error:String(e)}, 'clusterOut'); }
+}
+
 async function clusterRemoveNode() {
   try { const id = $('clusterNodeId')?.value.trim(); if (!id) throw new Error('Node id required'); await call('cluster.node.remove',{node_id:id},'clusterOut'); } catch (e) { setOut({error:String(e)},'clusterOut'); }
 }
@@ -2773,7 +2911,40 @@ async function settingsSetKey() {
   } catch (e) { setOut({error:String(e)},'settingsOut'); }
 }
 
-async function settingsListAll() { await call('settings.list',{},'settingsOut'); }
+function settingsUsePreset() {
+  const preset = $('settingsPreset')?.value || SETTINGS_PRESET_KEYS[0];
+  if ($('settingsKey')) $('settingsKey').value = preset;
+  settingsGetKey();
+}
+
+async function settingsListAll() {
+  const res = await call('settings.list', {}, 'settingsOut');
+  if (res?.json?.ok && res.json.result) {
+    const keys = Object.keys(res.json.result).sort();
+    const list = $('settingsKeyList');
+    if (list) {
+      list.textContent = '';
+      keys.forEach((key) => {
+        const btn = document.createElement('button');
+        btn.className = 'settings-key-btn sm';
+        btn.textContent = key;
+        btn.addEventListener('click', () => {
+          if ($('settingsKey')) $('settingsKey').value = key;
+          if ($('settingsValue')) $('settingsValue').value = JSON.stringify(res.json.result[key], null, 2);
+        });
+        list.appendChild(btn);
+      });
+    }
+  }
+}
+
+async function settingsLoadCapabilities() { await loadCapabilities(); }
+async function settingsLoadTransport() {
+  const res = await call('transport.capabilities', {}, 'settingsCapabilitiesOut');
+  if (res?.json?.ok && res.json.result) renderSettingsCapabilities({ methods: [], transport: res.json.result });
+}
+async function settingsLoadFeatureFlags() { await call('telemetry.feature_flags', {}, 'settingsCapabilitiesOut'); }
+async function settingsLoadWorkloadFeatures() { await call('telemetry.workload_features', {}, 'settingsCapabilitiesOut'); }
 
 // ---------------------------------------------------------------------------
 // Engine Config
@@ -2856,7 +3027,7 @@ function engineResetDefaults() {
   Object.entries(defaults).forEach(([id, val]) => {
     const el = $(id); if (el) el.checked = val;
   });
-  const fieldDefaults = { engStorageMode: 'row', engRetentionDays: '7', engMaxL0: '8', engCacheSizeMb: '256' };
+  const fieldDefaults = { engStorageMode: 'segment', engRetentionDays: '7', engMaxL0: '8', engCacheSizeMb: '256' };
   Object.entries(fieldDefaults).forEach(([id, val]) => {
     const el = $(id); if (el) el.value = val;
   });
@@ -2878,7 +3049,11 @@ async function userList() { await call('admin.user.list', {}, 'usersOut'); }
 
 async function userDrop() {
   const name = $('userName')?.value.trim(); if (!name) return;
-  if (!confirm('Drop user "' + name + '"?')) return;
+  const ok = await skeinModal('\u26A0\uFE0F', 'Drop User', 'Drop user "' + name + '"?', [
+    { label: 'Cancel', value: false, cls: 'ghost' },
+    { label: 'Drop', value: true, cls: 'danger' }
+  ]);
+  if (!ok) return;
   await call('admin.user.drop', { username: name }, 'usersOut');
 }
 
@@ -2887,6 +3062,14 @@ async function userGrant() {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
     await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
+  } catch (e) { setOut({error:String(e)},'usersOut'); }
+}
+
+async function userRevoke() {
+  try {
+    const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
+    if (!name || !db) throw new Error('User + db required');
+    await call('admin.user.revoke', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3036,6 +3219,30 @@ function renderFeatureCenterGrid() {
   });
 }
 
+function renderSettingsCapabilities(payload) {
+  const out = $('settingsCapabilitiesOut');
+  if (out) setOut(payload, 'settingsCapabilitiesOut');
+  const grid = $('settingsKeyList');
+  if (!grid) return;
+  const methods = Array.isArray(payload?.methods) ? payload.methods : [];
+  if (!methods.length) {
+    if (!grid.childElementCount) grid.textContent = 'No methods loaded yet.';
+    return;
+  }
+  grid.textContent = '';
+  methods.forEach((method) => {
+    const btn = document.createElement('button');
+    btn.className = 'settings-key-btn sm';
+    btn.textContent = method;
+    btn.addEventListener('click', () => {
+      if ($('rpcMethod')) $('rpcMethod').value = method;
+      if ($('rpcParams')) $('rpcParams').value = '{}';
+      setActivePanel('rpc', true);
+    });
+    grid.appendChild(btn);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard cards – Top Tables, Slow Queries, Sessions, Index Health, Research
 // ---------------------------------------------------------------------------
@@ -3182,23 +3389,45 @@ async function securityTopQueries() {
   }
 }
 
-function renderResearchSettings() {
+function renderResearchSettings(config = {}) {
   const grid = $('researchSettingsGrid'); if (!grid) return;
   grid.textContent = '';
   RESEARCH_TRACKS.forEach(track => {
     const card = document.createElement('div'); card.className = 'feature-card';
+    card.dataset.track = track.id;
     const statusBadge = track.status === 'hardened' ? ' <span class="tag secondary" style="font-size:8px">hardened</span>' : ' <span class="tag" style="font-size:8px">prototype</span>';
-    card.innerHTML = '<div class="feature-title">' + escapeHtml(track.id) + statusBadge + '</div><div class="hint">' + escapeHtml(track.title) + '</div>';
+    card.innerHTML = '<div class="feature-title">' + escapeHtml(track.id) + statusBadge + '</div><div class="hint">' + escapeHtml(track.title) + '</div><div class="hint">Methods: ' + escapeHtml(track.methods.join(', ')) + '</div>';
     const toggle = document.createElement('label'); toggle.style.cssText = 'display:flex;gap:4px;align-items:center;font-size:11px;cursor:pointer;';
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true; cb.dataset.track = track.id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = (config[track.id]?.enabled ?? true) !== false;
+    cb.dataset.track = track.id;
     toggle.appendChild(cb); toggle.appendChild(document.createTextNode('Enabled'));
-    card.appendChild(toggle); grid.appendChild(card);
+    card.appendChild(toggle);
+    const text = document.createElement('textarea');
+    text.dataset.role = 'config';
+    const extra = { ...(config[track.id] || {}) };
+    delete extra.enabled;
+    text.placeholder = '{"note":"optional per-track config"}';
+    text.value = Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '';
+    card.appendChild(text);
+    if (track.panel) {
+      const btn = document.createElement('button');
+      btn.className = 'sm ghost';
+      btn.textContent = 'Open Panel';
+      btn.addEventListener('click', () => setActivePanel(track.panel, true));
+      card.appendChild(btn);
+    }
+    grid.appendChild(card);
   });
 }
 
 async function researchSettingsLoad() {
   try {
-    await call('settings.get', { keys: ['research.config'] }, 'researchSettingsOut');
+    const res = await call('settings.get', { keys: ['research.config'] }, 'researchSettingsOut');
+    const config = res?.json?.ok ? (res.json.result?.['research.config'] || {}) : {};
+    renderResearchSettings(config);
+    setOut({ loaded: true, config }, 'researchSettingsOut');
   } catch (e) { setOut({error:String(e)}, 'researchSettingsOut'); }
 }
 
@@ -3206,8 +3435,16 @@ async function researchSettingsSave() {
   try {
     const grid = $('researchSettingsGrid'); if (!grid) return;
     const config = {};
-    grid.querySelectorAll('input[type="checkbox"]').forEach(cb => { config[cb.dataset.track] = { enabled: cb.checked }; });
+    grid.querySelectorAll('.feature-card').forEach((card) => {
+      const track = card.dataset.track;
+      if (!track) return;
+      const cb = card.querySelector('input[type="checkbox"]');
+      const raw = card.querySelector('textarea[data-role="config"]')?.value.trim() || '';
+      const extra = raw ? parseJsonInput(raw, track + ' config') : {};
+      config[track] = { ...(extra || {}), enabled: !!cb?.checked };
+    });
     await call('settings.set', { 'research.config': config }, 'researchSettingsOut');
+    setOut({ saved: true, config }, 'researchSettingsOut');
   } catch (e) { setOut({error:String(e)}, 'researchSettingsOut'); }
 }
 
@@ -3238,7 +3475,7 @@ async function vecInsert() {
 }
 
 async function vecIndexStatus() {
-  try { const t = readDbTable('vecDb','vecTable'); await call('vector.index_status',{table:t},'vecOut'); } catch (e) { setOut({error:String(e)},'vecOut'); }
+  try { const t = readDbTable('vecDb','vecTable'); await call('vector.index.status',{table:t},'vecOut'); } catch (e) { setOut({error:String(e)},'vecOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -3265,7 +3502,7 @@ async function dpBudgetSet() {
 }
 
 async function dpAudit() {
-  try { const t = readDbTable('dpDb','dpTable'); await call('dp.audit_log',{table:t},'dpOut'); } catch (e) { setOut({error:String(e)},'dpOut'); }
+  try { const t = readDbTable('dpDb','dpTable'); await call('dp.audit.log',{table:t},'dpOut'); } catch (e) { setOut({error:String(e)},'dpOut'); }
 }
 
 async function oblGet() {
@@ -3931,7 +4168,9 @@ wire('btnEngineReset', engineResetDefaults);
 // Easy viewer
 wire('themeToggle', toggleDarkMode);
 wire('btnEasyReloadTree', async () => { await loadDbTree(); easyRefreshTargetsFromTree(); });
-wire('easyBtnNewDb', easyNewDbPrompt);
+wire('easyBtnNewDb', () => easyToggleNewDbForm(true));
+wire('easyBtnCreateDbInline', easyCreateDbInline);
+wire('easyBtnCancelDbInline', () => easyToggleNewDbForm(false));
 wire('easyBtnInsertFromBrowse', () => { easySetSubTab('insert'); easyRenderInsertForm(); });
 wire('easyBtnRefreshBrowse', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
 wire('easyPgPrev', easyBrowsePrev);
@@ -3974,6 +4213,8 @@ if ($('easySqlText')) $('easySqlText').addEventListener('keydown', e => { if (e.
 if ($('easyTreeFilter')) $('easyTreeFilter').addEventListener('input', () => easyRenderTree());
 if ($('easyPerPage')) $('easyPerPage').addEventListener('change', () => { STATE.easyBrowseOffset = 0; easyBrowseRows(); });
 if ($('easyQuickFilter')) $('easyQuickFilter').addEventListener('input', e => { STATE.easyBrowseFilter = e.target.value; easyRenderDataGrid(); });
+if ($('easyCreateDb')) $('easyCreateDb').addEventListener('input', easyUpdateCreatePreview);
+if ($('easyCreateTableName')) $('easyCreateTableName').addEventListener('input', easyUpdateCreatePreview);
 document.querySelectorAll('.easy-tab').forEach(btn => {
   btn.addEventListener('click', () => easySetSubTab(btn.dataset.etab));
 });
@@ -4034,6 +4275,7 @@ wire('btnClusterNodes', clusterReadNodes);
 wire('btnClusterTransport', clusterTransportCapabilities);
 wire('btnClusterCreateToken', clusterCreateToken);
 wire('btnClusterJoinNode', clusterJoinNode);
+wire('btnClusterLeaveNode', clusterLeaveNode);
 wire('btnClusterRemoveNode', clusterRemoveNode);
 wire('btnClusterPromote', clusterPromoteNode);
 wire('btnClusterShardCreate', clusterShardCreate);
@@ -4044,7 +4286,12 @@ wire('btnClusterShardRebalance', clusterShardRebalance);
 wire('btnSettingsGet', settingsGetKey);
 wire('btnSettingsSet', settingsSetKey);
 wire('btnSettingsClusterPreset', () => { if ($('settingsKey')) $('settingsKey').value = 'cluster.state.v1'; settingsGetKey(); });
+wire('btnSettingsUsePreset', settingsUsePreset);
 wire('btnSettingsListAll', settingsListAll);
+wire('btnSettingsCapabilities', settingsLoadCapabilities);
+wire('btnSettingsTransport', settingsLoadTransport);
+wire('btnSettingsFeatureFlags', settingsLoadFeatureFlags);
+wire('btnSettingsWorkloadFeatures', settingsLoadWorkloadFeatures);
 
 // Research settings
 wire('btnResearchSettingsLoad', researchSettingsLoad);
@@ -4055,6 +4302,7 @@ wire('btnUserCreate', userCreate);
 wire('btnUserList', userList);
 wire('btnUserDrop', userDrop);
 wire('btnUserGrant', userGrant);
+wire('btnUserRevoke', userRevoke);
 
 // Import/Export
 wire('btnExportData', exportData);
@@ -4143,6 +4391,17 @@ wire('btnMigrationCopyMd', copyMigrationMarkdown);
 wire('btnSecCreateToken', securityCreateToken);
 wire('btnSecRefreshTokens', securityRefreshTokens);
 wire('btnSecTopQueries', securityTopQueries);
+
+// Telemetry
+wire('btnTelemetryCompatSummary', () => call('telemetry.compat_summary', {}, 'telemetryOut'));
+wire('btnTelemetryFeatureFlags', () => call('telemetry.feature_flags', {}, 'telemetryOut'));
+wire('btnTelemetryMigrationHints', () => call('telemetry.migration_hints', { limit: 20 }, 'telemetryOut'));
+wire('btnTelemetryWorkloadFeatures', () => call('telemetry.workload_features', {}, 'telemetryOut'));
+wire('btnTelemetryPlanCacheStatus', () => call('plan_cache.status', {}, 'telemetryPlanOut'));
+wire('btnTelemetryPlanCacheClear', () => call('plan_cache.clear', {}, 'telemetryPlanOut'));
+wire('btnTelemetryTopQueries', () => call('stats.top_queries', { limit: 20 }, 'telemetryPlanOut'));
+wire('btnTelemetrySlowQueries', () => call('stats.slow_queries', { limit: 20 }, 'telemetryPlanOut'));
+wire('btnTelemetryCoalescing', () => call('stats.coalescing', {}, 'telemetryPlanOut'));
 
 // RPC
 wire('btnRpcSend', rpcSend);

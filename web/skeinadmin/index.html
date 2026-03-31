@@ -164,6 +164,9 @@
       .easy-sidebar{background:#f8f9fb;border-right:1px solid var(--line);padding:10px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:calc(100vh - 200px)}
       .easy-sb-top{display:flex;justify-content:space-between;align-items:center}
       .easy-sb-title{font-size:11px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;color:var(--muted)}
+      .easy-inline-form{display:none;gap:6px;padding:8px;border:1px dashed var(--line);border-radius:8px;background:#fff}
+      .easy-inline-form.active{display:grid}
+      .easy-inline-form .actions{margin-bottom:0}
       .easy-sb-filter{font-size:11px;padding:5px 8px;border-radius:6px;border:1px solid var(--line)}
       .easy-tree{display:flex;flex-direction:column;gap:2px;overflow-y:auto;flex:1;min-height:60px}
       .easy-tree-db{border-radius:6px;overflow:hidden}
@@ -322,6 +325,10 @@
       .search-cond-row select{min-width:100px}
       .search-highlight{background:rgba(43,108,176,.15);border-radius:2px;padding:0 2px}
       html.dark .search-highlight{background:rgba(91,155,213,.2)}
+      .settings-preset-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+      .settings-key-list{display:grid;gap:6px;max-height:240px;overflow:auto}
+      .settings-key-btn{text-align:left;background:#fff}
+      .feature-card textarea{min-height:84px}
     </style>
   </head>
   <body data-app="skeinadmin" data-mode="admin">
@@ -343,7 +350,9 @@
           <button class="nav-item" data-panel="settings">Settings</button>
           <button class="nav-item" data-panel="engine" data-scope="admin">Engine Config</button>
           <button class="nav-item" data-panel="users" data-scope="admin">Users &amp; Grants</button>
+          <button class="nav-item" data-panel="security" data-scope="admin">Security</button>
           <button class="nav-item" data-panel="import" data-scope="admin">Import / Export</button>
+          <button class="nav-item" data-panel="telemetry" data-scope="admin">Telemetry</button>
           <div class="nav-group-title">Research (R01-R20)</div>
           <button class="nav-item" data-panel="research" data-scope="admin">Agenda Dashboard</button>
           <button class="nav-item" data-panel="vectors" data-scope="admin">Vectors (R10)</button>
@@ -397,6 +406,7 @@
           <button class="tab-btn" data-panel="data">Browse</button>
           <button class="tab-btn" data-panel="cluster">Cluster</button>
           <button class="tab-btn" data-panel="settings">Settings</button>
+          <button class="tab-btn" data-panel="telemetry" data-scope="admin">Telemetry</button>
           <button class="tab-btn" data-panel="security" data-scope="admin">Security</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
@@ -551,6 +561,10 @@
                 <span class="easy-sb-title">Databases</span>
                 <button id="easyBtnNewDb" class="primary sm" title="Create Database">+ New</button>
               </div>
+              <div id="easyNewDbForm" class="easy-inline-form">
+                <div class="field" style="margin-bottom:0"><label>Database Name</label><input id="easyNewDbName" placeholder="demo" /></div>
+                <div class="actions"><button id="easyBtnCreateDbInline" class="primary sm">Create</button><button id="easyBtnCancelDbInline" class="ghost sm">Cancel</button></div>
+              </div>
               <input id="easyTreeFilter" placeholder="Filter databases/tables…" class="easy-sb-filter" />
               <div class="easy-tree" id="easyTree">Connect to load databases.</div>
               <button id="btnEasyReloadTree" class="ghost sm" style="margin-top:6px;width:100%">&#x21bb; Reload</button>
@@ -693,6 +707,7 @@
                   <button id="easyBtnDoCreateTable" class="primary">Create Table</button>
                   <button id="easyBtnDoCreateDb" class="sm">Create Database first</button>
                 </div>
+                <div class="field" style="margin-top:12px"><label>Preview</label><div class="hint">Live SQL preview. Easy Viewer flags duplicate columns and unquoted identifier issues here before you create the table.</div><pre id="easyCreatePreview">CREATE TABLE demo.my_table (...);</pre></div>
                 <pre id="easyCreateOut" class="hint" style="margin-top:8px">Define columns and click Create Table.</pre>
               </div>
               <!-- Export Tab -->
@@ -823,7 +838,7 @@
             <div class="row"><div class="field"><label>TTL (ms)</label><input id="clusterJoinTtl" type="number" value="600000" /></div><div class="field"><label>Role</label><select id="clusterJoinRole"><option value="replica">replica</option><option value="primary">primary</option></select></div></div>
             <div class="actions"><button id="btnClusterCreateToken" class="secondary sm">Create Token</button></div>
             <div class="row"><div class="field"><label>Token</label><input id="clusterJoinToken" /></div><div class="field"><label>Node ID</label><input id="clusterNodeId" /></div><div class="field"><label>Node URL</label><input id="clusterNodeUrl" placeholder="http://127.0.0.1:8081" /></div></div>
-            <div class="actions"><button id="btnClusterJoinNode" class="sm">Join</button><button id="btnClusterRemoveNode" class="sm">Remove</button><button id="btnClusterPromote" class="sm">Promote</button></div>
+            <div class="actions"><button id="btnClusterJoinNode" class="sm">Join</button><button id="btnClusterLeaveNode" class="ghost sm">Leave</button><button id="btnClusterRemoveNode" class="sm">Remove</button><button id="btnClusterPromote" class="sm">Promote</button></div>
             <div class="row"><div class="field"><label>Shard ID</label><input id="clusterShardId" /></div><div class="field"><label>DB</label><input id="clusterShardDb" /></div><div class="field"><label>Table</label><input id="clusterShardTable" /></div></div>
             <div class="row"><div class="field"><label>Primary</label><input id="clusterShardPrimary" /></div><div class="field"><label>Replicas</label><input id="clusterShardReplicas" placeholder='["a"]' /></div><div class="field"><label>Move to</label><input id="clusterMoveTarget" /></div></div>
             <div class="actions"><button id="btnClusterShardCreate" class="sm">Create Shard</button><button id="btnClusterShardMove" class="sm">Move</button><button id="btnClusterShardRebalance" class="sm">Rebalance</button></div>
@@ -835,10 +850,15 @@
           <div class="panel-grid">
             <div class="card wide"><h2>Settings</h2>
               <div class="row"><div class="field"><label>Key</label><input id="settingsKey" placeholder="cluster.state.v1" /></div><div class="field"><label>Value (JSON)</label><input id="settingsValue" placeholder='{"enabled":true}' /></div></div>
-              <div class="actions"><button id="btnSettingsGet" class="primary sm">Get</button><button id="btnSettingsSet" class="sm">Set</button><button id="btnSettingsClusterPreset" class="secondary sm">Cluster Keys</button><button id="btnSettingsListAll" class="sm">List All</button></div>
+              <div class="actions"><button id="btnSettingsGet" class="primary sm">Get</button><button id="btnSettingsSet" class="sm">Set</button><button id="btnSettingsClusterPreset" class="secondary sm">Cluster Preset</button><button id="btnSettingsListAll" class="sm">List All</button></div>
+              <div class="settings-preset-grid">
+                <div class="field"><label>Preset</label><select id="settingsPreset"><option value="cluster.state.v1">Cluster State</option><option value="research.config">Research Config</option><option value="engine.storage_mode">Engine Storage</option><option value="engine.cache.enabled">Query Cache</option><option value="engine.coalescing.enabled">Query Coalescing</option><option value="engine.autoparameterize.enabled">Autoparam</option><option value="engine.cdc.enabled">CDC</option><option value="engine.quic.enabled">QUIC</option></select></div>
+                <div class="actions" style="align-items:end"><button id="btnSettingsUsePreset" class="sm">Use Preset</button></div>
+              </div>
               <pre id="settingsOut">No request yet.</pre>
             </div>
-            <div class="card wide"><h2>Research Feature Config</h2><div class="hint">Toggle and configure all 20 research features.</div><div id="researchSettingsGrid" class="feature-grid"></div><div class="actions" style="margin-top:8px"><button id="btnResearchSettingsLoad" class="sm">Load Config</button><button id="btnResearchSettingsSave" class="primary sm">Save Config</button></div><pre id="researchSettingsOut">Load to configure.</pre></div>
+            <div class="card wide"><h2>Research Feature Config</h2><div class="hint">Toggle and JSON-configure all 20 research features from one place.</div><div id="researchSettingsGrid" class="feature-grid"></div><div class="actions" style="margin-top:8px"><button id="btnResearchSettingsLoad" class="sm">Load Config</button><button id="btnResearchSettingsSave" class="primary sm">Save Config</button></div><pre id="researchSettingsOut">Load to configure.</pre></div>
+            <div class="card wide"><h2>Capabilities &amp; Method Explorer</h2><div class="hint">Inspect the live runtime surface and jump into supported methods quickly.</div><div class="actions"><button id="btnSettingsCapabilities" class="sm">System Capabilities</button><button id="btnSettingsTransport" class="sm">Transport</button><button id="btnSettingsFeatureFlags" class="sm">Feature Flags</button><button id="btnSettingsWorkloadFeatures" class="sm">Workload Features</button></div><div class="settings-key-list" id="settingsKeyList"></div><pre id="settingsCapabilitiesOut">Load capabilities to inspect runtime support.</pre></div>
           </div>
         </section>
 
@@ -858,7 +878,7 @@
                   <label class="engine-toggle"><input type="checkbox" id="engDedup" checked /><span class="engine-toggle-label">Deduplication</span><span class="engine-toggle-hint">Intern repeated cell values to save disk space. Recommended for most workloads.</span></label>
                   <label class="engine-toggle"><input type="checkbox" id="engCompression" /><span class="engine-toggle-label">Compression</span><span class="engine-toggle-hint">LZ4 compression for value segments. Reduces disk usage at slight CPU cost.</span></label>
                   <label class="engine-toggle"><input type="checkbox" id="engEncryption" /><span class="engine-toggle-label">Encryption at Rest</span><span class="engine-toggle-hint">AEAD encryption for value store. Requires key management setup.</span></label>
-                  <div class="engine-field"><label>Storage Mode</label><select id="engStorageMode"><option value="row">Row (default)</option><option value="column">Column</option><option value="hybrid">Hybrid</option></select><span class="hint">Row = OLTP, Column = analytics, Hybrid = adaptive.</span></div>
+                  <div class="engine-field"><label>Storage Mode</label><select id="engStorageMode"><option value="json">JSON</option><option value="segment">Segment (.rseg default)</option><option value="hybrid">Hybrid</option></select><span class="hint">Segment is the default serve mode; hybrid dual-writes `.json` and `.rseg`.</span></div>
                 </div>
                 <!-- MVCC -->
                 <div class="engine-section">
@@ -907,10 +927,23 @@
           <div class="panel-grid"><div class="card wide"><h2>Users &amp; Grants</h2>
             <div class="callout">User management via settings. Create roles, grant DB-level access.</div>
             <div class="row"><div class="field"><label>Username</label><input id="userName" /></div><div class="field"><label>Password</label><input id="userPass" type="password" /></div><div class="field"><label>Role</label><select id="userRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div></div>
-            <div class="actions"><button id="btnUserCreate" class="primary sm">Create</button><button id="btnUserList" class="sm">List</button><button id="btnUserDrop" class="danger sm">Drop</button><button id="btnUserGrant" class="secondary sm">Grant</button></div>
+            <div class="actions"><button id="btnUserCreate" class="primary sm">Create</button><button id="btnUserList" class="sm">List</button><button id="btnUserDrop" class="danger sm">Drop</button><button id="btnUserGrant" class="secondary sm">Grant</button><button id="btnUserRevoke" class="ghost sm">Revoke</button></div>
             <div class="row"><div class="field"><label>Grant DB</label><input id="userGrantDb" /></div><div class="field"><label>Privileges</label><input id="userGrantPrivs" placeholder="SELECT,INSERT,UPDATE,DELETE" /></div></div>
             <pre id="usersOut">User management via settings.</pre>
           </div></div>
+        </section>
+
+        <!-- TELEMETRY --><section class="panel" data-panel="telemetry">
+          <div class="panel-grid">
+            <div class="card wide"><h2>Compatibility &amp; Feature Telemetry</h2>
+              <div class="actions"><button id="btnTelemetryCompatSummary" class="primary sm">Compat Summary</button><button id="btnTelemetryFeatureFlags" class="sm">Feature Flags</button><button id="btnTelemetryMigrationHints" class="sm">Migration Hints</button><button id="btnTelemetryWorkloadFeatures" class="sm">Workload Features</button></div>
+              <pre id="telemetryOut">Load telemetry to inspect compatibility usage.</pre>
+            </div>
+            <div class="card wide"><h2>Plan Cache &amp; Query Pressure</h2>
+              <div class="actions"><button id="btnTelemetryPlanCacheStatus" class="sm">Plan Cache Status</button><button id="btnTelemetryPlanCacheClear" class="ghost sm">Clear Plan Cache</button><button id="btnTelemetryTopQueries" class="sm">Top Queries</button><button id="btnTelemetrySlowQueries" class="sm">Slow Queries</button><button id="btnTelemetryCoalescing" class="sm">Coalescing</button></div>
+              <pre id="telemetryPlanOut">Load runtime query telemetry.</pre>
+            </div>
+          </div>
         </section>
 
         <!-- SECURITY --><section class="panel" data-panel="security">

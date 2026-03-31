@@ -417,10 +417,18 @@ async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn admin_main_js_exposes_live_index_advisor_methods() -> anyhow::Result<()> {
+async fn admin_embeds_live_console_surface() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("admin_index_advisor_js")?;
-    let body = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let html = client
+        .get(format!("{}/admin", server.base_url()))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let body = client
         .get(format!("{}/admin/src/main.js", server.base_url()))
         .send()
         .await?
@@ -428,11 +436,29 @@ async fn admin_main_js_exposes_live_index_advisor_methods() -> anyhow::Result<()
         .text()
         .await?;
 
+    assert!(html.contains("data-panel=\"telemetry\""));
+    assert!(html.contains("data-panel=\"security\""));
+    assert!(html.contains("easyNewDbForm"));
+    assert!(html.contains("easyCreatePreview"));
+    assert!(html.contains("btnUserRevoke"));
+    assert!(html.contains("btnClusterLeaveNode"));
     assert!(body.contains("advisor.index_synthesize"));
     assert!(body.contains("advisor.apply_index"));
+    assert!(body.contains("settings.list"));
+    assert!(body.contains("cluster.node.leave"));
+    assert!(body.contains("admin.user.revoke"));
+    assert!(body.contains("telemetry.compat_summary"));
+    assert!(body.contains("telemetry.workload_features"));
+    assert!(body.contains("vector.index.status"));
+    assert!(body.contains("dp.audit.log"));
+    assert!(body.contains("researchSettingsLoad"));
+    assert!(body.contains("renderSettingsCapabilities"));
+    assert!(body.contains("security:"));
     assert!(body.contains("advisorReport"));
     assert!(!body.contains("advisor.synthesize"));
     assert!(!body.contains("call('advisor.apply'"));
+    assert!(!body.contains("dp.audit_log"));
+    assert!(!body.contains("vector.index_status"));
 
     Ok(())
 }
