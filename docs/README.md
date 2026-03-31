@@ -20,6 +20,7 @@ The repo is intentionally written so you can read it in two ways:
    - `MYSQL_COMPAT.md` (MySQL protocol surface and current coverage)
    - `PG_COMPAT.md` (current PostgreSQL wire-protocol baseline and open gaps)
    - `SKEINADMIN.md` (embedded web console)
+   - `../SUPPORT.md` (project support / sponsorship options)
 
 3) **Web-native consistency & traffic reduction**
    - `ETAG_VALIDATORS.md` (ETags, If-None-Match)

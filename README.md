@@ -167,10 +167,10 @@ Recent documentation updates (2026-03-30):
 
 ## Support
 
-If SkeinDB helps you, you can support the project here:
+If SkeinDB is useful to you and you want to help keep it moving:
 
-- GitHub Sponsors: preferred for recurring or one-off support. The `pinkysworld` sponsor profile is being set up and the GitHub `Sponsor` button will appear once approval is complete.
-- PayPal: one-off support can currently be arranged via `mip@gmx.biz`.
+- GitHub Sponsors is the main option. Once GitHub finishes approving the `pinkysworld` sponsor profile, the repo will show a `Sponsor` button.
+- If PayPal is easier, you can use `mip@gmx.biz`.
 
 See [SUPPORT.md](/Users/michelpicker/Library/Mobile%20Documents/com~apple~CloudDocs/Projekte/DB/SUPPORT.md).
 
