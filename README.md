@@ -165,6 +165,17 @@ Recent documentation updates (2026-03-30):
 
 ---
 
+## Support
+
+If SkeinDB helps you, you can support the project here:
+
+- GitHub Sponsors: preferred for recurring or one-off support. The `pinkysworld` sponsor profile is being set up and the GitHub `Sponsor` button will appear once approval is complete.
+- PayPal: one-off support can currently be arranged via `mip@gmx.biz`.
+
+See [SUPPORT.md](/Users/michelpicker/Library/Mobile%20Documents/com~apple~CloudDocs/Projekte/DB/SUPPORT.md).
+
+---
+
 ## License
 
 SkeinDB is licensed under the Apache License 2.0. See `LICENSE`.
