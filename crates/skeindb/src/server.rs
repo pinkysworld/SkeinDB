@@ -6112,17 +6112,8 @@ async fn mysql_try_projection_subquery(
                         Some(v) if v.parse::<f64>().is_ok() => v.to_string(),
                         Some(v) => format!("'{}'", v.replace('\'', "''")),
                     };
-                    // Case-insensitive replacement of outer ref in subquery
-                    let sub_lower = subquery.to_ascii_lowercase();
-                    let oref_lower = oref.to_ascii_lowercase();
-                    if let Some(pos) = sub_lower.find(&oref_lower) {
-                        subquery = format!(
-                            "{}{}{}",
-                            &subquery[..pos],
-                            replacement,
-                            &subquery[pos + oref.len()..]
-                        );
-                    }
+                    subquery =
+                        mysql_replace_case_insensitive_outer_ref(&subquery, oref, &replacement);
                 }
                 let sub_result = mysql_exec_subquery_query_outcome(
                     state,
@@ -6297,6 +6288,75 @@ fn mysql_literal_text_from_lit(lit: &Lit) -> Option<String> {
         Lit::Uuid { v } => Some(v.clone()),
         Lit::Bytes { .. } | Lit::Json { .. } | Lit::Embedding { .. } => None,
     }
+}
+
+fn mysql_replace_case_insensitive_outer_ref(
+    sql: &str,
+    outer_ref: &str,
+    replacement: &str,
+) -> String {
+    let needle = outer_ref.trim();
+    if needle.is_empty() {
+        return sql.to_string();
+    }
+
+    let bytes = sql.as_bytes();
+    let lower = sql.to_ascii_lowercase().into_bytes();
+    let needle_lower = needle.to_ascii_lowercase().into_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut quote = 0u8;
+    let mut i = 0usize;
+    let mut last_emit = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if mysql_is_doubled_single_quote(bytes, i, quote) {
+                    i += 2;
+                    continue;
+                }
+                if quote != b'`' && mysql_is_backslash_escaped(bytes, i) {
+                    i += 1;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if i + needle_lower.len() <= bytes.len()
+            && &lower[i..i + needle_lower.len()] == needle_lower.as_slice()
+            && (i == 0 || !is_sql_ident_char(lower[i - 1]))
+            && (i + needle_lower.len() == bytes.len()
+                || !is_sql_ident_char(lower[i + needle_lower.len()]))
+        {
+            out.push_str(&sql[last_emit..i]);
+            out.push_str(replacement);
+            i += needle_lower.len();
+            last_emit = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if last_emit == 0 {
+        return sql.to_string();
+    }
+
+    out.push_str(&sql[last_emit..]);
+    out
 }
 
 async fn mysql_try_select_subquery_compat_outcome(
@@ -7455,7 +7515,10 @@ fn mysql_stmt_expr_type(
             }
             out
         }
-        Expr::Subquery { .. } | Expr::Exists { .. } => MySqlStmtColumnType::VarString,
+        Expr::Subquery { subquery } => {
+            mysql_stmt_query_single_projection_type(&subquery.query, table_descs)
+        }
+        Expr::Exists { .. } => MySqlStmtColumnType::LongLong,
     }
 }
 
@@ -7497,6 +7560,10 @@ fn mysql_stmt_expr_flags(expr: &Expr, table_descs: &[MySqlStmtPrepareTableDesc])
             }
             _ => 0,
         },
+        Expr::Subquery { subquery } => mysql_stmt_scalar_subquery_result_flags(
+            mysql_stmt_query_single_projection_flags(&subquery.query, table_descs),
+        ),
+        Expr::Exists { .. } => MYSQL_COL_FLAG_NOT_NULL | MYSQL_COL_FLAG_NUM,
         _ => 0,
     }
 }
@@ -7541,6 +7608,60 @@ fn mysql_stmt_resolve_column_flags(
         }
     }
     0
+}
+
+fn mysql_stmt_query_body_single_projection_type(
+    body: &QueryBody,
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> MySqlStmtColumnType {
+    match body {
+        QueryBody::Select { select } => {
+            if select.projection.len() != 1 {
+                return MySqlStmtColumnType::VarString;
+            }
+            mysql_stmt_expr_type(&select.projection[0].expr, table_descs)
+        }
+        QueryBody::Setop { setop } => mysql_stmt_merge_column_types(
+            mysql_stmt_query_body_single_projection_type(setop.left.as_ref(), table_descs),
+            mysql_stmt_query_body_single_projection_type(setop.right.as_ref(), table_descs),
+        ),
+    }
+}
+
+fn mysql_stmt_query_single_projection_type(
+    query: &Query,
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> MySqlStmtColumnType {
+    mysql_stmt_query_body_single_projection_type(query.body.as_ref(), table_descs)
+}
+
+fn mysql_stmt_query_body_single_projection_flags(
+    body: &QueryBody,
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> u16 {
+    match body {
+        QueryBody::Select { select } => {
+            if select.projection.len() != 1 {
+                return 0;
+            }
+            mysql_stmt_expr_flags(&select.projection[0].expr, table_descs)
+        }
+        QueryBody::Setop { setop } => {
+            mysql_stmt_query_body_single_projection_flags(setop.left.as_ref(), table_descs)
+                | mysql_stmt_query_body_single_projection_flags(setop.right.as_ref(), table_descs)
+        }
+    }
+}
+
+fn mysql_stmt_query_single_projection_flags(
+    query: &Query,
+    table_descs: &[MySqlStmtPrepareTableDesc],
+) -> u16 {
+    mysql_stmt_query_body_single_projection_flags(query.body.as_ref(), table_descs)
+}
+
+fn mysql_stmt_scalar_subquery_result_flags(flags: u16) -> u16 {
+    flags & (MYSQL_COL_FLAG_NUM | MYSQL_COL_FLAG_UNSIGNED | MYSQL_COL_FLAG_BINARY)
 }
 
 fn mysql_expand_select_projection_wildcards(
@@ -7674,6 +7795,120 @@ fn mysql_stmt_prepare_columns_from_select(
         .collect()
 }
 
+fn mysql_stmt_placeholder_sql_for_column(column: &MySqlStmtPrepareColumn) -> &'static str {
+    match column.column_type {
+        MySqlStmtColumnType::LongLong => "0",
+        MySqlStmtColumnType::Double => "SQRT(0)",
+        MySqlStmtColumnType::VarString => {
+            if (column.flags & MYSQL_COL_FLAG_BINARY) != 0 {
+                "X''"
+            } else {
+                "''"
+            }
+        }
+    }
+}
+
+async fn mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
+    state: &AppState,
+    expr_sql: &str,
+    default_db: Option<&str>,
+) -> Option<String> {
+    let mut rewritten = expr_sql.to_string();
+    loop {
+        let lower = rewritten.to_ascii_lowercase();
+        let Some(sel_pos) = lower.find("(select ") else {
+            return Some(rewritten);
+        };
+        let close_pos = find_matching_parenthesis(&rewritten, sel_pos)?;
+        let sub_sql = rewritten[sel_pos + 1..close_pos].trim().to_string();
+        let sub_columns = Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
+        let first = sub_columns.first()?;
+        let replacement = mysql_stmt_placeholder_sql_for_column(first);
+        rewritten = format!(
+            "{}{}{}",
+            &rewritten[..sel_pos],
+            replacement,
+            &rewritten[close_pos + 1..]
+        );
+    }
+}
+
+async fn mysql_stmt_prepare_columns_for_projection_subquery(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Option<Vec<MySqlStmtPrepareColumn>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") || !lower.contains("(select ") {
+        return None;
+    }
+
+    let rest = &trimmed[7..];
+    let (projection_sql, from_tail) = match find_keyword_top_level(rest, "from") {
+        Some(from_pos) => (rest[..from_pos].trim(), Some(rest[from_pos..].trim())),
+        None => (rest.trim(), None),
+    };
+    let projection_items = split_csv_top_level(projection_sql);
+    if projection_items.is_empty() {
+        return None;
+    }
+    if !projection_items.iter().any(|item| {
+        let (expr_raw, _) = mysql_parse_projection_expr_alias(item);
+        expr_raw.to_ascii_lowercase().contains("(select ")
+    }) {
+        return None;
+    }
+
+    let mut columns = Vec::with_capacity(projection_items.len());
+    let mut saw_subquery = false;
+    for (idx, item) in projection_items.iter().enumerate() {
+        let (expr_raw, alias) = mysql_parse_projection_expr_alias(item);
+        if let Some(sub_sql) = mysql_parse_scalar_subquery_select(&expr_raw) {
+            saw_subquery = true;
+            let sub_columns =
+                Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
+            let first = sub_columns.first()?;
+            columns.push(MySqlStmtPrepareColumn {
+                name: alias.unwrap_or_else(|| format!("expr{}", idx + 1)),
+                column_type: first.column_type,
+                flags: mysql_stmt_scalar_subquery_result_flags(first.flags),
+            });
+            continue;
+        }
+
+        let projection_sql = if expr_raw.to_ascii_lowercase().contains("(select ") {
+            saw_subquery = true;
+            let rewritten_expr = mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
+                state, &expr_raw, default_db,
+            )
+            .await?;
+            if let Some(alias) = alias.as_ref() {
+                format!("{rewritten_expr} AS {alias}")
+            } else {
+                rewritten_expr
+            }
+        } else {
+            item.trim().to_string()
+        };
+
+        let single_sql = if let Some(from_tail) = from_tail {
+            format!("SELECT {projection_sql} {from_tail}")
+        } else {
+            format!("SELECT {projection_sql}")
+        };
+        let inferred = Box::pin(mysql_stmt_prepare_columns(state, &single_sql, default_db)).await;
+        let mut first = inferred.into_iter().next()?;
+        if let Some(alias) = alias {
+            first.name = alias;
+        }
+        columns.push(first);
+    }
+
+    saw_subquery.then_some(columns)
+}
+
 async fn mysql_stmt_prepare_columns_for_translated_select(
     state: &AppState,
     sql: &str,
@@ -7774,6 +8009,12 @@ async fn mysql_stmt_prepare_columns(
                 flags: MYSQL_COL_FLAG_NOT_NULL | MYSQL_COL_FLAG_NUM,
             },
         ];
+    }
+
+    if let Some(columns) =
+        mysql_stmt_prepare_columns_for_projection_subquery(state, sql, default_db).await
+    {
+        return columns;
     }
 
     mysql_stmt_prepare_columns_for_translated_select(state, sql, default_db)
@@ -24122,6 +24363,167 @@ mod tests {
         assert_eq!(
             scalar_compare_rows,
             vec![vec![Some("2".to_string())], vec![Some("4".to_string())],]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mysql_stmt_prepare_columns_support_projection_subquery_selects() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("mysql_stmt_prepare_projection_subquery_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "nodes",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "payroll",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "salary".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let correlated_projection_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT outer_q.id, (SELECT COUNT(*) FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM app.nodes AS outer_q ORDER BY outer_q.id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            correlated_projection_columns,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                    flags: MYSQL_COL_FLAG_NOT_NULL
+                        | MYSQL_COL_FLAG_PRIMARY_KEY
+                        | MYSQL_COL_FLAG_UNSIGNED
+                        | MYSQL_COL_FLAG_NUM,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "related".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                    flags: MYSQL_COL_FLAG_NUM,
+                },
+            ]
+        );
+
+        let embedded_projection_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT salary - (SELECT AVG(salary) FROM app.payroll) AS diff_from_avg FROM app.payroll ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            embedded_projection_columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "diff_from_avg".to_string(),
+                column_type: MySqlStmtColumnType::Double,
+                flags: MYSQL_COL_FLAG_NUM,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mysql_projection_subquery_rewrites_repeated_outer_refs() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_projection_subquery_repeated_outer_refs");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "nodes",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "nodes".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("parent_id", Lit::Null)]),
+                row(&[("id", Lit::U64 { v: 2 }), ("parent_id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 3 }), ("parent_id", Lit::U64 { v: 2 })]),
+                row(&[("id", Lit::U64 { v: 4 }), ("parent_id", Lit::U64 { v: 1 })]),
+            ],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+        let mut session = MySqlSessionState::new(Some("app".to_string()), 7);
+
+        let outcome = mysql_execute_sql(
+            &state,
+            "SELECT outer_q.id, (SELECT COUNT(*) FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM app.nodes AS outer_q ORDER BY outer_q.id ASC",
+            &mut session,
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        let MySqlQueryOutcome::ResultSet { columns, rows } = outcome else {
+            panic!("expected result set");
+        };
+        assert_eq!(columns, vec!["id".to_string(), "related".to_string()]);
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some("1".to_string()), Some("3".to_string())],
+                vec![Some("2".to_string()), Some("2".to_string())],
+                vec![Some("3".to_string()), Some("1".to_string())],
+                vec![Some("4".to_string()), Some("1".to_string())],
+            ]
         );
 
         std::fs::remove_dir_all(&dir).ok();

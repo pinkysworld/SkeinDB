@@ -2118,6 +2118,167 @@ async fn mysql_sql_calc_found_rows_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn mysql_correlated_projection_subquery_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_mysql("mysql_correlated_projection_subquery_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS nodes").await?;
+    let (_seq, ok_drop) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE nodes (id BIGINT NOT NULL, parent_id BIGINT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_table) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_table)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO nodes (id, parent_id) VALUES (1, NULL), (2, 1), (3, 2), (4, 1)",
+    )
+    .await?;
+    let (_seq, ok_insert) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert)?.0, 4);
+
+    send_com_query(
+        &mut stream,
+        "SELECT outer_q.id, (SELECT COUNT(*) FROM nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM nodes AS outer_q ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let rows = read_mysql_text_result_rows(&mut stream).await?;
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("1".to_string()), Some("3".to_string())],
+            vec![Some("2".to_string()), Some("2".to_string())],
+            vec![Some("3".to_string()), Some("1".to_string())],
+            vec![Some("4".to_string()), Some("1".to_string())],
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn mysql_com_stmt_prepare_projection_subquery_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server =
+        HttpHarness::start_with_mysql("mysql_com_stmt_prepare_projection_subquery_roundtrip")?;
+    wait_for_tcp(server.mysql_port())?;
+    let mut stream = mysql_connect_and_auth(server.mysql_port()).await?;
+
+    send_com_query(&mut stream, "CREATE DATABASE IF NOT EXISTS skein_test").await?;
+    let (_seq, ok_create_db) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_db)?.0, 0);
+
+    send_com_query(&mut stream, "USE skein_test").await?;
+    let (_seq, ok_use) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_use)?.0, 0);
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS nodes").await?;
+    let (_seq, ok_drop_nodes) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_nodes)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE nodes (id BIGINT NOT NULL, parent_id BIGINT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_nodes) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_nodes)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO nodes (id, parent_id) VALUES (1, NULL), (2, 1), (3, 2), (4, 1)",
+    )
+    .await?;
+    let (_seq, ok_insert_nodes) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_nodes)?.0, 4);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT outer_q.id, (SELECT COUNT(*) FROM nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM nodes AS outer_q ORDER BY outer_q.id ASC",
+    )
+    .await?;
+    let correlated_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(correlated_stmt.param_count, 0);
+    assert_eq!(
+        correlated_stmt.column_defs,
+        vec![("id".to_string(), 0x08), ("related".to_string(), 0x08)]
+    );
+
+    send_com_stmt_execute(&mut stream, correlated_stmt.statement_id, &[]).await?;
+    let correlated_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        correlated_rows,
+        vec![
+            vec![Some("1".to_string()), Some("3".to_string())],
+            vec![Some("2".to_string()), Some("2".to_string())],
+            vec![Some("3".to_string()), Some("1".to_string())],
+            vec![Some("4".to_string()), Some("1".to_string())],
+        ]
+    );
+    send_com_stmt_close(&mut stream, correlated_stmt.statement_id).await?;
+
+    send_com_query(&mut stream, "DROP TABLE IF EXISTS payroll").await?;
+    let (_seq, ok_drop_payroll) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_drop_payroll)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "CREATE TABLE payroll (id BIGINT NOT NULL, salary DOUBLE NOT NULL, PRIMARY KEY (id))",
+    )
+    .await?;
+    let (_seq, ok_create_payroll) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_create_payroll)?.0, 0);
+
+    send_com_query(
+        &mut stream,
+        "INSERT INTO payroll (id, salary) VALUES (1, 10.0), (2, 11.0)",
+    )
+    .await?;
+    let (_seq, ok_insert_payroll) = read_mysql_packet(&mut stream).await?;
+    assert_eq!(decode_mysql_ok_packet(&ok_insert_payroll)?.0, 2);
+
+    send_com_stmt_prepare(
+        &mut stream,
+        "SELECT salary - (SELECT AVG(salary) FROM payroll) AS diff_from_avg FROM payroll ORDER BY id ASC",
+    )
+    .await?;
+    let embedded_stmt = read_mysql_prepare_ok(&mut stream).await?;
+    assert_eq!(embedded_stmt.param_count, 0);
+    assert_eq!(
+        embedded_stmt.column_defs,
+        vec![("diff_from_avg".to_string(), 0x05)]
+    );
+
+    send_com_stmt_execute(&mut stream, embedded_stmt.statement_id, &[]).await?;
+    let embedded_rows = read_mysql_binary_result_rows(&mut stream).await?;
+    assert_eq!(
+        embedded_rows,
+        vec![
+            vec![Some("-0.5".to_string())],
+            vec![Some("0.5".to_string())],
+        ]
+    );
+    send_com_stmt_close(&mut stream, embedded_stmt.statement_id).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn mysql_compat_corpus_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start_with_mysql("mysql_compat_corpus_roundtrip")?;
