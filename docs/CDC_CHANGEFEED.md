@@ -8,6 +8,7 @@ Current runtime baseline:
 - `cdc.poll` long-polls row-level change events from the current in-memory change log.
 - `cdc.ack` advances an in-memory consumer cursor per subscription.
 - `cdc.close` removes the subscription handle.
+- SkeinAdmin now includes a dedicated CDC page for `cdc.subscribe_table` / `cdc.poll` / `cdc.ack` / `cdc.close`, with session-local lag visualization derived from `next_offset - acked_offset`.
 - `cdc.subscribe_query`, SSE/WebSocket delivery, WAL-backed retention, and resnapshot handling are still open backlog items.
 
 SkeinDB's MySQL compatibility mode is valuable for adoption, but modern web and data pipelines often need a "push" interface for changes.

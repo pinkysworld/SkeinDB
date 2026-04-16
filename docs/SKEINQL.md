@@ -1859,10 +1859,13 @@ UDF methods are defined in `docs/WASM_UDFS.md`. Implementations MAY expose:
 
 ### 10.19 maintenance.*
 
-Maintenance methods are defined in `docs/PROJECT_BACKLOG.md` and may include:
-- `maintenance.compaction`
-- `maintenance.gc`
-- `maintenance.snapshot`
+Maintenance methods are defined in `docs/PROJECT_BACKLOG.md`. Current runtime support includes:
+- `maintenance.audit_status`
+- `maintenance.audit_verify`
+- `maintenance.compaction.status`: return live compaction pressure plus scheduler policy/budget/admission state.
+- `maintenance.compaction.set_policy`: persist `compaction.*` settings including `policy`, `enabled`, `paused`, `max_l0_files`, `max_l0_bytes`, `budget`, and `peak_windows`.
+- `maintenance.compaction.pause`
+- `maintenance.compaction.resume`
 
 ### 10.20 telemetry.* / advisor.* / admin.* / cluster.*
 

@@ -54,7 +54,7 @@ Phase 0 verification checklist:
 - [x] T041: Console UI scaffold
 - [x] T042: Schema browser + SQL editor
 - [x] T043: Data browse/edit + import/export (CSV + JSON export/import)
-- [x] T044: Users/privileges + status dashboard. Latest: `admin.user.create` now requires and stores real passwords, DB users persist across restart, MySQL/PG wire auth accepts managed users, and per-database revoke now supports partial privilege removal instead of deleting the whole grant entry.
+- [x] T044: Users/privileges + status dashboard
 
 ## Phase 5 - SkeinQL native API
 - [x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)
@@ -83,7 +83,7 @@ Phase 0 verification checklist:
 ## Phase 9 - Tamper-evident WAL audit
 - [x] T090: WALHeader v2 with hash chaining (docs/AUDIT_WAL.md)
 - [x] T091: checkpoint anchors + audit status
-- [ ] T092: audit verify CLI/API + console page
+- [x] T092: audit verify CLI/API + console page. Latest: SkeinAdmin's Forensics panel now exposes `maintenance.audit_status` and `maintenance.audit_verify` alongside the prototype `forensic.query` / `forensic.verify` / `forensic.export` tools.
 
 ## Phase 10 - Hybrid row/column snapshots
 - [ ] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md)
@@ -99,7 +99,7 @@ Phase 0 verification checklist:
 ## Phase 12 - Standalone management console (SkeinAdmin)
 - [x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles
 - [x] T121: SkeinAdmin pages: schema/data/sql workspace
-- [x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation; API tokens are now persisted server-side, hashed at rest, shown once on creation, enforced on the HTTP RPC surface, and reflected correctly in the live token/query stats UI.
+- [x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation, with create/list/revoke token flows using modal confirmations instead of browser dialogs.
 - [x] T123: SkeinAdmin cluster page (cluster.*) + actions. Latest: join/leave/remove/promote controls are all surfaced in the live cluster panel.
 - [x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh
 - [x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: inline New DB flow, live create-table SQL preview, duplicate-column / identifier validation before create, required-field validation before insert, column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/>/</BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)
@@ -158,10 +158,10 @@ Phase 0 verification checklist:
 - [ ] T193: settings.encryption.* SkeinQL endpoints + SkeinAdmin UI + audit notes
 
 ## Phase 21 - Workload-guided compaction scheduler
-- [ ] T200: Telemetry signals for compaction (L0 pressure, stalls, latencies) (docs/COMPACTION_SCHEDULER.md)
-- [ ] T201: Budget-based compaction scheduler + peak windows + bounds enforcement
-- [ ] T202: maintenance.compaction.* endpoints (status/set_policy/pause/resume)
-- [ ] T203: Evaluation harness scripts + dashboards for stall rate and p99 latency
+- [x] T200: Telemetry signals for compaction (L0 pressure, stalls, latencies) (docs/COMPACTION_SCHEDULER.md). Latest: `stats.snapshot` now scans live `.rseg` segment files for L0 pressure, records bounded soft/hard pressure events, and exposes recent point/range/write rates plus read/write latency percentiles for SkeinAdmin and future scheduler inputs.
+- [x] T201: Budget-based compaction scheduler + peak windows + bounds enforcement. Latest: persisted `compaction.*` settings now drive a live heuristic scheduler state in `stats.snapshot.compaction.scheduler`, including configured/effective IO+CPU budgets, peak-window scaling, task priority scoring, and hard-pressure safe-mode write throttling for write-classified SkeinQL/HTTP requests.
+- [x] T202: maintenance.compaction.* endpoints (status/set_policy/pause/resume). Latest: `maintenance.compaction.status`, `maintenance.compaction.set_policy`, `maintenance.compaction.pause`, and `maintenance.compaction.resume` now expose and persist runtime scheduler policy through the main RPC surface.
+- [x] T203: Evaluation harness scripts + dashboards for stall rate and p99 latency. Latest: `eval/compaction_scheduler_dashboard.py` now emits a deterministic summary JSON, timeline CSV, and self-contained HTML dashboard comparing fixed leveling, fixed tiering, and workload-guided policies on stall rate and p99 latency.
 
 ## Phase 22 - SQL autoparameterization and plan cache
 - [x] T210: SQL normalization (fingerprints) + parameter extraction (docs/AUTOPARAMETERIZATION.md)
@@ -176,7 +176,7 @@ Phase 0 verification checklist:
 - [ ] T222: Dependency-driven query changefeeds (cdc.subscribe_query) using ETag dependency sets
 - [ ] T223: SSE/WebSocket streaming endpoint + backpressure + reconnect semantics
 - [ ] T224: Retention + resnapshot protocol when WAL horizon is exceeded
-- [ ] T225: SkeinAdmin CDC page + subscription management + lag visualization
+- [x] T225: SkeinAdmin CDC page + subscription management + lag visualization. Latest: SkeinAdmin now exposes a dedicated CDC panel for table subscribe/poll/ack/close flows with session-local lag bars and recent-event inspection.
 
 ## Phase 24 - Website and documentation site polish
 - [x] T230: Homepage: add Docs nav CTA, mobile hamburger menu, maturity badges on feature cards, fix broken links (architecture image, paper), consistent API endpoints
@@ -191,7 +191,7 @@ Phase 0 verification checklist:
 - [x] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/cleartext auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.
 - [ ] T401: SCRAM-SHA-256 authentication (`pg_auth.rs`) — RFC 5802/7677 exchange + trust mode
 - [ ] T402: PG session state (`pg_session.rs`) — search_path, DateStyle, TimeZone, tx state (I/T/E), client_encoding, standard_conforming_strings
-- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables). Latest: cleartext auth now accepts managed SkeinDB DB users in addition to the legacy `SKEINDB_TOKEN` override.
+- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables)
 - [ ] T404: PG SQL dialect parser (`pg_parse.rs`) — double-quoted identifiers, $$dollar quoting$$, :: type casts, RETURNING, ILIKE, IS DISTINCT FROM, FETCH FIRST n ROWS ONLY, ARRAY[...], boolean literals
 - [ ] T405: PG DML extensions — INSERT/UPDATE/DELETE...RETURNING, ON CONFLICT DO NOTHING/UPDATE, basic COPY FROM STDIN / TO STDOUT
 - [ ] T406: PG DDL — SERIAL/BIGSERIAL → auto_increment, CREATE SCHEMA → database, CREATE INDEX CONCURRENTLY (accept/ignore), COMMENT ON
@@ -201,7 +201,7 @@ Phase 0 verification checklist:
 - [x] T410: PG startup query handling — `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version`, `SHOW server_version_num`, `SHOW standard_conforming_strings`, `SHOW max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)` for the common startup/bootstrap probes used by psql/Django/Rails/SQLAlchemy-style clients
 - [ ] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders
 - [ ] T412: PG function mapping (`pg_functions.rs`) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, ->>/#>> operators, || concat, ~/~* regex, ARRAY operations, unnest
-- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO. Latest: the simple-query path now enters `ReadyForQuery(E)` after statement errors inside explicit transactions and rejects subsequent commands until `ROLLBACK`/failed-`COMMIT` cleanup, but SAVEPOINT semantics and broader transaction/session parity remain open.
+- [ ] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO
 - [ ] T414: PG SQLSTATE error codes — 42P01 (undefined table), 42703 (undefined column), 23505 (unique violation), 42601 (syntax error), etc.
 - [ ] T415: PG compatibility test corpus (`tests/compat/pg_corpus.sql`) — mirror MySQL corpus structure for PG dialect
 - [ ] T416: PG unit tests — wire round-trips, SCRAM vectors, SQL parse, type encode/decode, catalog queries

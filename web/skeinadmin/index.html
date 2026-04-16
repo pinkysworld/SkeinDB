@@ -147,6 +147,8 @@
       .dedup-bar{height:20px;border-radius:10px;overflow:hidden;display:flex;background:var(--line);border:1px solid var(--line)}
       .dedup-bar-unique{background:var(--accent);height:100%;transition:width .4s ease}
       .dedup-bar-saved{background:var(--accent-2);height:100%;transition:width .4s ease}
+      .lag-bar{height:10px;border-radius:999px;overflow:hidden;background:var(--panel-2);border:1px solid var(--line)}
+      .lag-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-3));transition:width .25s ease}
       /* Engine config panel */
       .engine-grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
       .engine-section{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fff}
@@ -353,6 +355,7 @@
           <button class="nav-item" data-panel="security" data-scope="admin">Security</button>
           <button class="nav-item" data-panel="import" data-scope="admin">Import / Export</button>
           <button class="nav-item" data-panel="telemetry" data-scope="admin">Telemetry</button>
+          <button class="nav-item" data-panel="cdc" data-scope="admin">CDC</button>
           <div class="nav-group-title">Research (R01-R20)</div>
           <button class="nav-item" data-panel="research" data-scope="admin">Agenda Dashboard</button>
           <button class="nav-item" data-panel="vectors" data-scope="admin">Vectors (R10)</button>
@@ -407,6 +410,7 @@
           <button class="tab-btn" data-panel="cluster">Cluster</button>
           <button class="tab-btn" data-panel="settings">Settings</button>
           <button class="tab-btn" data-panel="telemetry" data-scope="admin">Telemetry</button>
+          <button class="tab-btn" data-panel="cdc" data-scope="admin">CDC</button>
           <button class="tab-btn" data-panel="security" data-scope="admin">Security</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
@@ -925,7 +929,7 @@
 
         <!-- USERS --><section class="panel" data-panel="users">
           <div class="panel-grid"><div class="card wide"><h2>Users &amp; Grants</h2>
-            <div class="callout">Create real database login users with passwords and manage DB-level grants. Leave the revoke privileges field empty to remove all grants for the selected database.</div>
+            <div class="callout">User management via settings. Create roles, grant DB-level access.</div>
             <div class="row"><div class="field"><label>Username</label><input id="userName" /></div><div class="field"><label>Password</label><input id="userPass" type="password" /></div><div class="field"><label>Role</label><select id="userRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div></div>
             <div class="actions"><button id="btnUserCreate" class="primary sm">Create</button><button id="btnUserList" class="sm">List</button><button id="btnUserDrop" class="danger sm">Drop</button><button id="btnUserGrant" class="secondary sm">Grant</button><button id="btnUserRevoke" class="ghost sm">Revoke</button></div>
             <div class="row"><div class="field"><label>Grant DB</label><input id="userGrantDb" /></div><div class="field"><label>Privileges</label><input id="userGrantPrivs" placeholder="SELECT,INSERT,UPDATE,DELETE" /></div></div>
@@ -949,7 +953,7 @@
         <!-- SECURITY --><section class="panel" data-panel="security">
           <div class="panel-grid">
             <div class="card wide"><h2>API Tokens</h2>
-              <div class="callout">Create and manage persisted API bearer tokens for programmatic access. Secrets are shown once at creation time, and active tokens protect the HTTP RPC surface until you revoke them.</div>
+              <div class="callout">Create and manage API tokens for programmatic access. Tokens can have roles (admin, read_write, read_only) and optional expiration.</div>
               <div class="row">
                 <div class="field"><label>Label</label><input id="secTokenLabel" placeholder="My integration" /></div>
                 <div class="field"><label>Role</label><select id="secTokenRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div>
@@ -975,6 +979,26 @@
             <div class="actions"><button id="btnImportData" class="primary sm">Import</button></div>
             <pre id="importOut">Ready.</pre>
           </div></div>
+        </section>
+
+        <!-- CDC --><section class="panel" data-panel="cdc">
+          <div class="panel-grid">
+            <div class="card wide"><h2>CDC Subscriptions</h2>
+              <div class="callout">Create table subscriptions with <code>cdc.subscribe_table</code>, then poll, ACK, and close the current browser session's handles. Durable cursor listing and query subscriptions remain future work, so the lag view below reflects subscriptions created from this page.</div>
+              <div class="row"><div class="field"><label>Database</label><input id="cdcDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="cdcTable" placeholder="events" /></div><div class="field"><label>Poll Limit</label><input id="cdcLimit" type="number" value="200" min="1" /></div></div>
+              <div class="actions"><button id="btnCdcSubscribe" class="primary sm">Subscribe Table</button><button id="btnCdcPoll" class="sm">Poll</button><button id="btnCdcAck" class="secondary sm">Ack</button><button id="btnCdcClose" class="ghost sm">Close</button></div>
+              <div class="row"><div class="field"><label>Subscription</label><select id="cdcSubId"><option value="">No subscriptions</option></select></div><div class="field"><label>From Offset</label><input id="cdcFromOffset" type="number" value="0" min="0" /></div><div class="field"><label>Ack Offset</label><input id="cdcAckOffset" type="number" value="0" min="0" /></div></div>
+              <pre id="cdcOut">Ready.</pre>
+            </div>
+            <div class="card"><h2>Lag Overview</h2>
+              <div id="cdcLagSummary" class="hint">No CDC subscriptions in this browser session yet.</div>
+              <div class="table-wrap" style="margin-top:8px;max-height:280px"><div id="cdcSubGrid" style="min-height:120px"></div></div>
+            </div>
+            <div class="card wide"><h2>Recent Events</h2>
+              <div class="hint">Latest poll result for the selected subscription.</div>
+              <div class="table-wrap" style="max-height:320px"><table id="cdcEventGrid"></table></div>
+            </div>
+          </div>
         </section>
 
         <!-- RESEARCH --><section class="panel" data-panel="research">
@@ -1009,12 +1033,21 @@
         </section>
 
         <!-- FORENSICS --><section class="panel" data-panel="forensics">
-          <div class="panel-grid"><div class="card wide"><h2>Forensic Audit (R06)</h2>
-            <div class="row"><div class="field"><label>From ID</label><input id="forFromId" type="number" value="0" /></div><div class="field"><label>Limit</label><input id="forLimit" type="number" value="100" /></div></div>
-            <div class="field"><label>Filter</label><textarea id="forFilter" rows="2" placeholder='{"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"demo"}}}'></textarea></div>
-            <div class="actions"><button id="btnForVerify" class="primary sm">Verify</button><button id="btnForQuery" class="sm">Query</button><button id="btnForExport" class="secondary sm">Export</button></div>
-            <pre id="forOut">Ready.</pre>
-          </div></div>
+          <div class="panel-grid">
+            <div class="card wide"><h2>Audit Chain Health</h2>
+              <div class="callout">Inspect the current forensic chain via <code>maintenance.audit_status</code> and run full integrity verification via <code>maintenance.audit_verify</code>. Successful verification persists <code>last_verified_ms</code> so the next reopen shows the latest verified timestamp.</div>
+              <div class="actions"><button id="btnForAuditStatus" class="sm">Audit Status</button><button id="btnForAuditVerify" class="primary sm">Verify Chain</button></div>
+              <div id="forAuditSummary" class="hint" style="margin-top:8px">Load audit status to inspect chain length, anchors, and the latest verified timestamp.</div>
+              <pre id="forAuditOut">Ready.</pre>
+            </div>
+            <div class="card wide"><h2>Forensic Query &amp; Export</h2>
+              <div class="callout">Explore the prototype forensic chain directly with filtered queries, slice verification, and export tooling. These controls complement the maintenance audit status/verify path above.</div>
+              <div class="row"><div class="field"><label>From ID</label><input id="forFromId" type="number" value="0" /></div><div class="field"><label>Limit</label><input id="forLimit" type="number" value="100" /></div></div>
+              <div class="field"><label>Filter</label><textarea id="forFilter" rows="2" placeholder='{"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"demo"}}}'></textarea></div>
+              <div class="actions"><button id="btnForVerify" class="primary sm">Proof Verify</button><button id="btnForQuery" class="sm">Query</button><button id="btnForExport" class="secondary sm">Export</button></div>
+              <pre id="forOut">Ready.</pre>
+            </div>
+          </div>
         </section>
 
         <!-- VIEWS --><section class="panel" data-panel="views">

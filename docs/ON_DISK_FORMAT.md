@@ -24,7 +24,7 @@ data/
   dp_budgets.json             (prototype DP budgets, format v1)
   dp_audit.json               (prototype DP audit log, format v1)
   oblivious_policies.json     (prototype oblivious policy store, format v1)
-  forensic_chain.json         (prototype forensic hash chain, format v1)
+  forensic_chain.json         (prototype forensic hash chain, format v3)
   merge_policies.json         (prototype merge policies, format v1)
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
   views.json                  (prototype materialized views, format v1)
@@ -252,7 +252,49 @@ Compatibility notes:
 - Managed DB users persist digests (`password_sha1` for MySQL native-password verification and `password_sha256` for cleartext-password verification), never raw passwords.
 - If the file is missing or has an unknown `format_version`, the server starts with no managed API tokens or DB users.
 
-### 11.2 merge_wasm_registry.json
+### 11.2 forensic_chain.json
+
+Prototype forensic chain persistence used by `maintenance.audit_status`,
+`maintenance.audit_verify`, and `skeindb audit-verify`.
+
+Format:
+
+```json
+{
+  "format_version": 3,
+  "next_id": 4,
+  "records": [
+    {
+      "id": 1,
+      "ts_ms": 1730000000000,
+      "db": "app",
+      "table": "logs",
+      "op": "insert",
+      "pk": [{"t":"u64","v":1}],
+      "change_seq": 1,
+      "prev_hash": "genesis",
+      "hash": "8b9d..."
+    }
+  ],
+  "checkpoint_anchors": [
+    {
+      "checkpoint_id": "ckpt_1730000001000",
+      "ts_ms": 1730000001000,
+      "chain_len": 1,
+      "chain_head_hash": "8b9d...",
+      "change_seq": 1
+    }
+  ],
+  "last_verified_ms": 1730000002000
+}
+```
+
+Compatibility notes:
+- Format v3 persists `last_verified_ms` so successful verification survives reopen.
+- Older v1/v2 files load with `last_verified_ms = 0`.
+- The prototype chain remains a stand-in for the future WAL-backed verifier.
+
+### 11.3 merge_wasm_registry.json
 
 Format:
 
@@ -283,7 +325,7 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.3 tables/<db>/<table>.json (format v2)
+### 11.4 tables/<db>/<table>.json (format v2)
 
 Prototype row persistence for `tables/<db>/<table>.json` now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.

@@ -38,7 +38,9 @@ const STATE = {
   qbConditions: [],
   advisorSuggestions: [],
   advisorHistory: [],
-  advisorSelection: null
+  advisorSelection: null,
+  cdcSubscriptions: [],
+  cdcSelectedSubId: ''
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +55,7 @@ const PANEL_META = {
   cluster:    { title: 'Cluster Manager',      subtitle: 'Plan topology, inspect transport, and manage layouts.' },
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
   telemetry:  { title: 'Telemetry Center',     subtitle: 'Inspect compatibility, feature usage, plan cache, and query pressure.' },
+  cdc:        { title: 'CDC Manager',          subtitle: 'Subscribe to table changefeeds, poll events, ACK offsets, and inspect lag.' },
   security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
@@ -60,7 +63,7 @@ const PANEL_META = {
   research:   { title: 'Research Agenda',      subtitle: 'Dashboard for all 20 research tracks R01–R20.' },
   vectors:    { title: 'Vector Search (R10)',  subtitle: 'kNN search, vector insert, index status.' },
   privacy:    { title: 'Privacy & DP (R04-R05)', subtitle: 'Differential privacy aggregates and oblivious execution.' },
-  forensics:  { title: 'Forensic Audit (R06)', subtitle: 'Hash-chain verification and forensic queries.' },
+  forensics:  { title: 'Forensic Audit (R06)', subtitle: 'Audit chain health, verification, and forensic queries.' },
   views:      { title: 'Incremental Views (R08)', subtitle: 'Create, refresh, and inspect materialized views.' },
   merge:      { title: 'Merge & CRDT (R07)',   subtitle: 'Client-side merge functions and Wasm merge modules.' },
   wasm:       { title: 'Wasm Operators (R19)', subtitle: 'Compile and run Wasm query operators.' },
@@ -79,7 +82,7 @@ const RESEARCH_TRACKS = [
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['settings.get'], status: 'hardened' },
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
-  { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
+  { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], status: 'hardened' },
@@ -107,12 +110,12 @@ const FEATURE_CENTER = [
   { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
   { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
-  { title: 'CDC', desc: 'Change data capture + polling.', panel: 'rpc' },
+  { title: 'CDC', desc: 'Table subscriptions, polling, ACKs, and lag view.', panel: 'cdc' },
   { title: 'Security', desc: 'API tokens, grants, and sensitive controls.', panel: 'security' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
   { title: 'Differential Privacy', desc: 'DP aggregates w/ Laplace noise.', panel: 'privacy' },
   { title: 'Oblivious Exec', desc: 'Access pattern hiding.', panel: 'privacy' },
-  { title: 'Forensic Audit', desc: 'Hash-chain WAL verification.', panel: 'forensics' },
+  { title: 'Forensic Audit', desc: 'Audit chain health plus forensic proof tools.', panel: 'forensics' },
   { title: 'Views', desc: 'Incremental materialized views.', panel: 'views' },
   { title: 'Merge/CRDT', desc: 'Client merge + Wasm merge.', panel: 'merge' },
   { title: 'Wasm Ops', desc: 'Custom query plan operators.', panel: 'wasm' },
@@ -162,6 +165,8 @@ const RPC_TEMPLATES = [
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
   { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregate:{op:'count',col:'id'}, epsilon:1.0 } },
   { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { db:'demo', table:'events' } },
+  { label: 'maintenance.audit_status', method: 'maintenance.audit_status', params: {} },
+  { label: 'maintenance.audit_verify', method: 'maintenance.audit_verify', params: {} },
   { label: 'forensic.verify', method: 'forensic.verify', params: { from_id:0, limit:100 } },
   { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50 } },
   { label: 'view.create', method: 'view.create', params: { db:'demo', name:'active_users', query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
@@ -221,16 +226,6 @@ function validateEasyIdentifier(name, label) {
     throw new Error(label + ' must use a simple unquoted identifier (letters, numbers, underscore; no spaces).');
   }
   return value;
-}
-
-function quoteSqlIdentifier(name) {
-  const value = String(name || '').trim();
-  if (!value) throw new Error('Identifier is required');
-  return '`' + value.replace(/`/g, '``') + '`';
-}
-
-function quoteQualifiedTable(tableRef) {
-  return quoteSqlIdentifier(tableRef.db) + '.' + quoteSqlIdentifier(tableRef.table);
 }
 
 function analyzeEasyCreateDraft(db, table, rows) {
@@ -2487,23 +2482,22 @@ function qbGetSelectedColumns() {
 
 function qbBuildSQL() {
   const tableRef = easyReadTableRef();
-  const tableName = quoteQualifiedTable(tableRef);
+  const tableName = tableRef.db + '.' + tableRef.table;
   const selectedCols = qbGetSelectedColumns();
-  const colStr = selectedCols.length ? selectedCols.map(quoteSqlIdentifier).join(', ') : '*';
+  const colStr = selectedCols.length ? selectedCols.join(', ') : '*';
   let sql = 'SELECT ' + colStr + ' FROM ' + tableName;
   if (STATE.qbConditions.length) {
     const parts = STATE.qbConditions.map(c => {
-      const col = quoteSqlIdentifier(c.col);
-      if (c.op === 'IS NULL') return col + ' IS NULL';
-      if (c.op === 'IS NOT NULL') return col + ' IS NOT NULL';
-      if (c.op === 'LIKE') return col + " LIKE '%" + c.value.replace(/'/g, "''") + "%'";
-      return col + ' ' + c.op + " '" + c.value.replace(/'/g, "''") + "'";
+      if (c.op === 'IS NULL') return c.col + ' IS NULL';
+      if (c.op === 'IS NOT NULL') return c.col + ' IS NOT NULL';
+      if (c.op === 'LIKE') return c.col + " LIKE '%" + c.value.replace(/'/g, "''") + "%'";
+      return c.col + ' ' + c.op + " '" + c.value.replace(/'/g, "''") + "'";
     });
     sql += ' WHERE ' + parts.join(' AND ');
   }
   const orderCol = $('qbOrderCol')?.value || '';
   const orderDir = $('qbOrderDir')?.value || 'ASC';
-  if (orderCol) sql += ' ORDER BY ' + quoteSqlIdentifier(orderCol) + ' ' + orderDir;
+  if (orderCol) sql += ' ORDER BY ' + orderCol + ' ' + orderDir;
   const limit = parseInt($('qbLimit')?.value || '', 10) || 50;
   sql += ' LIMIT ' + limit;
   return sql + ';';
@@ -2699,7 +2693,7 @@ async function easyDoExport() {
           if (v.t === 'bool') return v.v ? 'TRUE' : 'FALSE';
           return "'" + String(formatLit(v)).replace(/'/g, "''") + "'";
         });
-        return 'INSERT INTO ' + quoteQualifiedTable(tableRef) + ' (' + columns.map(quoteSqlIdentifier).join(', ') + ') VALUES (' + vals.join(', ') + ');';
+        return 'INSERT INTO ' + tableRef.db + '.' + tableRef.table + ' (' + columns.join(', ') + ') VALUES (' + vals.join(', ') + ');';
       });
       downloadBlob(inserts.join('\n'), tableRef.db + '_' + tableRef.table + '.sql', 'text/sql');
     }
@@ -2732,10 +2726,9 @@ async function easyTruncateTable() {
     const tableRef = easyReadTableRef();
     const ok = await skeinModal('\u26A0\uFE0F', 'Truncate Table', 'Truncate all rows from "' + tableRef.db + '.' + tableRef.table + '"? This cannot be undone.', [{ label: 'Cancel', value: false }, { label: 'Truncate', value: true, cls: 'primary' }]);
     if (!ok) return;
-    const res = await call('sql.exec', { sql: 'DELETE FROM ' + quoteQualifiedTable(tableRef) + ';' }, 'easyOpsOut');
-    const result = unwrapRpcResult(res, 'sql.exec');
+    const res = await call('sql.exec', { sql: 'DELETE FROM ' + tableRef.db + '.' + tableRef.table + ';' }, 'easyOpsOut');
     easyShowToast('\u2713 Table truncated.', 'success');
-    setOut(result, 'easyOpsOut');
+    setOut(res, 'easyOpsOut');
     await easyBrowseRows();
   } catch (e) {
     easyShowToast('Truncate failed: ' + e.message, 'error');
@@ -2749,9 +2742,8 @@ async function easyDropTableOp() {
     const okDrop = await skeinModal('\u26A0\uFE0F', 'Drop Table', 'DROP TABLE "' + tableRef.db + '.' + tableRef.table + '"? This permanently deletes the table and all data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
     if (!okDrop) return;
     const res = await call('schema.drop_table', tableRef, 'easyOpsOut');
-    const result = unwrapRpcResult(res, 'schema.drop_table');
     easyShowToast('\u2713 Table "' + tableRef.table + '" dropped.', 'success');
-    setOut(result, 'easyOpsOut');
+    setOut(res, 'easyOpsOut');
     setSelectedTable('');
     await loadDbTree();
     easyRefreshTargetsFromTree();
@@ -2770,9 +2762,8 @@ async function easyDropDbOp() {
     const okDropDb = await skeinModal('\u26A0\uFE0F', 'Drop Database', 'DROP DATABASE "' + db + '"? This permanently deletes ALL tables and data.', [{ label: 'Cancel', value: false }, { label: 'Drop', value: true, cls: 'primary' }]);
     if (!okDropDb) return;
     const res = await call('schema.drop_database', { db }, 'easyOpsOut');
-    const result = unwrapRpcResult(res, 'schema.drop_database');
     easyShowToast('\u2713 Database "' + db + '" dropped.', 'success');
-    setOut(result, 'easyOpsOut');
+    setOut(res, 'easyOpsOut');
     setSelectedDb(''); setSelectedTable('');
     await loadDbTree();
     easyRefreshTargetsFromTree();
@@ -3055,10 +3046,7 @@ async function userCreate() {
   try {
     const name = $('userName')?.value.trim(), pass = $('userPass')?.value.trim(), role = $('userRole')?.value;
     if (!name) throw new Error('Username required');
-    if (!pass) throw new Error('Password required');
-    const res = await call('admin.user.create', { username: name, password: pass, role }, 'usersOut');
-    const result = unwrapRpcResult(res, 'admin.user.create');
-    easyShowToast('\u2713 User "' + result.username + '" created.', 'success');
+    await call('admin.user.create', { username: name, role }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3078,9 +3066,7 @@ async function userGrant() {
   try {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
-    const res = await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
-    unwrapRpcResult(res, 'admin.user.grant');
-    easyShowToast('\u2713 Grants updated for "' + name + '".', 'success');
+    await call('admin.user.grant', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3088,9 +3074,7 @@ async function userRevoke() {
   try {
     const name = $('userName')?.value.trim(), db = $('userGrantDb')?.value.trim(), privs = $('userGrantPrivs')?.value.trim();
     if (!name || !db) throw new Error('User + db required');
-    const res = await call('admin.user.revoke', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : [] }, 'usersOut');
-    unwrapRpcResult(res, 'admin.user.revoke');
-    easyShowToast('\u2713 Grants revoked for "' + name + '".', 'success');
+    await call('admin.user.revoke', { username: name, db, privileges: privs ? privs.split(',').map(s=>s.trim()) : ['SELECT'] }, 'usersOut');
   } catch (e) { setOut({error:String(e)},'usersOut'); }
 }
 
@@ -3346,25 +3330,20 @@ async function securityCreateToken() {
   const ttlHrs = parseInt($('secTokenTtl')?.value, 10) || 0;
   const ttlMs = ttlHrs > 0 ? ttlHrs * 3600000 : 0;
   try {
-    const res = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
-    const result = unwrapRpcResult(res, 'security.token.create');
-    if (result?.secret) {
-      if ($('token')) $('token').value = result.secret;
-      persistInputs();
+    const r = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
+    if (r?.secret) {
       const el = $('secTokenOut');
-      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + result.secret;
+      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + r.secret;
     }
-    easyShowToast('\u2713 API token created.', 'success');
     await securityRefreshTokens();
   } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
 }
 
 async function securityRefreshTokens() {
   try {
-    const res = await call('security.token.list', {}, 'secTokenOut');
-    const result = unwrapRpcResult(res, 'security.token.list');
+    const r = await call('security.token.list', {}, 'secTokenOut');
     const grid = $('secTokenGrid'); if (!grid) return;
-    const tokens = Array.isArray(result?.tokens) ? result.tokens : [];
+    const tokens = r?.tokens || [];
     if (!tokens.length) { grid.innerHTML = '<div class="hint">No tokens created yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>ID</th><th>Role</th><th>Label</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody>';
     tokens.forEach(t => {
@@ -3385,9 +3364,7 @@ async function securityRevokeToken(tokenId) {
   ]);
   if (!ok) return;
   try {
-    const res = await call('security.token.revoke', { token_id: tokenId }, 'secTokenOut');
-    unwrapRpcResult(res, 'security.token.revoke');
-    easyShowToast('\u2713 Token revoked.', 'success');
+    await call('security.token.revoke', { token_id: tokenId }, 'secTokenOut');
     await securityRefreshTokens();
   } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
 }
@@ -3397,10 +3374,9 @@ async function securityRevokeToken(tokenId) {
 // ---------------------------------------------------------------------------
 async function securityTopQueries() {
   try {
-    const res = await call('stats.top_queries', { limit: 20 }, null);
-    const result = unwrapRpcResult(res, 'stats.top_queries');
+    const r = await call('stats.top_queries', { limit: 20 }, null);
     const grid = $('secTopQueryGrid'); if (!grid) return;
-    const queries = Array.isArray(result?.queries) ? result.queries : [];
+    const queries = r?.queries || [];
     if (!queries.length) { grid.innerHTML = '<div class="hint">No query statistics available yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>#</th><th>Fingerprint</th><th>Count</th><th>Avg (ms)</th><th>Last Seen</th></tr></thead><tbody>';
     queries.forEach((q, i) => {
@@ -3415,6 +3391,225 @@ async function securityTopQueries() {
   } catch (e) {
     const grid = $('secTopQueryGrid');
     if (grid) grid.innerHTML = '<div class="hint">Query stats not available.</div>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CDC (Phase 23)
+// ---------------------------------------------------------------------------
+function formatUiTimestamp(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '--';
+  return new Date(ms).toLocaleString();
+}
+
+function cdcHydrateDefaultsFromContext() {
+  const dbInput = $('cdcDb');
+  const tableInput = $('cdcTable');
+  if (dbInput && !dbInput.value.trim() && STATE.selectedDb) dbInput.value = STATE.selectedDb;
+  if (tableInput && !tableInput.value.trim() && STATE.selectedTable) tableInput.value = STATE.selectedTable;
+}
+
+function cdcFindSubscription(subId) {
+  return (STATE.cdcSubscriptions || []).find((sub) => sub.sub_id === subId) || null;
+}
+
+function cdcLagForSub(sub) {
+  return Math.max(0, (Number(sub?.next_offset) || 0) - (Number(sub?.acked_offset) || 0));
+}
+
+function formatCdcPk(pk) {
+  if (!Array.isArray(pk) || !pk.length) return '--';
+  return pk.map((part) => formatLit(part)).join(', ');
+}
+
+function renderCdcLagSummary(subs, selected) {
+  const el = $('cdcLagSummary');
+  if (!el) return;
+  if (!subs.length) {
+    el.innerHTML = 'No CDC subscriptions in this browser session yet.';
+    return;
+  }
+  const totalLag = subs.reduce((sum, sub) => sum + cdcLagForSub(sub), 0);
+  const maxLag = subs.reduce((value, sub) => Math.max(value, cdcLagForSub(sub)), 0);
+  const selectedLabel = selected ? (selected.db + '.' + selected.table + ' (' + selected.sub_id + ')') : 'none';
+  el.innerHTML = '<strong>Subscriptions</strong>: ' + escapeHtml(String(subs.length))
+    + ' | <strong>Total lag</strong>: ' + escapeHtml(String(totalLag)) + ' event(s)'
+    + ' | <strong>Max lag</strong>: ' + escapeHtml(String(maxLag))
+    + ' | <strong>Selected</strong>: ' + escapeHtml(selectedLabel);
+}
+
+function renderCdcSubscriptionTable(subs) {
+  const host = $('cdcSubGrid');
+  if (!host) return;
+  if (!subs.length) {
+    host.innerHTML = '<div class="hint" style="padding:10px">Create a subscription to start tracking CDC lag.</div>';
+    return;
+  }
+  const maxLag = Math.max(1, ...subs.map((sub) => cdcLagForSub(sub)));
+  let h = '<table class="data-table"><thead><tr><th>Subscription</th><th>Table</th><th>Start</th><th>Acked</th><th>Next</th><th>Lag</th><th>Last Poll</th></tr></thead><tbody>';
+  subs.forEach((sub) => {
+    const lag = cdcLagForSub(sub);
+    const barWidth = lag <= 0 ? 0 : Math.max(8, Math.round((lag / maxLag) * 100));
+    const lagBar = lag <= 0
+      ? '<span class="hint">caught up</span>'
+      : '<div class="lag-bar"><div class="lag-bar-fill" style="width:' + barWidth + '%"></div></div>';
+    h += '<tr' + (sub.sub_id === STATE.cdcSelectedSubId ? ' class="row-selected"' : '') + '>'
+      + '<td><strong>' + escapeHtml(sub.sub_id) + '</strong></td>'
+      + '<td>' + escapeHtml(sub.db + '.' + sub.table) + '</td>'
+      + '<td>' + escapeHtml(String(Number(sub.offset) || 0)) + '</td>'
+      + '<td>' + escapeHtml(String(Number(sub.acked_offset) || 0)) + '</td>'
+      + '<td>' + escapeHtml(String(Number(sub.next_offset) || 0)) + '</td>'
+      + '<td><div style="min-width:120px">' + lagBar + '<div class="hint" style="margin-top:4px">' + escapeHtml(String(lag)) + ' event(s)</div></div></td>'
+      + '<td>' + escapeHtml(formatUiTimestamp(Number(sub.last_polled_at_ms) || 0)) + '</td>'
+      + '</tr>';
+  });
+  h += '</tbody></table>';
+  host.innerHTML = h;
+}
+
+function renderCdcEvents(selected) {
+  if (!selected || !Array.isArray(selected.last_events) || !selected.last_events.length) {
+    renderTable('cdcEventGrid', ['Seq', 'DB', 'Table', 'Op', 'PK'], [['--', 'No polled events yet', '', '', '']]);
+    return;
+  }
+  renderTable(
+    'cdcEventGrid',
+    ['Seq', 'DB', 'Table', 'Op', 'PK'],
+    selected.last_events.map((event) => [
+      event.seq,
+      event.db || '',
+      event.table || '',
+      event.op || '',
+      formatCdcPk(event.pk),
+    ]),
+  );
+}
+
+function renderCdcPanel() {
+  cdcHydrateDefaultsFromContext();
+  const subs = Array.isArray(STATE.cdcSubscriptions)
+    ? STATE.cdcSubscriptions.slice().sort((a, b) => (b.created_at_ms || 0) - (a.created_at_ms || 0))
+    : [];
+  if (STATE.cdcSelectedSubId && !subs.some((sub) => sub.sub_id === STATE.cdcSelectedSubId)) {
+    STATE.cdcSelectedSubId = '';
+  }
+  if (!STATE.cdcSelectedSubId && subs.length) {
+    STATE.cdcSelectedSubId = subs[0].sub_id;
+  }
+  const select = $('cdcSubId');
+  if (select) {
+    select.innerHTML = subs.length
+      ? subs.map((sub) => '<option value="' + escapeHtml(sub.sub_id) + '">' + escapeHtml(sub.sub_id + ' · ' + sub.db + '.' + sub.table) + '</option>').join('')
+      : '<option value="">No subscriptions</option>';
+    select.disabled = !subs.length;
+    select.value = STATE.cdcSelectedSubId || '';
+  }
+  const selected = cdcFindSubscription(STATE.cdcSelectedSubId);
+  const dbInput = $('cdcDb');
+  const tableInput = $('cdcTable');
+  const fromInput = $('cdcFromOffset');
+  const ackInput = $('cdcAckOffset');
+  if (selected) {
+    if (dbInput && document.activeElement !== dbInput) dbInput.value = selected.db;
+    if (tableInput && document.activeElement !== tableInput) tableInput.value = selected.table;
+    if (fromInput && document.activeElement !== fromInput) fromInput.value = String(Number(selected.next_offset) || Number(selected.offset) || 0);
+    if (ackInput && document.activeElement !== ackInput) ackInput.value = String(Math.max(Number(selected.next_offset) || 0, Number(selected.acked_offset) || 0));
+  }
+  renderCdcLagSummary(subs, selected);
+  renderCdcSubscriptionTable(subs);
+  renderCdcEvents(selected);
+}
+
+async function cdcSubscribe() {
+  try {
+    cdcHydrateDefaultsFromContext();
+    const db = ($('cdcDb')?.value || '').trim();
+    const table = ($('cdcTable')?.value || '').trim();
+    if (!db || !table) throw new Error('Database and table are required');
+    const res = await call('cdc.subscribe_table', { db, table }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.subscribe_table');
+    const offset = Number(result.offset) || 0;
+    STATE.cdcSubscriptions = (STATE.cdcSubscriptions || []).filter((sub) => sub.sub_id !== result.sub_id);
+    STATE.cdcSubscriptions.unshift({
+      sub_id: result.sub_id,
+      db,
+      table,
+      offset,
+      acked_offset: offset,
+      next_offset: offset,
+      created_at_ms: Date.now(),
+      last_polled_at_ms: 0,
+      last_events: [],
+    });
+    STATE.cdcSelectedSubId = result.sub_id;
+    setOut({ subscription: { sub_id: result.sub_id, db, table, offset } }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC subscription created for ' + db + '.' + table + '.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
+  }
+}
+
+async function cdcPoll() {
+  try {
+    const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
+    if (!selected) throw new Error('Select a subscription first');
+    const fromRaw = parseInt($('cdcFromOffset')?.value || '', 10);
+    const limitRaw = parseInt($('cdcLimit')?.value || '', 10);
+    const fromOffset = Number.isFinite(fromRaw)
+      ? Math.max(fromRaw, 0)
+      : (Number(selected.next_offset) || Number(selected.acked_offset) || Number(selected.offset) || 0);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 200;
+    const res = await call('cdc.poll', { sub_id: selected.sub_id, from_offset: fromOffset, limit }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.poll');
+    selected.last_events = Array.isArray(result.events) ? result.events : [];
+    selected.last_polled_at_ms = Date.now();
+    selected.next_offset = Number(result.next_offset) || fromOffset;
+    setOut({ subscription: { sub_id: selected.sub_id, db: selected.db, table: selected.table }, poll: result }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC poll returned ' + String(selected.last_events.length) + ' event(s).', selected.last_events.length ? 'success' : 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
+  }
+}
+
+async function cdcAck() {
+  try {
+    const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
+    if (!selected) throw new Error('Select a subscription first');
+    const ackRaw = parseInt($('cdcAckOffset')?.value || '', 10);
+    const offset = Number.isFinite(ackRaw) ? Math.max(ackRaw, 0) : (Number(selected.next_offset) || Number(selected.acked_offset) || 0);
+    const res = await call('cdc.ack', { sub_id: selected.sub_id, offset }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.ack');
+    selected.acked_offset = Number(result.acked_offset) || selected.acked_offset;
+    setOut({ subscription: { sub_id: selected.sub_id, db: selected.db, table: selected.table }, ack: result }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC subscription acked through offset ' + String(selected.acked_offset) + '.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
+  }
+}
+
+async function cdcClose() {
+  try {
+    const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
+    if (!selected) throw new Error('Select a subscription first');
+    const ok = await skeinModal('🛰️', 'Close CDC Subscription', 'Close <b>' + escapeHtml(selected.sub_id) + '</b> for <b>' + escapeHtml(selected.db + '.' + selected.table) + '</b>?', [
+      { label: 'Cancel', value: false },
+      { label: 'Close', value: true, cls: 'primary' },
+    ]);
+    if (!ok) return;
+    const res = await call('cdc.close', { sub_id: selected.sub_id }, 'cdcOut');
+    const result = unwrapRpcResult(res, 'cdc.close');
+    STATE.cdcSubscriptions = (STATE.cdcSubscriptions || []).filter((sub) => sub.sub_id !== selected.sub_id);
+    if (STATE.cdcSelectedSubId === selected.sub_id) {
+      STATE.cdcSelectedSubId = STATE.cdcSubscriptions[0]?.sub_id || '';
+    }
+    setOut({ close: result }, 'cdcOut');
+    renderCdcPanel();
+    showToast('CDC subscription ' + selected.sub_id + ' closed.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcOut');
   }
 }
 
@@ -3555,6 +3750,61 @@ async function oblExplain() {
 // ---------------------------------------------------------------------------
 // Forensics (R06)
 // ---------------------------------------------------------------------------
+function formatAuditTimestamp(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return 'never';
+  return new Date(ms).toLocaleString();
+}
+
+function renderForAuditSummary(status, verify) {
+  const el = $('forAuditSummary');
+  if (!el) return;
+  const chainLength = Number(status?.chain_length) || 0;
+  const anchorCount = Number(status?.anchor_count) || 0;
+  const headHash = status?.chain_head_hash || 'genesis';
+  const lastVerified = formatAuditTimestamp(Number(status?.last_verified_ms) || 0);
+  const lastAnchor = status?.last_anchor && typeof status.last_anchor === 'object'
+    ? status.last_anchor
+    : null;
+  const anchorSummary = lastAnchor && lastAnchor.checkpoint_id
+    ? lastAnchor.checkpoint_id + ' @ ' + formatAuditTimestamp(Number(lastAnchor.ts_ms) || 0)
+    : 'none';
+  let verifySummary = 'Verification not run in this session.';
+  if (verify && typeof verify === 'object') {
+    if (verify.ok) {
+      verifySummary = 'OK: ' + String(Number(verify.records_checked) || 0) + ' record(s) checked in ' + String(Number(verify.elapsed_ms) || 0) + ' ms.';
+    } else {
+      const reason = verify.reason || 'unknown';
+      const badIndex = verify.bad_index === undefined || verify.bad_index === null ? 'n/a' : String(verify.bad_index);
+      verifySummary = 'FAILED: reason=' + reason + ', bad_index=' + badIndex + '.';
+    }
+  }
+  el.innerHTML = '<strong>Chain</strong>: ' + escapeHtml(String(chainLength))
+    + ' record(s) | <strong>Anchors</strong>: ' + escapeHtml(String(anchorCount))
+    + ' | <strong>Last verified</strong>: ' + escapeHtml(lastVerified)
+    + '<br><strong>Head</strong>: ' + escapeHtml(headHash)
+    + '<br><strong>Last anchor</strong>: ' + escapeHtml(anchorSummary)
+    + '<br><strong>Verification</strong>: ' + escapeHtml(verifySummary);
+}
+
+async function forAuditStatus() {
+  try {
+    const res = await call('maintenance.audit_status', {}, 'forAuditOut');
+    const result = unwrapRpcResult(res, 'maintenance.audit_status');
+    renderForAuditSummary(result, null);
+  } catch (e) { setOut({error:String(e)}, 'forAuditOut'); }
+}
+
+async function forAuditVerify() {
+  try {
+    const verifyRes = await call('maintenance.audit_verify', {}, 'forAuditOut');
+    const verify = unwrapRpcResult(verifyRes, 'maintenance.audit_verify');
+    const statusRes = await call('maintenance.audit_status', {}, 'forAuditOut');
+    const status = unwrapRpcResult(statusRes, 'maintenance.audit_status');
+    renderForAuditSummary(status, verify);
+    setOut({ status, verify }, 'forAuditOut');
+  } catch (e) { setOut({error:String(e)}, 'forAuditOut'); }
+}
+
 async function forVerify() {
   try {
     const from = parseInt($('forFromId')?.value,10) || 0, limit = parseInt($('forLimit')?.value,10) || 100;
@@ -3915,6 +4165,7 @@ function setActivePanel(panel, updateHash) {
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   updateHeader(panel); updateContext();
+  if (panel === 'cdc') renderCdcPanel();
   if (updateHash) window.location.hash = panel;
 }
 
@@ -4353,7 +4604,17 @@ wire('btnOblGet', oblGet);
 wire('btnOblSet', oblSet);
 wire('btnOblExplain', oblExplain);
 
+// CDC
+wire('btnCdcSubscribe', cdcSubscribe);
+wire('btnCdcPoll', cdcPoll);
+wire('btnCdcAck', cdcAck);
+wire('btnCdcClose', cdcClose);
+const cdcSubIdSelect = $('cdcSubId');
+if (cdcSubIdSelect) cdcSubIdSelect.addEventListener('change', () => { STATE.cdcSelectedSubId = cdcSubIdSelect.value; renderCdcPanel(); });
+
 // Forensics
+wire('btnForAuditStatus', forAuditStatus);
+wire('btnForAuditVerify', forAuditVerify);
 wire('btnForVerify', forVerify);
 wire('btnForQuery', forQuery);
 wire('btnForExport', forExport);

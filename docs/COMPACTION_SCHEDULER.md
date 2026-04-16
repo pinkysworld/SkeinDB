@@ -1,7 +1,7 @@
 # Workload-guided compaction scheduling
 
-Status: Draft
-Last updated: 2026-01-31
+Status: Draft + live telemetry + runtime policy controls + evaluation harness
+Last updated: 2026-04-16
 
 SkeinDB uses an LSM-like structure for sorted runs and background compaction.
 Compaction is necessary to bound read amplification and reclaim space, but can also cause
@@ -45,6 +45,12 @@ The scheduler relies on telemetry already collected for SkeinAdmin:
 
 Telemetry should be stored in a privacy-safe, bounded ring buffer.
 
+Current baseline:
+- `stats.snapshot` now exports a top-level `compaction` object with live `status`, `l0_files`, `l0_bytes`, `l0_pressure_pct`, `stall_rate`, `pressure_rate`, bounded pressure-event history, recent point/range/write rates, and read/write p50/p95/p99 latency percentiles.
+- L0 pressure is derived from live `.rseg` files under `tables/<db>/*.rseg`, and recent workload signals are derived from the existing bounded RPC/query telemetry ring buffer.
+- `stats.snapshot.compaction.scheduler` now reports the live policy, configured/effective budgets, active peak window, queued task summary, and priority/admission state derived from the same runtime telemetry.
+- `maintenance.compaction.status`, `maintenance.compaction.set_policy`, and `maintenance.compaction.pause` / `resume` persist policy state in `settings.json`, expose live scheduler decisions, and enforce safe-mode write backpressure for write-classified SkeinQL/HTTP mutations when hard L0 bounds are exceeded.
+
 ## 4. Compaction task model
 
 Each compaction candidate is modeled as:
@@ -86,6 +92,7 @@ Prefer partial compactions (small file sets) to amortize cost and avoid long spi
 If the system approaches hard limits (e.g., L0 too large), the scheduler enters safe mode:
 - compaction budgets are temporarily increased
 - write admission may be throttled (backpressure)
+- read-only traffic remains available while write-classified SkeinQL/HTTP requests are rejected with `resource_exhausted`
 
 ## 6. Administrator controls
 
@@ -103,7 +110,7 @@ Methods:
 - maintenance.compaction.pause / resume
 
 Stats:
-- stats.snapshot includes compaction queue length and current task
+- `stats.snapshot` includes live compaction pressure/workload telemetry plus `compaction.scheduler` state for budgets, task priority, peak-window activation, and write-admission mode.
 
 ## 8. Evaluation plan
 
@@ -116,6 +123,14 @@ Compare:
 - fixed leveling policy
 - fixed tiering policy
 - workload-guided scheduler
+
+Prototype harness:
+- `python3 eval/compaction_scheduler_dashboard.py --scenario mixed --seconds 1800 --outdir eval/figures/compaction_scheduler`
+- emits `compaction_scheduler_summary.json`, `compaction_scheduler_timeline.csv`, and a self-contained `compaction_scheduler_dashboard.html`
+- compares `fixed_leveling`, `fixed_tiering`, and `workload_guided` policies over the same deterministic workload timeline
+- surfaces stall rate, total stall time, peak/p95-of-p99 read and write latency, backlog pressure, and average compaction budget
+
+The harness remains synthetic rather than tied directly to a background compactor. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, and safe-mode admission control.
 
 ## 9. Testing
 

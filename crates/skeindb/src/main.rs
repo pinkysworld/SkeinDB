@@ -8,6 +8,88 @@ mod pg_wire;
 mod quic;
 mod server;
 
+#[derive(Debug)]
+struct AuditVerifyReport {
+    status: serde_json::Value,
+    verify: serde_json::Value,
+}
+
+impl AuditVerifyReport {
+    fn is_ok(&self) -> bool {
+        self.verify
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn records_checked(&self) -> u64 {
+        self.verify
+            .get("records_checked")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.verify
+            .get("elapsed_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    fn chain_head_hash(&self) -> &str {
+        self.verify
+            .get("chain_head_hash")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("genesis")
+    }
+
+    fn anchor_count(&self) -> u64 {
+        self.status
+            .get("anchor_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    fn last_verified_ms(&self) -> u64 {
+        self.status
+            .get("last_verified_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    fn bad_index(&self) -> Option<u64> {
+        self.verify
+            .get("bad_index")
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    fn reason(&self) -> Option<&str> {
+        self.verify
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
+fn collect_audit_verify_report(data: &str) -> anyhow::Result<AuditVerifyReport> {
+    let mut engine = engine::Engine::open(data)?;
+    let verify = engine.maintenance_audit_verify();
+    let status = engine.maintenance_audit_status();
+    Ok(AuditVerifyReport { status, verify })
+}
+
+fn audit_verify_failure_message(report: &AuditVerifyReport) -> String {
+    let reason = report.reason().unwrap_or("unknown");
+    let bad_index = report
+        .bad_index()
+        .map(|idx| idx.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "audit verification failed: reason={reason}, bad_index={bad_index}, records_checked={}, chain_head_hash={}",
+        report.records_checked(),
+        report.chain_head_hash(),
+    )
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum StorageModeArg {
     Json,
@@ -18,6 +100,13 @@ enum StorageModeArg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skeindb_skeinql::methods::RowObject;
+    use skeindb_skeinql::types::{BaseTableRef, Lit, TypeDesc};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn serve_defaults_to_segment_storage_mode() {
@@ -63,6 +152,124 @@ mod tests {
             }
             _ => panic!("expected serve command"),
         }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("skeindb_{name}_{}_{}", std::process::id(), suffix));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn type_desc(kind: &str) -> TypeDesc {
+        TypeDesc {
+            kind: kind.to_string(),
+            max: None,
+            precision: None,
+            scale: None,
+            charset: None,
+            collation: None,
+            unsigned: None,
+        }
+    }
+
+    fn row(entries: &[(&str, Lit)]) -> RowObject {
+        let mut out = RowObject::new();
+        for (key, value) in entries.iter() {
+            out.insert((*key).to_string(), value.clone());
+        }
+        out
+    }
+
+    fn seed_forensic_chain(dir: &Path) -> anyhow::Result<()> {
+        let mut engine = engine::Engine::open(dir)?;
+        engine.create_table(
+            "app",
+            "logs",
+            vec![
+                engine::ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                engine::ColumnSchema {
+                    name: "message".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "logs".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "message",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn audit_verify_command_reports_valid_chain_and_persists_timestamp() -> anyhow::Result<()> {
+        let dir = temp_dir("audit_verify_ok");
+        seed_forensic_chain(&dir)?;
+
+        let report = collect_audit_verify_report(dir.to_str().expect("temp dir utf8"))?;
+        assert!(report.is_ok());
+        assert!(report.records_checked() >= 1);
+        assert!(report.last_verified_ms() > 0);
+
+        let reopened = engine::Engine::open(&dir)?;
+        let persisted = reopened.maintenance_audit_status();
+        assert!(
+            persisted
+                .get("last_verified_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn audit_verify_command_detects_tampered_chain() -> anyhow::Result<()> {
+        let dir = temp_dir("audit_verify_tampered");
+        seed_forensic_chain(&dir)?;
+
+        let forensic_path = dir.join("forensic_chain.json");
+        let mut disk: serde_json::Value = serde_json::from_slice(&fs::read(&forensic_path)?)?;
+        disk["records"][0]["hash"] = serde_json::Value::String("tampered".to_string());
+        fs::write(&forensic_path, serde_json::to_vec_pretty(&disk)?)?;
+
+        let report = collect_audit_verify_report(dir.to_str().expect("temp dir utf8"))?;
+        assert!(!report.is_ok());
+        assert_eq!(report.reason(), Some("hash_mismatch"));
+        assert!(audit_verify_failure_message(&report).contains("hash_mismatch"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 }
 
@@ -214,9 +421,23 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::AuditVerify { data } => {
-            println!("Audit verify is a placeholder. Data dir: {data}");
-            println!("See docs/AUDIT_WAL.md for the design.");
-            Ok(())
+            let report = collect_audit_verify_report(&data)?;
+            println!(
+                "Audit verification checked {} record(s) in {} ms.",
+                report.records_checked(),
+                report.elapsed_ms()
+            );
+            println!("Chain head hash: {}", report.chain_head_hash());
+            println!("Checkpoint anchors: {}", report.anchor_count());
+            if report.is_ok() {
+                println!(
+                    "Audit chain OK. last_verified_ms={}",
+                    report.last_verified_ms()
+                );
+                Ok(())
+            } else {
+                anyhow::bail!(audit_verify_failure_message(&report));
+            }
         }
         Commands::SnapshotBuild {
             data,

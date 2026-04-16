@@ -10,7 +10,7 @@ The current implementation is intentionally narrow: it is good for protocol brin
 ## Quick start
 
 ```bash
-# Trust auth when SKEINDB_TOKEN is unset and no managed DB users exist
+# Trust auth when SKEINDB_TOKEN is unset
 cargo run -- serve --data ./data --http 8080 --mysql 3306 --pg 5432
 
 psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" -c "SELECT 1"
@@ -19,11 +19,6 @@ psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" -c "SELECT
 PGPASSWORD="$SKEINDB_TOKEN" \
   psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" \
   -c "SELECT version()"
-
-# Or create a managed DB user over SkeinQL/SkeinAdmin and use that password:
-PGPASSWORD="secret123" \
-  psql "host=127.0.0.1 port=5432 user=alice dbname=app sslmode=disable" \
-  -c "SELECT 1"
 ```
 
 Notes:
@@ -35,15 +30,13 @@ Notes:
 - PostgreSQL v3 message framing in `pg_wire.rs`
 - `StartupMessage` and `SSLRequest` parsing
 - startup response batch: `AuthenticationOk` / `ParameterStatus` / `BackendKeyData` / `ReadyForQuery`
-- trust auth when `SKEINDB_TOKEN` is unset and no managed DB users exist
+- trust auth when `SKEINDB_TOKEN` is unset
 - cleartext-password auth path when `SKEINDB_TOKEN` is set
-- cleartext-password auth path for managed SkeinDB DB users created via `admin.user.create`
 - SSL negotiation rejection (`'N'`)
 - simple query protocol delegated to the shared SQL execution engine
 - special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - empty-query handling
-- `BEGIN` / `COMMIT` / `ROLLBACK` compatibility with simple-query `ReadyForQuery(I/T/E)` tracking
-- failed-transaction blocking until `ROLLBACK` (and failed `COMMIT` cleanup that returns the session to idle)
+- `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
 - `Terminate` handling
 - extended-query protocol acknowledgements as stubs only
 
@@ -64,8 +57,8 @@ Notes:
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| trust | Supported | Default when `SKEINDB_TOKEN` is not set and no managed DB users exist |
-| cleartext password | Supported | Uses `SKEINDB_TOKEN` as the password gate and also accepts managed DB-user passwords |
+| trust | Supported | Default when `SKEINDB_TOKEN` is not set |
+| cleartext password | Supported | Uses `SKEINDB_TOKEN` as the password gate |
 | SCRAM-SHA-256 | Planned | Backlog item T401 |
 | md5 | Not planned | Prefer SCRAM once implemented |
 | TLS client certs | Not implemented | SSL negotiation is currently rejected |
@@ -91,21 +84,18 @@ The listener currently accepts the extended-query message family only as a compa
 
 ### Transactions
 
-`BEGIN`, `COMMIT`, and `ROLLBACK` now drive the simple-query `ReadyForQuery` state bytes (`I` / `T` / `E`).
-Statement errors inside an explicit transaction move the session into the failed-transaction state and subsequent commands are rejected until `ROLLBACK` (or a failed `COMMIT` cleanup) ends the block.
-Broader PostgreSQL transaction semantics beyond that baseline are still open.
+`BEGIN`, `COMMIT`, and `ROLLBACK` are accepted as compatibility stubs.
+Full PostgreSQL transaction-state semantics, including richer `ReadyForQuery` state management (`I` / `T` / `E`) and failed-transaction blocks, are still open.
 
 ## Tested flows
 
 Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 
 - startup handshake reaches `ReadyForQuery`
-- password-auth startup succeeds for managed DB users
 - simple query `SELECT 1`
 - simple query `SELECT version()`
 - startup/bootstrap query bundle covering `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - empty query returns the expected empty response flow
-- failed transaction blocks hold `ReadyForQuery(E)` until rollback
 - `Terminate` closes the connection cleanly
 - SSL negotiation is rejected correctly
 
@@ -122,7 +112,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 ## Not implemented yet
 
 - SCRAM-SHA-256 authentication
-- Broader PostgreSQL session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, `standard_conforming_strings`)
+- PostgreSQL session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, `standard_conforming_strings`)
 - PG-specific SQL dialect features such as `RETURNING`, `::` casts, dollar-quoting, `ILIKE`, arrays, `FETCH FIRST`, and `ON CONFLICT`
 - `pg_catalog` system tables and broader PG bootstrap-query compatibility for tools/frameworks
 - COPY protocol

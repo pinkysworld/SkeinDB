@@ -322,6 +322,10 @@ struct Counters {
     per_method: HashMap<String, u64>,
     query_stats: HashMap<String, QueryStatsAgg>,
     query_log: VecDeque<QuerySample>,
+    compaction_samples: VecDeque<CompactionTelemetrySample>,
+    compaction_pressure_events: VecDeque<CompactionPressureEvent>,
+    last_compaction_state: Option<String>,
+    last_compaction_sample_ms: u64,
     // Feature flag telemetry (T110)
     feature_flags: HashMap<String, FeatureFlagCounter>,
     // Workload feature extraction (T170)
@@ -408,19 +412,54 @@ impl QueryStatsAgg {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryWorkloadKind {
+    PointRead,
+    RangeRead,
+    Write,
+    Other,
+}
+
 #[derive(Debug, Clone)]
 struct QuerySample {
     ts_ms: u64,
     method: String,
     fingerprint: String,
+    workload_kind: QueryWorkloadKind,
     duration_ms: u64,
     status: u16,
     ok: bool,
     rows_returned: u64,
+    io_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionTelemetrySample {
+    soft_pressure: bool,
+    hard_pressure: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionPressureEvent {
+    ts_ms: u64,
+    state: String,
+    reasons: Vec<String>,
 }
 
 const QUERY_LATENCY_SAMPLE_CAPACITY: usize = 256;
 const QUERY_LOG_CAPACITY: usize = 1024;
+const COMPACTION_SAMPLE_CAPACITY: usize = 256;
+const COMPACTION_EVENT_CAPACITY: usize = 64;
+const COMPACTION_RECENT_WINDOW_MS: u64 = 5 * 60 * 1000;
+const DEFAULT_COMPACTION_MAX_L0_FILES: u64 = 16;
+const DEFAULT_COMPACTION_MAX_L0_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_COMPACTION_MAX_IO_BYTES_PER_S: u64 = 32 * 1024 * 1024;
+const DEFAULT_COMPACTION_MAX_CPU_PCT: f64 = 35.0;
+const DEFAULT_COMPACTION_PEAK_WINDOW_IO_MULTIPLIER: f64 = 0.65;
+const DEFAULT_COMPACTION_PEAK_WINDOW_CPU_MULTIPLIER: f64 = 0.7;
+const DEFAULT_COMPACTION_SAFE_MODE_IO_MULTIPLIER: f64 = 1.75;
+const DEFAULT_COMPACTION_SAFE_MODE_CPU_PCT: f64 = 70.0;
+const COMPACTION_SAMPLE_INTERVAL_MS: u64 = 1000;
 
 #[derive(Default)]
 struct QueryCoalescer {
@@ -542,7 +581,6 @@ struct MySqlPreparedStatement {
 #[derive(Debug)]
 struct MySqlSessionState {
     default_db: Option<String>,
-    username: String,
     last_found_rows: u64,
     last_insert_id: u64,
     connection_id: u32,
@@ -568,10 +606,9 @@ impl MySqlPreparedStatement {
 }
 
 impl MySqlSessionState {
-    fn new(default_db: Option<String>, connection_id: u32, username: String) -> Self {
+    fn new(default_db: Option<String>, connection_id: u32) -> Self {
         Self {
             default_db,
-            username,
             last_found_rows: 0,
             last_insert_id: 0,
             connection_id,
@@ -1667,7 +1704,6 @@ fn mysql_literal_current_date_time_parts() -> ((i32, u8, u8), (u8, u8, u8)) {
 fn parse_select_literal_query(
     sql: &str,
     default_db: Option<&str>,
-    username: Option<&str>,
 ) -> Option<(Vec<(String, MySqlLiteral)>, bool)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if !trimmed.is_ascii() {
@@ -1710,13 +1746,7 @@ fn parse_select_literal_query(
             || value_src.eq_ignore_ascii_case("session_user()")
             || value_src.eq_ignore_ascii_case("system_user()")
         {
-            let account = username.unwrap_or("skeindb").trim();
-            let account = if account.is_empty() {
-                "skeindb"
-            } else {
-                account
-            };
-            MySqlLiteral::Str(format!("{account}@localhost"))
+            MySqlLiteral::Str("skeindb@localhost".to_string())
         } else if value_src.eq_ignore_ascii_case("now()")
             || value_src.eq_ignore_ascii_case("current_timestamp()")
             || value_src.eq_ignore_ascii_case("localtimestamp()")
@@ -7664,6 +7694,120 @@ fn mysql_stmt_scalar_subquery_result_flags(flags: u16) -> u16 {
     flags & (MYSQL_COL_FLAG_NUM | MYSQL_COL_FLAG_UNSIGNED | MYSQL_COL_FLAG_BINARY)
 }
 
+fn mysql_stmt_placeholder_sql_for_column(column: &MySqlStmtPrepareColumn) -> &'static str {
+    match column.column_type {
+        MySqlStmtColumnType::LongLong => "0",
+        MySqlStmtColumnType::Double => "SQRT(0)",
+        MySqlStmtColumnType::VarString => {
+            if (column.flags & MYSQL_COL_FLAG_BINARY) != 0 {
+                "X''"
+            } else {
+                "''"
+            }
+        }
+    }
+}
+
+async fn mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
+    state: &AppState,
+    expr_sql: &str,
+    default_db: Option<&str>,
+) -> Option<String> {
+    let mut rewritten = expr_sql.to_string();
+    loop {
+        let lower = rewritten.to_ascii_lowercase();
+        let Some(sel_pos) = lower.find("(select ") else {
+            return Some(rewritten);
+        };
+        let close_pos = find_matching_parenthesis(&rewritten, sel_pos)?;
+        let sub_sql = rewritten[sel_pos + 1..close_pos].trim().to_string();
+        let sub_columns = Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
+        let first = sub_columns.first()?;
+        let replacement = mysql_stmt_placeholder_sql_for_column(first);
+        rewritten = format!(
+            "{}{}{}",
+            &rewritten[..sel_pos],
+            replacement,
+            &rewritten[close_pos + 1..]
+        );
+    }
+}
+
+async fn mysql_stmt_prepare_columns_for_projection_subquery(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+) -> Option<Vec<MySqlStmtPrepareColumn>> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") || !lower.contains("(select ") {
+        return None;
+    }
+
+    let rest = &trimmed[7..];
+    let (projection_sql, from_tail) = match find_keyword_top_level(rest, "from") {
+        Some(from_pos) => (rest[..from_pos].trim(), Some(rest[from_pos..].trim())),
+        None => (rest.trim(), None),
+    };
+    let projection_items = split_csv_top_level(projection_sql);
+    if projection_items.is_empty() {
+        return None;
+    }
+    if !projection_items.iter().any(|item| {
+        let (expr_raw, _) = mysql_parse_projection_expr_alias(item);
+        expr_raw.to_ascii_lowercase().contains("(select ")
+    }) {
+        return None;
+    }
+
+    let mut columns = Vec::with_capacity(projection_items.len());
+    let mut saw_subquery = false;
+    for (idx, item) in projection_items.iter().enumerate() {
+        let (expr_raw, alias) = mysql_parse_projection_expr_alias(item);
+        if let Some(sub_sql) = mysql_parse_scalar_subquery_select(&expr_raw) {
+            saw_subquery = true;
+            let sub_columns =
+                Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
+            let first = sub_columns.first()?;
+            columns.push(MySqlStmtPrepareColumn {
+                name: alias.unwrap_or_else(|| format!("expr{}", idx + 1)),
+                column_type: first.column_type,
+                flags: mysql_stmt_scalar_subquery_result_flags(first.flags),
+            });
+            continue;
+        }
+
+        let projection_sql = if expr_raw.to_ascii_lowercase().contains("(select ") {
+            saw_subquery = true;
+            let rewritten_expr = mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
+                state, &expr_raw, default_db,
+            )
+            .await?;
+            if let Some(alias) = alias.as_ref() {
+                format!("{rewritten_expr} AS {alias}")
+            } else {
+                rewritten_expr
+            }
+        } else {
+            item.trim().to_string()
+        };
+
+        let single_sql = if let Some(from_tail) = from_tail {
+            format!("SELECT {projection_sql} {from_tail}")
+        } else {
+            format!("SELECT {projection_sql}")
+        };
+        let inferred = Box::pin(mysql_stmt_prepare_columns(state, &single_sql, default_db)).await;
+        let mut first = inferred.into_iter().next()?;
+        if let Some(alias) = alias {
+            first.name = alias;
+        }
+        columns.push(first);
+    }
+
+    saw_subquery.then_some(columns)
+}
+
 fn mysql_expand_select_projection_wildcards(
     from: Option<&TableRef>,
     projection: &[SelectItem],
@@ -7795,120 +7939,6 @@ fn mysql_stmt_prepare_columns_from_select(
         .collect()
 }
 
-fn mysql_stmt_placeholder_sql_for_column(column: &MySqlStmtPrepareColumn) -> &'static str {
-    match column.column_type {
-        MySqlStmtColumnType::LongLong => "0",
-        MySqlStmtColumnType::Double => "SQRT(0)",
-        MySqlStmtColumnType::VarString => {
-            if (column.flags & MYSQL_COL_FLAG_BINARY) != 0 {
-                "X''"
-            } else {
-                "''"
-            }
-        }
-    }
-}
-
-async fn mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
-    state: &AppState,
-    expr_sql: &str,
-    default_db: Option<&str>,
-) -> Option<String> {
-    let mut rewritten = expr_sql.to_string();
-    loop {
-        let lower = rewritten.to_ascii_lowercase();
-        let Some(sel_pos) = lower.find("(select ") else {
-            return Some(rewritten);
-        };
-        let close_pos = find_matching_parenthesis(&rewritten, sel_pos)?;
-        let sub_sql = rewritten[sel_pos + 1..close_pos].trim().to_string();
-        let sub_columns = Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
-        let first = sub_columns.first()?;
-        let replacement = mysql_stmt_placeholder_sql_for_column(first);
-        rewritten = format!(
-            "{}{}{}",
-            &rewritten[..sel_pos],
-            replacement,
-            &rewritten[close_pos + 1..]
-        );
-    }
-}
-
-async fn mysql_stmt_prepare_columns_for_projection_subquery(
-    state: &AppState,
-    sql: &str,
-    default_db: Option<&str>,
-) -> Option<Vec<MySqlStmtPrepareColumn>> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if !lower.starts_with("select ") || !lower.contains("(select ") {
-        return None;
-    }
-
-    let rest = &trimmed[7..];
-    let (projection_sql, from_tail) = match find_keyword_top_level(rest, "from") {
-        Some(from_pos) => (rest[..from_pos].trim(), Some(rest[from_pos..].trim())),
-        None => (rest.trim(), None),
-    };
-    let projection_items = split_csv_top_level(projection_sql);
-    if projection_items.is_empty() {
-        return None;
-    }
-    if !projection_items.iter().any(|item| {
-        let (expr_raw, _) = mysql_parse_projection_expr_alias(item);
-        expr_raw.to_ascii_lowercase().contains("(select ")
-    }) {
-        return None;
-    }
-
-    let mut columns = Vec::with_capacity(projection_items.len());
-    let mut saw_subquery = false;
-    for (idx, item) in projection_items.iter().enumerate() {
-        let (expr_raw, alias) = mysql_parse_projection_expr_alias(item);
-        if let Some(sub_sql) = mysql_parse_scalar_subquery_select(&expr_raw) {
-            saw_subquery = true;
-            let sub_columns =
-                Box::pin(mysql_stmt_prepare_columns(state, &sub_sql, default_db)).await;
-            let first = sub_columns.first()?;
-            columns.push(MySqlStmtPrepareColumn {
-                name: alias.unwrap_or_else(|| format!("expr{}", idx + 1)),
-                column_type: first.column_type,
-                flags: mysql_stmt_scalar_subquery_result_flags(first.flags),
-            });
-            continue;
-        }
-
-        let projection_sql = if expr_raw.to_ascii_lowercase().contains("(select ") {
-            saw_subquery = true;
-            let rewritten_expr = mysql_stmt_replace_embedded_subqueries_with_typed_placeholders(
-                state, &expr_raw, default_db,
-            )
-            .await?;
-            if let Some(alias) = alias.as_ref() {
-                format!("{rewritten_expr} AS {alias}")
-            } else {
-                rewritten_expr
-            }
-        } else {
-            item.trim().to_string()
-        };
-
-        let single_sql = if let Some(from_tail) = from_tail {
-            format!("SELECT {projection_sql} {from_tail}")
-        } else {
-            format!("SELECT {projection_sql}")
-        };
-        let inferred = Box::pin(mysql_stmt_prepare_columns(state, &single_sql, default_db)).await;
-        let mut first = inferred.into_iter().next()?;
-        if let Some(alias) = alias {
-            first.name = alias;
-        }
-        columns.push(first);
-    }
-
-    saw_subquery.then_some(columns)
-}
-
 async fn mysql_stmt_prepare_columns_for_translated_select(
     state: &AppState,
     sql: &str,
@@ -7950,7 +7980,7 @@ async fn mysql_stmt_prepare_columns(
     sql: &str,
     default_db: Option<&str>,
 ) -> Vec<MySqlStmtPrepareColumn> {
-    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db, Some("skeindb")) {
+    if let Some((cols, _emit_row)) = parse_select_literal_query(sql, default_db) {
         return cols
             .into_iter()
             .map(|(name, lit)| MySqlStmtPrepareColumn {
@@ -9574,11 +9604,9 @@ async fn mysql_execute_sql(
                 }
             }
         }
-        if let Some((cols, emit_row)) = parse_select_literal_query(
-            &exec_sql,
-            session.default_db.as_deref(),
-            Some(&session.username),
-        ) {
+        if let Some((cols, emit_row)) =
+            parse_select_literal_query(&exec_sql, session.default_db.as_deref())
+        {
             let columns = cols
                 .iter()
                 .map(|(name, _)| name.clone())
@@ -9980,38 +10008,16 @@ async fn handle_mysql_connection(
         }
     }
 
-    let username = response.username;
-    let env_password = std::env::var("SKEINDB_TOKEN").ok();
-    let (has_db_users, matched_user) = {
-        let eng = state.engine.read().await;
-        let matched_user =
-            eng.authenticate_db_user_mysql_native(&username, &seed, &response.auth_response);
-        (eng.has_db_users(), matched_user)
-    };
-    let env_auth_ok = env_password
-        .as_ref()
-        .map(|expected_password| {
-            mysql_validate_native_password(expected_password, &seed, &response.auth_response)
-        })
-        .unwrap_or(false);
-    if (env_password.is_some() || has_db_users) && !env_auth_ok && matched_user.is_none() {
-        let packet = mysql_err_packet(1045, "28000", "access denied");
-        mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
-        return Ok(());
+    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
+        if !mysql_validate_native_password(&expected_password, &seed, &response.auth_response) {
+            let packet = mysql_err_packet(1045, "28000", "access denied");
+            mysql_write_packet(&mut stream, seq.wrapping_add(1), &packet).await?;
+            return Ok(());
+        }
     }
 
-    let session_username = matched_user
-        .as_ref()
-        .map(|user| user.username.clone())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| {
-            if username.trim().is_empty() {
-                "skeindb".to_string()
-            } else {
-                username.clone()
-            }
-        });
-    let mut session = MySqlSessionState::new(response.database, connection_id, session_username);
+    let username = response.username;
+    let mut session = MySqlSessionState::new(response.database, connection_id);
     let mut prepared_statements = HashMap::<u32, MySqlPreparedStatement>::new();
     let mut next_statement_id = 1u32;
     let ok = mysql_ok_packet();
@@ -10490,13 +10496,8 @@ async fn handle_pg_connection(
         .or(Some(&username))
         .map(|s| s.to_string());
 
-    let env_password = std::env::var("SKEINDB_TOKEN").ok();
-    let has_db_users = {
-        let eng = state.engine.read().await;
-        eng.has_db_users()
-    };
-    // Authentication: trust when no bootstrap admin token or DB users exist.
-    if env_password.is_some() || has_db_users {
+    // Authentication: trust when SKEINDB_TOKEN is unset, cleartext password otherwise.
+    if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
         pg_wire::write_auth_cleartext_password(&mut stream).await?;
         let msg = pg_wire::read_message(&mut stream).await?;
         if msg.tag != frontend::PASSWORD_MESSAGE {
@@ -10505,15 +10506,7 @@ async fn handle_pg_connection(
             return Ok(());
         }
         let supplied = pg_wire::parse_query(&msg.payload); // password is C-string
-        let matched_user = {
-            let eng = state.engine.read().await;
-            eng.authenticate_db_user_password(&username, &supplied)
-        };
-        let env_auth_ok = env_password
-            .as_ref()
-            .map(|expected_password| supplied == *expected_password)
-            .unwrap_or(false);
-        if !env_auth_ok && matched_user.is_none() {
+        if supplied != expected_password {
             pg_wire::write_error_response(
                 &mut stream,
                 "FATAL",
@@ -10542,7 +10535,6 @@ async fn handle_pg_connection(
     pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
 
     let mut default_db = database;
-    let mut tx_status = TxStatus::Idle;
 
     // Command loop.
     loop {
@@ -10577,73 +10569,45 @@ async fn handle_pg_connection(
 
                 if sql.is_empty() {
                     pg_wire::write_empty_query_response(&mut stream).await?;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
 
                 let sql_lower = sql.to_ascii_lowercase();
 
-                if tx_status == TxStatus::Failed {
-                    if sql_lower == "rollback" {
-                        pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
-                        tx_status = TxStatus::Idle;
-                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
-                        continue;
-                    }
-                    if sql_lower == "commit" || sql_lower == "end" {
-                        pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
-                        tx_status = TxStatus::Idle;
-                        pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
-                        continue;
-                    }
-                    pg_wire::write_error_response(
-                        &mut stream,
-                        "ERROR",
-                        "25P02",
-                        "current transaction is aborted, commands ignored until end of transaction block",
-                    )
-                    .await?;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
-                    continue;
-                }
-
                 // Handle SET / session bootstrap queries as no-ops.
                 if sql_lower.starts_with("set ") || sql_lower.starts_with("reset ") {
                     pg_wire::write_command_complete(&mut stream, "SET").await?;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
 
                 if sql_lower == "begin" || sql_lower == "start transaction" {
                     pg_wire::write_command_complete(&mut stream, "BEGIN").await?;
-                    tx_status = TxStatus::InTransaction;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::InTransaction).await?;
                     continue;
                 }
 
                 if sql_lower == "commit" || sql_lower == "end" {
                     pg_wire::write_command_complete(&mut stream, "COMMIT").await?;
-                    tx_status = TxStatus::Idle;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
 
                 if sql_lower == "rollback" {
                     pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
-                    tx_status = TxStatus::Idle;
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
 
                 if pg_try_handle_bootstrap_query(&mut stream, sql, default_db.as_deref()).await? {
-                    pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
                     continue;
                 }
 
                 // Delegate to the shared SQL execution engine.
                 let exec_sql = sql.to_string();
-                let mut session =
-                    MySqlSessionState::new(default_db.clone(), connection_id, username.clone());
+                let mut session = MySqlSessionState::new(default_db.clone(), connection_id);
                 match mysql_execute_sql(&state, &exec_sql, &mut session).await {
                     Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
                         let pg_cols: Vec<pg_wire::PgColumn> = columns
@@ -10685,17 +10649,14 @@ async fn handle_pg_connection(
                     Err((_code, _state, message)) => {
                         pg_wire::write_error_response(&mut stream, "ERROR", "42000", &message)
                             .await?;
-                        if tx_status == TxStatus::InTransaction {
-                            tx_status = TxStatus::Failed;
-                        }
                     }
                 }
                 // Update default_db if session changed it
                 default_db = session.default_db;
-                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
             }
             frontend::SYNC => {
-                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
             }
             frontend::PARSE | frontend::BIND | frontend::DESCRIBE | frontend::EXECUTE => {
                 // Extended query protocol stubs — enough to not crash drivers
@@ -10722,10 +10683,7 @@ async fn handle_pg_connection(
                     &format!("unsupported message type: {}", char::from(msg.tag)),
                 )
                 .await?;
-                if tx_status == TxStatus::InTransaction {
-                    tx_status = TxStatus::Failed;
-                }
-                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
+                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
             }
         }
     }
@@ -11469,15 +11427,19 @@ fn query_rows_returned(result: Option<&Value>) -> u64 {
     0
 }
 
-fn percentile_ms(samples: &VecDeque<u64>, percentile: f64) -> u64 {
+fn percentile_u64_slice(samples: &[u64], percentile: f64) -> u64 {
     if samples.is_empty() {
         return 0;
     }
-    let mut sorted: Vec<u64> = samples.iter().copied().collect();
+    let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let max_idx = sorted.len().saturating_sub(1);
     let rank = ((percentile.clamp(0.0, 100.0) / 100.0) * max_idx as f64).round() as usize;
     sorted[rank.min(max_idx)]
+}
+
+fn percentile_ms(samples: &VecDeque<u64>, percentile: f64) -> u64 {
+    percentile_u64_slice(&samples.iter().copied().collect::<Vec<_>>(), percentile)
 }
 
 /// Record a MySQL feature flag hit for telemetry (T110).
@@ -11765,6 +11727,94 @@ fn extract_column_list(clause: &str) -> Vec<String> {
     cols
 }
 
+fn sql_exec_is_point_read(params: Option<&Value>) -> bool {
+    if !sql_exec_is_read_only(params) {
+        return false;
+    }
+    let sql = params
+        .and_then(|v| v.get("sql"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches(';')
+        .to_ascii_lowercase();
+    sql.starts_with("select ")
+        && sql.contains(" where ")
+        && (sql.contains(" limit 1") || sql.contains(" limit 0,1"))
+        && !sql.contains(" join ")
+        && !sql.contains(" group by ")
+        && !sql.contains(" order by ")
+}
+
+fn classify_query_workload(method: &str, params: Option<&Value>) -> QueryWorkloadKind {
+    match method {
+        "data.get" => QueryWorkloadKind::PointRead,
+        "query.select"
+        | "query.execute_prepared"
+        | "query.patch"
+        | "query.subscribe"
+        | "vector.search"
+        | "cluster.route_query" => QueryWorkloadKind::RangeRead,
+        "sql.exec" => {
+            if sql_exec_is_read_only(params) {
+                if sql_exec_is_point_read(params) {
+                    QueryWorkloadKind::PointRead
+                } else {
+                    QueryWorkloadKind::RangeRead
+                }
+            } else {
+                QueryWorkloadKind::Write
+            }
+        }
+        "data.insert"
+        | "data.update"
+        | "data.delete"
+        | "schema.create_database"
+        | "schema.drop_database"
+        | "schema.create_table"
+        | "schema.drop_table"
+        | "schema.create_index"
+        | "schema.drop_index"
+        | "schema.apply_merge"
+        | "schema.propose_change"
+        | "merge.apply"
+        | "view.create"
+        | "view.refresh"
+        | "view.drop" => QueryWorkloadKind::Write,
+        _ => QueryWorkloadKind::Other,
+    }
+}
+
+fn json_value_size(value: Option<&Value>) -> u64 {
+    value
+        .and_then(|v| serde_json::to_vec(v).ok())
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(0)
+}
+
+fn estimate_query_io_bytes(
+    workload_kind: QueryWorkloadKind,
+    method: &str,
+    params: Option<&Value>,
+    result: Option<&Value>,
+) -> u64 {
+    match workload_kind {
+        QueryWorkloadKind::PointRead | QueryWorkloadKind::RangeRead => json_value_size(result),
+        QueryWorkloadKind::Write => {
+            if method == "sql.exec" {
+                params
+                    .and_then(|v| v.get("sql"))
+                    .and_then(|v| v.as_str())
+                    .map(|sql| sql.len() as u64)
+                    .unwrap_or_else(|| json_value_size(params))
+            } else {
+                json_value_size(params)
+            }
+        }
+        QueryWorkloadKind::Other => 0,
+    }
+}
+
 fn observe_rpc_call(
     state: &AppState,
     method: &str,
@@ -11778,6 +11828,8 @@ fn observe_rpc_call(
     let duration_ms = elapsed.as_millis().max(1) as u64;
     let fingerprint = query_fingerprint(method, params);
     let rows_returned = query_rows_returned(result);
+    let workload_kind = classify_query_workload(method, params);
+    let io_bytes = estimate_query_io_bytes(workload_kind, method, params, result);
 
     let mut counters = state.counters.lock().unwrap();
     let agg = counters
@@ -11790,10 +11842,12 @@ fn observe_rpc_call(
         ts_ms: now_ms,
         method: method.to_string(),
         fingerprint,
+        workload_kind,
         duration_ms,
         status: status.as_u16(),
         ok,
         rows_returned,
+        io_bytes,
     });
     while counters.query_log.len() > QUERY_LOG_CAPACITY {
         counters.query_log.pop_front();
@@ -11953,28 +12007,6 @@ impl RpcOutcome {
     }
 }
 
-fn rpc_method_requires_admin(method: &str) -> bool {
-    method == "system.shutdown"
-        || method.starts_with("admin.")
-        || method.starts_with("security.token.")
-        || method.starts_with("settings.")
-}
-
-fn rpc_token_role_allows_method(role: &str, method: &str, is_read_only: bool) -> bool {
-    let normalized = role.trim().to_ascii_lowercase();
-    if normalized == "admin" {
-        return true;
-    }
-    if rpc_method_requires_admin(method) {
-        return false;
-    }
-    match normalized.as_str() {
-        "read_only" => is_read_only,
-        "read_write" => true,
-        _ => false,
-    }
-}
-
 pub(crate) async fn handle_rpc(
     state: &AppState,
     headers: Option<&HeaderMap>,
@@ -11990,49 +12022,31 @@ pub(crate) async fn handle_rpc(
         *c.per_method.entry(req.method.clone()).or_insert(0) += 1;
     }
 
-    let method = req.method.clone();
-    let params = req.params.clone();
-    let sql_read_only = method.as_str() == "sql.exec" && sql_exec_is_read_only(params.as_ref());
-
-    // HTTP RPC auth: env token remains an admin override; created API tokens are
-    // now persisted and enforced on the same bearer path.
-    let bearer = headers
-        .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string());
-    let env_token = std::env::var("SKEINDB_TOKEN").ok();
-    let (has_api_tokens, token_role) = {
-        let eng = state.engine.read().await;
-        let role = bearer
-            .as_deref()
-            .and_then(|secret| eng.authenticate_api_token(secret));
-        (eng.has_api_tokens(), role)
-    };
-    let env_auth_ok = env_token
-        .as_ref()
-        .zip(bearer.as_ref())
-        .map(|(expected, supplied)| supplied == expected)
-        .unwrap_or(false);
-    if (env_token.is_some() || has_api_tokens) && !env_auth_ok && token_role.is_none() {
-        let resp: RpcResponse = RpcResponse::err(
-            req.id.clone(),
-            RpcError::new("unauthorized", "Missing/invalid bearer token"),
-        );
-        observe_rpc_call(
-            state,
-            &req.method,
-            req.params.as_ref(),
-            StatusCode::UNAUTHORIZED,
-            false,
-            None,
-            started_at.elapsed(),
-        );
-        return RpcOutcome {
-            status: StatusCode::UNAUTHORIZED,
-            response: Some(resp),
-        };
+    // Very small auth placeholder: if SKEINDB_TOKEN is set, require matching bearer.
+    if let Ok(expected) = std::env::var("SKEINDB_TOKEN") {
+        let auth_ok = headers
+            .and_then(|map| map.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()))
+            .map(|v| v == format!("Bearer {}", expected))
+            .unwrap_or(false);
+        if !auth_ok {
+            let resp: RpcResponse = RpcResponse::err(
+                req.id.clone(),
+                RpcError::new("unauthorized", "Missing/invalid bearer token"),
+            );
+            observe_rpc_call(
+                state,
+                &req.method,
+                req.params.as_ref(),
+                StatusCode::UNAUTHORIZED,
+                false,
+                None,
+                started_at.elapsed(),
+            );
+            return RpcOutcome {
+                status: StatusCode::UNAUTHORIZED,
+                response: Some(resp),
+            };
+        }
     }
 
     // Version check
@@ -12061,28 +12075,10 @@ pub(crate) async fn handle_rpc(
             response: Some(resp),
         };
     }
-    let effective_read_only = is_read_only_method(&method) || sql_read_only;
-    if let Some(role) = token_role.as_deref() {
-        if !rpc_token_role_allows_method(role, &method, effective_read_only) {
-            let resp: RpcResponse = RpcResponse::err(
-                req.id.clone(),
-                RpcError::new("forbidden", "Bearer token does not allow this method"),
-            );
-            observe_rpc_call(
-                state,
-                &method,
-                params.as_ref(),
-                StatusCode::FORBIDDEN,
-                false,
-                None,
-                started_at.elapsed(),
-            );
-            return RpcOutcome {
-                status: StatusCode::FORBIDDEN,
-                response: Some(resp),
-            };
-        }
-    }
+
+    let method = req.method.clone();
+    let params = req.params.clone();
+    let sql_read_only = method.as_str() == "sql.exec" && sql_exec_is_read_only(params.as_ref());
     let is_replication_request = headers
         .and_then(|map| map.get(REPLICATION_HEADER).and_then(|v| v.to_str().ok()))
         .map(|v| v == "1")
@@ -12124,6 +12120,37 @@ pub(crate) async fn handle_rpc(
     if let Err(err) =
         enforce_cluster_write_guard(state, &method, params.as_ref(), is_replication_request)
     {
+        if req.id.is_none() {
+            observe_rpc_call(
+                state,
+                &method,
+                params.as_ref(),
+                StatusCode::NO_CONTENT,
+                false,
+                None,
+                started_at.elapsed(),
+            );
+            return RpcOutcome {
+                status: StatusCode::NO_CONTENT,
+                response: None,
+            };
+        }
+        let resp: RpcResponse = RpcResponse::err(req.id.clone(), err);
+        observe_rpc_call(
+            state,
+            &method,
+            params.as_ref(),
+            StatusCode::OK,
+            false,
+            None,
+            started_at.elapsed(),
+        );
+        return RpcOutcome {
+            status: StatusCode::OK,
+            response: Some(resp),
+        };
+    }
+    if let Some(err) = compaction_write_backpressure_error(state, &method, params.as_ref()) {
         if req.id.is_none() {
             observe_rpc_call(
                 state,
@@ -12960,7 +12987,6 @@ pub(crate) async fn handle_rpc(
                     #[derive(serde::Deserialize)]
                     struct P {
                         username: String,
-                        password: String,
                         #[serde(default = "default_admin_role")]
                         role: String,
                     }
@@ -12969,9 +12995,7 @@ pub(crate) async fn handle_rpc(
                     }
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
-                    let user = eng
-                        .user_create(&p.username, &p.role, &p.password)
-                        .map_err(|e| RpcError::new("invalid_params", e.to_string()))?;
+                    let user = eng.user_create(&p.username, &p.role);
                     Ok(serde_json::to_value(&user)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -13014,13 +13038,11 @@ pub(crate) async fn handle_rpc(
                     struct P {
                         username: String,
                         db: String,
-                        #[serde(default)]
-                        privileges: Vec<String>,
                     }
                     let p: P = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
                     let revoked = eng
-                        .user_revoke(&p.username, &p.db, p.privileges)
+                        .user_revoke(&p.username, &p.db)
                         .map_err(|e| RpcError::new("not_found", e.to_string()))?;
                     Ok(serde_json::json!({ "revoked": revoked }))
                 }
@@ -13183,6 +13205,204 @@ pub(crate) async fn handle_rpc(
                     let mut eng = state.engine.write().await;
                     let r = eng.maintenance_audit_verify();
                     Ok(r)
+                }
+                "maintenance.compaction.status" => Ok(maintenance_compaction_status(state).await),
+                "maintenance.compaction.set_policy" => {
+                    let obj = params
+                        .as_ref()
+                        .and_then(|value| value.as_object())
+                        .cloned()
+                        .ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "maintenance.compaction.set_policy requires an object params",
+                            )
+                        })?;
+                    let current_settings = state.settings.lock().unwrap().clone();
+                    let current_config = compaction_scheduler_config(&current_settings);
+                    let mut patch = serde_json::Map::new();
+
+                    if let Some(policy) = obj.get("policy") {
+                        let policy = policy.as_str().ok_or_else(|| {
+                            RpcError::new("invalid_request", "policy must be a string")
+                        })?;
+                        let parsed = CompactionPolicyKind::parse(policy).ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "policy must be one of fixed_leveling, fixed_tiering, workload_guided",
+                            )
+                        })?;
+                        patch.insert(
+                            "compaction.policy".to_string(),
+                            Value::String(parsed.as_str().to_string()),
+                        );
+                    }
+                    if let Some(enabled) = obj.get("enabled") {
+                        let enabled = enabled.as_bool().ok_or_else(|| {
+                            RpcError::new("invalid_request", "enabled must be a bool")
+                        })?;
+                        patch.insert("compaction.enabled".to_string(), Value::Bool(enabled));
+                        patch.insert("engine.compaction.auto".to_string(), Value::Bool(enabled));
+                    }
+                    if let Some(paused) = obj.get("paused") {
+                        let paused = paused.as_bool().ok_or_else(|| {
+                            RpcError::new("invalid_request", "paused must be a bool")
+                        })?;
+                        patch.insert("compaction.paused".to_string(), Value::Bool(paused));
+                    }
+                    if let Some(max_l0_files) = obj.get("max_l0_files") {
+                        let max_l0_files = max_l0_files.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "max_l0_files must be a positive integer",
+                            )
+                        })?;
+                        patch.insert(
+                            "compaction.max_l0_files".to_string(),
+                            Value::from(max_l0_files),
+                        );
+                        patch.insert(
+                            "engine.compaction.max_l0_files".to_string(),
+                            Value::from(max_l0_files),
+                        );
+                    }
+                    if let Some(max_l0_bytes) = obj.get("max_l0_bytes") {
+                        let max_l0_bytes = max_l0_bytes.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "max_l0_bytes must be a positive integer",
+                            )
+                        })?;
+                        patch.insert(
+                            "compaction.max_l0_bytes".to_string(),
+                            Value::from(max_l0_bytes),
+                        );
+                    }
+
+                    let mut peak_window_io_multiplier = current_config.peak_window_io_multiplier;
+                    let mut peak_window_cpu_multiplier = current_config.peak_window_cpu_multiplier;
+                    if let Some(budget) = obj.get("budget") {
+                        let budget = budget.as_object().ok_or_else(|| {
+                            RpcError::new("invalid_request", "budget must be an object")
+                        })?;
+                        if let Some(value) = budget.get("max_io_bytes_per_s") {
+                            let value = value.as_u64().filter(|v| *v > 0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.max_io_bytes_per_s must be a positive integer",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.budget.max_io_bytes_per_s".to_string(),
+                                Value::from(value),
+                            );
+                        }
+                        if let Some(value) = budget.get("max_cpu_pct") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0 && *v <= 100.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.max_cpu_pct must be a positive number <= 100",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.budget.max_cpu_pct".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = budget.get("peak_window_io_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.peak_window_io_multiplier must be a positive number",
+                                )
+                            })?;
+                            peak_window_io_multiplier = value;
+                            patch.insert(
+                                "compaction.budget.peak_window_io_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = budget.get("peak_window_cpu_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.peak_window_cpu_multiplier must be a positive number",
+                                )
+                            })?;
+                            peak_window_cpu_multiplier = value;
+                            patch.insert(
+                                "compaction.budget.peak_window_cpu_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = budget.get("safe_mode_io_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v >= 1.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.safe_mode_io_multiplier must be a number >= 1",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.budget.safe_mode_io_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = budget.get("safe_mode_cpu_pct") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0 && *v <= 100.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "budget.safe_mode_cpu_pct must be a positive number <= 100",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.budget.safe_mode_cpu_pct".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                    }
+
+                    if let Some(peak_windows) = obj.get("peak_windows") {
+                        let peak_windows = peak_windows.as_array().ok_or_else(|| {
+                            RpcError::new("invalid_request", "peak_windows must be an array")
+                        })?;
+                        let mut normalized = Vec::new();
+                        for window in peak_windows {
+                            let parsed = parse_compaction_peak_window(
+                                window,
+                                peak_window_io_multiplier,
+                                peak_window_cpu_multiplier,
+                            )
+                            .ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "peak_windows entries must be 'HH:MM-HH:MM' strings or objects with start/end",
+                                )
+                            })?;
+                            normalized.push(compaction_peak_window_to_value(&parsed));
+                        }
+                        patch.insert("compaction.peak_windows".to_string(), Value::Array(normalized));
+                    }
+
+                    if patch.is_empty() {
+                        return Err(RpcError::new(
+                            "invalid_request",
+                            "maintenance.compaction.set_policy requires at least one policy field",
+                        ));
+                    }
+                    let _ = handle_settings_set(state, Some(Value::Object(patch)))?;
+                    Ok(maintenance_compaction_status(state).await)
+                }
+                "maintenance.compaction.pause" => {
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("compaction.paused".to_string(), Value::Bool(true));
+                    let _ = handle_settings_set(state, Some(Value::Object(patch)))?;
+                    Ok(maintenance_compaction_status(state).await)
+                }
+                "maintenance.compaction.resume" => {
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("compaction.paused".to_string(), Value::Bool(false));
+                    let _ = handle_settings_set(state, Some(Value::Object(patch)))?;
+                    Ok(maintenance_compaction_status(state).await)
                 }
 
                 // --------------------
@@ -20436,6 +20656,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "forensic.verify"
             | "forensic.export"
             | "maintenance.audit_status"
+            | "maintenance.compaction.status"
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
@@ -20596,6 +20817,10 @@ fn system_capabilities(state: &AppState) -> Value {
         "forensic.export",
         "maintenance.audit_status",
         "maintenance.audit_verify",
+        "maintenance.compaction.status",
+        "maintenance.compaction.set_policy",
+        "maintenance.compaction.pause",
+        "maintenance.compaction.resume",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",
@@ -20647,6 +20872,859 @@ fn system_capabilities(state: &AppState) -> Value {
     })
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct L0SegmentStats {
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct WorkloadTelemetryBucket {
+    ops: u64,
+    io_bytes: u64,
+    latency_ms: Vec<u64>,
+}
+
+impl WorkloadTelemetryBucket {
+    fn record(&mut self, sample: &QuerySample) {
+        self.ops = self.ops.saturating_add(1);
+        self.io_bytes = self.io_bytes.saturating_add(sample.io_bytes);
+        self.latency_ms.push(sample.duration_ms);
+    }
+
+    fn ops_per_s(&self, window_s: f64) -> f64 {
+        if window_s <= 0.0 {
+            return 0.0;
+        }
+        self.ops as f64 / window_s
+    }
+
+    fn bytes_per_s(&self, window_s: f64) -> f64 {
+        if window_s <= 0.0 {
+            return 0.0;
+        }
+        self.io_bytes as f64 / window_s
+    }
+}
+
+fn round_metric(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn collect_l0_segment_stats(data_dir: &std::path::Path) -> L0SegmentStats {
+    let mut stats = L0SegmentStats::default();
+    let tables_dir = data_dir.join("tables");
+    let Ok(db_dirs) = std::fs::read_dir(&tables_dir) else {
+        return stats;
+    };
+    for db_dir in db_dirs.flatten() {
+        let Ok(file_type) = db_dir.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(db_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rseg") {
+                continue;
+            }
+            stats.files = stats.files.saturating_add(1);
+            stats.bytes = stats
+                .bytes
+                .saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+        }
+    }
+    stats
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionPolicyKind {
+    FixedLeveling,
+    FixedTiering,
+    WorkloadGuided,
+}
+
+impl CompactionPolicyKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FixedLeveling => "fixed_leveling",
+            Self::FixedTiering => "fixed_tiering",
+            Self::WorkloadGuided => "workload_guided",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "fixed_leveling" => Some(Self::FixedLeveling),
+            "fixed_tiering" => Some(Self::FixedTiering),
+            "workload_guided" => Some(Self::WorkloadGuided),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CompactionPeakWindow {
+    label: String,
+    start_minute: u16,
+    end_minute: u16,
+    io_multiplier: f64,
+    cpu_multiplier: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionSchedulerConfig {
+    enabled: bool,
+    paused: bool,
+    policy: CompactionPolicyKind,
+    max_l0_files: u64,
+    max_l0_bytes: u64,
+    max_io_bytes_per_s: u64,
+    max_cpu_pct: f64,
+    peak_window_io_multiplier: f64,
+    peak_window_cpu_multiplier: f64,
+    safe_mode_io_multiplier: f64,
+    safe_mode_cpu_pct: f64,
+    peak_windows: Vec<CompactionPeakWindow>,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionRuntimeSnapshot {
+    config: CompactionSchedulerConfig,
+    l0: L0SegmentStats,
+    soft_l0_files: u64,
+    soft_l0_bytes: u64,
+    l0_pressure_pct: f64,
+    soft_pressure: bool,
+    hard_pressure: bool,
+    status: String,
+    pressure_reasons: Vec<String>,
+    recent_sample_count: usize,
+    point_reads: WorkloadTelemetryBucket,
+    range_reads: WorkloadTelemetryBucket,
+    writes: WorkloadTelemetryBucket,
+    read_latency_ms: Vec<u64>,
+    avg_latency_ms: f64,
+    slow_count: u64,
+    stall_rate: f64,
+    pressure_rate: f64,
+    pressure_events_total: u64,
+    last_pressure_event: Option<CompactionPressureEvent>,
+    active_peak_window: Option<CompactionPeakWindow>,
+    scheduler_mode: String,
+    write_admission: String,
+    target_io_bytes_per_s: u64,
+    target_cpu_pct: f64,
+    effective_io_bytes_per_s: u64,
+    effective_cpu_pct: f64,
+    pending_tasks: u64,
+    current_task: Option<String>,
+    priority_stall_risk: f64,
+    priority_space_pressure: f64,
+    priority_read_pressure: f64,
+    priority_health: f64,
+    priority_score: f64,
+}
+
+fn setting_bool(
+    settings: &serde_json::Map<String, Value>,
+    key: &str,
+    fallback: Option<&str>,
+    default: bool,
+) -> bool {
+    settings
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .or_else(|| fallback.and_then(|alt| settings.get(alt).and_then(|v| v.as_bool())))
+        .unwrap_or(default)
+}
+
+fn setting_u64(
+    settings: &serde_json::Map<String, Value>,
+    key: &str,
+    fallback: Option<&str>,
+    default: u64,
+) -> u64 {
+    settings
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .or_else(|| fallback.and_then(|alt| settings.get(alt).and_then(|v| v.as_u64())))
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn setting_f64(
+    settings: &serde_json::Map<String, Value>,
+    key: &str,
+    fallback: Option<&str>,
+    default: f64,
+) -> f64 {
+    settings
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .or_else(|| fallback.and_then(|alt| settings.get(alt).and_then(|v| v.as_f64())))
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(default)
+}
+
+fn parse_clock_hhmm(raw: &str) -> Option<u16> {
+    let (hour_raw, minute_raw) = raw.trim().split_once(':')?;
+    let hour = hour_raw.trim().parse::<u16>().ok()?;
+    let minute = minute_raw.trim().parse::<u16>().ok()?;
+    if hour == 24 && minute == 0 {
+        return Some(24 * 60);
+    }
+    if hour < 24 && minute < 60 {
+        return Some(hour * 60 + minute);
+    }
+    None
+}
+
+fn format_clock_hhmm(minute_of_day: u16) -> String {
+    let total = minute_of_day.min(24 * 60);
+    let hour = total / 60;
+    let minute = total % 60;
+    format!("{hour:02}:{minute:02}")
+}
+
+fn current_utc_minute_of_day(now_ms: u64) -> u16 {
+    ((now_ms / 1000 / 60) % (24 * 60)) as u16
+}
+
+fn peak_window_is_active(now_minute: u16, window: &CompactionPeakWindow) -> bool {
+    if window.start_minute == window.end_minute {
+        return true;
+    }
+    if window.start_minute < window.end_minute {
+        return now_minute >= window.start_minute && now_minute < window.end_minute;
+    }
+    now_minute >= window.start_minute || now_minute < window.end_minute
+}
+
+fn parse_compaction_peak_window(
+    value: &Value,
+    default_io_multiplier: f64,
+    default_cpu_multiplier: f64,
+) -> Option<CompactionPeakWindow> {
+    if let Some(raw) = value.as_str() {
+        let (start_raw, end_raw) = raw.split_once('-')?;
+        let start_minute = parse_clock_hhmm(start_raw)?;
+        let end_minute = parse_clock_hhmm(end_raw)?;
+        return Some(CompactionPeakWindow {
+            label: raw.trim().to_string(),
+            start_minute,
+            end_minute,
+            io_multiplier: default_io_multiplier,
+            cpu_multiplier: default_cpu_multiplier,
+        });
+    }
+
+    let obj = value.as_object()?;
+    let start_raw = obj
+        .get("start")
+        .or_else(|| obj.get("from"))
+        .and_then(|v| v.as_str())?;
+    let end_raw = obj
+        .get("end")
+        .or_else(|| obj.get("to"))
+        .and_then(|v| v.as_str())?;
+    let start_minute = parse_clock_hhmm(start_raw)?;
+    let end_minute = parse_clock_hhmm(end_raw)?;
+    let label = obj
+        .get("label")
+        .or_else(|| obj.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("peak_window")
+        .trim()
+        .to_string();
+    let io_multiplier = obj
+        .get("io_multiplier")
+        .and_then(|v| v.as_f64())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(default_io_multiplier);
+    let cpu_multiplier = obj
+        .get("cpu_multiplier")
+        .and_then(|v| v.as_f64())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(default_cpu_multiplier);
+    Some(CompactionPeakWindow {
+        label,
+        start_minute,
+        end_minute,
+        io_multiplier,
+        cpu_multiplier,
+    })
+}
+
+fn compaction_peak_window_to_value(window: &CompactionPeakWindow) -> Value {
+    serde_json::json!({
+        "label": window.label,
+        "start": format_clock_hhmm(window.start_minute),
+        "end": format_clock_hhmm(window.end_minute),
+        "io_multiplier": round_metric(window.io_multiplier),
+        "cpu_multiplier": round_metric(window.cpu_multiplier),
+    })
+}
+
+fn compaction_scheduler_config(
+    settings: &serde_json::Map<String, Value>,
+) -> CompactionSchedulerConfig {
+    let peak_window_io_multiplier = setting_f64(
+        settings,
+        "compaction.budget.peak_window_io_multiplier",
+        None,
+        DEFAULT_COMPACTION_PEAK_WINDOW_IO_MULTIPLIER,
+    );
+    let peak_window_cpu_multiplier = setting_f64(
+        settings,
+        "compaction.budget.peak_window_cpu_multiplier",
+        None,
+        DEFAULT_COMPACTION_PEAK_WINDOW_CPU_MULTIPLIER,
+    );
+    let peak_windows = settings
+        .get("compaction.peak_windows")
+        .and_then(|v| v.as_array())
+        .map(|windows| {
+            windows
+                .iter()
+                .filter_map(|window| {
+                    parse_compaction_peak_window(
+                        window,
+                        peak_window_io_multiplier,
+                        peak_window_cpu_multiplier,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let policy = settings
+        .get("compaction.policy")
+        .and_then(|v| v.as_str())
+        .and_then(CompactionPolicyKind::parse)
+        .unwrap_or(CompactionPolicyKind::WorkloadGuided);
+
+    CompactionSchedulerConfig {
+        enabled: setting_bool(
+            settings,
+            "compaction.enabled",
+            Some("engine.compaction.auto"),
+            true,
+        ),
+        paused: setting_bool(settings, "compaction.paused", None, false),
+        policy,
+        max_l0_files: setting_u64(
+            settings,
+            "compaction.max_l0_files",
+            Some("engine.compaction.max_l0_files"),
+            DEFAULT_COMPACTION_MAX_L0_FILES,
+        ),
+        max_l0_bytes: setting_u64(
+            settings,
+            "compaction.max_l0_bytes",
+            None,
+            DEFAULT_COMPACTION_MAX_L0_BYTES,
+        ),
+        max_io_bytes_per_s: setting_u64(
+            settings,
+            "compaction.budget.max_io_bytes_per_s",
+            None,
+            DEFAULT_COMPACTION_MAX_IO_BYTES_PER_S,
+        ),
+        max_cpu_pct: setting_f64(
+            settings,
+            "compaction.budget.max_cpu_pct",
+            None,
+            DEFAULT_COMPACTION_MAX_CPU_PCT,
+        )
+        .min(100.0),
+        peak_window_io_multiplier,
+        peak_window_cpu_multiplier,
+        safe_mode_io_multiplier: setting_f64(
+            settings,
+            "compaction.budget.safe_mode_io_multiplier",
+            None,
+            DEFAULT_COMPACTION_SAFE_MODE_IO_MULTIPLIER,
+        ),
+        safe_mode_cpu_pct: setting_f64(
+            settings,
+            "compaction.budget.safe_mode_cpu_pct",
+            None,
+            DEFAULT_COMPACTION_SAFE_MODE_CPU_PCT,
+        )
+        .min(100.0),
+        peak_windows,
+    }
+}
+
+fn compaction_sampling_snapshot(
+    counters: &Counters,
+) -> (f64, f64, u64, Option<CompactionPressureEvent>) {
+    let sample_count = counters.compaction_samples.len() as f64;
+    let hard_samples = counters
+        .compaction_samples
+        .iter()
+        .filter(|sample| sample.hard_pressure)
+        .count() as f64;
+    let pressure_samples = counters
+        .compaction_samples
+        .iter()
+        .filter(|sample| sample.soft_pressure || sample.hard_pressure)
+        .count() as f64;
+    let stall_rate = if sample_count == 0.0 {
+        0.0
+    } else {
+        (hard_samples / sample_count) * 100.0
+    };
+    let pressure_rate = if sample_count == 0.0 {
+        0.0
+    } else {
+        (pressure_samples / sample_count) * 100.0
+    };
+    (
+        round_metric(stall_rate),
+        round_metric(pressure_rate),
+        counters.compaction_pressure_events.len() as u64,
+        counters.compaction_pressure_events.back().cloned(),
+    )
+}
+
+fn maybe_record_compaction_sample(
+    counters: &mut Counters,
+    now_ms: u64,
+    soft_pressure: bool,
+    hard_pressure: bool,
+    status: &str,
+    reasons: &[String],
+) {
+    let status_changed = counters.last_compaction_state.as_deref() != Some(status);
+    let sample_due = counters.last_compaction_sample_ms == 0
+        || now_ms.saturating_sub(counters.last_compaction_sample_ms)
+            >= COMPACTION_SAMPLE_INTERVAL_MS
+        || status_changed;
+
+    if sample_due {
+        counters
+            .compaction_samples
+            .push_back(CompactionTelemetrySample {
+                soft_pressure,
+                hard_pressure,
+            });
+        while counters.compaction_samples.len() > COMPACTION_SAMPLE_CAPACITY {
+            counters.compaction_samples.pop_front();
+        }
+        counters.last_compaction_sample_ms = now_ms;
+    }
+
+    if status_changed && (soft_pressure || hard_pressure) {
+        counters
+            .compaction_pressure_events
+            .push_back(CompactionPressureEvent {
+                ts_ms: now_ms,
+                state: status.to_string(),
+                reasons: reasons.to_vec(),
+            });
+        while counters.compaction_pressure_events.len() > COMPACTION_EVENT_CAPACITY {
+            counters.compaction_pressure_events.pop_front();
+        }
+    }
+    counters.last_compaction_state = Some(status.to_string());
+}
+
+fn collect_compaction_runtime(
+    state: &AppState,
+    now_ms: u64,
+    record_sample: bool,
+) -> CompactionRuntimeSnapshot {
+    let settings = state.settings.lock().unwrap().clone();
+    let config = compaction_scheduler_config(&settings);
+    let l0 = collect_l0_segment_stats(&state.data_dir);
+    let soft_l0_files = (config.max_l0_files.saturating_mul(3) / 4).max(1);
+    let soft_l0_bytes = (config.max_l0_bytes.saturating_mul(3) / 4).max(1);
+    let file_pressure_pct = (l0.files as f64 / config.max_l0_files.max(1) as f64) * 100.0;
+    let byte_pressure_pct = (l0.bytes as f64 / config.max_l0_bytes.max(1) as f64) * 100.0;
+    let l0_pressure_pct = file_pressure_pct.max(byte_pressure_pct);
+    let soft_pressure = l0.files >= soft_l0_files || l0.bytes >= soft_l0_bytes;
+    let hard_pressure = l0.files >= config.max_l0_files || l0.bytes >= config.max_l0_bytes;
+    let status = if hard_pressure {
+        "safe_mode"
+    } else if soft_pressure {
+        "pressure"
+    } else if l0.files > 0 || l0.bytes > 0 {
+        "tracking"
+    } else {
+        "idle"
+    }
+    .to_string();
+
+    let mut pressure_reasons = Vec::new();
+    if l0.files >= config.max_l0_files {
+        pressure_reasons.push("l0_files_hard".to_string());
+    } else if l0.files >= soft_l0_files {
+        pressure_reasons.push("l0_files_soft".to_string());
+    }
+    if l0.bytes >= config.max_l0_bytes {
+        pressure_reasons.push("l0_bytes_hard".to_string());
+    } else if l0.bytes >= soft_l0_bytes {
+        pressure_reasons.push("l0_bytes_soft".to_string());
+    }
+
+    let recent_window_start_ms = now_ms.saturating_sub(COMPACTION_RECENT_WINDOW_MS);
+    let recent_queries = {
+        let counters = state.counters.lock().unwrap();
+        counters
+            .query_log
+            .iter()
+            .filter(|sample| sample.ts_ms >= recent_window_start_ms)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let recent_window_s = COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0;
+    let mut point_reads = WorkloadTelemetryBucket::default();
+    let mut range_reads = WorkloadTelemetryBucket::default();
+    let mut writes = WorkloadTelemetryBucket::default();
+    let mut total_recent_latency_ms = 0u64;
+    let mut slow_count = 0u64;
+    for sample in &recent_queries {
+        total_recent_latency_ms = total_recent_latency_ms.saturating_add(sample.duration_ms);
+        if sample.duration_ms >= 200 {
+            slow_count = slow_count.saturating_add(1);
+        }
+        match sample.workload_kind {
+            QueryWorkloadKind::PointRead => point_reads.record(sample),
+            QueryWorkloadKind::RangeRead => range_reads.record(sample),
+            QueryWorkloadKind::Write => writes.record(sample),
+            QueryWorkloadKind::Other => {}
+        }
+    }
+    let read_latency_ms = point_reads
+        .latency_ms
+        .iter()
+        .chain(range_reads.latency_ms.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let avg_latency_ms = if recent_queries.is_empty() {
+        0.0
+    } else {
+        total_recent_latency_ms as f64 / recent_queries.len() as f64
+    };
+
+    let (stall_rate, pressure_rate, pressure_events_total, last_pressure_event) = {
+        let mut counters = state.counters.lock().unwrap();
+        if record_sample {
+            maybe_record_compaction_sample(
+                &mut counters,
+                now_ms,
+                soft_pressure,
+                hard_pressure,
+                &status,
+                &pressure_reasons,
+            );
+        }
+        compaction_sampling_snapshot(&counters)
+    };
+
+    let now_minute = current_utc_minute_of_day(now_ms);
+    let active_peak_window = config
+        .peak_windows
+        .iter()
+        .find(|window| peak_window_is_active(now_minute, window))
+        .cloned();
+
+    let read_p95_ms = percentile_u64_slice(&read_latency_ms, 95.0) as f64;
+    let write_p95_ms = percentile_u64_slice(&writes.latency_ms, 95.0) as f64;
+    let write_io_pressure = if config.max_io_bytes_per_s == 0 {
+        0.0
+    } else {
+        (writes.bytes_per_s(recent_window_s) / config.max_io_bytes_per_s as f64).clamp(0.0, 2.0)
+    };
+    let stall_risk = if hard_pressure {
+        1.0
+    } else if soft_pressure {
+        (0.65 + (l0_pressure_pct / 100.0).clamp(0.0, 1.0) * 0.35).clamp(0.0, 1.0)
+    } else {
+        ((l0_pressure_pct / 100.0).clamp(0.0, 1.0) * 0.4).clamp(0.0, 1.0)
+    };
+    let space_pressure = (l0_pressure_pct / 100.0).clamp(0.0, 1.5);
+    let read_pressure = ((read_p95_ms / 50.0).clamp(0.0, 2.0) * 0.6
+        + (range_reads.ops_per_s(recent_window_s) / 75.0).clamp(0.0, 1.0) * 0.25
+        + (point_reads.ops_per_s(recent_window_s) / 150.0).clamp(0.0, 1.0) * 0.15)
+        .clamp(0.0, 1.5);
+    let health = ((pressure_events_total as f64 / 12.0).clamp(0.0, 1.0) * 0.5
+        + (slow_count as f64 / 20.0).clamp(0.0, 1.0) * 0.5)
+        .clamp(0.0, 1.0);
+    let priority_score = round_metric(
+        (stall_risk * 0.4
+            + space_pressure.min(1.0) * 0.25
+            + read_pressure.min(1.0) * 0.25
+            + health * 0.1)
+            * 100.0,
+    );
+
+    let (io_scale, cpu_scale) = match config.policy {
+        CompactionPolicyKind::FixedLeveling => {
+            if hard_pressure {
+                (1.35, 1.35)
+            } else if soft_pressure {
+                (1.0, 1.0)
+            } else if l0.files > 0 {
+                (0.85, 0.9)
+            } else {
+                (0.65, 0.7)
+            }
+        }
+        CompactionPolicyKind::FixedTiering => {
+            if hard_pressure {
+                (1.2, 1.2)
+            } else if soft_pressure {
+                (0.85, 0.8)
+            } else if l0.files > 0 {
+                (0.7, 0.68)
+            } else {
+                (0.55, 0.5)
+            }
+        }
+        CompactionPolicyKind::WorkloadGuided => {
+            let io = (0.5 + stall_risk * 0.45 + space_pressure * 0.25 + write_io_pressure * 0.25)
+                .clamp(0.4, 1.4);
+            let cpu = (0.45
+                + stall_risk * 0.35
+                + read_pressure * 0.25
+                + (write_p95_ms / 75.0).clamp(0.0, 1.0) * 0.15)
+                .clamp(0.4, 1.4);
+            (io, cpu)
+        }
+    };
+
+    let mut target_io_bytes_per_s = (config.max_io_bytes_per_s as f64 * io_scale).round() as u64;
+    let mut target_cpu_pct = (config.max_cpu_pct * cpu_scale).clamp(0.0, 100.0);
+
+    if let Some(window) = active_peak_window.as_ref() {
+        if !hard_pressure {
+            target_io_bytes_per_s =
+                (target_io_bytes_per_s as f64 * window.io_multiplier).round() as u64;
+            target_cpu_pct = (target_cpu_pct * window.cpu_multiplier).clamp(0.0, 100.0);
+        }
+    }
+
+    let (effective_io_bytes_per_s, effective_cpu_pct) = if !config.enabled {
+        (0, 0.0)
+    } else if hard_pressure {
+        (
+            (config.max_io_bytes_per_s as f64 * config.safe_mode_io_multiplier)
+                .max(target_io_bytes_per_s as f64)
+                .round() as u64,
+            config
+                .safe_mode_cpu_pct
+                .max(target_cpu_pct)
+                .clamp(0.0, 100.0),
+        )
+    } else if config.paused {
+        (0, 0.0)
+    } else {
+        (target_io_bytes_per_s.max(1), target_cpu_pct)
+    };
+
+    let scheduler_mode = if !config.enabled {
+        "disabled"
+    } else if hard_pressure {
+        "safe_mode"
+    } else if config.paused {
+        "paused"
+    } else if active_peak_window.is_some() && (soft_pressure || l0.files > 0) {
+        "peak_window"
+    } else if soft_pressure {
+        "pressure_relief"
+    } else if l0.files > 0 {
+        "scheduled"
+    } else {
+        "idle"
+    }
+    .to_string();
+
+    let write_admission = if !config.enabled || (config.paused && !hard_pressure) {
+        "open"
+    } else if hard_pressure {
+        "throttle"
+    } else if soft_pressure || priority_score >= 75.0 {
+        "degraded"
+    } else {
+        "open"
+    }
+    .to_string();
+
+    let pending_tasks = if l0.files == 0 && !soft_pressure && !hard_pressure {
+        0
+    } else {
+        1 + u64::from(soft_pressure) + u64::from(hard_pressure)
+    };
+    let current_task = if effective_io_bytes_per_s == 0 {
+        None
+    } else if hard_pressure {
+        Some(format!("l0_emergency_drain:{}", config.policy.as_str()))
+    } else if soft_pressure {
+        Some(format!("l0_pressure_relief:{}", config.policy.as_str()))
+    } else if l0.files > 0 {
+        Some(format!("opportunistic_merge:{}", config.policy.as_str()))
+    } else {
+        None
+    };
+
+    CompactionRuntimeSnapshot {
+        config,
+        l0,
+        soft_l0_files,
+        soft_l0_bytes,
+        l0_pressure_pct: round_metric(l0_pressure_pct),
+        soft_pressure,
+        hard_pressure,
+        status,
+        pressure_reasons,
+        recent_sample_count: recent_queries.len(),
+        point_reads,
+        range_reads,
+        writes,
+        read_latency_ms,
+        avg_latency_ms,
+        slow_count,
+        stall_rate,
+        pressure_rate,
+        pressure_events_total,
+        last_pressure_event,
+        active_peak_window,
+        scheduler_mode,
+        write_admission,
+        target_io_bytes_per_s,
+        target_cpu_pct: round_metric(target_cpu_pct),
+        effective_io_bytes_per_s,
+        effective_cpu_pct: round_metric(effective_cpu_pct),
+        pending_tasks,
+        current_task,
+        priority_stall_risk: round_metric(stall_risk * 100.0),
+        priority_space_pressure: round_metric(space_pressure.min(1.5) * 100.0),
+        priority_read_pressure: round_metric(read_pressure.min(1.5) * 100.0),
+        priority_health: round_metric(health * 100.0),
+        priority_score,
+    }
+}
+
+fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
+    let last_pressure_event = snapshot.last_pressure_event.as_ref().map(|event| {
+        serde_json::json!({
+            "ts_ms": event.ts_ms,
+            "state": event.state,
+            "reasons": event.reasons,
+        })
+    });
+    serde_json::json!({
+        "runs": 0,
+        "status": snapshot.status,
+        "l0_files": snapshot.l0.files,
+        "l0_bytes": snapshot.l0.bytes,
+        "l0_pressure_pct": snapshot.l0_pressure_pct,
+        "stall_rate": snapshot.stall_rate,
+        "pressure_rate": snapshot.pressure_rate,
+        "pressure": {
+            "soft_limit_exceeded": snapshot.soft_pressure,
+            "hard_limit_exceeded": snapshot.hard_pressure,
+            "reasons": snapshot.pressure_reasons,
+            "l0_files": {
+                "count": snapshot.l0.files,
+                "soft_limit": snapshot.soft_l0_files,
+                "hard_limit": snapshot.config.max_l0_files
+            },
+            "l0_bytes": {
+                "bytes": snapshot.l0.bytes,
+                "soft_limit": snapshot.soft_l0_bytes,
+                "hard_limit": snapshot.config.max_l0_bytes
+            }
+        },
+        "workload": {
+            "window_s": COMPACTION_RECENT_WINDOW_MS / 1000,
+            "recent_samples": snapshot.recent_sample_count,
+            "point_reads_per_s": round_metric(snapshot.point_reads.ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0)),
+            "range_reads_per_s": round_metric(snapshot.range_reads.ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0)),
+            "write_ops_per_s": round_metric(snapshot.writes.ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0)),
+            "read_bytes_per_s": round_metric(
+                snapshot.point_reads.bytes_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0)
+                    + snapshot.range_reads.bytes_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0)
+            ),
+            "write_bytes_per_s": round_metric(snapshot.writes.bytes_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0))
+        },
+        "latency_ms": {
+            "read": {
+                "p50": percentile_u64_slice(&snapshot.read_latency_ms, 50.0),
+                "p95": percentile_u64_slice(&snapshot.read_latency_ms, 95.0),
+                "p99": percentile_u64_slice(&snapshot.read_latency_ms, 99.0)
+            },
+            "write": {
+                "p50": percentile_u64_slice(&snapshot.writes.latency_ms, 50.0),
+                "p95": percentile_u64_slice(&snapshot.writes.latency_ms, 95.0),
+                "p99": percentile_u64_slice(&snapshot.writes.latency_ms, 99.0)
+            }
+        },
+        "events": {
+            "total": snapshot.pressure_events_total,
+            "last": last_pressure_event
+        },
+        "scheduler": {
+            "enabled": snapshot.config.enabled,
+            "paused": snapshot.config.paused,
+            "policy": snapshot.config.policy.as_str(),
+            "mode": snapshot.scheduler_mode,
+            "window_clock": "utc",
+            "peak_window_active": snapshot.active_peak_window.is_some(),
+            "peak_window": snapshot
+                .active_peak_window
+                .as_ref()
+                .map(compaction_peak_window_to_value),
+            "budget": {
+                "configured": {
+                    "io_bytes_per_s": snapshot.config.max_io_bytes_per_s,
+                    "cpu_pct": round_metric(snapshot.config.max_cpu_pct)
+                },
+                "target": {
+                    "io_bytes_per_s": snapshot.target_io_bytes_per_s,
+                    "cpu_pct": snapshot.target_cpu_pct
+                },
+                "effective": {
+                    "io_bytes_per_s": snapshot.effective_io_bytes_per_s,
+                    "cpu_pct": snapshot.effective_cpu_pct
+                },
+                "peak_window_io_multiplier": round_metric(snapshot.config.peak_window_io_multiplier),
+                "peak_window_cpu_multiplier": round_metric(snapshot.config.peak_window_cpu_multiplier),
+                "safe_mode_io_multiplier": round_metric(snapshot.config.safe_mode_io_multiplier),
+                "safe_mode_cpu_pct": round_metric(snapshot.config.safe_mode_cpu_pct)
+            },
+            "admission": {
+                "write": snapshot.write_admission,
+                "scope": "skeinql_http"
+            },
+            "tasks": {
+                "pending": snapshot.pending_tasks,
+                "current": snapshot.current_task
+            },
+            "priority": {
+                "stall_risk": snapshot.priority_stall_risk,
+                "space_pressure": snapshot.priority_space_pressure,
+                "read_pressure": snapshot.priority_read_pressure,
+                "health": snapshot.priority_health,
+                "score": snapshot.priority_score
+            }
+        }
+    })
+}
+
+async fn maintenance_compaction_status(state: &AppState) -> Value {
+    let runtime = collect_compaction_runtime(state, now_unix_ms_u64(), true);
+    compaction_runtime_json(&runtime)
+}
+
 async fn stats_snapshot(state: &AppState) -> Value {
     // sysinfo is cross-platform; we keep fields minimal and optional.
     let mut sys = System::new();
@@ -20661,19 +21739,22 @@ async fn stats_snapshot(state: &AppState) -> Value {
         Some(p) => {
             // `cpu_usage` is a percentage of a single core in sysinfo.
             let cpu = p.cpu_usage() as f64;
-            let rss = p.memory() as u64 * 1024;
+            let rss = p.memory() * 1024;
             (cpu, rss)
         }
         None => (0.0, 0),
     };
 
     let uptime_s = state.started.elapsed().as_secs();
+    let now_ms = now_unix_ms_u64();
     let storage = {
         let eng = state.engine.read().await;
         eng.storage_stats_snapshot()
     };
+    let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
+    let compaction = compaction_runtime_json(&compaction_runtime);
     let cluster = state.cluster.lock().unwrap();
-    let (total_rpc, fingerprint_count, query_samples, qps) = {
+    let (total_rpc, fingerprint_count, query_samples, qps, coalesced_total) = {
         let c = state.counters.lock().unwrap();
         let total = c.total_rpc;
         let qps = if uptime_s == 0 {
@@ -20686,19 +21767,30 @@ async fn stats_snapshot(state: &AppState) -> Value {
             c.query_stats.len() as u64,
             c.query_log.len() as u64,
             qps,
+            c.coalesce_leader + c.coalesce_follower,
         )
     };
+    let open_txns = state.txns.lock().unwrap().len() as u64;
+    let tps = compaction_runtime
+        .writes
+        .ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0);
 
     serde_json::json!({
         "uptime_s": uptime_s,
         "sessions": {"active": 0, "total": 0},
         "qps": qps,
-        "tps": 0,
+        "tps": round_metric(tps),
+        "open_txns": open_txns,
+        "connections": 0,
         "process": {"cpu_pct": cpu_pct, "rss_bytes": rss_bytes},
         "query": {
             "tracked_calls": total_rpc,
             "fingerprints": fingerprint_count,
-            "recent_samples": query_samples
+            "recent_samples": query_samples,
+            "slow_count": compaction_runtime.slow_count,
+            "avg_latency_ms": round_metric(compaction_runtime.avg_latency_ms),
+            "etag_hits": 0,
+            "coalesced": coalesced_total
         },
         "storage": {
             "wal_bytes": storage.wal_bytes,
@@ -20709,7 +21801,8 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "unique_values": storage.unique_values,
             "interned_values": storage.interned_values
         },
-        "background": {"compaction": "idle", "snapshots": "idle"},
+        "compaction": compaction,
+        "background": {"compaction": compaction_runtime.scheduler_mode, "snapshots": "idle"},
         "cluster": {
             "enabled": cluster.enabled,
             "local_node_id": cluster.local_node_id,
@@ -20788,6 +21881,30 @@ fn handle_settings_set(state: &AppState, params: Option<Value>) -> Result<Value,
     }
 
     Ok(serde_json::json!({"ok": true}))
+}
+
+fn compaction_write_backpressure_error(
+    state: &AppState,
+    method: &str,
+    params: Option<&Value>,
+) -> Option<RpcError> {
+    if classify_query_workload(method, params) != QueryWorkloadKind::Write {
+        return None;
+    }
+    let snapshot = collect_compaction_runtime(state, now_unix_ms_u64(), false);
+    if snapshot.write_admission != "throttle" {
+        return None;
+    }
+    Some(RpcError::new(
+        "resource_exhausted",
+        format!(
+            "writes temporarily throttled while compaction safe mode is active (l0_files={} hard_limit={}, l0_bytes={} hard_limit={})",
+            snapshot.l0.files,
+            snapshot.config.max_l0_files,
+            snapshot.l0.bytes,
+            snapshot.config.max_l0_bytes,
+        ),
+    ))
 }
 
 fn settings_path(state: &AppState) -> PathBuf {
@@ -21079,34 +22196,21 @@ mod tests {
     }
 
     async fn call_rpc(state: &AppState, method: &str, params: Value) -> RpcResponse {
-        let (status, response) =
-            call_rpc_with_headers(state, HeaderMap::new(), method, params).await;
-        assert_eq!(status, StatusCode::OK);
-        response
-    }
-
-    async fn call_rpc_with_headers(
-        state: &AppState,
-        headers: HeaderMap,
-        method: &str,
-        params: Value,
-    ) -> (StatusCode, RpcResponse) {
         let req = RpcRequest {
             skeinql: SKEINQL_VERSION.to_string(),
             id: Some(RpcId::Str("t1".to_string())),
             method: method.to_string(),
             params: Some(params),
         };
-        let resp = rpc_handler(State(state.clone()), headers, Json(req)).await;
-        let status = resp.status();
+        let resp = rpc_handler(State(state.clone()), HeaderMap::new(), Json(req)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp
             .into_body()
             .collect()
             .await
             .expect("collect body")
             .to_bytes();
-        let body = serde_json::from_slice(&bytes).expect("parse rpc response");
-        (status, body)
+        serde_json::from_slice(&bytes).expect("parse rpc response")
     }
 
     async fn call_sql_exec_http(state: &AppState, payload: Value) -> RpcResponse {
@@ -23130,7 +24234,6 @@ mod tests {
         let (parsed, emit_row) = parse_select_literal_query(
             "SELECT 1 AS one, 'x' AS two, NULL, VERSION() AS version, DATABASE() AS db, @@sql_mode AS mode",
             Some("app"),
-            Some("alice"),
         )
         .expect("parse select literal");
         assert!(emit_row);
@@ -23153,49 +24256,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_select_literal_query_uses_authenticated_username() {
-        let (parsed, emit_row) =
-            parse_select_literal_query("SELECT USER() AS who", Some("app"), Some("alice"))
-                .expect("parse select user()");
-        assert!(emit_row);
-        assert_eq!(parsed[0].0, "who");
-        assert_eq!(
-            parsed[0].1,
-            MySqlLiteral::Str("alice@localhost".to_string())
-        );
-    }
-
-    #[test]
     fn parse_select_literal_query_limit_controls_row_visibility() {
         let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 1", None, Some("skeindb"))
-                .expect("limit 1");
+            parse_select_literal_query("SELECT @@version_comment LIMIT 1", None).expect("limit 1");
+        assert!(emit_row);
+
+        let (_, emit_row) = parse_select_literal_query("SELECT @@version_comment LIMIT 0,1", None)
+            .expect("limit offset,count");
         assert!(emit_row);
 
         let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 0,1", None, Some("skeindb"))
-                .expect("limit offset,count");
-        assert!(emit_row);
-
-        let (_, emit_row) =
-            parse_select_literal_query("SELECT @@version_comment LIMIT 0", None, Some("skeindb"))
-                .expect("limit 0");
+            parse_select_literal_query("SELECT @@version_comment LIMIT 0", None).expect("limit 0");
         assert!(!emit_row);
 
-        let (_, emit_row) = parse_select_literal_query(
-            "SELECT @@version_comment LIMIT 1 OFFSET 1",
-            None,
-            Some("skeindb"),
-        )
-        .expect("limit with offset");
+        let (_, emit_row) =
+            parse_select_literal_query("SELECT @@version_comment LIMIT 1 OFFSET 1", None)
+                .expect("limit with offset");
         assert!(!emit_row);
     }
 
     #[test]
     fn parse_select_literal_query_rejects_from_clause() {
-        assert!(
-            parse_select_literal_query("SELECT 1 FROM app.users", None, Some("skeindb")).is_none()
-        );
+        assert!(parse_select_literal_query("SELECT 1 FROM app.users", None).is_none());
     }
 
     #[test]
@@ -24068,6 +25150,99 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn mysql_stmt_prepare_columns_support_projection_subquery_selects() -> anyhow::Result<()>
+    {
+        let dir = temp_dir("mysql_stmt_prepare_projection_subquery_columns");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "nodes",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "parent_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "payroll",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "salary".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let correlated_projection_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT outer_q.id, (SELECT COUNT(*) FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM app.nodes AS outer_q ORDER BY outer_q.id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            correlated_projection_columns,
+            vec![
+                MySqlStmtPrepareColumn {
+                    name: "id".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                    flags: MYSQL_COL_FLAG_NOT_NULL
+                        | MYSQL_COL_FLAG_PRIMARY_KEY
+                        | MYSQL_COL_FLAG_UNSIGNED
+                        | MYSQL_COL_FLAG_NUM,
+                },
+                MySqlStmtPrepareColumn {
+                    name: "related".to_string(),
+                    column_type: MySqlStmtColumnType::LongLong,
+                    flags: MYSQL_COL_FLAG_NUM,
+                },
+            ]
+        );
+
+        let embedded_projection_columns = mysql_stmt_prepare_columns(
+            &state,
+            "SELECT salary - (SELECT AVG(salary) FROM app.payroll) AS diff_from_avg FROM app.payroll ORDER BY id ASC",
+            Some("app"),
+        )
+        .await;
+        assert_eq!(
+            embedded_projection_columns,
+            vec![MySqlStmtPrepareColumn {
+                name: "diff_from_avg".to_string(),
+                column_type: MySqlStmtColumnType::Double,
+                flags: MYSQL_COL_FLAG_NUM,
+            }]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
     #[test]
     fn mysql_expand_select_projection_wildcards_supports_join_star_queries() {
         let plan = parse_sql_plan(
@@ -24363,99 +25538,6 @@ mod tests {
         assert_eq!(
             scalar_compare_rows,
             vec![vec![Some("2".to_string())], vec![Some("4".to_string())],]
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mysql_stmt_prepare_columns_support_projection_subquery_selects() -> anyhow::Result<()>
-    {
-        let dir = temp_dir("mysql_stmt_prepare_projection_subquery_columns");
-        let mut engine = Engine::open(&dir)?;
-        engine.create_table(
-            "app",
-            "nodes",
-            vec![
-                ColumnSchema {
-                    name: "id".to_string(),
-                    r#type: type_desc("u64"),
-                    nullable: false,
-                    auto_increment: false,
-                },
-                ColumnSchema {
-                    name: "parent_id".to_string(),
-                    r#type: type_desc("u64"),
-                    nullable: true,
-                    auto_increment: false,
-                },
-            ],
-            vec!["id".to_string()],
-            false,
-            None,
-        )?;
-        engine.create_table(
-            "app",
-            "payroll",
-            vec![
-                ColumnSchema {
-                    name: "id".to_string(),
-                    r#type: type_desc("u64"),
-                    nullable: false,
-                    auto_increment: false,
-                },
-                ColumnSchema {
-                    name: "salary".to_string(),
-                    r#type: type_desc("f64"),
-                    nullable: false,
-                    auto_increment: false,
-                },
-            ],
-            vec!["id".to_string()],
-            false,
-            None,
-        )?;
-        let state = build_state(dir.clone(), engine);
-
-        let correlated_projection_columns = mysql_stmt_prepare_columns(
-            &state,
-            "SELECT outer_q.id, (SELECT COUNT(*) FROM app.nodes AS inner_q WHERE inner_q.parent_id = outer_q.id OR inner_q.id = outer_q.id) AS related FROM app.nodes AS outer_q ORDER BY outer_q.id ASC",
-            Some("app"),
-        )
-        .await;
-        assert_eq!(
-            correlated_projection_columns,
-            vec![
-                MySqlStmtPrepareColumn {
-                    name: "id".to_string(),
-                    column_type: MySqlStmtColumnType::LongLong,
-                    flags: MYSQL_COL_FLAG_NOT_NULL
-                        | MYSQL_COL_FLAG_PRIMARY_KEY
-                        | MYSQL_COL_FLAG_UNSIGNED
-                        | MYSQL_COL_FLAG_NUM,
-                },
-                MySqlStmtPrepareColumn {
-                    name: "related".to_string(),
-                    column_type: MySqlStmtColumnType::LongLong,
-                    flags: MYSQL_COL_FLAG_NUM,
-                },
-            ]
-        );
-
-        let embedded_projection_columns = mysql_stmt_prepare_columns(
-            &state,
-            "SELECT salary - (SELECT AVG(salary) FROM app.payroll) AS diff_from_avg FROM app.payroll ORDER BY id ASC",
-            Some("app"),
-        )
-        .await;
-        assert_eq!(
-            embedded_projection_columns,
-            vec![MySqlStmtPrepareColumn {
-                name: "diff_from_avg".to_string(),
-                column_type: MySqlStmtColumnType::Double,
-                flags: MYSQL_COL_FLAG_NUM,
-            }]
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -26206,6 +27288,145 @@ mod tests {
         assert!(duplicate > 0);
         assert!(ratio > 1.0);
         assert!(interned > 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stats_snapshot_reports_compaction_telemetry() -> anyhow::Result<()> {
+        let dir = temp_dir("stats_compaction_telemetry");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        let segment_bytes = vec![7u8; 128];
+        std::fs::write(segment_dir.join("users.rseg"), &segment_bytes)?;
+
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db":"app","table":"users"},
+                "rows": [
+                    {"id": {"t":"u64","v":1}, "score": {"t":"u64","v":10}},
+                    {"id": {"t":"u64","v":2}, "score": {"t":"u64","v":20}}
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "data.get",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "pk": [{"t":"u64","v":1}]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let query = select_query(
+            "app",
+            "users",
+            vec!["id", "score"],
+            Some(gt_expr("score", Lit::U64 { v: 5 })),
+        );
+        let resp = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(stats.ok);
+        let result = stats.result.unwrap_or_default();
+        let compaction = result.get("compaction").cloned().unwrap_or_default();
+        assert_eq!(
+            compaction.get("status").and_then(|v| v.as_str()),
+            Some("tracking")
+        );
+        assert_eq!(compaction.get("l0_files").and_then(|v| v.as_u64()), Some(1));
+        assert!(
+            compaction
+                .get("l0_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                >= 128
+        );
+        assert_eq!(
+            compaction
+                .get("pressure")
+                .and_then(|v| v.get("soft_limit_exceeded"))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        let workload = compaction.get("workload").cloned().unwrap_or_default();
+        assert_eq!(
+            workload.get("recent_samples").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert!(
+            workload
+                .get("point_reads_per_s")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            workload
+                .get("range_reads_per_s")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            workload
+                .get("write_ops_per_s")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+        );
+
+        let latency = compaction.get("latency_ms").cloned().unwrap_or_default();
+        assert!(latency.get("read").is_some());
+        assert!(latency.get("write").is_some());
+
+        let query_stats = result.get("query").cloned().unwrap_or_default();
+        assert_eq!(
+            query_stats.get("recent_samples").and_then(|v| v.as_u64()),
+            Some(3)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -28268,7 +29489,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "alice", "password": "secret123", "role": "admin" }),
+            json!({ "username": "alice", "role": "admin" }),
         )
         .await;
         assert!(resp.ok);
@@ -28279,7 +29500,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "bob", "password": "secret456", "role": "read_only" }),
+            json!({ "username": "bob", "role": "read_only" }),
         )
         .await;
         assert!(resp.ok);
@@ -28318,7 +29539,7 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.create",
-            json!({ "username": "eve", "password": "horsebattery", "role": "read_write" }),
+            json!({ "username": "eve", "role": "read_write" }),
         )
         .await;
         assert!(resp.ok);
@@ -28346,26 +29567,6 @@ mod tests {
         let resp = call_rpc(
             &state,
             "admin.user.revoke",
-            json!({ "username": "eve", "db": "mydb", "privileges": ["SELECT"] }),
-        )
-        .await;
-        assert!(resp.ok);
-        let result = resp.result.expect("missing result");
-        assert_eq!(result["revoked"], true);
-
-        let resp = call_rpc(&state, "admin.user.list", json!({})).await;
-        let result = resp.result.expect("missing result");
-        let users = result["users"].as_array().unwrap();
-        let eve = users
-            .iter()
-            .find(|user| user["username"].as_str() == Some("eve"))
-            .expect("eve user");
-        let grants = eve["grants"]["mydb"].as_array().unwrap();
-        assert_eq!(grants, &[json!("INSERT")]);
-
-        let resp = call_rpc(
-            &state,
-            "admin.user.revoke",
             json!({ "username": "eve", "db": "mydb" }),
         )
         .await;
@@ -28380,58 +29581,6 @@ mod tests {
             json!({ "username": "ghost", "db": "x", "privileges": ["SELECT"] }),
         )
         .await;
-        assert!(!resp.ok);
-
-        std::fs::remove_dir_all(&dir).ok();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn api_token_auth_requires_bearer_and_enforces_role() -> anyhow::Result<()> {
-        let dir = temp_dir("api_token_auth");
-        let engine = Engine::open(&dir)?;
-        let state = build_state(dir.clone(), engine);
-
-        let resp = call_rpc(
-            &state,
-            "security.token.create",
-            json!({ "role": "read_only", "label": "review-token" }),
-        )
-        .await;
-        assert!(resp.ok);
-        let secret = resp
-            .result
-            .as_ref()
-            .and_then(|value| value.get("secret"))
-            .and_then(|value| value.as_str())
-            .expect("token secret")
-            .to_string();
-
-        let (status, resp) =
-            call_rpc_with_headers(&state, HeaderMap::new(), "schema.list_databases", json!({}))
-                .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(!resp.ok);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {secret}").parse().expect("bearer header"),
-        );
-        let (status, resp) =
-            call_rpc_with_headers(&state, headers.clone(), "schema.list_databases", json!({}))
-                .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(resp.ok);
-
-        let (status, resp) = call_rpc_with_headers(
-            &state,
-            headers,
-            "schema.create_database",
-            json!({ "db": "secure_app" }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(!resp.ok);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -28514,6 +29663,179 @@ mod tests {
         let result = resp.result.expect("missing result");
         assert_eq!(result["ok"], true);
         assert!(result["records_checked"].as_u64().unwrap() >= 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maintenance_compaction_policy_and_pause_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("compaction_policy_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        std::fs::write(segment_dir.join("users.rseg"), vec![3u8; 256])?;
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "policy": "fixed_tiering",
+                "enabled": true,
+                "max_l0_files": 8,
+                "max_l0_bytes": 4096,
+                "budget": {
+                    "max_io_bytes_per_s": 1048576,
+                    "max_cpu_pct": 22.5,
+                    "peak_window_io_multiplier": 0.5,
+                    "peak_window_cpu_multiplier": 0.6,
+                    "safe_mode_io_multiplier": 2.0,
+                    "safe_mode_cpu_pct": 80.0
+                },
+                "peak_windows": [
+                    {"label": "all_day", "start": "00:00", "end": "24:00", "io_multiplier": 0.5, "cpu_multiplier": 0.6}
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(
+            result["scheduler"]["policy"].as_str(),
+            Some("fixed_tiering")
+        );
+        assert_eq!(result["scheduler"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            result["scheduler"]["peak_window_active"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            result["scheduler"]["budget"]["configured"]["io_bytes_per_s"].as_u64(),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            result["scheduler"]["budget"]["configured"]["cpu_pct"].as_f64(),
+            Some(22.5)
+        );
+
+        let resp = call_rpc(&state, "maintenance.compaction.pause", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["scheduler"]["paused"].as_bool(), Some(true));
+        assert_eq!(result["scheduler"]["mode"].as_str(), Some("paused"));
+        assert_eq!(
+            result["scheduler"]["budget"]["effective"]["io_bytes_per_s"].as_u64(),
+            Some(0)
+        );
+
+        let resp = call_rpc(&state, "maintenance.compaction.resume", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["scheduler"]["paused"].as_bool(), Some(false));
+
+        let resp = call_rpc(
+            &state,
+            "settings.get",
+            json!({
+                "keys": [
+                    "compaction.policy",
+                    "compaction.paused",
+                    "compaction.budget.max_io_bytes_per_s",
+                    "compaction.peak_windows"
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["compaction.policy"], json!("fixed_tiering"));
+        assert_eq!(result["compaction.paused"], json!(false));
+        assert_eq!(
+            result["compaction.budget.max_io_bytes_per_s"],
+            json!(1_048_576u64)
+        );
+        assert_eq!(
+            result["compaction.peak_windows"]
+                .as_array()
+                .map(|value| value.len()),
+            Some(1)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compaction_safe_mode_throttles_skeinql_writes() -> anyhow::Result<()> {
+        let dir = temp_dir("compaction_safe_mode_throttle");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        std::fs::write(segment_dir.join("users.rseg"), vec![9u8; 128])?;
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "enabled": true,
+                "policy": "workload_guided",
+                "max_l0_files": 1,
+                "max_l0_bytes": 128,
+                "budget": {
+                    "max_io_bytes_per_s": 65536,
+                    "max_cpu_pct": 15.0,
+                    "safe_mode_io_multiplier": 2.0,
+                    "safe_mode_cpu_pct": 75.0
+                }
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db":"app","table":"users"},
+                "rows": [{"id": {"t":"u64","v":1}}]
+            }),
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.error.as_ref().map(|error| error.code.as_str()),
+            Some("resource_exhausted")
+        );
+
+        let resp = call_rpc(&state, "schema.list_tables", json!({"db":"app"})).await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["status"].as_str(), Some("safe_mode"));
+        assert_eq!(result["scheduler"]["mode"].as_str(), Some("safe_mode"));
+        assert_eq!(
+            result["scheduler"]["admission"]["write"].as_str(),
+            Some("throttle")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

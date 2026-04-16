@@ -77,12 +77,14 @@ SkeinQL:
 - forensic.query / forensic.verify / forensic.export (prototype)
 
 CLI:
-- skeindb audit verify --data ./data --from-checkpoint <id>
+- skeindb audit-verify --data ./data
 
 Prototype note:
 - The current scaffold stores a hash-chained record log in `forensic_chain.json`.
 - Each entry links to the previous hash and records db/table/op/pk metadata.
-- This is a stand-in for the WAL chain until the real WAL is implemented.
+- `skeindb audit-verify` and `maintenance.audit_verify` currently verify that prototype chain, persist `last_verified_ms` on success, and return a non-zero CLI exit on mismatch.
+- SkeinAdmin's Forensics panel exposes `maintenance.audit_status` / `maintenance.audit_verify` for chain health plus the prototype `forensic.query` / `forensic.verify` / `forensic.export` tooling.
+- Checkpoint-scoped verification flags such as `--from-checkpoint` remain future work until the WAL-backed verifier lands.
 
 ---
 

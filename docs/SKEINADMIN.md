@@ -223,9 +223,10 @@ Security note:
 - Key rotation and re-encryption progress
 
 ### 4.12 CDC Subscriptions
-- Table subscriptions
-- Prepared-query subscriptions
-- Lag and backlog
+- Create table subscriptions via `cdc.subscribe_table`
+- Poll / ACK / close session-local handles via `cdc.poll`, `cdc.ack`, and `cdc.close`
+- Inspect lag for the currently tracked browser-session subscriptions via `next_offset - acked_offset`
+- Prepared-query subscriptions remain planned work
 
 ### 4.13 Index Advisor
 (See docs/INDEX_ADVISOR.md)
@@ -246,8 +247,10 @@ Security note:
 
 ### 4.14 Forensics (Verifiable WAL Queries)
 (See `docs/AUDIT_WAL.md` and `docs/research_agenda/R06_*`)
+- Inspect chain length, checkpoint anchors, and last verified time via `maintenance.audit_status`
+- Run full-chain verification via `maintenance.audit_verify` and surface the persisted `last_verified_ms`
 - Run forensic queries over the hash-chained WAL
-- Verify proofs (completeness/inclusion)
+- Verify proof slices (completeness/inclusion)
 - Export signed forensic reports
 
 ### 4.15 Migration Assistant (MySQL → SkeinQL)
@@ -322,10 +325,10 @@ SkeinAdmin should support:
 - SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog
 - SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*)
 - SA11: Encryption + key rotation UI (settings.encryption + status/progress)
-- SA12: CDC subscriptions UI (cdc.*) + lag visualization
+- SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work
 - SA13: Compaction scheduler policy UI (maintenance.compaction.*)
 - SA14: Autoparameterization and plan-cache widgets
-- SA15: Forensics page (forensic.*) + proof verification UI
+- SA15: Forensics page (`maintenance.audit_*`, `forensic.*`) + proof verification UI
 - SA16: Views page (view.*) + dependency visualization
 - SA17: Migration Assistant (telemetry + intent inference) + exportable report
 - SA18: Embeddings playground (vector.*) + index status

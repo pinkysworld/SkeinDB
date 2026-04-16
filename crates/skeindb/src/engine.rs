@@ -128,7 +128,6 @@ const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
 const SECONDARY_INDEX_CACHE_FORMAT_VERSION: u32 = 1;
-const SECURITY_STATE_FORMAT_VERSION: u32 = 1;
 const STORAGE_MODE_ENV: &str = "SKEINDB_STORAGE_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,11 +306,11 @@ pub struct Engine {
     schema_changes_next_id: u64,
 
     /// API tokens for security (T122).
-    api_tokens: HashMap<String, StoredApiToken>,
+    api_tokens: HashMap<String, ApiToken>,
     api_token_next_id: u64,
 
     /// Database users (T044).
-    db_users: HashMap<String, StoredDbUser>,
+    db_users: HashMap<String, DbUser>,
 }
 
 #[derive(Debug, Clone)]
@@ -562,7 +561,7 @@ struct ObliviousPolicyDisk {
 // forensic.* (research)
 // -----------------------------
 
-const FORENSIC_CHAIN_FORMAT_VERSION: u32 = 2;
+const FORENSIC_CHAIN_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ForensicRecord {
@@ -585,6 +584,8 @@ struct ForensicChainDisk {
     records: Vec<ForensicRecord>,
     #[serde(default)]
     checkpoint_anchors: Vec<CheckpointAnchor>,
+    #[serde(default)]
+    last_verified_ms: u64,
 }
 
 /// A checkpoint anchor snapshot of the forensic chain head at checkpoint time.
@@ -1067,36 +1068,6 @@ pub struct DbUser {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredApiToken {
-    token_id: String,
-    secret_sha256: String,
-    role: String,
-    label: String,
-    created_at_ms: u64,
-    expires_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredDbUser {
-    username: String,
-    role: String,
-    created_at_ms: u64,
-    grants: HashMap<String, Vec<String>>,
-    password_sha1: String,
-    password_sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SecurityStateDisk {
-    format_version: u32,
-    next_api_token_id: u64,
-    #[serde(default)]
-    api_tokens: Vec<StoredApiToken>,
-    #[serde(default)]
-    db_users: Vec<StoredDbUser>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcPollResult {
     pub events: Vec<ChangeEvent>,
     pub next_offset: u64,
@@ -1211,7 +1182,6 @@ impl Engine {
         engine.rebuild_value_store_from_tables_best_effort();
         engine.load_changes_best_effort();
         engine.load_prepared_best_effort();
-        engine.load_security_best_effort();
         engine.load_snapshots_best_effort();
         engine.load_dp_best_effort();
         engine.load_oblivious_best_effort();
@@ -2521,109 +2491,46 @@ impl Engine {
         let expires = if ttl_ms > 0 { now + ttl_ms } else { 0 };
         let token = ApiToken {
             token_id: id.clone(),
-            secret: secret.clone(),
+            secret,
             role: role.to_string(),
             label: label.to_string(),
             created_at_ms: now,
             expires_at_ms: expires,
         };
-        self.api_tokens.insert(
-            id,
-            StoredApiToken {
-                token_id: token.token_id.clone(),
-                secret_sha256: sha256_hex(secret.as_bytes()),
-                role: token.role.clone(),
-                label: token.label.clone(),
-                created_at_ms: token.created_at_ms,
-                expires_at_ms: token.expires_at_ms,
-            },
-        );
-        self.persist_security_best_effort();
+        self.api_tokens.insert(id, token.clone());
         token
     }
 
     pub fn list_api_tokens(&self) -> Vec<ApiToken> {
-        let now = current_time_ms();
-        let mut tokens = self
-            .api_tokens
-            .values()
-            .filter(|token| token.expires_at_ms == 0 || token.expires_at_ms > now)
-            .map(public_api_token_view)
-            .collect::<Vec<_>>();
-        tokens.sort_by(|a, b| a.token_id.cmp(&b.token_id));
-        tokens
+        self.api_tokens.values().cloned().collect()
     }
 
     pub fn revoke_api_token(&mut self, token_id: &str) -> bool {
-        let removed = self.api_tokens.remove(token_id).is_some();
-        if removed {
-            self.persist_security_best_effort();
-        }
-        removed
-    }
-
-    pub fn has_api_tokens(&self) -> bool {
-        let now = current_time_ms();
-        self.api_tokens
-            .values()
-            .any(|token| token.expires_at_ms == 0 || token.expires_at_ms > now)
-    }
-
-    pub fn authenticate_api_token(&self, secret: &str) -> Option<String> {
-        let secret_sha256 = sha256_hex(secret.as_bytes());
-        let now = current_time_ms();
-        self.api_tokens
-            .values()
-            .find(|token| {
-                token.secret_sha256 == secret_sha256
-                    && (token.expires_at_ms == 0 || token.expires_at_ms > now)
-            })
-            .map(|token| token.role.clone())
+        self.api_tokens.remove(token_id).is_some()
     }
 
     // ── T044: User management ───────────────────────────────────────────────
-    pub fn user_create(
-        &mut self,
-        username: &str,
-        role: &str,
-        password: &str,
-    ) -> anyhow::Result<DbUser> {
-        if password.is_empty() {
-            anyhow::bail!("password is required");
-        }
-        if self.db_users.contains_key(username) {
-            anyhow::bail!("user already exists: {username}");
-        }
-        let now = current_time_ms();
-        let user = StoredDbUser {
+    pub fn user_create(&mut self, username: &str, role: &str) -> DbUser {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let user = DbUser {
             username: username.to_string(),
             role: role.to_string(),
             created_at_ms: now,
             grants: HashMap::new(),
-            password_sha1: sha1_hex(password.as_bytes()),
-            password_sha256: sha256_hex(password.as_bytes()),
         };
         self.db_users.insert(username.to_string(), user.clone());
-        self.persist_security_best_effort();
-        Ok(public_db_user_view(&user))
+        user
     }
 
     pub fn user_list(&self) -> Vec<DbUser> {
-        let mut users = self
-            .db_users
-            .values()
-            .map(public_db_user_view)
-            .collect::<Vec<_>>();
-        users.sort_by(|a, b| a.username.cmp(&b.username));
-        users
+        self.db_users.values().cloned().collect()
     }
 
     pub fn user_drop(&mut self, username: &str) -> bool {
-        let dropped = self.db_users.remove(username).is_some();
-        if dropped {
-            self.persist_security_best_effort();
-        }
-        dropped
+        self.db_users.remove(username).is_some()
     }
 
     pub fn user_grant(
@@ -2636,69 +2543,16 @@ impl Engine {
             .db_users
             .get_mut(username)
             .ok_or_else(|| anyhow::anyhow!("user not found: {username}"))?;
-        user.grants
-            .insert(db.to_string(), normalize_privileges(privileges));
-        self.persist_security_best_effort();
+        user.grants.insert(db.to_string(), privileges);
         Ok(())
     }
 
-    pub fn user_revoke(
-        &mut self,
-        username: &str,
-        db: &str,
-        privileges: Vec<String>,
-    ) -> anyhow::Result<bool> {
+    pub fn user_revoke(&mut self, username: &str, db: &str) -> anyhow::Result<bool> {
         let user = self
             .db_users
             .get_mut(username)
             .ok_or_else(|| anyhow::anyhow!("user not found: {username}"))?;
-        let Some(current) = user.grants.get(db).cloned() else {
-            return Ok(false);
-        };
-        let revoked = if privileges.is_empty() {
-            user.grants.remove(db).is_some()
-        } else {
-            let revoke_set = normalize_privileges(privileges);
-            let mut remaining = current;
-            let before = remaining.len();
-            remaining.retain(|privilege| !revoke_set.iter().any(|revoked| revoked == privilege));
-            if remaining.is_empty() {
-                user.grants.remove(db);
-            } else {
-                user.grants.insert(db.to_string(), remaining);
-            }
-            before != user.grants.get(db).map(|v| v.len()).unwrap_or(0)
-        };
-        if revoked {
-            self.persist_security_best_effort();
-        }
-        Ok(revoked)
-    }
-
-    pub fn has_db_users(&self) -> bool {
-        !self.db_users.is_empty()
-    }
-
-    pub fn authenticate_db_user_password(&self, username: &str, password: &str) -> Option<DbUser> {
-        let user = self.db_users.get(username)?;
-        let password_sha256 = sha256_hex(password.as_bytes());
-        if user.password_sha256 != password_sha256 {
-            return None;
-        }
-        Some(public_db_user_view(user))
-    }
-
-    pub fn authenticate_db_user_mysql_native(
-        &self,
-        username: &str,
-        seed: &[u8],
-        auth_response: &[u8],
-    ) -> Option<DbUser> {
-        let user = self.db_users.get(username)?;
-        if !mysql_native_password_matches_sha1_hex(&user.password_sha1, seed, auth_response) {
-            return None;
-        }
-        Some(public_db_user_view(user))
+        Ok(user.grants.remove(db).is_some())
     }
 
     pub fn build_column_snapshot(
@@ -5209,6 +5063,7 @@ impl Engine {
         let elapsed_ms = start.elapsed().as_millis() as u64;
         if ok {
             self.audit_last_verified_ms = now_millis();
+            self.persist_forensic_best_effort();
         }
 
         serde_json::json!({
@@ -7017,40 +6872,6 @@ impl Engine {
         let _ = save_json(&self.prepared_path(), &list);
     }
 
-    fn security_state_path(&self) -> PathBuf {
-        self.data_dir.join("security_state.json")
-    }
-
-    fn load_security_best_effort(&mut self) {
-        let Some(disk) = load_json::<SecurityStateDisk>(&self.security_state_path()) else {
-            return;
-        };
-        if disk.format_version != SECURITY_STATE_FORMAT_VERSION {
-            return;
-        }
-        self.api_token_next_id = disk.next_api_token_id.max(1);
-        self.api_tokens = disk
-            .api_tokens
-            .into_iter()
-            .map(|token| (token.token_id.clone(), token))
-            .collect();
-        self.db_users = disk
-            .db_users
-            .into_iter()
-            .map(|user| (user.username.clone(), user))
-            .collect();
-    }
-
-    fn persist_security_best_effort(&self) {
-        let disk = SecurityStateDisk {
-            format_version: SECURITY_STATE_FORMAT_VERSION,
-            next_api_token_id: self.api_token_next_id,
-            api_tokens: self.api_tokens.values().cloned().collect(),
-            db_users: self.db_users.values().cloned().collect(),
-        };
-        let _ = save_json(&self.security_state_path(), &disk);
-    }
-
     fn snapshots_path(&self) -> PathBuf {
         self.data_dir.join("snapshots.json")
     }
@@ -7255,6 +7076,7 @@ impl Engine {
                 self.forensic_next_id = disk.next_id.max(1);
                 self.forensic_chain = disk.records;
                 self.checkpoint_anchors = disk.checkpoint_anchors;
+                self.audit_last_verified_ms = disk.last_verified_ms;
             }
         }
     }
@@ -7267,6 +7089,7 @@ impl Engine {
                 next_id: self.forensic_next_id,
                 records: self.forensic_chain.clone(),
                 checkpoint_anchors: self.checkpoint_anchors.clone(),
+                last_verified_ms: self.audit_last_verified_ms,
             },
         );
     }
@@ -12526,95 +12349,6 @@ fn lit_to_u64(lit: &Lit) -> Option<u64> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_decode(bytes: &str) -> Option<Vec<u8>> {
-    if bytes.len() % 2 != 0 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let chars = bytes.as_bytes();
-    let mut i = 0usize;
-    while i < chars.len() {
-        let hi = (chars[i] as char).to_digit(16)?;
-        let lo = (chars[i + 1] as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-        i += 2;
-    }
-    Some(out)
-}
-
-fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn sha1_hex(bytes: &[u8]) -> String {
-    hex_encode(&Sha1::digest(bytes))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex_encode(&Sha256::digest(bytes))
-}
-
-fn public_api_token_view(token: &StoredApiToken) -> ApiToken {
-    ApiToken {
-        token_id: token.token_id.clone(),
-        secret: String::new(),
-        role: token.role.clone(),
-        label: token.label.clone(),
-        created_at_ms: token.created_at_ms,
-        expires_at_ms: token.expires_at_ms,
-    }
-}
-
-fn public_db_user_view(user: &StoredDbUser) -> DbUser {
-    DbUser {
-        username: user.username.clone(),
-        role: user.role.clone(),
-        created_at_ms: user.created_at_ms,
-        grants: user.grants.clone(),
-    }
-}
-
-fn normalize_privileges(privileges: Vec<String>) -> Vec<String> {
-    let mut normalized = Vec::new();
-    for privilege in privileges {
-        let trimmed = privilege.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let upper = trimmed.to_ascii_uppercase();
-        if !normalized.contains(&upper) {
-            normalized.push(upper);
-        }
-    }
-    normalized
-}
-
-fn mysql_native_password_matches_sha1_hex(
-    password_sha1_hex: &str,
-    seed: &[u8],
-    auth_response: &[u8],
-) -> bool {
-    let Some(stage1) = hex_decode(password_sha1_hex) else {
-        return false;
-    };
-    if stage1.is_empty() {
-        return auth_response.is_empty();
-    }
-    let stage2 = Sha1::digest(&stage1);
-    let mut combined = Vec::with_capacity(seed.len() + stage2.len());
-    combined.extend_from_slice(seed);
-    combined.extend_from_slice(&stage2);
-    let digest = Sha1::digest(&combined);
-    let mut expected = vec![0u8; stage1.len()];
-    for (idx, byte) in stage1.iter().enumerate() {
-        expected[idx] = *byte ^ digest[idx];
-    }
-    expected == auth_response
 }
 
 fn crc32_hash(data: &[u8]) -> u32 {
@@ -21563,55 +21297,6 @@ mod tests {
         dir.push(unique);
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
-    }
-
-    #[test]
-    fn security_state_persists_tokens_and_users() -> anyhow::Result<()> {
-        let dir = temp_dir("security_state");
-
-        let token_secret = {
-            let mut engine = Engine::open(&dir)?;
-            let token = engine.create_api_token("admin", "ci", 0);
-            assert_eq!(engine.list_api_tokens().len(), 1);
-            assert_eq!(
-                engine.authenticate_api_token(&token.secret).as_deref(),
-                Some("admin")
-            );
-
-            let user = engine.user_create("alice", "read_write", "secret123")?;
-            assert_eq!(user.username, "alice");
-            engine.user_grant(
-                "alice",
-                "app",
-                vec!["select".to_string(), "insert".to_string()],
-            )?;
-            assert!(engine
-                .authenticate_db_user_password("alice", "secret123")
-                .is_some());
-            token.secret
-        };
-
-        let reopened = Engine::open(&dir)?;
-        let listed_tokens = reopened.list_api_tokens();
-        assert_eq!(listed_tokens.len(), 1);
-        assert!(
-            listed_tokens[0].secret.is_empty(),
-            "listed tokens should not leak secrets"
-        );
-        assert_eq!(
-            reopened.authenticate_api_token(&token_secret).as_deref(),
-            Some("admin")
-        );
-        let users = reopened.user_list();
-        assert_eq!(users.len(), 1);
-        assert_eq!(users[0].username, "alice");
-        assert_eq!(users[0].grants["app"], vec!["SELECT", "INSERT"]);
-        assert!(reopened
-            .authenticate_db_user_password("alice", "secret123")
-            .is_some());
-
-        fs::remove_dir_all(&dir).ok();
-        Ok(())
     }
 
     fn eq_expr(left: Expr, right: Expr) -> Expr {
