@@ -1,6 +1,6 @@
 # SkeinDB
 
-Last updated: 2026-03-31
+Last updated: 2026-04-16
 
 SkeinDB is a single-binary database server that combines:
 
@@ -74,6 +74,34 @@ SkeinDB is useful if you want one of these:
 ---
 
 ## Quick Start
+
+### Install
+
+Homebrew:
+
+```bash
+brew tap pinkysworld/skeindb https://github.com/pinkysworld/SkeinDB
+brew install --HEAD pinkysworld/skeindb/skeindb
+```
+
+Tagged `v*` releases update the repo-local Homebrew formula automatically, after which the stable path is:
+
+```bash
+brew install pinkysworld/skeindb/skeindb
+```
+
+apt-get:
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/pinkysworld/SkeinDB/apt/pubkey.gpg \
+  -o /usr/share/keyrings/skeindb-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/skeindb-archive-keyring.gpg] https://raw.githubusercontent.com/pinkysworld/SkeinDB/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/skeindb.list >/dev/null
+sudo apt-get update
+sudo apt-get install skeindb
+```
+
+The apt repository is published by the tag-driven release workflow once the signing secrets are configured.
 
 ### Build
 
@@ -179,6 +207,14 @@ cargo test --locked
 ```
 
 Note: strict `clippy -D warnings` is still not clean repo-wide today; use `docs/TRUE_STATUS_MATRIX.md` and current CI/local output as the source of truth for that status.
+
+## Release Packaging
+
+Tagged releases now drive the install surfaces:
+
+- `vX.Y.Z` tags build a source tarball, a Linux `amd64` tarball, and a Debian package.
+- The same workflow renders a stable `Formula/skeindb.rb` entry in this repo for the Homebrew tap.
+- If `APT_GPG_PRIVATE_KEY`, `APT_GPG_KEY_ID`, and the optional `APT_GPG_PASSPHRASE` GitHub Actions secrets are configured, the workflow also publishes a signed apt repository to the `apt` branch.
 
 ---
 

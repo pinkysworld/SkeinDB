@@ -208,6 +208,10 @@ Phase 0 verification checklist:
 - [ ] T417: PG integration tests — psql end-to-end, psycopg2, node-postgres driver tests
 - [x] T418: PG compatibility documentation (`docs/PG_COMPAT.md`) — refreshed to the current partial baseline (startup/auth, SSL rejection, simple query, tx stubs, extended-protocol stubs) and linked backlog gaps
 
+## Phase 26 - Distribution and installation
+- [x] T419: Debian packaging metadata + signed apt repository publication pipeline. Latest: `cargo-deb` metadata is wired into `crates/skeindb/Cargo.toml`, and tagged releases can publish a signed `apt` branch with `Packages`, `Release`, `InRelease`, and exported key material.
+- [x] T420: Homebrew tap formula + release automation. Latest: the repo now ships `Formula/skeindb.rb` for tap-based installs, supports immediate `HEAD` installs from this repo, and tagged releases auto-render a stable formula from the release source tarball.
+
 ---
 
 ## Research Agenda Extensions (Optional)

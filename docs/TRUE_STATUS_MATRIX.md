@@ -1,7 +1,7 @@
 # SkeinDB True Status Matrix
 
 Last updated: 2026-04-16
-Latest changes: MySQL COM_STMT prepare metadata now covers supported projection-level scalar subqueries plus embedded scalar-subquery arithmetic, `serve` now defaults row persistence to `segment`/`.rseg`, the PostgreSQL listener now handles common startup/bootstrap probes including `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`, SkeinAdmin’s live surface was reconciled with the runtime (`settings.list`, telemetry/security navigation, research-config hydration, cluster leave / user revoke, Easy Viewer inline DB creation plus create-table validation/preview, the Forensics panel’s `maintenance.audit_*` controls, a dedicated CDC subscriptions page with lag visualization, and live compaction pressure/workload cards backed by `stats.snapshot`), and Phase 21 now includes both reproducible scheduler evaluation artifacts and live scheduler policy controls (`maintenance.compaction.*`, `stats.snapshot.compaction.scheduler`, and hard-pressure write backpressure for write-classified SkeinQL/HTTP mutations).
+Latest changes: MySQL COM_STMT prepare metadata now covers supported projection-level scalar subqueries plus embedded scalar-subquery arithmetic, `serve` now defaults row persistence to `segment`/`.rseg`, the PostgreSQL listener now handles common startup/bootstrap probes including `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`, SkeinAdmin’s live surface was reconciled with the runtime (`settings.list`, telemetry/security navigation, research-config hydration, cluster leave / user revoke, Easy Viewer inline DB creation plus create-table validation/preview, the Forensics panel’s `maintenance.audit_*` controls, a dedicated CDC subscriptions page with lag visualization, and live compaction pressure/workload cards backed by `stats.snapshot`), Phase 21 now includes both reproducible scheduler evaluation artifacts and live scheduler policy controls (`maintenance.compaction.*`, `stats.snapshot.compaction.scheduler`, and hard-pressure write backpressure for write-classified SkeinQL/HTTP mutations), and Phase 26 now adds Debian packaging metadata, a signed apt publication path, and a repo-scoped Homebrew tap formula with tag-driven updates.
 
 This matrix reconciles runtime reality with backlog checklists.
 
@@ -12,13 +12,13 @@ Interpretation:
 
 ## 1) Backlog checklist snapshot
 
-- `docs/PROJECT_BACKLOG.md`: **86 done / 52 open** (138 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T410/T418 complete and the remaining PG tasks still open)
+- `docs/PROJECT_BACKLOG.md`: **88 done / 52 open** (140 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T410/T418 complete and the remaining PG tasks still open)
 - `docs/RESEARCH_BACKLOG.md`: **0 done / 109 open** (109 total)
 
 Why `RESEARCH_BACKLOG` still shows 0 done: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
 
-## 2) Core roadmap (Phases 0-23)
+## 2) Core roadmap (Phases 0-26)
 
 | Phase | Current status | Notes / evidence |
 |---|---|---|
@@ -47,6 +47,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | Phase 22 Autoparam + plan cache | Implemented (baseline) | `ai.autoparam.classify/analyze` with rule-based literal classification; `plan_cache.status` returns cache entries with hit counts, fingerprints, creation/last-hit timestamps; `plan_cache.clear` clears select + patch caches; `CachedSelect` enriched with query/hits/created_ms/last_hit_ms/schema_version; `SET @@skein.autoparameterize = 1` MySQL session variable support; SkeinAdmin top queries by fingerprint display; integration test in `cluster_rpc.rs::telemetry_and_plan_cache_integration`. |
 | Phase 23 CDC/changefeeds | Partial | `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close` are implemented for table subscriptions with in-memory ack cursors, and SkeinAdmin now exposes a dedicated CDC panel with session-local subscription management plus lag visualization; query subscriptions, streaming transports, and retention/resnapshot remain open. |
 | Phase 25 PostgreSQL compat | Partial | PG v3 wire protocol primitives (`pg_wire.rs`) with message framing (1-byte tag + 4-byte BE length), StartupMessage/SSLRequest parsing, ParameterStatus/BackendKeyData/ReadyForQuery/RowDescription/DataRow/CommandComplete/ErrorResponse encode/write, common PG type OIDs. Connection handler in `server.rs` with trust/cleartext auth, SSL rejection, simple query protocol delegating to the shared SQL engine, transaction stubs (BEGIN/COMMIT/ROLLBACK), explicit startup/bootstrap query handling for `SELECT version()`, `SELECT current_database()`, `SELECT current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`, plus extended query protocol stubs (Parse/Bind/Describe/Execute/Close). Listener on port 5432 (configurable via `--pg` flag). T400/T403/T410 complete; SCRAM-SHA-256 auth (T401), PG session state (T402), PG SQL dialect parser (T404), and remaining tasks still open. |
+| Phase 26 Distribution | Partial | The repo now carries `cargo-deb` metadata for `skeindb`, a repo-local `Formula/skeindb.rb` tap entry for Homebrew, and a tag-driven GitHub Actions workflow that builds a source tarball plus `.deb`, updates the formula, and can publish a signed apt repository to the `apt` branch once the signing secrets are configured. |
 
 ## 3) Research tracks (R01-R20)
 

@@ -1,4 +1,6 @@
 target/
+target_*/
+dist/
 .DS_Store
 AGENTS.md
 **/AGENTS.md

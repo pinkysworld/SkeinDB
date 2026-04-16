@@ -3,6 +3,26 @@ name = "skeindb"
 version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
+description = "Single-binary database server with SkeinQL, SkeinAdmin, MySQL, and early PostgreSQL surfaces"
+homepage = "https://github.com/pinkysworld/SkeinDB"
+repository = "https://github.com/pinkysworld/SkeinDB"
+readme = "../../README.md"
+keywords = ["database", "mysql", "postgresql", "json-rpc", "admin-ui"]
+categories = ["database", "command-line-utilities", "web-programming::http-server"]
+
+[package.metadata.deb]
+maintainer = "Michél Nguyen"
+copyright = "2026, Michél Nguyen"
+license-file = ["../../LICENSE", "0"]
+depends = "$auto"
+section = "database"
+priority = "optional"
+extended-description-file = "../../README.md"
+assets = [
+	["target/release/skeindb", "usr/bin/skeindb", "755"],
+	["../../README.md", "usr/share/doc/skeindb/README.md", "644"],
+	["../../LICENSE", "usr/share/doc/skeindb/LICENSE", "644"],
+]
 
 [dependencies]
 base64 = "0.22"

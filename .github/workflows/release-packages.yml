@@ -1,0 +1,132 @@
+name: release-packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-packages:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Debian packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils dpkg-dev gnupg
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Resolve and verify version
+        id: resolve_version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python3 - "$VERSION" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          crate = tomllib.loads(pathlib.Path("crates/skeindb/Cargo.toml").read_text(encoding="utf-8"))
+          crate_version = crate["package"]["version"]
+          tag_version = sys.argv[1]
+          if crate_version != tag_version:
+              raise SystemExit(f"tag version {tag_version} does not match crates/skeindb/Cargo.toml ({crate_version})")
+          PY
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.resolve_version.outputs.version }}
+        run: |
+          mkdir -p dist
+          cargo build --release -p skeindb
+          git archive --format=tar.gz --prefix="skeindb-${VERSION}/" -o "dist/skeindb-${VERSION}-source.tar.gz" "${GITHUB_REF_NAME}"
+          tar -C target/release -czf "dist/skeindb-${VERSION}-linux-amd64.tar.gz" skeindb
+          cargo deb -p skeindb --no-build --output "dist/skeindb_${VERSION}_amd64.deb"
+          sha256sum dist/* > dist/sha256sums.txt
+
+      - name: Render release Homebrew formula
+        env:
+          VERSION: ${{ steps.resolve_version.outputs.version }}
+        run: |
+          mkdir -p dist/Formula
+          SOURCE_SHA256="$(sha256sum "dist/skeindb-${VERSION}-source.tar.gz" | awk '{print $1}')"
+          echo "SOURCE_SHA256=$SOURCE_SHA256" >> "$GITHUB_ENV"
+          python3 scripts/release/render_homebrew_formula.py \
+            --version "$VERSION" \
+            --sha256 "$SOURCE_SHA256" \
+            --output dist/Formula/skeindb.rb
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/skeindb-${{ steps.resolve_version.outputs.version }}-source.tar.gz
+            dist/skeindb-${{ steps.resolve_version.outputs.version }}-linux-amd64.tar.gz
+            dist/skeindb_${{ steps.resolve_version.outputs.version }}_amd64.deb
+            dist/sha256sums.txt
+
+      - name: Update tap formula on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          cp dist/Formula/skeindb.rb Formula/skeindb.rb
+          if git diff --quiet -- Formula/skeindb.rb; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/skeindb.rb
+          git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+
+      - name: Build signed apt repository layout
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          VERSION: ${{ steps.resolve_version.outputs.version }}
+        run: |
+          scripts/release/build_apt_repo.sh \
+            --deb "dist/skeindb_${VERSION}_amd64.deb" \
+            --output dist/apt-repo
+
+      - name: Publish apt repository branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ ! -f dist/apt-repo/dists/stable/InRelease || ! -f dist/apt-repo/pubkey.gpg ]]; then
+            echo "Signed apt repository was not generated; skipping apt branch publish."
+            exit 0
+          fi
+          publish_dir="$(mktemp -d)"
+          cp -R dist/apt-repo/. "$publish_dir/"
+          touch "$publish_dir/.nojekyll"
+          pushd "$publish_dir" >/dev/null
+          git init
+          git checkout -b apt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Publish apt repo for ${GITHUB_REF_NAME}"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin apt
+          popd >/dev/null
