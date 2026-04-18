@@ -342,6 +342,35 @@ struct Counters {
     plan_cache_hits: u64,
     plan_cache_misses: u64,
     plan_cache_evictions: u64,
+    // CAS replication object-pull metrics (T167)
+    replication_objects: ReplicationObjectCounters,
+}
+
+/// CAS replication object-pull counters (T167).
+///
+/// Tracks bandwidth-saving metrics for `objects.need` / `objects.missing` /
+/// `objects.fetch` RPCs that drive replica backfill over the content-addressed
+/// ValueStore. `ref_bytes` is the byte length of objects a local replica
+/// already had (= bytes NOT re-shipped thanks to CAS dedup). `obj_bytes` is
+/// the byte length of objects actually served via `objects.fetch`. Hit-rate
+/// is computed lazily at reporting time from `need_hits` / (`need_hits` +
+/// `need_misses`).
+#[derive(Debug, Clone, Default)]
+struct ReplicationObjectCounters {
+    need_calls: u64,
+    need_ids_total: u64,
+    need_hits: u64,
+    need_misses: u64,
+    missing_calls: u64,
+    missing_ids_total: u64,
+    missing_hits: u64,
+    missing_misses: u64,
+    fetch_calls: u64,
+    fetch_ids_total: u64,
+    fetch_objects_served: u64,
+    obj_bytes: u64,
+    ref_bytes: u64,
+    last_updated_ms: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -14919,6 +14948,10 @@ pub(crate) async fn handle_rpc(
                     cluster_route_query(state, p.db, p.table, p.read_only.unwrap_or(true))
                 }
                 // --------------------
+                // cluster.replication_stats (T167 – CAS replication bandwidth metrics)
+                // --------------------
+                "cluster.replication_stats" => Ok(cluster_replication_stats_json(state)),
+                // --------------------
                 // schema.*
                 // --------------------
                 "schema.list_databases" => {
@@ -17088,22 +17121,74 @@ fn parse_value_id(hex: &str) -> Option<skeindb_core::valuestore::ValueId> {
     Some(id)
 }
 
+/// Build the T167 CAS replication object-pull stats JSON from current
+/// counters. Exposed via `cluster.replication_stats` and embedded into
+/// `stats.snapshot` under `cluster.replication.objects`.
+fn cluster_replication_stats_json(state: &AppState) -> Value {
+    let c = state.counters.lock().unwrap();
+    let r = &c.replication_objects;
+    let need_total = r.need_hits.saturating_add(r.need_misses);
+    let hit_rate = if need_total == 0 {
+        0.0
+    } else {
+        r.need_hits as f64 / need_total as f64
+    };
+    let total_obj_demand = r.ref_bytes.saturating_add(r.obj_bytes);
+    let saved_bytes_ratio = if total_obj_demand == 0 {
+        0.0
+    } else {
+        r.ref_bytes as f64 / total_obj_demand as f64
+    };
+    serde_json::json!({
+        "need_calls": r.need_calls,
+        "need_ids_total": r.need_ids_total,
+        "need_hits": r.need_hits,
+        "need_misses": r.need_misses,
+        "missing_calls": r.missing_calls,
+        "missing_ids_total": r.missing_ids_total,
+        "missing_hits": r.missing_hits,
+        "missing_misses": r.missing_misses,
+        "fetch_calls": r.fetch_calls,
+        "fetch_ids_total": r.fetch_ids_total,
+        "fetch_objects_served": r.fetch_objects_served,
+        "ref_bytes": r.ref_bytes,
+        "obj_bytes": r.obj_bytes,
+        "saved_bytes": r.ref_bytes,
+        "hit_rate": hit_rate,
+        "saved_bytes_ratio": saved_bytes_ratio,
+        "last_updated_ms": r.last_updated_ms,
+    })
+}
+
 /// `objects.need`: given a list of ValueIDs, return which ones the local node already has.
 async fn objects_need(state: &AppState, ids: Vec<String>) -> Result<Value, RpcError> {
     let eng = state.engine.read().await;
-    let vs = eng.value_store_lock();
+    let mut vs = eng.value_store_lock();
     let mut present: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+    let mut hit_bytes: u64 = 0;
     for id_str in &ids {
         if let Some(id) = parse_value_id(id_str) {
-            if vs.contains(id) {
+            if let Some(entry) = vs.get(&id) {
+                hit_bytes = hit_bytes.saturating_add(entry.bytes.len() as u64);
                 present.push(id_str.clone());
-            } else {
-                missing.push(id_str.clone());
+                continue;
             }
-        } else {
-            missing.push(id_str.clone());
         }
+        missing.push(id_str.clone());
+    }
+    drop(vs);
+    drop(eng);
+    // T167: record CAS replication object-pull metrics.
+    {
+        let mut c = state.counters.lock().unwrap();
+        let r = &mut c.replication_objects;
+        r.need_calls = r.need_calls.saturating_add(1);
+        r.need_ids_total = r.need_ids_total.saturating_add(ids.len() as u64);
+        r.need_hits = r.need_hits.saturating_add(present.len() as u64);
+        r.need_misses = r.need_misses.saturating_add(missing.len() as u64);
+        r.ref_bytes = r.ref_bytes.saturating_add(hit_bytes);
+        r.last_updated_ms = now_unix_ms_u64();
     }
     Ok(serde_json::json!({
         "ok": true,
@@ -17118,11 +17203,25 @@ async fn objects_missing(state: &AppState, ids: Vec<String>) -> Result<Value, Rp
     let eng = state.engine.read().await;
     let vs = eng.value_store_lock();
     let mut missing: Vec<String> = Vec::new();
+    let mut hits: u64 = 0;
     for id_str in &ids {
         match parse_value_id(id_str) {
-            Some(id) if vs.contains(id) => {}
+            Some(id) if vs.contains(id) => {
+                hits = hits.saturating_add(1);
+            }
             _ => missing.push(id_str.clone()),
         }
+    }
+    drop(vs);
+    drop(eng);
+    {
+        let mut c = state.counters.lock().unwrap();
+        let r = &mut c.replication_objects;
+        r.missing_calls = r.missing_calls.saturating_add(1);
+        r.missing_ids_total = r.missing_ids_total.saturating_add(ids.len() as u64);
+        r.missing_hits = r.missing_hits.saturating_add(hits);
+        r.missing_misses = r.missing_misses.saturating_add(missing.len() as u64);
+        r.last_updated_ms = now_unix_ms_u64();
     }
     Ok(serde_json::json!({ "ok": true, "missing": missing }))
 }
@@ -17132,6 +17231,7 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
     let eng = state.engine.read().await;
     let mut vs = eng.value_store_lock();
     let mut objects: Vec<Value> = Vec::new();
+    let mut obj_bytes: u64 = 0;
     for id_str in &ids {
         let id = match parse_value_id(id_str) {
             Some(id) => id,
@@ -17141,6 +17241,7 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&entry.bytes);
             let computed = skeindb_core::value_id(&entry.bytes);
+            obj_bytes = obj_bytes.saturating_add(entry.bytes.len() as u64);
             objects.push(serde_json::json!({
                 "id": id_str,
                 "bytes_b64": b64,
@@ -17148,6 +17249,18 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
                 "verified": computed == id,
             }));
         }
+    }
+    drop(vs);
+    drop(eng);
+    let objects_served = objects.len() as u64;
+    {
+        let mut c = state.counters.lock().unwrap();
+        let r = &mut c.replication_objects;
+        r.fetch_calls = r.fetch_calls.saturating_add(1);
+        r.fetch_ids_total = r.fetch_ids_total.saturating_add(ids.len() as u64);
+        r.fetch_objects_served = r.fetch_objects_served.saturating_add(objects_served);
+        r.obj_bytes = r.obj_bytes.saturating_add(obj_bytes);
+        r.last_updated_ms = now_unix_ms_u64();
     }
     Ok(serde_json::json!({ "ok": true, "objects": objects }))
 }
@@ -25019,6 +25132,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "objects.missing"
             | "objects.fetch"
             | "cluster.route_query"
+            | "cluster.replication_stats"
     )
 }
 
@@ -25107,6 +25221,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "cluster.shard.create",
         "cluster.shard.move",
         "cluster.shard.rebalance",
+        "cluster.replication_stats",
         "schema.list_databases",
         "schema.create_database",
         "schema.drop_database",
@@ -26122,6 +26237,7 @@ async fn stats_snapshot(state: &AppState) -> Value {
     let tps = compaction_runtime
         .writes
         .ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0);
+    let replication_objects = cluster_replication_stats_json(state);
 
     serde_json::json!({
         "uptime_s": uptime_s,
@@ -26157,7 +26273,8 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "primary_node_id": cluster.primary_node_id,
             "nodes": cluster.nodes.len(),
             "shards": cluster.shards.len(),
-            "replication": cluster.replication
+            "replication": cluster.replication,
+            "replication_objects": replication_objects
         }
     })
 }
@@ -34088,6 +34205,102 @@ mod tests {
             .decode(b64)
             .unwrap();
         assert_eq!(bytes, b"hello");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // T167: CAS replication bandwidth metrics tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cluster_replication_stats_tracks_hits_misses_and_bytes() -> anyhow::Result<()> {
+        let dir = temp_dir("replication_stats");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        // Seed a known object so hit/miss accounting is deterministic.
+        {
+            let eng = state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            vs.put(skeindb_core::ValueKind::Cell, b"payload-xyz".to_vec());
+        }
+        let hit_id = skeindb_core::value_id(b"payload-xyz");
+        let hit_hex: String = hit_id.iter().map(|b| format!("{:02x}", b)).collect();
+        let miss_hex = "00000000000000000000000000000001".to_string();
+
+        // Baseline snapshot: all counters should be zero.
+        let resp = call_rpc(&state, "cluster.replication_stats", json!({})).await;
+        assert!(resp.ok);
+        let base = resp.result.unwrap();
+        assert_eq!(base["need_calls"].as_u64().unwrap(), 0);
+        assert_eq!(base["fetch_calls"].as_u64().unwrap(), 0);
+        assert_eq!(base["ref_bytes"].as_u64().unwrap(), 0);
+
+        // `objects.need` with one hit + one miss → hit/miss counters advance,
+        // and `ref_bytes` records bytes that did NOT need to be re-shipped.
+        let resp = call_rpc(
+            &state,
+            "objects.need",
+            json!({ "ids": [hit_hex.clone(), miss_hex.clone()] }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // `objects.missing` should also advance missing_* counters.
+        let resp = call_rpc(
+            &state,
+            "objects.missing",
+            json!({ "ids": [hit_hex.clone(), miss_hex.clone()] }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        // `objects.fetch` on the hit id should record obj_bytes.
+        let resp = call_rpc(&state, "objects.fetch", json!({ "ids": [hit_hex.clone()] })).await;
+        assert!(resp.ok);
+
+        let resp = call_rpc(&state, "cluster.replication_stats", json!({})).await;
+        assert!(resp.ok);
+        let s = resp.result.unwrap();
+        assert_eq!(s["need_calls"].as_u64().unwrap(), 1);
+        assert_eq!(s["need_ids_total"].as_u64().unwrap(), 2);
+        assert_eq!(s["need_hits"].as_u64().unwrap(), 1);
+        assert_eq!(s["need_misses"].as_u64().unwrap(), 1);
+        assert_eq!(s["missing_calls"].as_u64().unwrap(), 1);
+        assert_eq!(s["missing_hits"].as_u64().unwrap(), 1);
+        assert_eq!(s["missing_misses"].as_u64().unwrap(), 1);
+        assert_eq!(s["fetch_calls"].as_u64().unwrap(), 1);
+        assert_eq!(s["fetch_objects_served"].as_u64().unwrap(), 1);
+        assert_eq!(
+            s["ref_bytes"].as_u64().unwrap(),
+            b"payload-xyz".len() as u64
+        );
+        assert_eq!(
+            s["obj_bytes"].as_u64().unwrap(),
+            b"payload-xyz".len() as u64
+        );
+        let hit_rate = s["hit_rate"].as_f64().unwrap();
+        assert!((hit_rate - 0.5).abs() < 1e-9, "hit_rate={}", hit_rate);
+        let saved_ratio = s["saved_bytes_ratio"].as_f64().unwrap();
+        assert!(
+            (saved_ratio - 0.5).abs() < 1e-9,
+            "saved_bytes_ratio={}",
+            saved_ratio
+        );
+
+        // The same counters must also appear in `stats.snapshot` under
+        // `cluster.replication_objects`.
+        let resp = call_rpc(&state, "stats.snapshot", json!({})).await;
+        assert!(resp.ok);
+        let snap = resp.result.unwrap();
+        let emb = &snap["cluster"]["replication_objects"];
+        assert_eq!(emb["need_hits"].as_u64().unwrap(), 1);
+        assert_eq!(
+            emb["ref_bytes"].as_u64().unwrap(),
+            b"payload-xyz".len() as u64
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

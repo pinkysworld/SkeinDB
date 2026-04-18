@@ -154,6 +154,37 @@ Expose per link and per node:
 
 These metrics make the feature publishable: they quantify bandwidth savings.
 
+### 7.1) `cluster.replication_stats` RPC (T167)
+
+The runtime counters behind these metrics are exposed via the
+read-only RPC `cluster.replication_stats`, and embedded into
+`stats.snapshot` under `cluster.replication_objects`. Shape:
+
+```json
+{
+  "need_calls": 12, "need_ids_total": 480, "need_hits": 420, "need_misses": 60,
+  "missing_calls": 3, "missing_ids_total": 120, "missing_hits": 100, "missing_misses": 20,
+  "fetch_calls": 3, "fetch_ids_total": 60, "fetch_objects_served": 60,
+  "ref_bytes": 4096000,
+  "obj_bytes": 524288,
+  "saved_bytes": 4096000,
+  "hit_rate": 0.875,
+  "saved_bytes_ratio": 0.887,
+  "last_updated_ms": 1758700000000
+}
+```
+
+- `ref_bytes` = total bytes of objects the local replica already had when
+  asked about them via `objects.need` (= bytes avoided on the wire thanks
+  to CAS dedup).
+- `obj_bytes` = total bytes actually served via `objects.fetch`.
+- `hit_rate` = `need_hits / (need_hits + need_misses)`.
+- `saved_bytes_ratio` = `ref_bytes / (ref_bytes + obj_bytes)`.
+
+Counters are updated inside the `objects.need` / `objects.missing` /
+`objects.fetch` handlers regardless of caller role, so both primary and
+replica sides see the local CAS cost model in real time.
+
 ---
 
 ## 8) Backlog

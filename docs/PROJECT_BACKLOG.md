@@ -134,7 +134,7 @@ Phase 0 verification checklist:
 ## Phase 17 - CAS-aware replication bandwidth bounds (object-aware sync)
 - [x] T165: Bloom summaries for ValueID existence (per valseg + union)
 - [ ] T166: Object pull protocol (batch missing ValueIDs, fetch objects, verify hashes)
-- [ ] T167: Replication metrics: object hit-rate, saved bytes, ref-bytes vs obj-bytes
+- [x] T167: Replication metrics: object hit-rate, saved bytes, ref-bytes vs obj-bytes. Latest: added `ReplicationObjectCounters` to the server counters, instrumented `objects.need` / `objects.missing` / `objects.fetch` with hit/miss accounting and byte accounting (hits accumulate `ref_bytes`, fetches accumulate `obj_bytes`), exposed a new `cluster.replication_stats` RPC (read-only, capability-listed) reporting `need_*`, `missing_*`, `fetch_*`, `ref_bytes`, `obj_bytes`, `hit_rate`, `saved_bytes_ratio`, and `last_updated_ms`, and embedded the same JSON under `stats.snapshot.cluster.replication_objects`. One end-to-end integration test (`cluster_replication_stats_tracks_hits_misses_and_bytes`) verifies the counters advance correctly across seed → need → missing → fetch → stats.snapshot.
 - [ ] T168: Shard move/rebalance uses object manifests + progress reporting
 
 ## Phase 18 - Self-tuning index advisor
