@@ -560,6 +560,16 @@ function formatAdvisorTime(ms) {
   return new Date(ms).toLocaleString();
 }
 
+function formatAdvisorHistoryState(entry) {
+  if (!entry) return 'unknown';
+  const bits = [entry.action || 'action'];
+  if (entry.status) bits.push(entry.status);
+  if (Number.isFinite(entry.progress_pct)) bits.push(String(entry.progress_pct) + '%');
+  if (entry.result_status) bits.push(entry.result_status);
+  if (entry.rollback_status) bits.push('rollback=' + entry.rollback_status);
+  return bits.join(' | ');
+}
+
 function findAdvisorHistoryEntry(selection) {
   if (!selection) return null;
   const key = advisorSelectionKey(selection.columns, selection.include);
@@ -624,7 +634,7 @@ function renderAdvisorReport() {
         'After (expected)',
         advisorExpectedAccess(item.columns),
         'scan opportunity: up to ' + formatNumber(item.rows_scanned) + ' historical rows avoided',
-        historyEntry ? ('latest action: ' + historyEntry.action + ' at ' + formatAdvisorTime(historyEntry.created_at_ms)) : 'latest action: not yet applied'
+        historyEntry ? ('latest action: ' + formatAdvisorHistoryState(historyEntry) + ' at ' + formatAdvisorTime(historyEntry.updated_at_ms || historyEntry.created_at_ms)) : 'latest action: not yet applied'
       ];
       target.appendChild(buildAdvisorReportCard(
         advisorLabel(item.columns, item.include),
@@ -655,7 +665,7 @@ function renderAdvisorReport() {
     history.forEach((entry, idx) => {
       target.appendChild(buildAdvisorReportCard(
         advisorLabel(entry.columns, entry.include),
-        entry.action + ' at ' + formatAdvisorTime(entry.created_at_ms),
+        formatAdvisorHistoryState(entry) + ' at ' + formatAdvisorTime(entry.updated_at_ms || entry.created_at_ms),
         [
           entry.table && entry.table.db ? (entry.table.db + '.' + entry.table.table) : 'unknown table',
           entry.note || 'no note'
@@ -664,8 +674,9 @@ function renderAdvisorReport() {
           'suggestion id: ' + (entry.suggestion_id || 'n/a') + '\n' +
           'action id: ' + (entry.id || 'n/a'),
         'After\n' +
-          'recorded action: ' + entry.action + '\n' +
-          'selection: ' + advisorLabel(entry.columns, entry.include),
+          'recorded action: ' + formatAdvisorHistoryState(entry) + '\n' +
+          'selection: ' + advisorLabel(entry.columns, entry.include) + '\n' +
+          'error: ' + (entry.error || 'none'),
         'Load selection',
         'history',
         idx
@@ -3969,7 +3980,10 @@ async function advApply() {
       include: [...selection.include],
       action: 'apply',
       created_at_ms: Date.now(),
-      note: $('advNote')?.value.trim() || null
+      note: $('advNote')?.value.trim() || null,
+      status: result.status || 'queued',
+      progress_pct: Number.isFinite(result.progress_pct) ? result.progress_pct : 0,
+      updated_at_ms: Date.now()
     });
     const selectionKey = advisorSelectionKey(selection.columns, selection.include);
     STATE.advisorSuggestions = STATE.advisorSuggestions.filter((item) => advisorSelectionKey(item.columns, item.include) !== selectionKey);

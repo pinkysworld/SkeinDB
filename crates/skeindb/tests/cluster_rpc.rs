@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, Context};
 use serde_json::json;
 use skeindb_skeinql::types::{
-    BaseTableRef, Expr, Query, QueryBody, SelectBody, SelectItem, TableRef,
+    BaseTableRef, Expr, OrderBy, Query, QueryBody, SelectBody, SelectItem, TableRef,
 };
 use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -50,6 +50,32 @@ fn select_query(db: &str, table: &str, projection: &[&str]) -> Query {
         limit: None,
         lock: None,
     }
+}
+
+fn advisor_workload_query(db: &str, table: &str) -> Query {
+    let mut query = select_query(db, table, &["id", "name"]);
+    if let QueryBody::Select { select } = query.body.as_mut() {
+        select.r#where = Some(Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "category".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Param { param: 0 })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        });
+    }
+    query.order_by = vec![OrderBy {
+        expr: Expr::Col {
+            col: "value".to_string(),
+            table: None,
+        },
+        dir: None,
+    }];
+    query
 }
 
 async fn cluster_test_guard() -> OwnedSemaphorePermit {
@@ -4280,52 +4306,396 @@ async fn r16_index_advisor_synthesis_workflow() -> anyhow::Result<()> {
     // R16: Index Advisor — verify recommendation workflow
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("r16_index_advisor")?;
-    let client = reqwest::Client::new();
-    let base = server.base_url();
+    let client = RpcHttpClient::new(server.base_url());
 
     // Create table with data
     let resp = client
-        .post(format!("{base}/api/v1/rpc"))
-        .json(&serde_json::json!({
-            "skeinql": "1.0", "id": "t1",
-            "method": "sql.exec",
-            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT)" }
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_test (id INT PRIMARY KEY, category VARCHAR(50), value INT, name VARCHAR(50))"
         }))
-        .send()
         .await?;
-    assert!(resp.status().is_success());
+    assert!(resp.ok);
 
     for i in 1..=20 {
         let resp = client
-            .post(format!("{base}/api/v1/rpc"))
-            .json(&serde_json::json!({
-                "skeinql": "1.0", "id": "t1",
-            "method": "sql.exec",
-                "params": { "default_db": "test", "sql": format!("INSERT INTO r16_test (id, category, value) VALUES ({i}, 'cat_{c}', {v})", c = i % 5, v = i * 10) }
+            .sql_exec(json!({
+                "default_db": "test",
+                "sql": format!(
+                    "INSERT INTO r16_test (id, category, value, name) VALUES ({i}, 'cat_{c}', {v}, 'name_{i}')",
+                    c = i % 5,
+                    v = i * 10
+                )
             }))
-            .send()
             .await?;
-        assert!(resp.status().is_success());
+        assert!(resp.ok);
     }
+
+    let query = advisor_workload_query("test", "r16_test");
+    let resp = client
+        .rpc(
+            "query.select",
+            json!({
+                "query": query,
+                "args": [{"t": "str", "v": "cat_1"}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
 
     // Request index recommendations
     let resp = client
-        .post(format!("{base}/api/v1/rpc"))
-        .json(&serde_json::json!({
-            "skeinql": "1.0", "id": "t1",
-            "method": "advisor.index_synthesize",
-            "params": {
+        .rpc(
+            "advisor.index_synthesize",
+            json!({
                 "table": { "db": "test", "table": "r16_test" }
-            }
-        }))
-        .send()
+                ,"min_queries": 1,
+                "min_rows": 1
+            }),
+        )
         .await?;
-    assert!(resp.status().is_success());
-    let body: serde_json::Value = resp.json().await?;
+    assert!(resp.ok);
+    let result = resp.result.expect("missing advisor synthesis result");
+    let suggestions = result["suggestions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        body.get("result").is_some(),
-        "advisor.index_synthesize should return result"
+        !suggestions.is_empty(),
+        "expected at least one advisor suggestion"
     );
+    assert_eq!(suggestions[0]["columns"], json!(["category", "value"]));
+    assert!(
+        suggestions[0]["include"]
+            .as_array()
+            .map(|cols| cols.iter().any(|v| v.as_str() == Some("name")))
+            .unwrap_or(false),
+        "expected suggestion to include covering projection column"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_apply_roundtrip_and_suppresses_suggestion() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_apply")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_apply_test (id INT PRIMARY KEY, category VARCHAR(50), value INT, name VARCHAR(50))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    for i in 1..=20 {
+        let resp = client
+            .sql_exec(json!({
+                "default_db": "test",
+                "sql": format!(
+                    "INSERT INTO r16_apply_test (id, category, value, name) VALUES ({i}, 'cat_{c}', {v}, 'name_{i}')",
+                    c = i % 5,
+                    v = i * 10
+                )
+            }))
+            .await?;
+        assert!(resp.ok);
+    }
+
+    let query = advisor_workload_query("test", "r16_apply_test");
+    let resp = client
+        .rpc(
+            "query.select",
+            json!({
+                "query": query,
+                "args": [{"t": "str", "v": "cat_1"}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let synth = client
+        .rpc(
+            "advisor.index_synthesize",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "min_queries": 1,
+                "min_rows": 1
+            }),
+        )
+        .await?;
+    assert!(synth.ok);
+    let result = synth.result.expect("missing advisor synthesize result");
+    let suggestion = result["suggestions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .cloned()
+        .expect("missing advisor suggestion");
+    let columns = suggestion["columns"]
+        .as_array()
+        .expect("missing suggestion columns")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+    let include = suggestion["include"]
+        .as_array()
+        .expect("missing suggestion include")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+    let suggestion_id = suggestion["id"]
+        .as_str()
+        .expect("missing suggestion id")
+        .to_string();
+
+    let apply = client
+        .rpc(
+            "advisor.apply_index",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "columns": columns,
+                "include": include,
+                "note": "integration apply"
+            }),
+        )
+        .await?;
+    assert!(apply.ok);
+    let action_id = apply
+        .result
+        .as_ref()
+        .and_then(|value| value.get("action_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing advisor action_id"))?
+        .to_string();
+    assert_eq!(
+        apply.result.as_ref().and_then(|v| v.get("status")),
+        Some(&json!("queued"))
+    );
+    assert_eq!(
+        apply.result.as_ref().and_then(|v| v.get("progress_pct")),
+        Some(&json!(0))
+    );
+
+    let completed =
+        wait_for_advisor_history_entry(&client, "test", "r16_apply_test", &action_id, "completed")
+            .await?;
+    assert_eq!(completed["result_status"].as_str(), Some("built"));
+    assert_eq!(completed["progress_pct"].as_u64(), Some(100));
+
+    let apply_again = client
+        .rpc(
+            "advisor.apply_index",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "columns": suggestion["columns"],
+                "include": suggestion["include"],
+                "note": "integration apply again"
+            }),
+        )
+        .await?;
+    assert!(apply_again.ok);
+    assert_eq!(
+        apply_again.result.as_ref().and_then(|v| v.get("status")),
+        Some(&json!("exists"))
+    );
+    assert_eq!(
+        apply_again
+            .result
+            .as_ref()
+            .and_then(|v| v.get("progress_pct")),
+        Some(&json!(100))
+    );
+
+    let history = client
+        .rpc(
+            "advisor.history",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "limit": 10
+            }),
+        )
+        .await?;
+    assert!(history.ok);
+    let entries = history.result.expect("missing advisor history result")["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        entries
+            .iter()
+            .filter(|entry| entry["action"] == "apply")
+            .count()
+            >= 2
+    );
+    assert!(entries
+        .iter()
+        .any(|entry| entry["suggestion_id"] == suggestion_id));
+
+    let dismiss = client
+        .rpc(
+            "advisor.dismiss",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "columns": suggestion["columns"],
+                "include": suggestion["include"],
+                "note": "integration dismiss"
+            }),
+        )
+        .await?;
+    assert!(dismiss.ok);
+    assert_eq!(
+        dismiss.result.as_ref().and_then(|v| v.get("dismissed")),
+        Some(&json!(true))
+    );
+
+    let resynth = client
+        .rpc(
+            "advisor.index_synthesize",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_test" },
+                "min_queries": 1,
+                "min_rows": 1
+            }),
+        )
+        .await?;
+    assert!(resynth.ok);
+    let remaining = resynth.result.expect("missing re-synthesize result")["suggestions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        remaining.iter().all(|item| item["id"] != suggestion_id),
+        "applied or dismissed suggestion should be suppressed from future synthesize results"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r16_index_advisor_apply_failure_rolls_back_and_resurfaces_suggestion() -> anyhow::Result<()>
+{
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_env(
+        "r16_index_apply_failure",
+        &[("SKEINDB_ADVISOR_FAIL_BUILD", "1")],
+    )?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_apply_fail_test (id INT PRIMARY KEY, category VARCHAR(50), value INT, name VARCHAR(50))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    for i in 1..=20 {
+        let resp = client
+            .sql_exec(json!({
+                "default_db": "test",
+                "sql": format!(
+                    "INSERT INTO r16_apply_fail_test (id, category, value, name) VALUES ({i}, 'cat_{c}', {v}, 'name_{i}')",
+                    c = i % 5,
+                    v = i * 10
+                )
+            }))
+            .await?;
+        assert!(resp.ok);
+    }
+
+    let query = advisor_workload_query("test", "r16_apply_fail_test");
+    let resp = client
+        .rpc(
+            "query.select",
+            json!({
+                "query": query,
+                "args": [{"t": "str", "v": "cat_1"}]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let synth = client
+        .rpc(
+            "advisor.index_synthesize",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_fail_test" },
+                "min_queries": 1,
+                "min_rows": 1
+            }),
+        )
+        .await?;
+    assert!(synth.ok);
+    let result = synth.result.expect("missing advisor synthesize result");
+    let suggestion = result["suggestions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .cloned()
+        .expect("missing advisor suggestion");
+    let suggestion_id = suggestion["id"]
+        .as_str()
+        .expect("missing suggestion id")
+        .to_string();
+
+    let apply = client
+        .rpc(
+            "advisor.apply_index",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_fail_test" },
+                "columns": suggestion["columns"],
+                "include": suggestion["include"],
+                "note": "forced failure"
+            }),
+        )
+        .await?;
+    assert!(apply.ok);
+    let action_id = apply
+        .result
+        .as_ref()
+        .and_then(|value| value.get("action_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing advisor failure action_id"))?
+        .to_string();
+    assert_eq!(
+        apply.result.as_ref().and_then(|value| value.get("status")),
+        Some(&json!("queued"))
+    );
+
+    let failed = wait_for_advisor_history_entry(
+        &client,
+        "test",
+        "r16_apply_fail_test",
+        &action_id,
+        "failed",
+    )
+    .await?;
+    assert_eq!(failed["rollback_status"].as_str(), Some("rolled_back"));
+    assert!(failed["error"].as_str().is_some());
+
+    let resynth = client
+        .rpc(
+            "advisor.index_synthesize",
+            json!({
+                "table": { "db": "test", "table": "r16_apply_fail_test" },
+                "min_queries": 1,
+                "min_rows": 1
+            }),
+        )
+        .await?;
+    assert!(resynth.ok);
+    let remaining = resynth
+        .result
+        .expect("missing failure re-synthesize result")["suggestions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(remaining
+        .iter()
+        .any(|item| item["id"].as_str() == Some(suggestion_id.as_str())));
 
     Ok(())
 }
@@ -4952,6 +5322,540 @@ async fn t062_prepared_get_etag_roundtrip() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn cdc_query_subscription_invalidates_prepared_query() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_query_subscription")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "events",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "data", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let prepare = client
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": {
+                    "body": {
+                        "select": {
+                            "from": [{"db": "app", "table": "events"}],
+                            "projection": [
+                                {"expr": {"col": "id"}},
+                                {"expr": {"col": "data"}}
+                            ]
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let subscribe = client
+        .rpc("cdc.subscribe_query", json!({"query_id": query_id}))
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    assert_eq!(
+        subscribe
+            .result
+            .as_ref()
+            .and_then(|value| value.get("sse_url"))
+            .and_then(|value| value.as_str()),
+        Some(format!("/api/v1/cdc/sse/{sub_id}").as_str())
+    );
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing offset"))?;
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "events"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+
+    let execute = client
+        .rpc(
+            "query.execute_prepared",
+            json!({"query_id": query_id, "args": []}),
+        )
+        .await?;
+    let current_etag = execute
+        .result
+        .as_ref()
+        .and_then(|value| value.get("etag"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing prepared query etag"))?
+        .to_string();
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id.clone(), "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let events = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("events"))
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| anyhow!("missing events"))?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["op"].as_str(), Some("invalidate"));
+    assert_eq!(events[0]["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(events[0]["etag"].as_str(), Some(current_etag.as_str()));
+    assert_eq!(events[0]["table"].as_str(), Some("events"));
+
+    let next_offset = poll
+        .result
+        .as_ref()
+        .and_then(|value| value.get("next_offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing next_offset"))?;
+    let ack = client
+        .rpc(
+            "cdc.ack",
+            json!({"sub_id": sub_id.clone(), "offset": next_offset}),
+        )
+        .await?;
+    assert!(ack.ok);
+
+    let query_subscribe = client
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    assert!(query_subscribe.ok);
+    let table_keys = query_subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("table_keys"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(table_keys
+        .iter()
+        .any(|value| value.as_str() == Some("app.events")));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_poll_requires_resnapshot_after_retention_horizon() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_env(
+        "cdc_poll_resnapshot",
+        &[("SKEINDB_CDC_RETENTION_EVENTS", "2")],
+    )?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "events",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "data", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+
+    let subscribe = client
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc sub_id"))?
+        .to_string();
+    let start_offset = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("offset"))
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("missing cdc offset"))?;
+
+    for (id, name) in [(1u64, "Ada"), (2u64, "Grace"), (3u64, "Linus")] {
+        let resp = client
+            .rpc(
+                "data.insert",
+                json!({
+                    "into": {"db": "app", "table": "events"},
+                    "rows": [{"id": {"t": "u64", "v": id}, "data": {"t": "str", "v": name}}]
+                }),
+            )
+            .await?;
+        assert!(resp.ok);
+    }
+
+    let poll = client
+        .rpc(
+            "cdc.poll",
+            json!({"sub_id": sub_id, "from_offset": start_offset, "limit": 10}),
+        )
+        .await?;
+    assert!(poll.ok);
+    let result = poll.result.expect("missing cdc poll result");
+    assert_eq!(
+        result["events"].as_array().map(|items| items.len()),
+        Some(0)
+    );
+    assert_eq!(result["resnapshot_required"].as_bool(), Some(true));
+    assert_eq!(result["earliest_offset"].as_u64(), Some(2));
+    assert_eq!(result["latest_offset"].as_u64(), Some(3));
+    assert_eq!(result["next_offset"].as_u64(), Some(1));
+    assert_eq!(result["resnapshot_from_offset"].as_u64(), Some(1));
+    assert_eq!(
+        result["resnapshot_reason"].as_str(),
+        Some("wal_horizon_exceeded")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_sse_stream_reconnects_from_last_event_id() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_table_sse_reconnect")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let subscribe = rpc
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let sse_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sse_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sse_url"))?
+        .to_string();
+    assert_eq!(sse_url, format!("/api/v1/cdc/sse/{sub_id}"));
+
+    let sse_full_url = format!("{}{}", server.base_url(), sse_url);
+    let mut first_stream = http.get(&sse_full_url).send().await?;
+    assert_eq!(first_stream.status(), reqwest::StatusCode::OK);
+    assert!(first_stream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("text/event-stream"));
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let first_event = read_sse_event(&mut first_stream).await?;
+    assert_eq!(first_event.id.as_deref(), Some("1"));
+    assert_eq!(first_event.event.as_deref(), Some("insert"));
+    let first_payload: serde_json::Value = serde_json::from_str(&first_event.data)?;
+    assert_eq!(first_payload["db"].as_str(), Some("app"));
+    assert_eq!(first_payload["table"].as_str(), Some("events"));
+    assert_eq!(first_payload["op"].as_str(), Some("insert"));
+    assert_eq!(first_payload["pk"][0]["v"].as_u64(), Some(1));
+    drop(first_stream);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 2}, "data": {"t": "str", "v": "Grace"}}]
+        }),
+    )
+    .await?;
+
+    let mut resumed_stream = http
+        .get(&sse_full_url)
+        .header("Last-Event-ID", "1")
+        .send()
+        .await?;
+    assert_eq!(resumed_stream.status(), reqwest::StatusCode::OK);
+
+    let resumed_event = read_sse_event(&mut resumed_stream).await?;
+    assert_eq!(resumed_event.id.as_deref(), Some("2"));
+    assert_eq!(resumed_event.event.as_deref(), Some("insert"));
+    let resumed_payload: serde_json::Value = serde_json::from_str(&resumed_event.data)?;
+    assert_eq!(resumed_payload["pk"][0]["v"].as_u64(), Some(2));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_table_sse_stream_emits_resnapshot_event_after_horizon_loss() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_env(
+        "cdc_table_sse_resnapshot",
+        &[("SKEINDB_CDC_RETENTION_EVENTS", "2")],
+    )?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let subscribe = rpc
+        .rpc(
+            "cdc.subscribe_table",
+            json!({"db": "app", "table": "events"}),
+        )
+        .await?;
+    assert!(subscribe.ok);
+    let sse_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sse_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing cdc sse_url"))?
+        .to_string();
+
+    let sse_full_url = format!("{}{}", server.base_url(), sse_url);
+    let mut first_stream = http.get(&sse_full_url).send().await?;
+    assert_eq!(first_stream.status(), reqwest::StatusCode::OK);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+    let first_event = read_sse_event(&mut first_stream).await?;
+    assert_eq!(first_event.id.as_deref(), Some("1"));
+    drop(first_stream);
+
+    for (id, name) in [(2u64, "Grace"), (3u64, "Linus"), (4u64, "Margaret")] {
+        rpc.rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "events"},
+                "rows": [{"id": {"t": "u64", "v": id}, "data": {"t": "str", "v": name}}]
+            }),
+        )
+        .await?;
+    }
+
+    let mut resumed_stream = http
+        .get(&sse_full_url)
+        .header("Last-Event-ID", "1")
+        .send()
+        .await?;
+    assert_eq!(resumed_stream.status(), reqwest::StatusCode::OK);
+
+    let resnapshot_event = read_sse_event(&mut resumed_stream).await?;
+    assert_eq!(resnapshot_event.event.as_deref(), Some("resnapshot"));
+    assert_eq!(resnapshot_event.id.as_deref(), Some("2"));
+    let payload: serde_json::Value = serde_json::from_str(&resnapshot_event.data)?;
+    assert_eq!(payload["earliest_offset"].as_u64(), Some(3));
+    assert_eq!(payload["latest_offset"].as_u64(), Some(4));
+    assert_eq!(payload["resnapshot_from_offset"].as_u64(), Some(2));
+    assert_eq!(payload["reason"].as_str(), Some("wal_horizon_exceeded"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cdc_query_sse_stream_emits_invalidation_events() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("cdc_query_sse")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    rpc.rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    rpc.rpc(
+        "schema.create_table",
+        json!({
+            "db": "app",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                {"name": "data", "type": {"kind": "str"}, "nullable": false}
+            ],
+            "primary_key": ["id"]
+        }),
+    )
+    .await?;
+
+    let prepare = rpc
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": {
+                    "body": {
+                        "select": {
+                            "from": [{"db": "app", "table": "events"}],
+                            "projection": [
+                                {"expr": {"col": "id"}},
+                                {"expr": {"col": "data"}}
+                            ]
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let subscribe = rpc
+        .rpc("cdc.subscribe_query", json!({"query_id": query_id}))
+        .await?;
+    assert!(subscribe.ok);
+    let sub_id = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sub_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sub_id"))?
+        .to_string();
+    let sse_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sse_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing sse_url"))?
+        .to_string();
+    assert_eq!(sse_url, format!("/api/v1/cdc/sse/{sub_id}"));
+
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert_eq!(stream.status(), reqwest::StatusCode::OK);
+
+    rpc.rpc(
+        "data.insert",
+        json!({
+            "into": {"db": "app", "table": "events"},
+            "rows": [{"id": {"t": "u64", "v": 1}, "data": {"t": "str", "v": "Ada"}}]
+        }),
+    )
+    .await?;
+
+    let execute = rpc
+        .rpc(
+            "query.execute_prepared",
+            json!({"query_id": query_id, "args": []}),
+        )
+        .await?;
+    let etag = execute
+        .result
+        .as_ref()
+        .and_then(|value| value.get("etag"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing etag"))?
+        .to_string();
+
+    let event = read_sse_event(&mut stream).await?;
+    assert_eq!(event.id.as_deref(), Some("1"));
+    assert_eq!(event.event.as_deref(), Some("invalidate"));
+    let payload: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(payload["op"].as_str(), Some("invalidate"));
+    assert_eq!(payload["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(payload["etag"].as_str(), Some(etag.as_str()));
+    assert_eq!(payload["table"].as_str(), Some("events"));
+
+    Ok(())
+}
+
 /// T063 + T122: Verify query.subscribe RPC + security token CRUD.
 #[tokio::test]
 async fn t063_t122_subscribe_and_security_tokens() -> anyhow::Result<()> {
@@ -5055,29 +5959,49 @@ struct HttpHarness {
 
 impl HttpHarness {
     fn start(label: &str) -> anyhow::Result<Self> {
-        Self::start_with_ports(label, 0, 0)
+        Self::start_with_ports_and_env(label, 0, 0, &[])
+    }
+
+    fn start_with_env(label: &str, envs: &[(&str, &str)]) -> anyhow::Result<Self> {
+        Self::start_with_ports_and_env(label, 0, 0, envs)
     }
 
     fn start_with_mysql(label: &str) -> anyhow::Result<Self> {
         let mysql_port = free_tcp_port();
-        Self::start_with_ports(label, mysql_port, 0)
+        Self::start_with_ports_and_env(label, mysql_port, 0, &[])
     }
 
     fn start_with_pg(label: &str) -> anyhow::Result<Self> {
         let pg_port = free_tcp_port();
-        Self::start_with_ports(label, 0, pg_port)
+        Self::start_with_ports_and_env(label, 0, pg_port, &[])
+    }
+
+    fn start_with_pg_and_env(label: &str, envs: &[(&str, &str)]) -> anyhow::Result<Self> {
+        let pg_port = free_tcp_port();
+        Self::start_with_ports_and_env(label, 0, pg_port, envs)
     }
 
     #[allow(dead_code)]
     fn start_with_mysql_port(label: &str, mysql_port: u16) -> anyhow::Result<Self> {
-        Self::start_with_ports(label, mysql_port, 0)
+        Self::start_with_ports_and_env(label, mysql_port, 0, &[])
     }
 
+    #[allow(dead_code)]
     fn start_with_ports(label: &str, mysql_port: u16, pg_port: u16) -> anyhow::Result<Self> {
+        Self::start_with_ports_and_env(label, mysql_port, pg_port, &[])
+    }
+
+    fn start_with_ports_and_env(
+        label: &str,
+        mysql_port: u16,
+        pg_port: u16,
+        envs: &[(&str, &str)],
+    ) -> anyhow::Result<Self> {
         let dir = temp_dir(label);
         let http_port = free_tcp_port();
         let cluster_port = free_tcp_port();
-        let child = spawn_server_with_pg(&dir, http_port, cluster_port, mysql_port, pg_port)?;
+        let child =
+            spawn_server_with_pg_env(&dir, http_port, cluster_port, mysql_port, pg_port, envs)?;
         let _guard = ChildGuard::new(child);
 
         wait_for_health(http_port)?;
@@ -5157,6 +6081,44 @@ impl RpcHttpClient {
         let parsed: RpcResponse = serde_json::from_slice(&bytes).context("decode sql response")?;
         Ok(parsed)
     }
+}
+
+async fn wait_for_advisor_history_entry(
+    client: &RpcHttpClient,
+    db: &str,
+    table: &str,
+    action_id: &str,
+    expected_status: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let history = client
+            .rpc(
+                "advisor.history",
+                json!({
+                    "table": { "db": db, "table": table },
+                    "limit": 20
+                }),
+            )
+            .await?;
+        let entries = history
+            .result
+            .as_ref()
+            .and_then(|value| value.get("entries"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(entry) = entries.into_iter().find(|entry| {
+            entry.get("id").and_then(|value| value.as_str()) == Some(action_id)
+                && entry.get("status").and_then(|value| value.as_str()) == Some(expected_status)
+        }) {
+            return Ok(entry);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(anyhow!(
+        "timed out waiting for advisor action {action_id} to reach status {expected_status}"
+    ))
 }
 
 fn wait_for_health(port: u16) -> anyhow::Result<()> {
@@ -5703,6 +6665,124 @@ fn compat_corpus_statements() -> Vec<String> {
     statements
 }
 
+#[derive(Debug)]
+struct SseEventFrame {
+    id: Option<String>,
+    event: Option<String>,
+    data: String,
+}
+
+fn find_sse_frame_end(buf: &[u8]) -> Option<(usize, usize)> {
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| (idx, 4))
+        .or_else(|| {
+            buf.windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|idx| (idx, 2))
+        })
+}
+
+fn parse_sse_event_frame(frame: &str) -> SseEventFrame {
+    let mut id = None;
+    let mut event = None;
+    let mut data_lines = Vec::new();
+
+    for line in frame.lines() {
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("id:") {
+            id = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("event:") {
+            event = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+
+    SseEventFrame {
+        id,
+        event,
+        data: data_lines.join("\n"),
+    }
+}
+
+async fn read_sse_event(response: &mut reqwest::Response) -> anyhow::Result<SseEventFrame> {
+    let mut buffer = Vec::new();
+    loop {
+        if let Some((frame_end, delimiter_len)) = find_sse_frame_end(&buffer) {
+            let frame = String::from_utf8_lossy(&buffer[..frame_end]).into_owned();
+            buffer.drain(..frame_end + delimiter_len);
+            let parsed = parse_sse_event_frame(&frame);
+            if !parsed.data.is_empty() {
+                return Ok(parsed);
+            }
+        }
+
+        let chunk = tokio::time::timeout(Duration::from_secs(5), response.chunk())
+            .await
+            .context("timeout waiting for SSE chunk")??;
+        let Some(chunk) = chunk else {
+            anyhow::bail!("SSE stream closed before an event was delivered");
+        };
+        buffer.extend_from_slice(&chunk);
+    }
+}
+
+fn pg_compat_corpus_statements() -> Vec<String> {
+    let corpus = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/compat/pg_corpus.sql"
+    ));
+    let mut cleaned = String::new();
+    for line in corpus.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut chars = cleaned.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match quote {
+            Some(q) if ch == q => {
+                if q == '\'' && chars.peek().copied() == Some('\'') {
+                    current.push('\'');
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == ';' => {
+                let stmt = current.trim().to_string();
+                if !stmt.is_empty() {
+                    statements.push(stmt);
+                }
+                current.clear();
+            }
+            None => {}
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+    statements
+}
+
 async fn write_mysql_packet(stream: &mut TcpStream, seq: u8, payload: &[u8]) -> anyhow::Result<()> {
     if payload.len() > 0x00ff_ffff {
         return Err(anyhow!("payload too large"));
@@ -5874,9 +6954,10 @@ fn spawn_server(
     cluster_port: u16,
     mysql_port: u16,
 ) -> anyhow::Result<Child> {
-    spawn_server_with_pg(dir, http_port, cluster_port, mysql_port, 0)
+    spawn_server_with_pg_env(dir, http_port, cluster_port, mysql_port, 0, &[])
 }
 
+#[allow(dead_code)]
 fn spawn_server_with_pg(
     dir: &PathBuf,
     http_port: u16,
@@ -5884,8 +6965,20 @@ fn spawn_server_with_pg(
     mysql_port: u16,
     pg_port: u16,
 ) -> anyhow::Result<Child> {
+    spawn_server_with_pg_env(dir, http_port, cluster_port, mysql_port, pg_port, &[])
+}
+
+fn spawn_server_with_pg_env(
+    dir: &PathBuf,
+    http_port: u16,
+    cluster_port: u16,
+    mysql_port: u16,
+    pg_port: u16,
+    envs: &[(&str, &str)],
+) -> anyhow::Result<Child> {
     let bin = env!("CARGO_BIN_EXE_skeindb");
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .arg("serve")
         .arg("--data")
         .arg(dir)
@@ -5900,9 +6993,11 @@ fn spawn_server_with_pg(
         .arg("--cluster-port")
         .arg(cluster_port.to_string())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn skeindb server")
+        .stderr(Stdio::null());
+    for (key, value) in envs.iter().copied() {
+        command.env(key, value);
+    }
+    command.spawn().context("spawn skeindb server")
 }
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -6036,6 +7131,238 @@ async fn pg_simple_query(stream: &mut TcpStream, sql: &str) -> anyhow::Result<Ve
     Ok(messages)
 }
 
+async fn pg_send_frontend_message(
+    stream: &mut TcpStream,
+    tag: u8,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    stream.write_u8(tag).await?;
+    stream.write_i32((payload.len() + 4) as i32).await?;
+    if !payload.is_empty() {
+        stream.write_all(payload).await?;
+    }
+    Ok(())
+}
+
+async fn pg_send_messages_until_ready(
+    stream: &mut TcpStream,
+    messages: &[(u8, Vec<u8>)],
+) -> anyhow::Result<Vec<(u8, Vec<u8>)>> {
+    for (tag, payload) in messages {
+        pg_send_frontend_message(stream, *tag, payload).await?;
+    }
+    stream.flush().await?;
+
+    let mut responses = Vec::new();
+    loop {
+        let message = read_pg_message(stream).await?;
+        let done = message.0 == b'Z';
+        responses.push(message);
+        if done {
+            break;
+        }
+    }
+    Ok(responses)
+}
+
+fn pg_parse_payload(statement_name: &str, sql: &str, param_types: &[i32]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(statement_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(sql.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
+    for param_type in param_types {
+        payload.extend_from_slice(&param_type.to_be_bytes());
+    }
+    payload
+}
+
+fn pg_bind_text_payload(
+    portal_name: &str,
+    statement_name: &str,
+    params: &[Option<&str>],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(portal_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(statement_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0i16.to_be_bytes());
+    payload.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for param in params {
+        match param {
+            Some(value) => {
+                payload.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                payload.extend_from_slice(value.as_bytes());
+            }
+            None => payload.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    payload.extend_from_slice(&0i16.to_be_bytes()); // 0 result format codes = all text
+    payload
+}
+
+/// Build a Bind payload requesting binary format for all result columns.
+fn pg_bind_binary_result_payload(
+    portal_name: &str,
+    statement_name: &str,
+    params: &[Option<&str>],
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(portal_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(statement_name.as_bytes());
+    payload.push(0);
+    // Parameter format codes: 0 = all text
+    payload.extend_from_slice(&0i16.to_be_bytes());
+    // Parameters
+    payload.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for param in params {
+        match param {
+            Some(value) => {
+                payload.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                payload.extend_from_slice(value.as_bytes());
+            }
+            None => payload.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    // Result format codes: 1 code, value 1 = all binary
+    payload.extend_from_slice(&1i16.to_be_bytes());
+    payload.extend_from_slice(&1i16.to_be_bytes());
+    payload
+}
+
+fn pg_describe_payload(target_kind: u8, name: &str) -> Vec<u8> {
+    let mut payload = vec![target_kind];
+    payload.extend_from_slice(name.as_bytes());
+    payload.push(0);
+    payload
+}
+
+fn pg_execute_payload(portal_name: &str, max_rows: i32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(portal_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&max_rows.to_be_bytes());
+    payload
+}
+
+fn pg_close_payload(target_kind: u8, name: &str) -> Vec<u8> {
+    let mut payload = vec![target_kind];
+    payload.extend_from_slice(name.as_bytes());
+    payload.push(0);
+    payload
+}
+
+fn pg_message_tags(messages: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    messages.iter().map(|(tag, _)| *tag).collect()
+}
+
+fn pg_parameter_description_oids(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<i32>> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b't')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing ParameterDescription"))?;
+    let count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut offset = 2usize;
+    let mut oids = Vec::with_capacity(count);
+    for _ in 0..count {
+        let bytes = payload
+            .get(offset..offset + 4)
+            .ok_or_else(|| anyhow!("truncated ParameterDescription payload"))?;
+        oids.push(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        offset += 4;
+    }
+    Ok(oids)
+}
+
+fn pg_row_description_names(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<String>> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'T')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing RowDescription"))?;
+    let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut offset = 2usize;
+    let mut names = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let end = payload[offset..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| anyhow!("unterminated RowDescription column name"))?
+            + offset;
+        names.push(String::from_utf8_lossy(&payload[offset..end]).into_owned());
+        offset = end + 1 + 4 + 2 + 4 + 2 + 4 + 2;
+    }
+    Ok(names)
+}
+
+fn pg_row_description_type_oids(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<i32>> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'T')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing RowDescription"))?;
+    let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut offset = 2usize;
+    let mut type_oids = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let end = payload[offset..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| anyhow!("unterminated RowDescription column name"))?
+            + offset;
+        offset = end + 1 + 4 + 2;
+        let bytes = payload
+            .get(offset..offset + 4)
+            .ok_or_else(|| anyhow!("truncated RowDescription type oid"))?;
+        type_oids.push(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        offset += 4 + 2 + 4 + 2;
+    }
+    Ok(type_oids)
+}
+
+/// Extract format codes (0=text, 1=binary) from RowDescription.
+fn pg_row_description_format_codes(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<i16>> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'T')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing RowDescription"))?;
+    let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut offset = 2usize;
+    let mut formats = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let end = payload[offset..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| anyhow!("unterminated RowDescription column name"))?
+            + offset;
+        // Skip: name + \0 + table_oid(4) + col_attr(2) + type_oid(4) + type_size(2) + type_mod(4)
+        offset = end + 1 + 4 + 2 + 4 + 2 + 4;
+        let bytes = payload
+            .get(offset..offset + 2)
+            .ok_or_else(|| anyhow!("truncated RowDescription format code"))?;
+        formats.push(i16::from_be_bytes([bytes[0], bytes[1]]));
+        offset += 2;
+    }
+    Ok(formats)
+}
+
+/// Extract raw bytes from the first DataRow column (for binary format testing).
+fn pg_first_data_row_raw_bytes(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<u8>> {
+    let row = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'D')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing DataRow"))?;
+    let _col_count = i16::from_be_bytes([row[0], row[1]]);
+    let data_len = i32::from_be_bytes([row[2], row[3], row[4], row[5]]) as usize;
+    Ok(row[6..6 + data_len].to_vec())
+}
+
 fn pg_first_text_cell(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
     let row = messages
         .iter()
@@ -6046,6 +7373,89 @@ fn pg_first_text_cell(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
     anyhow::ensure!(col_count == 1, "expected single-column DataRow");
     let data_len = i32::from_be_bytes([row[2], row[3], row[4], row[5]]) as usize;
     Ok(String::from_utf8_lossy(&row[6..6 + data_len]).into_owned())
+}
+
+fn pg_first_data_row_cells(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<Vec<Option<String>>> {
+    let row = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'D')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing DataRow"))?;
+    let col_count = i16::from_be_bytes([row[0], row[1]]) as usize;
+    let mut offset = 2usize;
+    let mut values = Vec::with_capacity(col_count);
+    for _ in 0..col_count {
+        let len = i32::from_be_bytes([
+            row[offset],
+            row[offset + 1],
+            row[offset + 2],
+            row[offset + 3],
+        ]);
+        offset += 4;
+        if len < 0 {
+            values.push(None);
+            continue;
+        }
+        let len = len as usize;
+        let value = String::from_utf8_lossy(&row[offset..offset + len]).into_owned();
+        offset += len;
+        values.push(Some(value));
+    }
+    Ok(values)
+}
+
+fn pg_ready_status(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<u8> {
+    messages
+        .iter()
+        .rev()
+        .find(|(tag, _)| *tag == b'Z')
+        .and_then(|(_, payload)| payload.first().copied())
+        .ok_or_else(|| anyhow!("missing ReadyForQuery status"))
+}
+
+fn pg_command_complete_tag(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<String> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'C')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing CommandComplete"))?;
+    let end = payload
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(payload.len());
+    Ok(String::from_utf8_lossy(&payload[..end]).into_owned())
+}
+
+fn pg_error_field(payload: &[u8], wanted: u8) -> Option<String> {
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let field = *payload.get(offset)?;
+        if field == 0 {
+            break;
+        }
+        offset += 1;
+        let start = offset;
+        while offset < payload.len() && payload[offset] != 0 {
+            offset += 1;
+        }
+        let value = String::from_utf8_lossy(&payload[start..offset]).into_owned();
+        if field == wanted {
+            return Some(value);
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn pg_error_response(messages: &[(u8, Vec<u8>)]) -> anyhow::Result<(String, String)> {
+    let payload = messages
+        .iter()
+        .find(|(tag, _)| *tag == b'E')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow!("missing ErrorResponse"))?;
+    let code = pg_error_field(payload, b'C').context("missing SQLSTATE field")?;
+    let message = pg_error_field(payload, b'M').context("missing error message field")?;
+    Ok((code, message))
 }
 
 #[tokio::test]
@@ -6083,6 +7493,131 @@ async fn pg_simple_query_select_literal() -> anyhow::Result<()> {
         b'Z',
         "last message should be ReadyForQuery"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_row_description_uses_inferred_oids() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_row_description_oids")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_row_description_oids (id BIGINT NOT NULL, score DOUBLE NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_row_description_oids (id, score, name) VALUES (1, 1.5, 'Ada')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT id, score, name FROM app.pg_row_description_oids",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec!["id".to_string(), "score".to_string(), "name".to_string()]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![20, 701, 25]);
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_row_description_uses_schema_oids_for_typed_columns() -> anyhow::Result<()>
+{
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_schema_typed_oids")?;
+    let rpc = RpcHttpClient::new(server.base_url());
+
+    let resp = rpc
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    assert!(resp.ok);
+
+    let resp = rpc
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "pg_schema_typed_oids",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "active", "type": {"kind": "bool"}, "nullable": false},
+                    {"name": "profile", "type": {"kind": "json"}, "nullable": false},
+                    {"name": "payload", "type": {"kind": "bytes"}, "nullable": false},
+                    {"name": "birth_date", "type": {"kind": "date"}, "nullable": false},
+                    {"name": "wake_time", "type": {"kind": "time"}, "nullable": false},
+                    {"name": "created_at", "type": {"kind": "datetime"}, "nullable": false},
+                    {"name": "user_uuid", "type": {"kind": "uuid"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let resp = rpc
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "pg_schema_typed_oids"},
+                "rows": [{
+                    "id": {"t": "u64", "v": 1},
+                    "active": {"t": "bool", "v": true},
+                    "profile": {"t": "json", "v": {"role": "admin"}},
+                    "payload": {"t": "bytes", "b64": "AAECAw=="},
+                    "birth_date": {"t": "date", "iso": "2026-04-17"},
+                    "wake_time": {"t": "time", "iso": "08:30:00"},
+                    "created_at": {"t": "datetime", "iso": "2026-04-17 08:30:00"},
+                    "user_uuid": {"t": "uuid", "v": "550e8400-e29b-41d4-a716-446655440000"}
+                }]
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT active, profile, payload, birth_date, wake_time, created_at, user_uuid FROM app.pg_schema_typed_oids",
+    )
+    .await?;
+
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "active".to_string(),
+            "profile".to_string(),
+            "payload".to_string(),
+            "birth_date".to_string(),
+            "wake_time".to_string(),
+            "created_at".to_string(),
+            "user_uuid".to_string(),
+        ]
+    );
+    assert_eq!(
+        pg_row_description_type_oids(&msgs)?,
+        vec![16, 3802, 17, 1082, 1083, 1114, 2950]
+    );
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![
+            Some("t".to_string()),
+            Some("{\"role\":\"admin\"}".to_string()),
+            Some("\\x00010203".to_string()),
+            Some("2026-04-17".to_string()),
+            Some("08:30:00".to_string()),
+            Some("2026-04-17 08:30:00".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+        ]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
 
     Ok(())
 }
@@ -6141,6 +7676,651 @@ async fn pg_startup_bootstrap_queries() -> anyhow::Result<()> {
         let actual = pg_first_text_cell(&msgs)?;
         assert_eq!(actual, expected, "query: {sql}");
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_catalog_virtual_tables")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_simple_query(&mut stream, "CREATE DATABASE app").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "CREATE DATABASE");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT datname, datistemplate FROM pg_catalog.pg_database WHERE datname = 'app'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec!["datname".to_string(), "datistemplate".to_string()]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25, 16]);
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![Some("app".to_string()), Some("f".to_string())]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname = 'public'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec!["nspname".to_string()]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25]);
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![Some("public".to_string())]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT name, setting, pending_restart FROM pg_catalog.pg_settings WHERE name = 'server_version_num'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "name".to_string(),
+            "setting".to_string(),
+            "pending_restart".to_string(),
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25, 25, 16]);
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![
+            Some("server_version_num".to_string()),
+            Some("160000".to_string()),
+            Some("f".to_string()),
+        ]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT typname, typlen FROM pg_catalog.pg_type WHERE typname = 'bytea'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec!["typname".to_string(), "typlen".to_string()]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25, 20]);
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![Some("bytea".to_string()), Some("-1".to_string())]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT datname, usename, state FROM pg_catalog.pg_stat_activity LIMIT 1",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "datname".to_string(),
+            "usename".to_string(),
+            "state".to_string()
+        ]
+    );
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25, 25, 25]);
+    assert_eq!(
+        pg_first_data_row_cells(&msgs)?,
+        vec![
+            Some("testdb".to_string()),
+            Some("root".to_string()),
+            Some("active".to_string()),
+        ]
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_simple_query_pg_catalog_class_attribute_index_constraint() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_catalog_class_attr")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    // Set up a database + table with a primary key and a unique index.
+    for sql in [
+        "CREATE DATABASE cattest",
+        "CREATE TABLE cattest.items (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, price DOUBLE, PRIMARY KEY (id))",
+        "CREATE UNIQUE INDEX idx_items_name ON cattest.items (name)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "setup: {sql}");
+    }
+
+    // --- pg_class: table row ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT relname, relkind, relhaspkey, relnatts FROM pg_catalog.pg_class WHERE relname = 'items' AND relkind = 'r'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "relname".to_string(),
+            "relkind".to_string(),
+            "relhaspkey".to_string(),
+            "relnatts".to_string(),
+        ]
+    );
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("items".to_string()));
+    assert_eq!(cells[1], Some("r".to_string()));
+    assert_eq!(cells[2], Some("t".to_string())); // relhaspkey = true
+    assert_eq!(cells[3], Some("3".to_string())); // 3 columns
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    // --- pg_class: index rows ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT relname, relkind FROM pg_catalog.pg_class WHERE relkind = 'i' AND relname = 'items_pkey'",
+    )
+    .await?;
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("items_pkey".to_string()));
+    assert_eq!(cells[1], Some("i".to_string()));
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    // --- pg_attribute: column metadata ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT attname, attnum, attnotnull FROM pg_catalog.pg_attribute WHERE attname = 'name'",
+    )
+    .await?;
+    assert_eq!(
+        pg_row_description_names(&msgs)?,
+        vec![
+            "attname".to_string(),
+            "attnum".to_string(),
+            "attnotnull".to_string(),
+        ]
+    );
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("name".to_string()));
+    assert_eq!(cells[1], Some("2".to_string())); // second column
+    assert_eq!(cells[2], Some("t".to_string())); // NOT NULL
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    // --- pg_index: primary key entry ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT indisprimary, indisunique, indnatts FROM pg_catalog.pg_index WHERE indisprimary = true",
+    )
+    .await?;
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("t".to_string())); // indisprimary
+    assert_eq!(cells[1], Some("t".to_string())); // indisunique
+    assert_eq!(cells[2], Some("1".to_string())); // 1 column in PK
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    // --- pg_constraint: primary key constraint ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT conname, contype FROM pg_catalog.pg_constraint WHERE contype = 'p'",
+    )
+    .await?;
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("items_pkey".to_string()));
+    assert_eq!(cells[1], Some("p".to_string()));
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    // --- pg_constraint: unique constraint from index ---
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT conname, contype FROM pg_catalog.pg_constraint WHERE contype = 'u'",
+    )
+    .await?;
+    let cells = pg_first_data_row_cells(&msgs)?;
+    assert_eq!(cells[0], Some("idx_items_name_unique".to_string()));
+    assert_eq!(cells[1], Some("u".to_string()));
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_parse_bind_describe_execute_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_roundtrip")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_ext_users (id BIGINT NOT NULL, name VARCHAR(255) NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_ext_users (id, name) VALUES (1, 'Ada')",
+        "INSERT INTO app.pg_ext_users (id, name) VALUES (2, 'Grace')",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "sel_user",
+                    "SELECT name FROM app.pg_ext_users WHERE id = $1",
+                    &[20],
+                ),
+            ),
+            (b'D', pg_describe_payload(b'S', "sel_user")),
+            (
+                b'B',
+                pg_bind_text_payload("user_portal", "sel_user", &[Some("2")]),
+            ),
+            (b'D', pg_describe_payload(b'P', "user_portal")),
+            (b'E', pg_execute_payload("user_portal", 0)),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert!(tags.contains(&b'1'), "missing ParseComplete: {tags:?}");
+    assert!(tags.contains(&b'2'), "missing BindComplete: {tags:?}");
+    assert!(
+        tags.contains(&b't'),
+        "missing ParameterDescription: {tags:?}"
+    );
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'T').count(),
+        3,
+        "expected statement describe, portal describe, and execute RowDescription"
+    );
+    assert_eq!(pg_parameter_description_oids(&msgs)?, vec![20]);
+    assert_eq!(pg_row_description_names(&msgs)?, vec!["name".to_string()]);
+    assert_eq!(pg_row_description_type_oids(&msgs)?, vec![25]);
+    assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SELECT 1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_close_removes_named_objects() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_close")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (b'P', pg_parse_payload("sel_close", "SELECT 1", &[])),
+            (b'B', pg_bind_text_payload("portal_close", "sel_close", &[])),
+            (b'C', pg_close_payload(b'P', "portal_close")),
+            (b'C', pg_close_payload(b'S', "sel_close")),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'3').count(),
+        2,
+        "expected CloseComplete for both portal and statement"
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (b'D', pg_describe_payload(b'S', "sel_close")),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "26000");
+    assert!(message.contains("sel_close"));
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_sync_recovers_after_execute_error() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_sync_recovery")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[
+            (
+                b'P',
+                pg_parse_payload(
+                    "missing_stmt",
+                    "SELECT * FROM app.pg_missing_ext WHERE id = $1",
+                    &[20],
+                ),
+            ),
+            (
+                b'B',
+                pg_bind_text_payload("missing_portal", "missing_stmt", &[Some("1")]),
+            ),
+            (b'E', pg_execute_payload("missing_portal", 0)),
+            (b'P', pg_parse_payload("ignored_stmt", "SELECT 1", &[])),
+            (b'S', Vec::new()),
+        ],
+    )
+    .await?;
+
+    let tags = pg_message_tags(&msgs);
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'1').count(),
+        1,
+        "messages after the first extended-protocol error should be ignored until Sync"
+    );
+    assert_eq!(
+        tags.iter().filter(|tag| **tag == b'E').count(),
+        1,
+        "expected a single ErrorResponse before Sync"
+    );
+    let (code, _) = pg_error_response(&msgs)?;
+    assert_eq!(code, "42P01");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    assert_eq!(pg_first_text_cell(&msgs)?, "1");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_flush_keeps_connection_usable() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_extended_query_flush")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    pg_send_frontend_message(
+        &mut stream,
+        b'P',
+        &pg_parse_payload("flush_stmt", "SELECT 1", &[]),
+    )
+    .await?;
+    pg_send_frontend_message(&mut stream, b'H', &[]).await?;
+    stream.flush().await?;
+
+    let (tag, _) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'1', "expected ParseComplete after Flush");
+
+    pg_send_frontend_message(&mut stream, b'S', &[]).await?;
+    stream.flush().await?;
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'Z');
+    assert_eq!(payload[0], b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_compat_corpus_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_compat_corpus_roundtrip")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for statement in pg_compat_corpus_statements() {
+        let msgs = pg_simple_query(&mut stream, &statement).await?;
+        let normalized = statement
+            .trim()
+            .trim_end_matches(';')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+
+        match normalized.as_str() {
+            "select 1" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "1");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "select version()" => {
+                assert!(pg_first_text_cell(&msgs)?.contains("SkeinDB compatibility"));
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "select current_database()" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "testdb");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "select current_schema()" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "public");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "show server_version" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "16.0 (SkeinDB compatibility)");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "show server_version_num" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "160000");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "show standard_conforming_strings" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "on");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "show max_identifier_length" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "63");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "show transaction isolation level" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "read committed");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "create database app" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "CREATE DATABASE");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "create table app.pg_corpus_users (id bigint not null, name varchar(255) not null, primary key (id))" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "CREATE TABLE");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "insert into app.pg_corpus_users (id, name) values (1, 'ada')"
+            | "insert into app.pg_corpus_users (id, name) values (2, 'grace')"
+            | "insert into app.pg_corpus_users (id, name) values (3, 'linus')" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "INSERT 0 1");
+            }
+            "select count(*) from app.pg_corpus_users" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "2");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "select name from app.pg_corpus_users where id = 2" => {
+                assert_eq!(pg_first_text_cell(&msgs)?, "Grace");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            "begin" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "BEGIN");
+                assert_eq!(pg_ready_status(&msgs)?, b'T');
+            }
+            "savepoint before_insert" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "SAVEPOINT");
+                assert_eq!(pg_ready_status(&msgs)?, b'T');
+            }
+            "rollback to savepoint before_insert" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "ROLLBACK");
+                assert_eq!(pg_ready_status(&msgs)?, b'T');
+            }
+            "release savepoint before_insert" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "RELEASE");
+                assert_eq!(pg_ready_status(&msgs)?, b'T');
+            }
+            "commit" => {
+                assert_eq!(pg_command_complete_tag(&msgs)?, "COMMIT");
+                assert_eq!(pg_ready_status(&msgs)?, b'I');
+            }
+            other => anyhow::bail!("unhandled PG corpus statement: {other}"),
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_failed_transaction_commit_rolls_back() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_failed_tx_commit")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_failed_tx_commit (id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(&mut stream, "BEGIN").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "BEGIN");
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "INSERT INTO app.pg_failed_tx_commit (id) VALUES (1)",
+    )
+    .await?;
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs =
+        pg_simple_query(&mut stream, "SELECT * FROM app.missing_pg_failed_tx_commit").await?;
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "42P01");
+    assert!(message.to_ascii_lowercase().contains("table"));
+    assert_eq!(pg_ready_status(&msgs)?, b'E');
+
+    let msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "25P02");
+    assert!(message.contains("current transaction is aborted"));
+    assert_eq!(pg_ready_status(&msgs)?, b'E');
+
+    let msgs = pg_simple_query(&mut stream, "COMMIT").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "ROLLBACK");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(&mut stream, "SELECT COUNT(*) FROM app.pg_failed_tx_commit").await?;
+    assert_eq!(pg_first_text_cell(&msgs)?, "0");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_rollback_to_savepoint_clears_failed_state() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_savepoint_recovery")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_savepoint_recovery (id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(&mut stream, "BEGIN").await?;
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(&mut stream, "SAVEPOINT before_insert").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "SAVEPOINT");
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "INSERT INTO app.pg_savepoint_recovery (id) VALUES (7)",
+    )
+    .await?;
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT * FROM app.missing_pg_savepoint_recovery",
+    )
+    .await?;
+    let (code, _) = pg_error_response(&msgs)?;
+    assert_eq!(code, "42P01");
+    assert_eq!(pg_ready_status(&msgs)?, b'E');
+
+    let msgs = pg_simple_query(&mut stream, "ROLLBACK TO SAVEPOINT before_insert").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "ROLLBACK");
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT COUNT(*) FROM app.pg_savepoint_recovery",
+    )
+    .await?;
+    assert_eq!(pg_first_text_cell(&msgs)?, "0");
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(&mut stream, "RELEASE SAVEPOINT before_insert").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "RELEASE");
+    assert_eq!(pg_ready_status(&msgs)?, b'T');
+
+    let msgs = pg_simple_query(&mut stream, "COMMIT").await?;
+    assert_eq!(pg_command_complete_tag(&msgs)?, "COMMIT");
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_sqlstate_maps_duplicate_and_syntax_errors() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_sqlstate_errors")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    for sql in [
+        "CREATE DATABASE app",
+        "CREATE TABLE app.pg_sqlstate_errors (id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+        "INSERT INTO app.pg_sqlstate_errors (id) VALUES (1)",
+    ] {
+        let msgs = pg_simple_query(&mut stream, sql).await?;
+        assert_eq!(pg_ready_status(&msgs)?, b'I', "query: {sql}");
+    }
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "INSERT INTO app.pg_sqlstate_errors (id) VALUES (1)",
+    )
+    .await?;
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "23505");
+    assert!(message.to_ascii_lowercase().contains("duplicate key"));
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
+
+    let msgs = pg_simple_query(
+        &mut stream,
+        "SELECT * FROM app.pg_sqlstate_errors WHERE id =",
+    )
+    .await?;
+    let (code, message) = pg_error_response(&msgs)?;
+    assert_eq!(code, "42601");
+    assert!(
+        message.contains("malformed") || message.contains("invalid") || message.contains("WHERE")
+    );
+    assert_eq!(pg_ready_status(&msgs)?, b'I');
 
     Ok(())
 }
@@ -6215,6 +8395,343 @@ async fn pg_ssl_negotiation_is_rejected() -> anyhow::Result<()> {
             break;
         }
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// T417: PG integration tests — SCRAM-SHA-256, binary format, type OIDs
+// ---------------------------------------------------------------------------
+
+/// Perform SCRAM-SHA-256 authentication handshake manually.
+async fn pg_connect_with_scram(port: u16, user: &str, password: &str) -> anyhow::Result<TcpStream> {
+    wait_for_tcp(port)?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    let startup = build_pg_startup(user, "testdb");
+    stream.write_all(&startup).await?;
+    stream.flush().await?;
+
+    // Expect AuthenticationSASL (type=10)
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R', "expected Authentication message");
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(auth_type, 10, "expected AuthenticationSASL (type 10)");
+
+    // Parse mechanism list
+    let mut offset = 4;
+    let mut mechanisms = Vec::new();
+    loop {
+        if offset >= payload.len() {
+            break;
+        }
+        if payload[offset] == 0 {
+            break;
+        }
+        let start = offset;
+        while offset < payload.len() && payload[offset] != 0 {
+            offset += 1;
+        }
+        mechanisms.push(String::from_utf8_lossy(&payload[start..offset]).to_string());
+        offset += 1; // skip null
+    }
+    assert!(
+        mechanisms.contains(&"SCRAM-SHA-256".to_string()),
+        "SCRAM-SHA-256 not in mechanism list: {:?}",
+        mechanisms
+    );
+
+    // Build client-first-message
+    let client_nonce = "rOprNGfwEbeRWgbNEkqO"; // fixed test nonce
+    let client_first_bare = format!("n={},r={}", user, client_nonce);
+    let client_first = format!("n,,{}", client_first_bare);
+
+    // Send SASLInitialResponse
+    let mechanism_name = "SCRAM-SHA-256";
+    let mut sasl_payload = Vec::new();
+    sasl_payload.extend_from_slice(mechanism_name.as_bytes());
+    sasl_payload.push(0);
+    sasl_payload.extend_from_slice(&(client_first.len() as i32).to_be_bytes());
+    sasl_payload.extend_from_slice(client_first.as_bytes());
+
+    stream.write_u8(b'p').await?;
+    stream.write_i32((sasl_payload.len() + 4) as i32).await?;
+    stream.write_all(&sasl_payload).await?;
+    stream.flush().await?;
+
+    // Expect AuthenticationSASLContinue (type=11) with server-first-message
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R', "expected Authentication message");
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(
+        auth_type, 11,
+        "expected AuthenticationSASLContinue (type 11)"
+    );
+    let server_first = String::from_utf8_lossy(&payload[4..]).to_string();
+
+    // Parse server-first: r=<combined_nonce>,s=<salt_b64>,i=<iterations>
+    let mut combined_nonce = String::new();
+    let mut salt_b64 = String::new();
+    let mut iterations = 0u32;
+    for attr in server_first.split(',') {
+        if let Some(val) = attr.strip_prefix("r=") {
+            combined_nonce = val.to_string();
+        } else if let Some(val) = attr.strip_prefix("s=") {
+            salt_b64 = val.to_string();
+        } else if let Some(val) = attr.strip_prefix("i=") {
+            iterations = val.parse().unwrap();
+        }
+    }
+    assert!(
+        combined_nonce.starts_with(client_nonce),
+        "server nonce doesn't start with client nonce"
+    );
+    assert!(iterations > 0);
+
+    // Derive keys
+    use base64::Engine;
+    let salt = base64::engine::general_purpose::STANDARD
+        .decode(&salt_b64)
+        .unwrap();
+    let salted_password = scram_pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+    let client_key = scram_hmac_sha256(&salted_password, b"Client Key");
+    let stored_key = {
+        use sha2::{Digest, Sha256};
+        let h: [u8; 32] = Sha256::digest(client_key).into();
+        h
+    };
+
+    let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
+    let auth_message = format!(
+        "{},{},{}",
+        client_first_bare, server_first, client_final_without_proof
+    );
+    let client_signature = scram_hmac_sha256(&stored_key, auth_message.as_bytes());
+    let mut client_proof = [0u8; 32];
+    for i in 0..32 {
+        client_proof[i] = client_key[i] ^ client_signature[i];
+    }
+    let proof_b64 = base64::engine::general_purpose::STANDARD.encode(client_proof);
+    let client_final = format!("{},p={}", client_final_without_proof, proof_b64);
+
+    // Send SASLResponse (client-final-message)
+    stream.write_u8(b'p').await?;
+    stream.write_i32((client_final.len() + 4) as i32).await?;
+    stream.write_all(client_final.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Expect AuthenticationSASLFinal (type=12) with server signature
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R', "expected Authentication message");
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(auth_type, 12, "expected AuthenticationSASLFinal (type 12)");
+    let server_final = String::from_utf8_lossy(&payload[4..]).to_string();
+    assert!(
+        server_final.starts_with("v="),
+        "server-final should start with v=, got: {}",
+        server_final
+    );
+
+    // Expect AuthenticationOk
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R');
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(auth_type, 0, "expected AuthenticationOk after SCRAM");
+
+    // Consume ParameterStatus, BackendKeyData, ReadyForQuery
+    loop {
+        let (tag, payload) = read_pg_message(&mut stream).await?;
+        if tag == b'Z' {
+            assert_eq!(payload[0], b'I');
+            break;
+        }
+    }
+
+    Ok(stream)
+}
+
+/// Inline HMAC-SHA-256 for test SCRAM client.
+fn scram_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const BLOCK_SIZE: usize = 64;
+    let mut k = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let h: [u8; 32] = Sha256::digest(key).into();
+        k[..32].copy_from_slice(&h);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK_SIZE];
+    let mut opad = [0x5cu8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+/// Inline PBKDF2-HMAC-SHA256 for test SCRAM client.
+fn scram_pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut u = scram_hmac_sha256(password, &[salt, &1u32.to_be_bytes()].concat());
+    let mut result = u;
+    for _ in 1..iterations {
+        u = scram_hmac_sha256(password, &u);
+        for j in 0..32 {
+            result[j] ^= u[j];
+        }
+    }
+    result
+}
+
+#[tokio::test]
+async fn pg_scram_sha256_auth_succeeds() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let password = "test-scram-password-42";
+    let server =
+        HttpHarness::start_with_pg_and_env("pg_scram_auth", &[("SKEINDB_TOKEN", password)])?;
+    wait_for_tcp(server.pg_port())?;
+
+    let mut stream = pg_connect_with_scram(server.pg_port(), "skein", password).await?;
+
+    // Verify the connection works by running a query
+    let msgs = pg_simple_query(&mut stream, "SELECT 1").await?;
+    assert_eq!(pg_first_text_cell(&msgs)?, "1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_scram_sha256_wrong_password_fails() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg_and_env(
+        "pg_scram_wrong_pw",
+        &[("SKEINDB_TOKEN", "correct-password")],
+    )?;
+    wait_for_tcp(server.pg_port())?;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", server.pg_port())).await?;
+    let startup = build_pg_startup("skein", "testdb");
+    stream.write_all(&startup).await?;
+    stream.flush().await?;
+
+    // Read AuthenticationSASL
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R');
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(auth_type, 10);
+
+    // Send client-first with wrong password derivation
+    let client_first = "n,,n=skein,r=testnonce123";
+    let mechanism = "SCRAM-SHA-256";
+    let mut sasl_payload = Vec::new();
+    sasl_payload.extend_from_slice(mechanism.as_bytes());
+    sasl_payload.push(0);
+    sasl_payload.extend_from_slice(&(client_first.len() as i32).to_be_bytes());
+    sasl_payload.extend_from_slice(client_first.as_bytes());
+
+    stream.write_u8(b'p').await?;
+    stream.write_i32((sasl_payload.len() + 4) as i32).await?;
+    stream.write_all(&sasl_payload).await?;
+    stream.flush().await?;
+
+    // Read server-first
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'R');
+    let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    assert_eq!(auth_type, 11);
+    let server_first = String::from_utf8_lossy(&payload[4..]).to_string();
+
+    // Parse server-first to get nonce
+    let combined_nonce = server_first
+        .split(',')
+        .find_map(|a| a.strip_prefix("r="))
+        .unwrap()
+        .to_string();
+
+    // Send a client-final with bogus proof (wrong password)
+    use base64::Engine;
+    let bogus_proof = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+    let client_final = format!("c=biws,r={},p={}", combined_nonce, bogus_proof);
+
+    stream.write_u8(b'p').await?;
+    stream.write_i32((client_final.len() + 4) as i32).await?;
+    stream.write_all(client_final.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Should get an ErrorResponse with 28P01 (password authentication failed)
+    let (tag, payload) = read_pg_message(&mut stream).await?;
+    assert_eq!(tag, b'E', "expected ErrorResponse for wrong password");
+    let code = pg_error_field(&payload, b'C');
+    assert_eq!(code.as_deref(), Some("28P01"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_binary_result_format_returns_binary_data() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_binary_format")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    // Parse: SELECT 42
+    let parse = pg_parse_payload("s1", "SELECT 42", &[]);
+    // Bind with binary result format
+    let bind = pg_bind_binary_result_payload("", "s1", &[]);
+    let execute = pg_execute_payload("", 0);
+    // Sync
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[(b'P', parse), (b'B', bind), (b'E', execute), (b'S', vec![])],
+    )
+    .await?;
+
+    // Check RowDescription has format=1 (binary)
+    let formats = pg_row_description_format_codes(&msgs)?;
+    assert_eq!(formats, vec![1], "expected binary format code");
+
+    // Check DataRow contains binary-encoded i64 (8 bytes, big-endian 42)
+    let raw = pg_first_data_row_raw_bytes(&msgs)?;
+    assert_eq!(raw.len(), 8, "INT8 binary should be 8 bytes");
+    let value = i64::from_be_bytes(raw.try_into().unwrap());
+    assert_eq!(value, 42);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pg_extended_query_type_oids_cover_bool_date_uuid() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start_with_pg("pg_type_oids_wide")?;
+    let mut stream = pg_connect_and_startup(server.pg_port()).await?;
+
+    // Parse + Describe a query with diverse literal types
+    let sql = "SELECT true, false, 42, 3.14, 'hello'";
+    let parse = pg_parse_payload("s_types", sql, &[]);
+    let describe = pg_describe_payload(b'S', "s_types");
+    let msgs = pg_send_messages_until_ready(
+        &mut stream,
+        &[(b'P', parse), (b'D', describe), (b'S', vec![])],
+    )
+    .await?;
+
+    let type_oids = pg_row_description_type_oids(&msgs)?;
+    assert_eq!(type_oids.len(), 5);
+    // Verify type inference:
+    // - true/false → BOOL (OID 16)
+    // - 42 → INT8 (OID 20)
+    // - 3.14 → FLOAT8 (OID 701)
+    // - 'hello' → TEXT (OID 25)
+    assert_eq!(type_oids[0], 16, "expected BOOL OID for 'true'");
+    assert_eq!(type_oids[1], 16, "expected BOOL OID for 'false'");
+    assert_eq!(type_oids[2], 20, "expected INT8 OID for integer literal");
+    assert_eq!(type_oids[3], 701, "expected FLOAT8 OID for float literal");
+    assert_eq!(type_oids[4], 25, "expected TEXT OID for string literal");
 
     Ok(())
 }

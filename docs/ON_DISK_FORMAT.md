@@ -30,8 +30,9 @@ data/
   views.json                  (prototype materialized views, format v1)
   schema_versions.json        (prototype schema versions, format v1)
   schema_changes.json         (prototype schema change log, format v1)
+  changes.json                (prototype retained CDC change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
-  advisor_history.json        (prototype index advisor history, format v1)
+  advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
   tables/
     <db>/<table>.json         (prototype row store, format v2)
@@ -495,11 +496,17 @@ See docs/COLUMN_SNAPSHOTS.md for cseg v0.1.
 ## A.4 Index advisor telemetry (prototype)
 
 - `advisor_patterns.json` stores aggregated query dependency patterns (format v1).
-- `advisor_history.json` stores apply/dismiss actions (format v1).
+- `advisor_history.json` stores apply/dismiss actions plus lifecycle state (`status`, `progress_pct`, `result_status`, `rollback_status`, `updated_at_ms`, `error`) (format v2; legacy format v1 entries are still accepted on load).
+
+## A.5 CDC retained change log (prototype)
+
+- `changes.json` stores the retained change-log window used for CDC replay (format v1).
+- Each record persists `seq`, `db`, `table`, `op`, optional `pk` / `query_id` / `etag`, plus `commit_ts_ms` and optional `lsn` metadata.
+- Older unversioned array snapshots are still accepted on load and rewritten to the versioned envelope on the next persist.
 
 Files are optional and written only when `SKEINDB_ADVISOR_PERSIST=1`.
 
-## A.5 Embedding ValueEntries
+## A.6 Embedding ValueEntries
 
 Value segments (.vseg) add a new value kind:
 - val_kind = 6 (EMBEDDING)

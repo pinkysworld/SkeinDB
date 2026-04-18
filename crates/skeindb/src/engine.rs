@@ -121,6 +121,10 @@ pub struct RowEntry {
     /// Soft delete marker.
     #[serde(default)]
     pub deleted: bool,
+
+    /// Commit timestamp (epoch ms) for time-travel reads.
+    #[serde(default)]
+    pub commit_ts_ms: u64,
 }
 
 const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
@@ -142,6 +146,8 @@ struct RowEntryDisk {
     version: u64,
     #[serde(default)]
     deleted: bool,
+    #[serde(default)]
+    commit_ts_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +242,7 @@ pub struct Engine {
     /// Global change sequence for CDC.
     change_seq: u64,
     changes: Vec<ChangeEvent>,
+    cdc_retention_events: usize,
 
     /// Prepared queries.
     prepared: HashMap<String, PreparedQuery>,
@@ -402,6 +409,14 @@ pub struct ChangeEvent {
     pub op: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pk: Option<Vec<Lit>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub commit_ts_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsn: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +491,12 @@ struct AdvisorHistoryDisk {
     entries: Vec<AdvisorHistoryEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChangeLogDisk {
+    format_version: u32,
+    events: Vec<ChangeEvent>,
+}
+
 // -----------------------------
 // dp.* (research)
 // -----------------------------
@@ -483,7 +504,8 @@ struct AdvisorHistoryDisk {
 const SCHEMA_VERSION_FORMAT_VERSION: u32 = 1;
 const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
-const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 1;
+const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
+const CHANGE_LOG_FORMAT_VERSION: u32 = 1;
 
 const DP_BUDGET_FORMAT_VERSION: u32 = 2;
 const DP_AUDIT_FORMAT_VERSION: u32 = 1;
@@ -1071,6 +1093,13 @@ pub struct DbUser {
 pub struct CdcPollResult {
     pub events: Vec<ChangeEvent>,
     pub next_offset: u64,
+    pub earliest_offset: u64,
+    pub latest_offset: u64,
+    pub resnapshot_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resnapshot_from_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resnapshot_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1105,9 +1134,22 @@ pub struct Subscriptions {
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub id: String,
-    pub db: String,
-    pub table: String,
     pub acked_offset: u64,
+    pub target: SubscriptionTarget,
+}
+
+#[derive(Debug, Clone)]
+pub enum SubscriptionTarget {
+    Table {
+        db: String,
+        table: String,
+    },
+    Query {
+        query_id: String,
+        query: Query,
+        args: Vec<Lit>,
+        dep_tables: HashSet<String>,
+    },
 }
 
 impl Engine {
@@ -1142,6 +1184,7 @@ impl Engine {
             tables: HashMap::new(),
             change_seq: 0,
             changes: Vec::new(),
+            cdc_retention_events: cdc_retention_events(),
             prepared: HashMap::new(),
             next_prepared_id: 1,
             cached_select: Mutex::new(HashMap::new()),
@@ -1235,7 +1278,7 @@ impl Engine {
             .unwrap_or(0);
 
         EngineStorageStats {
-            wal_bytes: 0,
+            wal_bytes: self.change_log_bytes(),
             dedup_ratio,
             logical_bytes,
             unique_bytes,
@@ -2200,6 +2243,7 @@ impl Engine {
                     row: row.clone(),
                     version,
                     deleted: false,
+                    commit_ts_ms: now_millis(),
                 });
                 tdata.pk_index.insert(pk_key_s, idx);
                 secondary_index_add_row(tdata, idx, &row)?;
@@ -2332,6 +2376,7 @@ impl Engine {
                     tdata.pk_index.insert(new_pk_key, idx);
                 }
                 tdata.rows[idx].version = next_row_version(schema);
+                tdata.rows[idx].commit_ts_ms = now_millis();
                 affected += 1;
 
                 let pk = extract_pk(schema, &tdata.rows[idx].row).ok();
@@ -2407,6 +2452,7 @@ impl Engine {
                 let entry = &mut tdata.rows[idx];
                 entry.deleted = true;
                 entry.version = next_row_version(schema);
+                entry.commit_ts_ms = now_millis();
                 affected += 1;
                 let pk = extract_pk(schema, &row_before_delete).ok();
                 if let Some(ref pk) = pk {
@@ -2467,6 +2513,14 @@ impl Engine {
 
     pub fn get_prepared(&self, id: &str) -> Option<PreparedQuery> {
         self.prepared.get(id).cloned()
+    }
+
+    pub fn query_dependency_tables(&self, query: &Query) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .dependencies_for_query(query)?
+            .into_iter()
+            .map(|dep| dep.table)
+            .collect())
     }
 
     pub fn create_api_token(&mut self, role: &str, label: &str, ttl_ms: u64) -> ApiToken {
@@ -2589,9 +2643,14 @@ impl Engine {
             .index_advisor_history
             .iter()
             .filter(|entry| {
-                entry.table.db == key.db
-                    && entry.table.table == key.table
-                    && matches!(entry.action.as_str(), "apply" | "dismiss")
+                if entry.table.db != key.db || entry.table.table != key.table {
+                    return false;
+                }
+                if entry.action == "dismiss" {
+                    return true;
+                }
+                entry.action == "apply"
+                    && !matches!(entry.status.as_deref(), Some("failed" | "cancelled"))
             })
             .map(|entry| entry.suggestion_id.clone())
             .collect();
@@ -2639,9 +2698,23 @@ impl Engine {
             table: params.table.table.clone(),
         };
         let suggestion_id = advisor_suggestion_id(&key, &columns, &include);
-        let status = register_secondary_index(schema, tdata, &columns, &include)?;
+        if let Some(existing) = self.advisor_inflight_apply(&params.table, &suggestion_id) {
+            return Ok(existing);
+        }
+
+        let registration_status =
+            secondary_index_registration_status(schema, tdata, &columns, &include)?;
         let action_id = format!("adv_{:016x}", self.index_advisor_history_next_id);
         self.index_advisor_history_next_id += 1;
+        let created_at_ms = now_millis();
+        let (status, progress_pct, result_status) = match registration_status {
+            IndexRegistrationStatus::Exists => {
+                ("exists".to_string(), Some(100), Some("exists".to_string()))
+            }
+            IndexRegistrationStatus::Built | IndexRegistrationStatus::Rebuilt => {
+                ("queued".to_string(), Some(0), None)
+            }
+        };
 
         self.index_advisor_history.push(AdvisorHistoryEntry {
             id: action_id.clone(),
@@ -2654,26 +2727,122 @@ impl Engine {
             columns,
             include,
             action: "apply".to_string(),
-            created_at_ms: now_millis(),
+            created_at_ms,
             note: params.note,
+            status: Some(status.clone()),
+            progress_pct,
+            result_status,
+            rollback_status: None,
+            updated_at_ms: Some(created_at_ms),
+            error: None,
         });
         self.persist_advisor_history_best_effort();
-        if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
-            metrics.applied_total = metrics.applied_total.saturating_add(1);
+        if registration_status == IndexRegistrationStatus::Exists {
+            if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
+                metrics.applied_total = metrics.applied_total.saturating_add(1);
+            }
         }
 
         Ok(AdvisorIndexApplyResult {
             accepted: true,
             action_id,
-            status: Some(
-                match status {
-                    IndexRegistrationStatus::Built => "built",
-                    IndexRegistrationStatus::Rebuilt => "rebuilt",
-                    IndexRegistrationStatus::Exists => "exists",
-                }
-                .to_string(),
-            ),
+            status: Some(status),
+            progress_pct,
         })
+    }
+
+    pub(crate) fn advisor_complete_index_apply(
+        &mut self,
+        action_id: &str,
+        injected_failure: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(action_idx) = self
+            .index_advisor_history
+            .iter()
+            .position(|entry| entry.id == action_id)
+        else {
+            anyhow::bail!("not_found: advisor action not found");
+        };
+
+        let action = self.index_advisor_history[action_idx].clone();
+        if action.action != "apply" {
+            anyhow::bail!("invalid_request: advisor action is not an apply");
+        }
+        if !matches!(action.status.as_deref(), Some("queued" | "building")) {
+            return Ok(());
+        }
+        if self.index_advisor_history[action_idx + 1..]
+            .iter()
+            .any(|entry| {
+                entry.table.db == action.table.db
+                    && entry.table.table == action.table.table
+                    && entry.suggestion_id == action.suggestion_id
+                    && entry.action == "dismiss"
+            })
+        {
+            self.update_advisor_history_state(
+                action_id,
+                "cancelled",
+                Some(100),
+                None,
+                Some("not_needed".to_string()),
+                Some("dismissed before build started".to_string()),
+            );
+            return Ok(());
+        }
+
+        self.update_advisor_history_state(action_id, "building", Some(50), None, None, None);
+
+        let build_result = (|| -> anyhow::Result<IndexRegistrationStatus> {
+            let (schema, tdata) = self.get_table(&action.table)?;
+            validate_columns(schema, &action.columns)?;
+            validate_columns(schema, &action.include)?;
+            let status = register_secondary_index(schema, tdata, &action.columns, &action.include)?;
+            if let Some(message) = injected_failure {
+                anyhow::bail!(message.to_string());
+            }
+            Ok(status)
+        })();
+
+        match build_result {
+            Ok(status) => {
+                self.update_advisor_history_state(
+                    action_id,
+                    "completed",
+                    Some(100),
+                    Some(
+                        match status {
+                            IndexRegistrationStatus::Built => "built",
+                            IndexRegistrationStatus::Rebuilt => "rebuilt",
+                            IndexRegistrationStatus::Exists => "exists",
+                        }
+                        .to_string(),
+                    ),
+                    None,
+                    None,
+                );
+                if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
+                    metrics.applied_total = metrics.applied_total.saturating_add(1);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let rollback_status = self.rollback_advisor_index_build(
+                    &action.table,
+                    &action.columns,
+                    &action.include,
+                );
+                self.update_advisor_history_state(
+                    action_id,
+                    "failed",
+                    Some(100),
+                    None,
+                    rollback_status,
+                    Some(err.to_string()),
+                );
+                Err(err)
+            }
+        }
     }
 
     pub fn advisor_index_dismiss(
@@ -2695,9 +2864,10 @@ impl Engine {
             table: params.table.table.clone(),
         };
         let suggestion_id = advisor_suggestion_id(&key, &columns, &include);
-        drop_secondary_index(tdata, &columns, &include)?;
+        let dropped = drop_secondary_index(tdata, &columns, &include)?;
         let action_id = format!("adv_{:016x}", self.index_advisor_history_next_id);
         self.index_advisor_history_next_id += 1;
+        let created_at_ms = now_millis();
 
         self.index_advisor_history.push(AdvisorHistoryEntry {
             id: action_id.clone(),
@@ -2710,8 +2880,18 @@ impl Engine {
             columns,
             include,
             action: "dismiss".to_string(),
-            created_at_ms: now_millis(),
+            created_at_ms,
             note: params.note,
+            status: Some("completed".to_string()),
+            progress_pct: Some(100),
+            result_status: Some(if dropped {
+                "dropped".to_string()
+            } else {
+                "not_found".to_string()
+            }),
+            rollback_status: None,
+            updated_at_ms: Some(created_at_ms),
+            error: None,
         });
         self.persist_advisor_history_best_effort();
         if let Ok(mut metrics) = self.index_advisor_metrics.lock() {
@@ -2746,6 +2926,74 @@ impl Engine {
             entries.truncate(limit);
         }
         Ok(AdvisorHistoryResult { entries })
+    }
+
+    fn advisor_inflight_apply(
+        &self,
+        table: &BaseTableRef,
+        suggestion_id: &str,
+    ) -> Option<AdvisorIndexApplyResult> {
+        let latest = self.index_advisor_history.iter().rev().find(|entry| {
+            entry.table.db == table.db
+                && entry.table.table == table.table
+                && entry.suggestion_id == suggestion_id
+        })?;
+        if latest.action != "apply"
+            || !matches!(latest.status.as_deref(), Some("queued" | "building"))
+        {
+            return None;
+        }
+        Some(AdvisorIndexApplyResult {
+            accepted: true,
+            action_id: latest.id.clone(),
+            status: latest.status.clone(),
+            progress_pct: latest.progress_pct,
+        })
+    }
+
+    fn update_advisor_history_state(
+        &mut self,
+        action_id: &str,
+        status: &str,
+        progress_pct: Option<u64>,
+        result_status: Option<String>,
+        rollback_status: Option<String>,
+        error: Option<String>,
+    ) {
+        let updated_at_ms = now_millis();
+        if let Some(entry) = self
+            .index_advisor_history
+            .iter_mut()
+            .find(|entry| entry.id == action_id)
+        {
+            entry.status = Some(status.to_string());
+            entry.progress_pct = progress_pct;
+            entry.result_status = result_status;
+            entry.rollback_status = rollback_status;
+            entry.updated_at_ms = Some(updated_at_ms);
+            entry.error = error;
+        }
+        self.persist_advisor_history_best_effort();
+    }
+
+    fn rollback_advisor_index_build(
+        &self,
+        table: &BaseTableRef,
+        columns: &[String],
+        include: &[String],
+    ) -> Option<String> {
+        let Ok((schema, tdata)) = self.get_table(table) else {
+            return Some("not_needed".to_string());
+        };
+        if validate_columns(schema, columns).is_err() || validate_columns(schema, include).is_err()
+        {
+            return Some("not_needed".to_string());
+        }
+        match drop_secondary_index(tdata, columns, include) {
+            Ok(true) => Some("rolled_back".to_string()),
+            Ok(false) => Some("not_needed".to_string()),
+            Err(_) => Some("rollback_failed".to_string()),
+        }
     }
 
     pub fn advisor_metrics_snapshot(&self) -> AdvisorMetrics {
@@ -2863,6 +3111,7 @@ impl Engine {
         min_causality: Option<&CausalityToken>,
         wire_known_valueids: Option<&HashSet<String>>,
         wire_skeinpack: bool,
+        as_of_ms: Option<u64>,
     ) -> anyhow::Result<QuerySelectResult> {
         self.record_intent_sample(query, args);
 
@@ -2902,10 +3151,10 @@ impl Engine {
             } else {
                 // Attempt a patchable execution (single-table with PK) so we can
                 // later compute query-scoped deltas (`query.patch`) from cached results.
-                let (c, r, keys) = match execute_select_with_keys(self, query, args) {
+                let (c, r, keys) = match execute_select_with_keys(self, query, args, as_of_ms) {
                     Ok((c, r, keys)) => (c, r, Some(keys)),
                     Err(e) if e.to_string() == "not_patchable" => {
-                        let (c, r) = execute_select(self, query, args)?;
+                        let (c, r) = execute_select(self, query, args, as_of_ms)?;
                         (c, r, None)
                     }
                     Err(e) => return Err(e),
@@ -2930,7 +3179,7 @@ impl Engine {
                 (c, r)
             }
         } else {
-            execute_select(self, query, args)?
+            execute_select(self, query, args, as_of_ms)?
         };
 
         // Format output.
@@ -3586,7 +3835,7 @@ impl Engine {
         }
 
         // Recompute in patchable mode and refresh cache.
-        let (c, r, keys) = execute_select_with_keys(self, query, args)?;
+        let (c, r, keys) = execute_select_with_keys(self, query, args, None)?;
         self.cached_select.lock().unwrap().insert(
             etag.to_string(),
             CachedSelect {
@@ -3662,6 +3911,7 @@ impl Engine {
                         .row
                         .insert(params.column.clone(), row.embedding.clone());
                     entry.version = next_row_version(schema);
+                    entry.commit_ts_ms = now_millis();
                     updated += 1;
                     change_ops.push((row.pk.clone(), "update"));
                     collect_value_store_items(&entry.row, &mut intern_items);
@@ -3678,6 +3928,7 @@ impl Engine {
                         row: new_row.clone(),
                         version,
                         deleted: false,
+                        commit_ts_ms: now_millis(),
                     });
                     tdata.pk_index.insert(key, idx);
                     inserted += 1;
@@ -4406,6 +4657,7 @@ impl Engine {
             params.min_causality.as_ref(),
             None,
             false,
+            None,
         )?;
 
         Ok(AiNlExecuteResult {
@@ -5077,6 +5329,199 @@ impl Engine {
     }
 
     // -----------------------------
+    // maintenance.history.* (T182)
+    // -----------------------------
+
+    /// Return a snapshot of time-travel history retention state: per-table
+    /// tombstone counts, the oldest tombstone `commit_ts_ms`, and a preview
+    /// of how many rows would be purged by a GC pass against
+    /// `horizon_ms`. When `horizon_ms` is `None`, purgeable rows default to
+    /// all tombstones with `commit_ts_ms > 0` (backward-compatible
+    /// tombstones from the pre-T180 era keep `commit_ts_ms == 0` and are
+    /// never purged).
+    pub fn maintenance_history_status(&self, horizon_ms: Option<u64>) -> serde_json::Value {
+        let mut total_live: u64 = 0;
+        let mut total_tombstones: u64 = 0;
+        let mut total_purgeable: u64 = 0;
+        let mut oldest_tombstone_commit_ts_ms: Option<u64> = None;
+        let mut tables_report = Vec::new();
+
+        let mut keys: Vec<&TableKey> = self.tables.keys().collect();
+        keys.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.table.cmp(&b.table)));
+
+        for key in keys {
+            let Some(tdata) = self.tables.get(key) else {
+                continue;
+            };
+            let mut live: u64 = 0;
+            let mut tombstones: u64 = 0;
+            let mut purgeable: u64 = 0;
+            let mut table_oldest: Option<u64> = None;
+            for entry in tdata.rows.iter() {
+                if entry.deleted {
+                    tombstones += 1;
+                    if entry.commit_ts_ms > 0 {
+                        match table_oldest {
+                            Some(v) if v <= entry.commit_ts_ms => {}
+                            _ => table_oldest = Some(entry.commit_ts_ms),
+                        }
+                        if let Some(h) = horizon_ms {
+                            if entry.commit_ts_ms <= h {
+                                purgeable += 1;
+                            }
+                        } else {
+                            purgeable += 1;
+                        }
+                    }
+                } else {
+                    live += 1;
+                }
+            }
+            total_live += live;
+            total_tombstones += tombstones;
+            total_purgeable += purgeable;
+            if let Some(t) = table_oldest {
+                match oldest_tombstone_commit_ts_ms {
+                    Some(v) if v <= t => {}
+                    _ => oldest_tombstone_commit_ts_ms = Some(t),
+                }
+            }
+            tables_report.push(serde_json::json!({
+                "db": key.db,
+                "table": key.table,
+                "live_rows": live,
+                "tombstones": tombstones,
+                "purgeable": purgeable,
+                "oldest_tombstone_commit_ts_ms": table_oldest,
+            }));
+        }
+
+        serde_json::json!({
+            "horizon_ms": horizon_ms,
+            "total_live_rows": total_live,
+            "total_tombstones": total_tombstones,
+            "total_purgeable": total_purgeable,
+            "oldest_tombstone_commit_ts_ms": oldest_tombstone_commit_ts_ms,
+            "tables": tables_report,
+        })
+    }
+
+    /// Permanently remove tombstoned rows whose `commit_ts_ms <= horizon_ms`.
+    ///
+    /// When `horizon_ms` is `None`, all tombstones with `commit_ts_ms > 0`
+    /// are removed. Tombstones with `commit_ts_ms == 0` (pre-T180) are
+    /// always retained for safety. Rebuilds the primary-key index of each
+    /// affected table and bumps the schema `table_version` so that
+    /// secondary indexes get rebuilt lazily. Persists the mutated tables
+    /// best-effort; the first persistence error is returned after all
+    /// tables have been scanned (GC in memory has already succeeded).
+    pub fn maintenance_history_gc(
+        &mut self,
+        horizon_ms: Option<u64>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let keys: Vec<TableKey> = self.tables.keys().cloned().collect();
+        let mut total_scanned: u64 = 0;
+        let mut total_purged: u64 = 0;
+        let mut tables_report = Vec::new();
+        let mut touched: Vec<TableKey> = Vec::new();
+
+        for key in keys {
+            let Some(tdata) = self.tables.get_mut(&key) else {
+                continue;
+            };
+            total_scanned += tdata.rows.len() as u64;
+            let before = tdata.rows.len();
+            tdata.rows.retain(|entry| {
+                if !entry.deleted {
+                    return true;
+                }
+                if entry.commit_ts_ms == 0 {
+                    return true;
+                }
+                match horizon_ms {
+                    Some(h) => entry.commit_ts_ms > h,
+                    None => false,
+                }
+            });
+            let after = tdata.rows.len();
+            let purged = (before - after) as u64;
+            if purged > 0 {
+                // Rebuild pk_index — indices of retained rows may have shifted.
+                tdata.pk_index.clear();
+                // Need schema to extract pk, but we cannot borrow self immutably
+                // while holding the mutable table borrow. Capture the needed
+                // info and rebuild after the loop.
+                touched.push(key.clone());
+                total_purged += purged;
+            }
+            tables_report.push(serde_json::json!({
+                "db": key.db,
+                "table": key.table,
+                "rows_purged": purged,
+            }));
+        }
+
+        // Rebuild pk_index + bump table_version + invalidate vector/secondary
+        // indexes for each touched table.
+        let mut first_err: Option<anyhow::Error> = None;
+        for key in &touched {
+            let rebuild = self.rebuild_indexes_after_history_gc(&key.db, &key.table);
+            if let Err(e) = rebuild {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                continue;
+            }
+            if let Err(e) = self.persist_table(&key.db, &key.table) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = first_err {
+            anyhow::bail!("history_gc_partial: {}", e);
+        }
+
+        Ok(serde_json::json!({
+            "horizon_ms": horizon_ms,
+            "rows_scanned": total_scanned,
+            "rows_purged": total_purged,
+            "tables_touched": touched.len(),
+            "tables": tables_report,
+        }))
+    }
+
+    fn rebuild_indexes_after_history_gc(&mut self, db: &str, table: &str) -> anyhow::Result<()> {
+        let table_ref = BaseTableRef {
+            db: db.to_string(),
+            table: table.to_string(),
+            r#as: None,
+        };
+        let (schema, tdata) = self.get_table_mut(&table_ref)?;
+        tdata.pk_index.clear();
+        for (idx, entry) in tdata.rows.iter().enumerate() {
+            if entry.deleted {
+                continue;
+            }
+            let pk = extract_pk(schema, &entry.row)?;
+            let key = pk_key(&pk);
+            if tdata.pk_index.insert(key, idx).is_some() {
+                anyhow::bail!("conflict: duplicate primary key after history GC");
+            }
+        }
+        // Bump table_version so that cached vector / secondary indexes are
+        // rebuilt lazily on their next use.
+        bump_table_version(schema);
+        // Clear any cached vector indexes (their stored row indices are now
+        // stale); secondary index cache gets invalidated via built_version.
+        if let Ok(mut guard) = tdata.vector_index.lock() {
+            guard.clear();
+        }
+        Ok(())
+    }
+
+    // -----------------------------
     // edge.* (research)
     // -----------------------------
 
@@ -5489,6 +5934,7 @@ impl Engine {
                         row,
                         version,
                         deleted: false,
+                        commit_ts_ms: now_millis(),
                     });
                     tdata.pk_index.insert(key, idx);
                     bump_table_version(schema);
@@ -5704,7 +6150,7 @@ impl Engine {
             }
         }
 
-        let (columns, rows) = execute_select(self, &query, args)?;
+        let (columns, rows) = execute_select(self, &query, args, None)?;
 
         let (data_json, wire_json) = match (result_format, wire_skeinpack) {
             (ResultFormat::SkeinpackV1, true) => {
@@ -6005,7 +6451,7 @@ impl Engine {
     }
 
     fn refresh_view_full(&self, view: &mut ViewState) -> anyhow::Result<u64> {
-        let (columns, rows, keys) = execute_select_with_keys(self, &view.query, &[])?;
+        let (columns, rows, keys) = execute_select_with_keys(self, &view.query, &[], None)?;
         let mut view_rows = Vec::new();
         let mut pk_index = HashMap::new();
         for (idx, (pk, values)) in keys.into_iter().zip(rows.into_iter()).enumerate() {
@@ -6282,9 +6728,48 @@ impl Engine {
             id.clone(),
             Subscription {
                 id: id.clone(),
-                db: db.to_string(),
-                table: table.to_string(),
                 acked_offset: self.change_seq,
+                target: SubscriptionTarget::Table {
+                    db: db.to_string(),
+                    table: table.to_string(),
+                },
+            },
+        );
+
+        Ok(CdcSubscribeResult {
+            sub_id: id,
+            offset: self.change_seq,
+        })
+    }
+
+    pub fn cdc_subscribe_query(
+        &self,
+        subs: &mut Subscriptions,
+        query_id: &str,
+        args: &[Lit],
+    ) -> anyhow::Result<CdcSubscribeResult> {
+        let Some(prepared) = self.get_prepared(query_id) else {
+            anyhow::bail!("not_found");
+        };
+        let dep_tables: HashSet<String> = self
+            .dependencies_for_query(&prepared.query)?
+            .into_iter()
+            .map(|dep| dep.table)
+            .collect();
+
+        let id = format!("sub_{:016x}", subs.next_id);
+        subs.next_id += 1;
+        subs.subs.insert(
+            id.clone(),
+            Subscription {
+                id: id.clone(),
+                acked_offset: self.change_seq,
+                target: SubscriptionTarget::Query {
+                    query_id: query_id.to_string(),
+                    query: prepared.query,
+                    args: args.to_vec(),
+                    dep_tables,
+                },
             },
         );
 
@@ -6307,16 +6792,59 @@ impl Engine {
 
         let mut events = Vec::new();
         let resume_offset = from_offset.max(sub.acked_offset);
+        let earliest_offset = self.current_cdc_earliest_offset();
+        let latest_offset = self.change_seq;
+        if earliest_offset > 0 && resume_offset.saturating_add(1) < earliest_offset {
+            return Ok(CdcPollResult {
+                events,
+                next_offset: earliest_offset.saturating_sub(1),
+                earliest_offset,
+                latest_offset,
+                resnapshot_required: true,
+                resnapshot_from_offset: Some(earliest_offset.saturating_sub(1)),
+                resnapshot_reason: Some("wal_horizon_exceeded".to_string()),
+            });
+        }
         let mut next_offset = resume_offset;
-        for ev in self.changes.iter() {
-            if ev.seq <= resume_offset {
-                continue;
+        match &sub.target {
+            SubscriptionTarget::Table { db, table } => {
+                for ev in self.changes.iter() {
+                    if ev.seq <= resume_offset {
+                        continue;
+                    }
+                    if ev.db == *db && ev.table == *table {
+                        events.push(ev.clone());
+                        next_offset = ev.seq;
+                        if events.len() as u64 >= limit {
+                            break;
+                        }
+                    }
+                }
             }
-            if ev.db == sub.db && ev.table == sub.table {
-                events.push(ev.clone());
-                next_offset = ev.seq;
-                if events.len() as u64 >= limit {
-                    break;
+            SubscriptionTarget::Query {
+                query_id,
+                query,
+                args,
+                dep_tables,
+            } => {
+                let deps = self.dependencies_for_query(query)?;
+                let etag = build_query_etag(query, args, &deps);
+                for ev in self.changes.iter() {
+                    if ev.seq <= resume_offset {
+                        continue;
+                    }
+                    let changed_table = format!("{}.{}", ev.db, ev.table);
+                    if dep_tables.contains(&changed_table) {
+                        let mut invalidation = ev.clone();
+                        invalidation.op = "invalidate".to_string();
+                        invalidation.query_id = Some(query_id.clone());
+                        invalidation.etag = Some(etag.clone());
+                        events.push(invalidation);
+                        next_offset = ev.seq;
+                        if events.len() as u64 >= limit {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -6324,6 +6852,11 @@ impl Engine {
         Ok(CdcPollResult {
             events,
             next_offset,
+            earliest_offset,
+            latest_offset,
+            resnapshot_required: false,
+            resnapshot_from_offset: None,
+            resnapshot_reason: None,
         })
     }
 
@@ -6841,13 +7374,45 @@ impl Engine {
 
     fn load_changes_best_effort(&mut self) {
         let path = self.changes_path();
-        let events: Vec<ChangeEvent> = load_json(&path).unwrap_or_default();
+        let events = load_json::<ChangeLogDisk>(&path)
+            .filter(|disk| disk.format_version == CHANGE_LOG_FORMAT_VERSION)
+            .map(|disk| disk.events)
+            .or_else(|| load_json::<Vec<ChangeEvent>>(&path))
+            .unwrap_or_default();
         self.changes = events;
+        self.trim_retained_change_log();
         self.change_seq = self.changes.last().map(|e| e.seq).unwrap_or(0);
     }
 
     fn persist_changes_best_effort(&self) {
-        let _ = save_json(&self.changes_path(), &self.changes);
+        let _ = save_json(
+            &self.changes_path(),
+            &ChangeLogDisk {
+                format_version: CHANGE_LOG_FORMAT_VERSION,
+                events: self.changes.clone(),
+            },
+        );
+    }
+
+    fn trim_retained_change_log(&mut self) {
+        if self.changes.len() <= self.cdc_retention_events {
+            return;
+        }
+        let drop_count = self.changes.len() - self.cdc_retention_events;
+        self.changes.drain(0..drop_count);
+    }
+
+    fn current_cdc_earliest_offset(&self) -> u64 {
+        self.changes.first().map(|event| event.seq).unwrap_or(0)
+    }
+
+    fn change_log_bytes(&self) -> u64 {
+        serde_json::to_vec(&ChangeLogDisk {
+            format_version: CHANGE_LOG_FORMAT_VERSION,
+            events: self.changes.clone(),
+        })
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(0)
     }
 
     fn prepared_path(&self) -> PathBuf {
@@ -6911,7 +7476,7 @@ impl Engine {
             }
         }
         if let Some(disk) = load_json::<AdvisorHistoryDisk>(&self.advisor_history_path()) {
-            if disk.format_version == ADVISOR_HISTORY_FORMAT_VERSION {
+            if matches!(disk.format_version, 1 | ADVISOR_HISTORY_FORMAT_VERSION) {
                 self.index_advisor_history = disk.entries;
                 self.index_advisor_history_next_id = disk.next_id.max(1);
             }
@@ -6929,6 +7494,9 @@ impl Engine {
 
         for entry in latest.values() {
             if entry.action != "apply" {
+                continue;
+            }
+            if !matches!(entry.status.as_deref(), None | Some("completed" | "exists")) {
                 continue;
             }
             if entry.columns.is_empty() {
@@ -7348,7 +7916,12 @@ impl Engine {
             table: table.to_string(),
             op: op.to_string(),
             pk,
+            query_id: None,
+            etag: None,
+            commit_ts_ms: now_millis(),
+            lsn: Some(self.change_seq),
         });
+        self.trim_retained_change_log();
         self.append_forensic_record(db, table, op, self.change_seq, pk_for_forensic);
         self.mark_views_stale(db, table);
     }
@@ -8063,7 +8636,7 @@ impl IndexAdvisor {
             if key_cols.len() > INDEX_ADVISOR_MAX_COLUMNS {
                 continue;
             }
-            if pk_prefix_match(&schema.primary_key, &key_cols) {
+            if advisor_candidate_matches_existing_prefix(schema, &key_cols) {
                 continue;
             }
 
@@ -8215,6 +8788,7 @@ fn execute_select(
     engine: &Engine,
     query: &Query,
     args: &[Lit],
+    as_of_ms: Option<u64>,
 ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>)> {
     let snapshot_info = query_snapshot_info(query);
     let index_infos = query_index_infos(query);
@@ -8291,7 +8865,7 @@ fn execute_select(
                                         let Some(entry) = tdata.rows.get(*idx) else {
                                             continue;
                                         };
-                                        if entry.deleted {
+                                        if !row_visible_at(entry, as_of_ms) {
                                             continue;
                                         }
                                         rows_scanned = rows_scanned.saturating_add(1);
@@ -8371,7 +8945,7 @@ fn execute_select(
                     let Some(entry) = tdata.rows.get(*idx) else {
                         continue;
                     };
-                    if entry.deleted {
+                    if !row_visible_at(entry, as_of_ms) {
                         continue;
                     }
                     ctxs.push(row_ctx_from_row(&alias, &entry.row));
@@ -8382,12 +8956,12 @@ fn execute_select(
         }
     }
     if !used_index {
-        ctxs = eval_from(engine, &from[0], args)?;
+        ctxs = eval_from(engine, &from[0], args, as_of_ms)?;
         rows_scanned = ctxs.len() as u64;
     }
     // If there are multiple from items (comma join), treat as CROSS joins.
     for tref in from.iter().skip(1) {
-        let rhs = eval_from(engine, tref, args)?;
+        let rhs = eval_from(engine, tref, args, as_of_ms)?;
         let mut next = Vec::new();
         for a in ctxs.iter() {
             for b in rhs.iter() {
@@ -8477,6 +9051,7 @@ fn execute_select_with_keys(
     engine: &Engine,
     query: &Query,
     args: &[Lit],
+    as_of_ms: Option<u64>,
 ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
     let snapshot_info = query_snapshot_info(query);
     let index_infos = query_index_infos(query);
@@ -8620,7 +9195,7 @@ fn execute_select_with_keys(
     let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new(); // (order_keys, pk, projected_row)
     let mut rows_scanned = 0u64;
     let mut push_entry = |entry: &RowEntry| -> anyhow::Result<()> {
-        if entry.deleted {
+        if !row_visible_at(entry, as_of_ms) {
             return Ok(());
         }
         rows_scanned = rows_scanned.saturating_add(1);
@@ -9299,15 +9874,41 @@ fn view_row_ctx(alias: &str, columns: &[String], row: &ViewRow) -> RowCtx {
 
 type RowCtx = BTreeMap<String, Lit>; // keys like "alias.col"
 
-fn eval_from(engine: &Engine, tref: &TableRef, args: &[Lit]) -> anyhow::Result<Vec<RowCtx>> {
+fn row_visible_at(entry: &RowEntry, as_of_ms: Option<u64>) -> bool {
+    let Some(ts) = as_of_ms else {
+        return !entry.deleted;
+    };
+    // Pre-time-travel rows (commit_ts_ms == 0) are visible unless deleted.
+    if entry.commit_ts_ms == 0 {
+        return !entry.deleted;
+    }
+    if entry.deleted {
+        // Deletion happened at commit_ts_ms; row is visible only if deletion is after snapshot.
+        entry.commit_ts_ms > ts
+    } else {
+        // Row was created/updated at commit_ts_ms; visible if at or before snapshot.
+        entry.commit_ts_ms <= ts
+    }
+}
+
+fn eval_from(
+    engine: &Engine,
+    tref: &TableRef,
+    args: &[Lit],
+    as_of_ms: Option<u64>,
+) -> anyhow::Result<Vec<RowCtx>> {
     match tref {
-        TableRef::Base(base) => scan_table(engine, base),
+        TableRef::Base(base) => scan_table(engine, base, as_of_ms),
         TableRef::Join(join) => eval_join(engine, &join.join, args),
         TableRef::Subquery(_) => anyhow::bail!("subqueries in FROM are not implemented"),
     }
 }
 
-fn scan_table(engine: &Engine, base: &BaseTableRef) -> anyhow::Result<Vec<RowCtx>> {
+fn scan_table(
+    engine: &Engine,
+    base: &BaseTableRef,
+    as_of_ms: Option<u64>,
+) -> anyhow::Result<Vec<RowCtx>> {
     let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
     let key = TableKey {
         db: base.db.clone(),
@@ -9324,7 +9925,7 @@ fn scan_table(engine: &Engine, base: &BaseTableRef) -> anyhow::Result<Vec<RowCtx
     let (_, tdata) = engine.get_table(base)?;
     let mut out = Vec::new();
     for entry in tdata.rows.iter() {
-        if entry.deleted {
+        if !row_visible_at(entry, as_of_ms) {
             continue;
         }
         out.push(row_ctx_from_row(&alias, &entry.row));
@@ -9376,8 +9977,8 @@ fn null_row_ctx_for_ref(engine: &Engine, tref: &TableRef) -> anyhow::Result<RowC
 }
 
 fn eval_join(engine: &Engine, join: &JoinRef, args: &[Lit]) -> anyhow::Result<Vec<RowCtx>> {
-    let left = eval_from(engine, &join.left, args)?;
-    let right = eval_from(engine, &join.right, args)?;
+    let left = eval_from(engine, &join.left, args, None)?;
+    let right = eval_from(engine, &join.right, args, None)?;
     let mut out = Vec::new();
 
     match join.join_type {
@@ -9779,6 +10380,120 @@ fn eval_expr(
                     Ok(Lit::Bool {
                         v: matches!(va, Lit::Null),
                     })
+                }
+                // PG string concatenation operator: expr || expr
+                "concat_op" => {
+                    let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("|| requires a"))?;
+                    let bb = b.as_ref().ok_or_else(|| anyhow::anyhow!("|| requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let sa = lit_to_string_for_like(&va).unwrap_or_default();
+                    let sb = lit_to_string_for_like(&vb).unwrap_or_default();
+                    Ok(Lit::Str {
+                        v: format!("{sa}{sb}"),
+                    })
+                }
+                // PG case-sensitive regex match: expr ~ pattern
+                "pg_regex" => {
+                    let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("~ requires a"))?;
+                    let bb = b.as_ref().ok_or_else(|| anyhow::anyhow!("~ requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("~ requires string-like lhs"))?;
+                    let pattern_str = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("~ requires string-like rhs"))?;
+                    let re = regex::Regex::new(&pattern_str)
+                        .map_err(|e| anyhow::anyhow!("invalid ~ pattern: {e}"))?;
+                    Ok(Lit::Bool {
+                        v: re.is_match(&subject),
+                    })
+                }
+                // PG case-insensitive regex match: expr ~* pattern
+                "pg_regex_i" => {
+                    let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("~* requires a"))?;
+                    let bb = b.as_ref().ok_or_else(|| anyhow::anyhow!("~* requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) || matches!(vb, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let subject = lit_to_string_for_like(&va)
+                        .ok_or_else(|| anyhow::anyhow!("~* requires string-like lhs"))?;
+                    let pattern_str = lit_to_string_for_like(&vb)
+                        .ok_or_else(|| anyhow::anyhow!("~* requires string-like rhs"))?;
+                    let ci_pat = format!("(?i){pattern_str}");
+                    let re = regex::Regex::new(&ci_pat)
+                        .map_err(|e| anyhow::anyhow!("invalid ~* pattern: {e}"))?;
+                    Ok(Lit::Bool {
+                        v: re.is_match(&subject),
+                    })
+                }
+                // PG JSON extract (returns JSON): expr -> key_or_index
+                "json_arrow" => {
+                    let aa = a.as_ref().ok_or_else(|| anyhow::anyhow!("-> requires a"))?;
+                    let bb = b.as_ref().ok_or_else(|| anyhow::anyhow!("-> requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let doc_str = lit_to_string_for_like(&va).unwrap_or_default();
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    let result = match &vb {
+                        Lit::I64 { v } => parsed.get(*v as usize),
+                        Lit::U64 { v } => parsed.get(*v as usize),
+                        _ => {
+                            let key = lit_to_string_for_like(&vb).unwrap_or_default();
+                            parsed.get(key.as_str())
+                        }
+                    };
+                    match result {
+                        Some(v) => Ok(Lit::Str {
+                            v: serde_json::to_string(v).unwrap_or_default(),
+                        }),
+                        None => Ok(Lit::Null),
+                    }
+                }
+                // PG JSON extract as text: expr ->> key_or_index
+                "json_arrow_text" => {
+                    let aa = a
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("->> requires a"))?;
+                    let bb = b
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("->> requires b"))?;
+                    let va = eval_expr(aa, row, ctx, args)?;
+                    let vb = eval_expr(bb, row, ctx, args)?;
+                    if matches!(va, Lit::Null) {
+                        return Ok(Lit::Null);
+                    }
+                    let doc_str = lit_to_string_for_like(&va).unwrap_or_default();
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&doc_str) else {
+                        return Ok(Lit::Null);
+                    };
+                    let result = match &vb {
+                        Lit::I64 { v } => parsed.get(*v as usize).cloned(),
+                        Lit::U64 { v } => parsed.get(*v as usize).cloned(),
+                        _ => {
+                            let key = lit_to_string_for_like(&vb).unwrap_or_default();
+                            parsed.get(key.as_str()).cloned()
+                        }
+                    };
+                    match result {
+                        Some(serde_json::Value::Null) => Ok(Lit::Null),
+                        Some(serde_json::Value::String(s)) => Ok(Lit::Str { v: s }),
+                        Some(v) => Ok(Lit::Str { v: v.to_string() }),
+                        None => Ok(Lit::Null),
+                    }
                 }
                 _ => anyhow::bail!("unsupported op: {op}"),
             }
@@ -10378,7 +11093,12 @@ fn eval_expr(
                     };
                     Ok(mysql_datetime_add_interval_lit(&value, &unit, amount).unwrap_or(Lit::Null))
                 }
-                "now" | "current_timestamp" | "localtimestamp" => {
+                "now"
+                | "current_timestamp"
+                | "localtimestamp"
+                | "clock_timestamp"
+                | "statement_timestamp"
+                | "transaction_timestamp" => {
                     if !fargs.is_empty() {
                         anyhow::bail!("{name} does not accept args");
                     }
@@ -10873,7 +11593,7 @@ fn eval_expr(
                     let pseudo = ((nanos as f64) / 1_000_000_000.0).fract();
                     Ok(Lit::F64 { v: pseudo })
                 }
-                "uuid" => {
+                "uuid" | "gen_random_uuid" => {
                     if !fargs.is_empty() {
                         anyhow::bail!("uuid does not accept args");
                     }
@@ -11923,6 +12643,298 @@ fn eval_expr(
                     Ok(Lit::Str {
                         v: format!("{hour:02}:{minute:02}:{second:02}"),
                     })
+                }
+                // --- PG-specific scalar functions ---
+                "date_trunc" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("date_trunc requires 2 args (field, timestamp)");
+                    }
+                    let field = eval_expr(&fargs[0], row, ctx, args)?;
+                    let value = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(field) = lit_to_string_for_like(&field) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some((date_opt, time_opt)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(date) = date_opt else {
+                        return Ok(Lit::Null);
+                    };
+                    let (h, mi, s) = match time_opt {
+                        Some(t) => (t.hour, t.minute, t.second),
+                        None => (0, 0, 0),
+                    };
+                    let result = match field.to_ascii_lowercase().as_str() {
+                        "year" => format!("{:04}-01-01 00:00:00", date.year),
+                        "quarter" => {
+                            let qm = ((date.month - 1) / 3) * 3 + 1;
+                            format!("{:04}-{qm:02}-01 00:00:00", date.year)
+                        }
+                        "month" => format!("{:04}-{:02}-01 00:00:00", date.year, date.month),
+                        "week" => {
+                            let dow = mysql_weekday_monday_index(date) as i32; // Monday=0
+                            let mut d = date.day as i32 - dow;
+                            let mut m = date.month;
+                            let mut y = date.year;
+                            if d < 1 {
+                                m = m.saturating_sub(1);
+                                if m == 0 {
+                                    m = 12;
+                                    y -= 1;
+                                }
+                                d += mysql_days_in_month(y, m) as i32;
+                            }
+                            format!("{y:04}-{m:02}-{d:02} 00:00:00")
+                        }
+                        "day" => format!(
+                            "{:04}-{:02}-{:02} 00:00:00",
+                            date.year, date.month, date.day
+                        ),
+                        "hour" => format!(
+                            "{:04}-{:02}-{:02} {h:02}:00:00",
+                            date.year, date.month, date.day
+                        ),
+                        "minute" => format!(
+                            "{:04}-{:02}-{:02} {h:02}:{mi:02}:00",
+                            date.year, date.month, date.day
+                        ),
+                        "second" => format!(
+                            "{:04}-{:02}-{:02} {h:02}:{mi:02}:{s:02}",
+                            date.year, date.month, date.day
+                        ),
+                        _ => {
+                            anyhow::bail!("unsupported date_trunc field: {field}");
+                        }
+                    };
+                    Ok(Lit::Str { v: result })
+                }
+                "to_char" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("to_char requires 2 args (value, format)");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let fmt = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(fmt_str) = lit_to_string_for_like(&fmt) else {
+                        return Ok(Lit::Null);
+                    };
+                    // Check if it's a number format (FM9,999, etc.)
+                    if matches!(&value, Lit::I64 { .. } | Lit::U64 { .. } | Lit::F64 { .. })
+                        && !fmt_str.contains("YY")
+                        && !fmt_str.contains("MM")
+                        && !fmt_str.contains("DD")
+                        && !fmt_str.contains("HH")
+                    {
+                        let n_str = lit_to_string_for_like(&value).unwrap_or_default();
+                        return Ok(Lit::Str { v: n_str });
+                    }
+                    let Some((date_opt, time_opt)) = mysql_parse_date_time_lit_parts(&value) else {
+                        return Ok(Lit::Null);
+                    };
+                    let Some(date) = date_opt else {
+                        return Ok(Lit::Null);
+                    };
+                    let (h, mi, s) = match time_opt {
+                        Some(t) => (t.hour, t.minute, t.second),
+                        None => (0, 0, 0),
+                    };
+                    let result = pg_to_char_format(date, h, mi, s, &fmt_str);
+                    Ok(Lit::Str { v: result })
+                }
+                "pg_typeof" => {
+                    if fargs.len() != 1 {
+                        anyhow::bail!("pg_typeof requires 1 arg");
+                    }
+                    let value = eval_expr(&fargs[0], row, ctx, args)?;
+                    let type_name = match &value {
+                        Lit::Null => "unknown",
+                        Lit::Bool { .. } => "boolean",
+                        Lit::I64 { .. } => "bigint",
+                        Lit::U64 { .. } => "bigint",
+                        Lit::F64 { .. } => "double precision",
+                        Lit::Str { v } => {
+                            if v.len() == 36 && v.chars().filter(|c| *c == '-').count() == 4 {
+                                "uuid"
+                            } else {
+                                "text"
+                            }
+                        }
+                        _ => "unknown",
+                    };
+                    Ok(Lit::Str {
+                        v: type_name.to_string(),
+                    })
+                }
+                "pg_format" if fargs.len() >= 1 => {
+                    let fmt = eval_expr(&fargs[0], row, ctx, args)?;
+                    let Some(fmt_str) = lit_to_string_for_like(&fmt) else {
+                        return Ok(Lit::Null);
+                    };
+                    let mut result = String::new();
+                    let mut arg_idx: usize = 0;
+                    let fmt_bytes = fmt_str.as_bytes();
+                    let mut i = 0usize;
+                    while i < fmt_bytes.len() {
+                        if fmt_bytes[i] == b'%' && i + 1 < fmt_bytes.len() {
+                            match fmt_bytes[i + 1] {
+                                b's' => {
+                                    arg_idx += 1;
+                                    if arg_idx < fargs.len() {
+                                        let v = eval_expr(&fargs[arg_idx], row, ctx, args)?;
+                                        result.push_str(
+                                            &lit_to_string_for_like(&v).unwrap_or_default(),
+                                        );
+                                    }
+                                    i += 2;
+                                }
+                                b'I' => {
+                                    arg_idx += 1;
+                                    if arg_idx < fargs.len() {
+                                        let v = eval_expr(&fargs[arg_idx], row, ctx, args)?;
+                                        let ident = lit_to_string_for_like(&v).unwrap_or_default();
+                                        result.push('"');
+                                        result.push_str(&ident.replace('"', "\"\""));
+                                        result.push('"');
+                                    }
+                                    i += 2;
+                                }
+                                b'L' => {
+                                    arg_idx += 1;
+                                    if arg_idx < fargs.len() {
+                                        let v = eval_expr(&fargs[arg_idx], row, ctx, args)?;
+                                        let lit_val =
+                                            lit_to_string_for_like(&v).unwrap_or_default();
+                                        result.push('\'');
+                                        result.push_str(&lit_val.replace('\'', "''"));
+                                        result.push('\'');
+                                    }
+                                    i += 2;
+                                }
+                                b'%' => {
+                                    result.push('%');
+                                    i += 2;
+                                }
+                                _ => {
+                                    result.push('%');
+                                    i += 1;
+                                }
+                            }
+                        } else {
+                            result.push(fmt_bytes[i] as char);
+                            i += 1;
+                        }
+                    }
+                    Ok(Lit::Str { v: result })
+                }
+                "string_to_array" => {
+                    if fargs.len() < 2 || fargs.len() > 3 {
+                        anyhow::bail!("string_to_array requires 2 or 3 args");
+                    }
+                    let input = eval_expr(&fargs[0], row, ctx, args)?;
+                    let delim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(input_str) = lit_to_string_for_like(&input) else {
+                        return Ok(Lit::Null);
+                    };
+                    if matches!(delim, Lit::Null) {
+                        // NULL delimiter → each character becomes an element
+                        let elements: Vec<String> =
+                            input_str.chars().map(|c| c.to_string()).collect();
+                        return Ok(Lit::Str {
+                            v: format!(
+                                "{{{}}}",
+                                elements
+                                    .iter()
+                                    .map(|e| format!("\"{}\"", e.replace('"', "\\\"")))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                        });
+                    }
+                    let delim_str = lit_to_string_for_like(&delim).unwrap_or_default();
+                    let null_str = if fargs.len() == 3 {
+                        let n = eval_expr(&fargs[2], row, ctx, args)?;
+                        lit_to_string_for_like(&n)
+                    } else {
+                        None
+                    };
+                    let parts: Vec<String> = input_str
+                        .split(&delim_str)
+                        .map(|s| {
+                            if null_str.as_deref() == Some(s) {
+                                "NULL".to_string()
+                            } else if s.contains(',')
+                                || s.contains('{')
+                                || s.contains('}')
+                                || s.contains('"')
+                                || s.contains(' ')
+                            {
+                                format!("\"{}\"", s.replace('"', "\\\""))
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .collect();
+                    Ok(Lit::Str {
+                        v: format!("{{{}}}", parts.join(",")),
+                    })
+                }
+                "array_length" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("array_length requires 2 args");
+                    }
+                    let arr = eval_expr(&fargs[0], row, ctx, args)?;
+                    let _dim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(arr_str) = lit_to_string_for_like(&arr) else {
+                        return Ok(Lit::Null);
+                    };
+                    if arr_str.starts_with('{') && arr_str.ends_with('}') {
+                        let inner = &arr_str[1..arr_str.len() - 1];
+                        if inner.is_empty() {
+                            return Ok(Lit::Null);
+                        }
+                        let count = inner.split(',').count() as i64;
+                        Ok(Lit::I64 { v: count })
+                    } else {
+                        Ok(Lit::Null)
+                    }
+                }
+                "array_upper" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("array_upper requires 2 args");
+                    }
+                    let arr = eval_expr(&fargs[0], row, ctx, args)?;
+                    let _dim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(arr_str) = lit_to_string_for_like(&arr) else {
+                        return Ok(Lit::Null);
+                    };
+                    if arr_str.starts_with('{') && arr_str.ends_with('}') {
+                        let inner = &arr_str[1..arr_str.len() - 1];
+                        if inner.is_empty() {
+                            return Ok(Lit::Null);
+                        }
+                        let count = inner.split(',').count() as i64;
+                        Ok(Lit::I64 { v: count })
+                    } else {
+                        Ok(Lit::Null)
+                    }
+                }
+                "array_lower" => {
+                    if fargs.len() != 2 {
+                        anyhow::bail!("array_lower requires 2 args");
+                    }
+                    let arr = eval_expr(&fargs[0], row, ctx, args)?;
+                    let _dim = eval_expr(&fargs[1], row, ctx, args)?;
+                    let Some(arr_str) = lit_to_string_for_like(&arr) else {
+                        return Ok(Lit::Null);
+                    };
+                    if arr_str.starts_with('{') && arr_str.ends_with('}') {
+                        let inner = &arr_str[1..arr_str.len() - 1];
+                        if inner.is_empty() {
+                            return Ok(Lit::Null);
+                        }
+                        Ok(Lit::I64 { v: 1 })
+                    } else {
+                        Ok(Lit::Null)
+                    }
                 }
                 _ => anyhow::bail!("unsupported function: {name}"),
             }
@@ -13018,6 +14030,118 @@ fn mysql_current_date_time_parts() -> (MySqlDateParts, MySqlTimeParts) {
     mysql_datetime_parts_from_unix_seconds(mysql_current_unix_seconds())
 }
 
+/// PG to_char formatting: supports common PG format tokens.
+fn pg_to_char_format(date: MySqlDateParts, h: u8, mi: u8, s: u8, fmt: &str) -> String {
+    let mut result = String::with_capacity(fmt.len() + 16);
+    let bytes = fmt.as_bytes();
+    let mut i = 0usize;
+    let month_names = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let day_names = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    // strip leading FM (fill mode) prefix
+    let strip_fm = bytes.len() >= 2
+        && (bytes[0] == b'F' || bytes[0] == b'f')
+        && (bytes[1] == b'M' || bytes[1] == b'm');
+    if strip_fm {
+        i = 2;
+    }
+    while i < bytes.len() {
+        let remaining = &fmt[i..];
+        if remaining.len() >= 4 && remaining[..4].eq_ignore_ascii_case("YYYY") {
+            result.push_str(&format!("{:04}", date.year));
+            i += 4;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("YY") {
+            result.push_str(&format!("{:02}", date.year % 100));
+            i += 2;
+        } else if remaining.len() >= 5 && remaining[..5].eq_ignore_ascii_case("Month") {
+            let idx = date.month.saturating_sub(1) as usize;
+            let name = month_names.get(idx).copied().unwrap_or("Unknown");
+            if remaining.starts_with('M') {
+                result.push_str(name);
+            } else {
+                result.push_str(&name.to_lowercase());
+            }
+            i += 5;
+        } else if remaining.len() >= 3 && remaining[..3].eq_ignore_ascii_case("Mon") {
+            let idx = date.month.saturating_sub(1) as usize;
+            let name = month_names.get(idx).copied().unwrap_or("Unk");
+            let short = &name[..3];
+            if remaining.starts_with('M') {
+                result.push_str(short);
+            } else {
+                result.push_str(&short.to_lowercase());
+            }
+            i += 3;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("MM") {
+            result.push_str(&format!("{:02}", date.month));
+            i += 2;
+        } else if remaining.len() >= 3 && remaining[..3].eq_ignore_ascii_case("Day") {
+            let dow = mysql_weekday_index(date);
+            let name = day_names.get(dow).copied().unwrap_or("Unknown");
+            if remaining.starts_with('D') {
+                result.push_str(name);
+            } else {
+                result.push_str(&name.to_lowercase());
+            }
+            i += 3;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("DD") {
+            result.push_str(&format!("{:02}", date.day));
+            i += 2;
+        } else if remaining.len() >= 4 && remaining[..4].eq_ignore_ascii_case("HH24") {
+            result.push_str(&format!("{h:02}"));
+            i += 4;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("HH") {
+            let h12 = if h == 0 {
+                12
+            } else if h > 12 {
+                h - 12
+            } else {
+                h
+            };
+            result.push_str(&format!("{h12:02}"));
+            i += 2;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("MI") {
+            result.push_str(&format!("{mi:02}"));
+            i += 2;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("SS") {
+            result.push_str(&format!("{s:02}"));
+            i += 2;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("AM") {
+            result.push_str(if h < 12 { "AM" } else { "PM" });
+            i += 2;
+        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("PM") {
+            result.push_str(if h < 12 { "AM" } else { "PM" });
+            i += 2;
+        } else if remaining.len() >= 2 && &remaining[..2] == "\"\"" {
+            i += 2;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
 fn mysql_current_datetime_lit() -> Lit {
     let (date, time) = mysql_current_date_time_parts();
     Lit::Datetime {
@@ -13726,11 +14850,30 @@ fn register_secondary_index(
     include: &[String],
 ) -> anyhow::Result<IndexRegistrationStatus> {
     let key = secondary_index_key(columns, include);
+    let status = secondary_index_registration_status(schema, tdata, columns, include)?;
+    if status != IndexRegistrationStatus::Exists {
+        let index = build_secondary_index(schema.table_version, columns, include, &tdata.rows);
+        let mut guard = tdata
+            .secondary_indexes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+        guard.insert(key, index);
+    }
+    Ok(status)
+}
+
+fn secondary_index_registration_status(
+    schema: &TableSchema,
+    tdata: &TableData,
+    columns: &[String],
+    include: &[String],
+) -> anyhow::Result<IndexRegistrationStatus> {
+    let key = secondary_index_key(columns, include);
     let mut guard = tdata
         .secondary_indexes
         .lock()
         .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
-    let status = match guard.get(&key) {
+    Ok(match guard.get_mut(&key) {
         Some(existing) => {
             if existing.built_version != schema.table_version {
                 IndexRegistrationStatus::Rebuilt
@@ -13739,12 +14882,7 @@ fn register_secondary_index(
             }
         }
         None => IndexRegistrationStatus::Built,
-    };
-    if status != IndexRegistrationStatus::Exists {
-        let index = build_secondary_index(schema.table_version, columns, include, &tdata.rows);
-        guard.insert(key, index);
-    }
-    Ok(status)
+    })
 }
 
 fn drop_secondary_index(
@@ -16090,6 +17228,7 @@ fn encode_row_entry_disk(
         row,
         version: entry.version,
         deleted: entry.deleted,
+        commit_ts_ms: entry.commit_ts_ms,
     }
 }
 
@@ -16242,6 +17381,7 @@ fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> 
             row: decoded,
             version: row.version,
             deleted: row.deleted,
+            commit_ts_ms: row.commit_ts_ms,
         });
     }
     Ok(rows)
@@ -17050,6 +18190,17 @@ fn sql_tokenize(sql: &str) -> Vec<SqlToken> {
             continue;
         }
 
+        // Check 3-byte operators first
+        if i + 2 < bytes.len() {
+            let three = [bytes[i], bytes[i + 1], bytes[i + 2]];
+            if &three == b"->>" {
+                out.push(SqlToken {
+                    kind: SqlTokenKind::Operator("->>".to_string()),
+                });
+                i += 3;
+                continue;
+            }
+        }
         if i + 1 < bytes.len() {
             let two = [bytes[i], bytes[i + 1]];
             let op = match &two {
@@ -17058,6 +18209,8 @@ fn sql_tokenize(sql: &str) -> Vec<SqlToken> {
                 b"!=" => Some("!="),
                 b"<>" => Some("<>"),
                 b"||" => Some("||"),
+                b"->" => Some("->"),
+                b"~*" => Some("~*"),
                 _ => None,
             };
             if let Some(op) = op {
@@ -17070,7 +18223,7 @@ fn sql_tokenize(sql: &str) -> Vec<SqlToken> {
         }
 
         let single_op = match c {
-            '=' | '<' | '>' | '+' | '-' | '*' | '/' | '%' => Some(c),
+            '=' | '<' | '>' | '+' | '-' | '*' | '/' | '%' | '~' => Some(c),
             _ => None,
         };
         if let Some(op) = single_op {
@@ -17741,7 +18894,7 @@ fn ai_nl_preview(
         offset: Some(offset),
     });
 
-    let (columns, rows) = execute_select(engine, &preview_query, args)?;
+    let (columns, rows) = execute_select(engine, &preview_query, args, None)?;
     let data = match format {
         ResultFormat::ObjectsJson => rows_to_objects(&columns, &rows)?,
         _ => serde_json::json!({
@@ -18361,6 +19514,18 @@ fn advisor_persist_enabled() -> bool {
     )
 }
 
+fn cdc_retention_events() -> usize {
+    let Ok(value) = std::env::var("SKEINDB_CDC_RETENTION_EVENTS") else {
+        return 4_096;
+    };
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(4_096)
+}
+
 fn snapshot_id(db: &str, table: &str, snapshot_ts: u64, columns: &[String]) -> String {
     let bytes = serde_json::to_vec(&(db, table, snapshot_ts, columns)).unwrap_or_default();
     let id = value_id(&bytes);
@@ -18418,6 +19583,20 @@ fn pk_prefix_match(pk: &[String], candidate: &[String]) -> bool {
         return false;
     }
     pk.iter().zip(candidate.iter()).all(|(a, b)| a == b)
+}
+
+fn index_prefix_match(existing: &[String], candidate: &[String]) -> bool {
+    if candidate.is_empty() || existing.is_empty() || candidate.len() > existing.len() {
+        return false;
+    }
+    existing.iter().zip(candidate.iter()).all(|(a, b)| a == b)
+}
+
+fn advisor_candidate_matches_existing_prefix(schema: &TableSchema, candidate: &[String]) -> bool {
+    pk_prefix_match(&schema.primary_key, candidate)
+        || mysql_compat_index_defs(schema)
+            .iter()
+            .any(|index| index_prefix_match(&index.columns, candidate))
 }
 
 fn join_selectivity_factor(schema: &TableSchema, join_cols: &[String]) -> f64 {
@@ -21597,6 +22776,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )?;
         let base_etag = base.etag.clone().expect("etag");
 
@@ -21740,7 +22920,7 @@ mod tests {
             )),
         );
 
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0],
@@ -21885,6 +23065,7 @@ mod tests {
             &[Lit::Str {
                 v: "Oslo".to_string(),
             }],
+            None,
         )?;
         assert_eq!(rows.len(), 2);
 
@@ -21906,6 +23087,146 @@ mod tests {
             vec!["city".to_string(), "created_at".to_string()]
         );
         assert!(suggestion.include.contains(&"name".to_string()));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn index_advisor_skips_existing_index_prefix_candidates() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_existing_prefix");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_created_at_idx".to_string(),
+            vec!["city".to_string(), "created_at".to_string()],
+            false,
+        )?;
+
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("created_at", Lit::U64 { v: 10 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Ava".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("created_at", Lit::U64 { v: 11 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Bo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+            ],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+
+        let (_cols, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "Oslo".to_string(),
+            }],
+            None,
+        )?;
+        assert_eq!(rows.len(), 2);
+
+        let result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table,
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        assert!(result.suggestions.is_empty());
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -22073,6 +23394,7 @@ mod tests {
             &[Lit::Str {
                 v: "NO".to_string(),
             }],
+            None,
         )?;
         assert_eq!(rows.len(), 1);
 
@@ -22205,6 +23527,8 @@ mod tests {
             note: Some("apply".to_string()),
         })?;
         assert!(apply.accepted);
+        assert_eq!(apply.status.as_deref(), Some("queued"));
+        engine.advisor_complete_index_apply(&apply.action_id, None)?;
 
         let dismiss = engine.advisor_index_dismiss(AdvisorIndexDismissParams {
             table: BaseTableRef {
@@ -22229,6 +23553,19 @@ mod tests {
         assert_eq!(history.entries.len(), 2);
         assert!(history.entries.iter().any(|e| e.action == "apply"));
         assert!(history.entries.iter().any(|e| e.action == "dismiss"));
+        let applied = history
+            .entries
+            .iter()
+            .find(|entry| entry.action == "apply")
+            .expect("missing apply history entry");
+        assert_eq!(applied.status.as_deref(), Some("completed"));
+        assert_eq!(applied.result_status.as_deref(), Some("built"));
+        let dismissed = history
+            .entries
+            .iter()
+            .find(|entry| entry.action == "dismiss")
+            .expect("missing dismiss history entry");
+        assert_eq!(dismissed.result_status.as_deref(), Some("dropped"));
         let metrics = engine.advisor_metrics_snapshot();
         assert_eq!(metrics.applied_total, 1);
         assert_eq!(metrics.rejected_total, 1);
@@ -22303,6 +23640,8 @@ mod tests {
             note: None,
         })?;
         assert!(apply.accepted);
+        assert_eq!(apply.status.as_deref(), Some("queued"));
+        engine.advisor_complete_index_apply(&apply.action_id, None)?;
 
         let (schema, tdata) = engine.get_table(&BaseTableRef {
             db: "app".to_string(),
@@ -22343,6 +23682,257 @@ mod tests {
         })?;
         let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
         assert_eq!(candidates.len(), 3);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_index_apply_failure_rolls_back_registered_index() -> anyhow::Result<()> {
+        let dir = temp_dir("index_apply_failure_rolls_back");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: Some("force failure".to_string()),
+        })?;
+        assert_eq!(apply.status.as_deref(), Some("queued"));
+        assert!(engine
+            .advisor_complete_index_apply(&apply.action_id, Some("forced failure"))
+            .is_err());
+
+        let history = engine.advisor_history(AdvisorHistoryParams {
+            table: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            }),
+            limit: Some(10),
+        })?;
+        let failed = history
+            .entries
+            .iter()
+            .find(|entry| entry.id == apply.action_id)
+            .expect("missing failed advisor history entry");
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+        assert_eq!(failed.rollback_status.as_deref(), Some("rolled_back"));
+
+        let (schema, tdata) = engine.get_table(&BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        })?;
+        let mut filters = HashMap::new();
+        filters.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        let candidates = secondary_index_candidates(schema, tdata, &filters).unwrap_or_default();
+        assert!(candidates.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_query_subscription_emits_invalidation_with_etag() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_query_subscription");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "events",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "data".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+        let prepared = engine.query_prepare(query.clone())?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_query(&mut subs, &prepared.id, &[])?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "data",
+                    Lit::Str {
+                        v: "hello".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert_eq!(poll.events.len(), 1);
+        let event = &poll.events[0];
+        assert_eq!(event.op, "invalidate");
+        assert_eq!(event.query_id.as_deref(), Some(prepared.id.as_str()));
+        assert_eq!(event.db, "app");
+        assert_eq!(event.table, "events");
+
+        let select = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            true,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        assert_eq!(event.etag.as_deref(), select.etag.as_deref());
+        assert!(event.commit_ts_ms > 0);
+        assert_eq!(event.lsn, Some(1));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn cdc_poll_requires_resnapshot_after_retention_horizon() -> anyhow::Result<()> {
+        let dir = temp_dir("cdc_resnapshot_horizon");
+        let mut engine = Engine::open(&dir)?;
+        engine.cdc_retention_events = 2;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "data".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut subs = Subscriptions::default();
+        let subscribe = engine.cdc_subscribe_table(&mut subs, "app", "events")?;
+
+        for (id, value) in [(1u64, "one"), (2u64, "two"), (3u64, "three")] {
+            engine.data_insert(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "events".to_string(),
+                    r#as: None,
+                },
+                vec![row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "data",
+                        Lit::Str {
+                            v: value.to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+        }
+
+        let poll = engine.cdc_poll(&subs, &subscribe.sub_id, subscribe.offset, 10)?;
+        assert!(poll.events.is_empty());
+        assert!(poll.resnapshot_required);
+        assert_eq!(poll.earliest_offset, 2);
+        assert_eq!(poll.latest_offset, 3);
+        assert_eq!(poll.next_offset, 1);
+        assert_eq!(poll.resnapshot_from_offset, Some(1));
+        assert_eq!(
+            poll.resnapshot_reason.as_deref(),
+            Some("wal_horizon_exceeded")
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -23033,6 +24623,7 @@ mod tests {
                 Some(&token),
                 None,
                 false,
+                None,
             )
             .expect_err("expected causality enforcement error");
         assert!(err.to_string().contains("causality_not_satisfied"));
@@ -23353,7 +24944,7 @@ mod tests {
             offset: Some(0),
         });
 
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], vec![Lit::U64 { v: 1 }]);
 
@@ -23511,7 +25102,7 @@ mod tests {
             lock: None,
         };
 
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 9 }, Lit::Null]]);
 
         fs::remove_dir_all(&dir).ok();
@@ -23610,7 +25201,7 @@ mod tests {
                 Expr::Lit { lit: Lit::Null },
             )),
         );
-        let (_cols, rows) = execute_select(&engine, &eq_null, &[])?;
+        let (_cols, rows) = execute_select(&engine, &eq_null, &[], None)?;
         assert!(rows.is_empty());
 
         let like_query = base_query(
@@ -23637,7 +25228,7 @@ mod tests {
                 hi: None,
             }),
         );
-        let (_cols, rows) = execute_select(&engine, &like_query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &like_query, &[], None)?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
 
         let in_query = base_query(
@@ -23667,7 +25258,7 @@ mod tests {
                 hi: None,
             }),
         );
-        let (_cols, rows) = execute_select(&engine, &in_query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &in_query, &[], None)?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 2 }]]);
 
         fs::remove_dir_all(&dir).ok();
@@ -24154,7 +25745,7 @@ mod tests {
             )),
         );
 
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(
             rows,
             vec![vec![
@@ -24345,7 +25936,7 @@ mod tests {
                 },
             )),
         );
-        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[], None)?;
         assert_eq!(
             rows,
             vec![vec![
@@ -24410,7 +26001,7 @@ mod tests {
                 dir: Some(OrderDir::Asc),
             },
         ];
-        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[], None)?;
         assert_eq!(
             ordered_rows,
             vec![vec![Lit::U64 { v: 2 }], vec![Lit::U64 { v: 4 }]]
@@ -24765,7 +26356,7 @@ mod tests {
                 },
             )),
         );
-        let (_cols, rows) = execute_select(&engine, &projection_query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &projection_query, &[], None)?;
         assert_eq!(
             rows,
             vec![vec![
@@ -24842,7 +26433,7 @@ mod tests {
                 hi: None,
             }),
         );
-        let (_cols, filtered_rows) = execute_select(&engine, &date_filtered_query, &[])?;
+        let (_cols, filtered_rows) = execute_select(&engine, &date_filtered_query, &[], None)?;
         assert_eq!(filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let formatted_filtered_query = base_query(
@@ -24881,7 +26472,7 @@ mod tests {
             }),
         );
         let (_cols, formatted_filtered_rows) =
-            execute_select(&engine, &formatted_filtered_query, &[])?;
+            execute_select(&engine, &formatted_filtered_query, &[], None)?;
         assert_eq!(formatted_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let datediff_filtered_query = base_query(
@@ -24918,7 +26509,7 @@ mod tests {
             }),
         );
         let (_cols, datediff_filtered_rows) =
-            execute_select(&engine, &datediff_filtered_query, &[])?;
+            execute_select(&engine, &datediff_filtered_query, &[], None)?;
         assert_eq!(datediff_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let dayname_filtered_query = base_query(
@@ -24949,7 +26540,8 @@ mod tests {
                 hi: None,
             }),
         );
-        let (_cols, dayname_filtered_rows) = execute_select(&engine, &dayname_filtered_query, &[])?;
+        let (_cols, dayname_filtered_rows) =
+            execute_select(&engine, &dayname_filtered_query, &[], None)?;
         assert_eq!(dayname_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let extract_filtered_query = base_query(
@@ -24985,7 +26577,8 @@ mod tests {
                 hi: None,
             }),
         );
-        let (_cols, extract_filtered_rows) = execute_select(&engine, &extract_filtered_query, &[])?;
+        let (_cols, extract_filtered_rows) =
+            execute_select(&engine, &extract_filtered_query, &[], None)?;
         assert_eq!(extract_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let date_add_filtered_query = base_query(
@@ -25027,7 +26620,7 @@ mod tests {
             }),
         );
         let (_cols, date_add_filtered_rows) =
-            execute_select(&engine, &date_add_filtered_query, &[])?;
+            execute_select(&engine, &date_add_filtered_query, &[], None)?;
         assert_eq!(date_add_filtered_rows, vec![vec![Lit::U64 { v: 3 }]]);
 
         let mut ordered_query = base_query(
@@ -25080,7 +26673,7 @@ mod tests {
             limit: Some(2),
             offset: Some(0),
         });
-        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[])?;
+        let (_cols, ordered_rows) = execute_select(&engine, &ordered_query, &[], None)?;
         assert_eq!(
             ordered_rows,
             vec![vec![Lit::U64 { v: 3 }], vec![Lit::U64 { v: 2 }]]
@@ -25321,7 +26914,7 @@ mod tests {
             lock: None,
         };
 
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows, vec![vec![Lit::U64 { v: 4 }, Lit::Null]]);
 
         fs::remove_dir_all(&dir).ok();
@@ -25689,7 +27282,7 @@ mod tests {
                 },
             )),
         );
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(
             rows[0],
             vec![Lit::Str {
@@ -26101,7 +27694,7 @@ mod tests {
             }],
             None,
         );
-        let (_cols, rows) = execute_select(&engine, &query, &[])?;
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
         assert_eq!(rows.len(), 2);
 
         fs::remove_dir_all(&dir).ok();
@@ -29038,5 +30631,874 @@ mod tests {
             (var - expected_var).abs() < 1.0,
             "variance should be near {expected_var}, got {var}"
         );
+    }
+
+    #[test]
+    fn pg_to_char_format_basic() {
+        let date = MySqlDateParts {
+            year: 2024,
+            month: 3,
+            day: 15,
+        };
+        assert_eq!(
+            pg_to_char_format(date, 14, 30, 45, "YYYY-MM-DD"),
+            "2024-03-15"
+        );
+        assert_eq!(
+            pg_to_char_format(date, 14, 30, 45, "HH24:MI:SS"),
+            "14:30:45"
+        );
+        assert_eq!(
+            pg_to_char_format(date, 14, 30, 45, "Mon DD, YYYY"),
+            "Mar 15, 2024"
+        );
+        assert_eq!(
+            pg_to_char_format(date, 14, 30, 45, "YYYY-MM-DD HH24:MI:SS"),
+            "2024-03-15 14:30:45"
+        );
+    }
+
+    #[test]
+    fn pg_to_char_format_fill_mode() {
+        let date = MySqlDateParts {
+            year: 2024,
+            month: 1,
+            day: 5,
+        };
+        assert_eq!(
+            pg_to_char_format(date, 9, 5, 3, "FMYYYY-MM-DD"),
+            "2024-01-05"
+        );
+    }
+
+    #[test]
+    fn pg_to_char_format_12h_and_ampm() {
+        let date = MySqlDateParts {
+            year: 2024,
+            month: 6,
+            day: 1,
+        };
+        assert_eq!(pg_to_char_format(date, 14, 0, 0, "HH AM"), "02 PM");
+        assert_eq!(pg_to_char_format(date, 9, 0, 0, "HH AM"), "09 AM");
+        assert_eq!(pg_to_char_format(date, 0, 0, 0, "HH AM"), "12 AM");
+    }
+
+    #[test]
+    fn eval_pg_typeof_returns_correct_types() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "pg_typeof".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::I64 { v: 42 },
+            }],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(
+            result,
+            Lit::Str {
+                v: "bigint".to_string()
+            }
+        );
+
+        let expr2 = Expr::Func {
+            name: "pg_typeof".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::Str {
+                    v: "hello".to_string(),
+                },
+            }],
+            distinct: None,
+        };
+        let result2 = eval_expr(&expr2, &row, None, &args).unwrap();
+        assert_eq!(
+            result2,
+            Lit::Str {
+                v: "text".to_string()
+            }
+        );
+
+        let expr3 = Expr::Func {
+            name: "pg_typeof".to_string(),
+            args: vec![Expr::Lit {
+                lit: Lit::Bool { v: true },
+            }],
+            distinct: None,
+        };
+        let result3 = eval_expr(&expr3, &row, None, &args).unwrap();
+        assert_eq!(
+            result3,
+            Lit::Str {
+                v: "boolean".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_pg_concat_op() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Op {
+            op: "concat_op".to_string(),
+            a: Some(Box::new(Expr::Lit {
+                lit: Lit::Str {
+                    v: "hello".to_string(),
+                },
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::Str {
+                    v: " world".to_string(),
+                },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(
+            result,
+            Lit::Str {
+                v: "hello world".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_pg_gen_random_uuid() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "gen_random_uuid".to_string(),
+            args: vec![],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        let Lit::Str { v } = result else {
+            panic!("expected string UUID");
+        };
+        assert_eq!(v.len(), 36);
+        assert_eq!(v.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    #[test]
+    fn eval_pg_date_trunc() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "date_trunc".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "month".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2024-03-15 14:30:00".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(
+            result,
+            Lit::Str {
+                v: "2024-03-01 00:00:00".to_string()
+            }
+        );
+
+        let year_expr = Expr::Func {
+            name: "date_trunc".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "year".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "2024-03-15 14:30:00".to_string(),
+                    },
+                },
+            ],
+            distinct: None,
+        };
+        let year_result = eval_expr(&year_expr, &row, None, &args).unwrap();
+        assert_eq!(
+            year_result,
+            Lit::Str {
+                v: "2024-01-01 00:00:00".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_pg_string_to_array() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "string_to_array".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "a,b,c".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str { v: ",".to_string() },
+                },
+            ],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(
+            result,
+            Lit::Str {
+                v: "{a,b,c}".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_pg_array_length() {
+        let row = BTreeMap::new();
+        let args: Vec<Lit> = Vec::new();
+
+        let expr = Expr::Func {
+            name: "array_length".to_string(),
+            args: vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "{a,b,c}".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::I64 { v: 1 },
+                },
+            ],
+            distinct: None,
+        };
+        let result = eval_expr(&expr, &row, None, &args).unwrap();
+        assert_eq!(result, Lit::I64 { v: 3 });
+    }
+
+    // ── T180: Time-travel as_of reads ───────────────────────────────────────
+
+    #[test]
+    fn as_of_hides_rows_inserted_after_snapshot() -> anyhow::Result<()> {
+        let dir = temp_dir("as_of_insert");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("int"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "val".to_string(),
+                    r#type: type_desc("text"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        // Insert first row — record its commit_ts_ms.
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("val", Lit::Str { v: "a".into() }),
+            ])],
+            None,
+        )?;
+        let ts_after_first = now_millis();
+
+        // Small sleep equivalent — bump millis by inserting second row after a tiny delay.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 2 }),
+                ("val", Lit::Str { v: "b".into() }),
+            ])],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "items",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "val".to_string(),
+                    table: None,
+                },
+            ],
+            None,
+        );
+
+        // Current-time select: both rows visible.
+        let r = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let data = r.data.unwrap();
+        let rows = data.get("rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        // As-of select at ts_after_first: only first row should be visible.
+        let r = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(ts_after_first),
+        )?;
+        let data = r.data.unwrap();
+        let rows = data.get("rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn as_of_resurrects_deleted_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("as_of_delete");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 2 })]),
+            ],
+            None,
+        )?;
+        let ts_before_delete = now_millis();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Delete row 2.
+        engine.data_delete(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            ),
+            None,
+            &[],
+        )?;
+
+        let query = base_query(
+            "app",
+            "items",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+
+        // Current: only row 1.
+        let r = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let data = r.data.unwrap();
+        let rows = data.get("rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // As-of before delete: both rows visible.
+        let r = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(ts_before_delete),
+        )?;
+        let data = r.data.unwrap();
+        let rows = data.get("rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn as_of_none_returns_current_state() -> anyhow::Result<()> {
+        let dir = temp_dir("as_of_none");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "items",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+
+        // as_of = None behaves identically to no time-travel.
+        let r = engine.query_select(
+            &query,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let data = r.data.unwrap();
+        let rows = data.get("rows").unwrap().as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_ts_ms_set_on_insert_update_delete() -> anyhow::Result<()> {
+        let dir = temp_dir("commit_ts_ms");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let before = now_millis();
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+        let after = now_millis();
+
+        // Check commit_ts_ms was set on insert.
+        {
+            let (_, tdata) = engine.get_table(&BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            })?;
+            let entry = &tdata.rows[0];
+            assert!(
+                entry.commit_ts_ms >= before && entry.commit_ts_ms <= after,
+                "commit_ts_ms {} not in range [{}, {}]",
+                entry.commit_ts_ms,
+                before,
+                after
+            );
+        }
+
+        // Update — commit_ts_ms should advance.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let before_update = now_millis();
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            &row(&[("id", Lit::U64 { v: 1 })]),
+            None,
+            None,
+            &[],
+        )?;
+        {
+            let (_, tdata) = engine.get_table(&BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            })?;
+            assert!(tdata.rows[0].commit_ts_ms >= before_update);
+        }
+
+        // Delete — commit_ts_ms should advance.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let before_delete = now_millis();
+        engine.data_delete(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            },
+            &Expr::Lit {
+                lit: Lit::Bool { v: true },
+            },
+            None,
+            &[],
+        )?;
+        {
+            let (_, tdata) = engine.get_table(&BaseTableRef {
+                db: "app".to_string(),
+                table: "items".to_string(),
+                r#as: None,
+            })?;
+            assert!(tdata.rows[0].deleted);
+            assert!(tdata.rows[0].commit_ts_ms >= before_delete);
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn row_visible_at_helper() {
+        let entry_live = RowEntry {
+            row: RowObject::new(),
+            version: 1,
+            deleted: false,
+            commit_ts_ms: 100,
+        };
+        let entry_deleted = RowEntry {
+            row: RowObject::new(),
+            version: 2,
+            deleted: true,
+            commit_ts_ms: 200,
+        };
+        let entry_pre_tt = RowEntry {
+            row: RowObject::new(),
+            version: 1,
+            deleted: false,
+            commit_ts_ms: 0,
+        };
+
+        // No as_of: live visible, deleted not.
+        assert!(row_visible_at(&entry_live, None));
+        assert!(!row_visible_at(&entry_deleted, None));
+
+        // As-of at 150: live row (committed at 100) visible.
+        assert!(row_visible_at(&entry_live, Some(150)));
+        // As-of at 50: live row (committed at 100) NOT visible.
+        assert!(!row_visible_at(&entry_live, Some(50)));
+
+        // As-of at 150: deleted row (deleted at 200) should be visible (deletion in future).
+        assert!(row_visible_at(&entry_deleted, Some(150)));
+        // As-of at 250: deleted row (deleted at 200) not visible.
+        assert!(!row_visible_at(&entry_deleted, Some(250)));
+
+        // Pre-time-travel row (commit_ts_ms == 0): always visible if not deleted.
+        assert!(row_visible_at(&entry_pre_tt, Some(50)));
+        assert!(row_visible_at(&entry_pre_tt, Some(0)));
+    }
+
+    // ------------------------------------------------------------------
+    // T182 — History retention policy & GC
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn history_gc_purges_old_tombstones_and_preserves_live_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("history_gc_basic");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let tref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &tref,
+            vec![
+                row(&[("id", Lit::U64 { v: 1 })]),
+                row(&[("id", Lit::U64 { v: 2 })]),
+                row(&[("id", Lit::U64 { v: 3 })]),
+            ],
+            None,
+        )?;
+
+        // Delete id=2 — creates tombstone with commit_ts_ms == now.
+        engine.data_delete(
+            &tref,
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            ),
+            None,
+            &[],
+        )?;
+
+        // Status before GC: 1 tombstone purgeable at far-future horizon.
+        let horizon = now_millis() + 10_000;
+        let status_before = engine.maintenance_history_status(Some(horizon));
+        assert_eq!(status_before["total_live_rows"].as_u64().unwrap(), 2);
+        assert_eq!(status_before["total_tombstones"].as_u64().unwrap(), 1);
+        assert_eq!(status_before["total_purgeable"].as_u64().unwrap(), 1);
+
+        // Run GC.
+        let gc = engine.maintenance_history_gc(Some(horizon))?;
+        assert_eq!(gc["rows_purged"].as_u64().unwrap(), 1);
+        assert_eq!(gc["tables_touched"].as_u64().unwrap(), 1);
+
+        // Status after GC: tombstone gone.
+        let status_after = engine.maintenance_history_status(Some(horizon));
+        assert_eq!(status_after["total_live_rows"].as_u64().unwrap(), 2);
+        assert_eq!(status_after["total_tombstones"].as_u64().unwrap(), 0);
+
+        // Live rows still queryable (pk_index rebuilt).
+        let q = base_query(
+            "app",
+            "items",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let r = engine.query_select(
+            &q,
+            &[],
+            ResultFormat::RowsJson,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let rows = r.data.unwrap()["rows"].as_array().unwrap().len();
+        assert_eq!(rows, 2);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn history_gc_retains_pre_t180_tombstones() -> anyhow::Result<()> {
+        let dir = temp_dir("history_gc_pre_t180");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let tref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(&tref, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+
+        // Synthesise a pre-T180 tombstone: commit_ts_ms == 0, deleted == true.
+        {
+            let key = TableKey {
+                db: "app".to_string(),
+                table: "items".to_string(),
+            };
+            let tdata = engine.tables.get_mut(&key).expect("table");
+            tdata.rows.push(RowEntry {
+                row: row(&[("id", Lit::U64 { v: 99 })]),
+                version: 1,
+                deleted: true,
+                commit_ts_ms: 0,
+            });
+        }
+
+        // Horizon == u64::MAX should NOT purge the pre-T180 tombstone.
+        let gc = engine.maintenance_history_gc(Some(u64::MAX))?;
+        assert_eq!(gc["rows_purged"].as_u64().unwrap(), 0);
+
+        let status = engine.maintenance_history_status(None);
+        assert_eq!(status["total_tombstones"].as_u64().unwrap(), 1);
+        assert_eq!(status["total_purgeable"].as_u64().unwrap(), 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn history_gc_horizon_filters_recent_tombstones() -> anyhow::Result<()> {
+        let dir = temp_dir("history_gc_horizon");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("int"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let tref = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(&tref, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+
+        let horizon_before = now_millis();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Delete — tombstone commit_ts_ms > horizon_before.
+        engine.data_delete(
+            &tref,
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            ),
+            None,
+            &[],
+        )?;
+
+        // GC with the old horizon: must keep the tombstone (too recent).
+        let gc = engine.maintenance_history_gc(Some(horizon_before))?;
+        assert_eq!(gc["rows_purged"].as_u64().unwrap(), 0);
+        let status = engine.maintenance_history_status(Some(horizon_before));
+        assert_eq!(status["total_tombstones"].as_u64().unwrap(), 1);
+        assert_eq!(status["total_purgeable"].as_u64().unwrap(), 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 }

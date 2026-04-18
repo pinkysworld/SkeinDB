@@ -8,11 +8,12 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
     extract::Path,
+    extract::Query as AxumQuery,
     extract::State,
     http::{header, HeaderMap, Method, StatusCode},
     response::{sse, Html, IntoResponse},
@@ -29,22 +30,23 @@ use skeindb_skeinql::{
         AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
         AdvisorIndexSynthesizeParams, AiAutoparamAnalyzeParams, AiAutoparamClassifyParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcAckParams, CdcCloseParams,
-        CdcPollParams, CdcSubscribeTableParams, ClusterJoinTokenCreateParams,
-        ClusterNodeJoinParams, ClusterNodeLeaveParams, ClusterNodeRemoveParams, ClusterNodesParams,
-        ClusterReplicaPromoteParams, ClusterShardCreateParams, ClusterShardMoveParams,
-        ClusterShardRebalanceParams, DataDeleteParams, DataGetParams, DataInsertParams,
-        DataUpdateParams, DpAggregateParams, DpAuditLogParams, DpBudgetGetParams,
-        DpBudgetSetParams, EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
-        ForensicExportParams, ForensicQueryParams, ForensicVerifyParams, MergeApplyParams,
-        MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams, MergeWasmRegisterParams,
-        MigrationIntentReportParams, MigrationRewritePreviewParams, ObliviousExplainParams,
-        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
-        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
-        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
-        SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
-        TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
-        VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
-        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
+        CdcPollParams, CdcSubscribeQueryParams, CdcSubscribeTableParams,
+        ClusterJoinTokenCreateParams, ClusterNodeJoinParams, ClusterNodeLeaveParams,
+        ClusterNodeRemoveParams, ClusterNodesParams, ClusterReplicaPromoteParams,
+        ClusterShardCreateParams, ClusterShardMoveParams, ClusterShardRebalanceParams,
+        DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
+        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, EdgeBundleApplyParams,
+        EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
+        ForensicVerifyParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
+        MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
+        MigrationRewritePreviewParams, ObliviousExplainParams, ObliviousPolicyGetParams,
+        ObliviousPolicySetParams, PlanCacheClearParams, PlanCacheStatusParams,
+        QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams,
+        SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
+        TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
+        VectorIndexStatusParams, VectorInsertParams, VectorSearchParams, ViewCreateParams,
+        ViewDropParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
+        WasmPlanCompileParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -54,7 +56,7 @@ use skeindb_skeinql::{
     RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
 
-use crate::engine::{ColumnSchema, Engine, Subscriptions};
+use crate::engine::{CdcPollResult, ChangeEvent, ColumnSchema, Engine, Subscriptions};
 use crate::pg_wire;
 use crate::quic;
 
@@ -68,6 +70,9 @@ use tower_http::cors::{Any, CorsLayer};
 const REPLICATION_HEADER: &str = "x-skeindb-replication";
 const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
 const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
+const CDC_SSE_BATCH_LIMIT: u64 = 64;
+const CDC_SSE_FALLBACK_POLL_MS: u64 = 1000;
+const ADVISOR_APPLY_START_DELAY_MS: u64 = 25;
 static CLUSTER_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 static TX_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -528,8 +533,15 @@ enum MySqlQueryOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MySqlStmtColumnType {
+    Bool,
     LongLong,
     Double,
+    Date,
+    Time,
+    DateTime,
+    Json,
+    Bytes,
+    Uuid,
     VarString,
 }
 
@@ -588,6 +600,14 @@ struct MySqlSessionState {
     tx_active: bool,
     tx_undo_sql: Vec<String>,
     user_variables: HashMap<String, String>,
+    /// PG session-level settings (SET key = value). Initialized with PG defaults.
+    pg_settings: HashMap<String, String>,
+    /// Time-travel snapshot timestamp (epoch milliseconds). When set,
+    /// SELECT statements in this session observe the snapshot at this
+    /// point in time (see docs/TIME_TRAVEL_REPLAY.md §1.4). Controlled
+    /// by `SET @@skein.as_of = '...'`; cleared by assigning NULL or
+    /// `RESET @@skein.as_of`.
+    skein_as_of_ms: Option<u64>,
 }
 
 type MySqlWireError = (u16, &'static str, String);
@@ -616,8 +636,34 @@ impl MySqlSessionState {
             tx_active: false,
             tx_undo_sql: Vec::new(),
             user_variables: HashMap::new(),
+            pg_settings: pg_default_settings(),
+            skein_as_of_ms: None,
         }
     }
+}
+
+fn pg_default_settings() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert(
+        "server_version".into(),
+        pg_wire::PG_SERVER_VERSION.to_string(),
+    );
+    m.insert("server_encoding".into(), "UTF8".into());
+    m.insert("client_encoding".into(), "UTF8".into());
+    m.insert("datestyle".into(), "ISO, MDY".into());
+    m.insert("timezone".into(), "UTC".into());
+    m.insert("standard_conforming_strings".into(), "on".into());
+    m.insert("integer_datetimes".into(), "on".into());
+    m.insert("is_superuser".into(), "on".into());
+    m.insert("intervalstyle".into(), "postgres".into());
+    m.insert("extra_float_digits".into(), "3".into());
+    m.insert("search_path".into(), "\"$user\", public".into());
+    m.insert("application_name".into(), String::new());
+    m.insert(
+        "default_transaction_isolation".into(),
+        PG_DEFAULT_TX_ISOLATION.to_string(),
+    );
+    m
 }
 
 fn mysql_seed(conn_id: u32) -> [u8; 20] {
@@ -1982,7 +2028,10 @@ fn mysql_render_default_lit(lit: &Lit) -> String {
         Lit::Time { iso } => format!("'{}'", iso.replace('\'', "''")),
         Lit::Datetime { iso } => format!("'{}'", iso.replace('\'', "''")),
         Lit::Uuid { v } => format!("'{}'", v.replace('\'', "''")),
-        Lit::Bytes { .. } | Lit::Json { .. } | Lit::Embedding { .. } => "NULL".to_string(),
+        Lit::Bytes { b64 } => decode_base64_text(b64)
+            .map(|bytes| format!("X'{}'", hex_encode(&bytes)))
+            .unwrap_or_else(|| "NULL".to_string()),
+        Lit::Json { .. } | Lit::Embedding { .. } => "NULL".to_string(),
     }
 }
 
@@ -2251,6 +2300,8 @@ enum MySqlCompatAggregateOp {
     BitAnd,
     BitOr,
     BitXor,
+    StringAgg,
+    ArrayAgg,
 }
 
 // ── Multi-column GROUP BY support ───────────────────────────────────────
@@ -2466,6 +2517,29 @@ fn mysql_parse_aggregate_projection_expr(
             aggregate_expr,
             "bit_xor",
             MySqlCompatAggregateOp::BitXor,
+        );
+    }
+    // PG string_agg(col, separator)
+    if aggregate_lower.starts_with("string_agg(") && aggregate_lower.ends_with(')') {
+        let inner = aggregate_expr["string_agg(".len()..aggregate_expr.len() - 1].trim();
+        let parts = split_csv_top_level(inner);
+        if parts.len() >= 1 {
+            let col_part = parts[0].trim();
+            let (col, table) = parse_sql_column_ref(col_part)?;
+            let select_expr = table.map(|t| format!("{t}.{col}")).unwrap_or(col.clone());
+            return Some((
+                Some(select_expr.clone()),
+                format!("STRING_AGG({select_expr})"),
+                MySqlCompatAggregateOp::StringAgg,
+            ));
+        }
+    }
+    // PG array_agg(col)
+    if aggregate_lower.starts_with("array_agg(") && aggregate_lower.ends_with(')') {
+        return mysql_parse_column_aggregate_projection(
+            aggregate_expr,
+            "array_agg",
+            MySqlCompatAggregateOp::ArrayAgg,
         );
     }
     None
@@ -3715,6 +3789,7 @@ async fn mysql_try_simple_aggregate_query_outcome(
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
+        as_of_ms: None,
     };
     let result = sql_exec(state, params).await?;
     let (_, rows) =
@@ -3777,7 +3852,7 @@ async fn mysql_try_simple_aggregate_query_outcome(
                 ))
             }
         }
-        MySqlCompatAggregateOp::GroupConcat => {
+        MySqlCompatAggregateOp::GroupConcat | MySqlCompatAggregateOp::StringAgg => {
             let values: Vec<String> = rows
                 .iter()
                 .filter_map(|row| row.first().and_then(|value| value.clone()))
@@ -3786,6 +3861,18 @@ async fn mysql_try_simple_aggregate_query_outcome(
                 None
             } else {
                 Some(values.join(","))
+            }
+        }
+        MySqlCompatAggregateOp::ArrayAgg => {
+            let values: Vec<String> = rows
+                .iter()
+                .filter_map(|row| row.first().and_then(|value| value.clone()))
+                .collect();
+            if values.is_empty() {
+                None
+            } else {
+                let inner = values.join(",");
+                Some(format!("{{{inner}}}"))
             }
         }
         MySqlCompatAggregateOp::BitAnd => {
@@ -3868,6 +3955,7 @@ async fn mysql_try_multi_aggregate_query_outcome(
             explain: false,
             default_db: default_db.map(|db| db.to_string()),
             result_format: Some(ResultFormat::RowsJson),
+            as_of_ms: None,
         },
     )
     .await?;
@@ -4128,6 +4216,7 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
+        as_of_ms: None,
     };
     let result = sql_exec(state, params).await?;
     let (_, rows) =
@@ -4206,7 +4295,9 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                         }
                     }
                 }
-                MySqlCompatAggregateOp::GroupConcat => {
+                MySqlCompatAggregateOp::GroupConcat
+                | MySqlCompatAggregateOp::StringAgg
+                | MySqlCompatAggregateOp::ArrayAgg => {
                     if let Some(raw) = agg_val {
                         agg_state.concat_values.push(raw.to_string());
                     }
@@ -4281,6 +4372,21 @@ async fn mysql_try_multi_grouped_aggregate_query_outcome(
                             None
                         } else {
                             Some(st.concat_values.join(","))
+                        }
+                    }
+                    MySqlCompatAggregateOp::StringAgg => {
+                        if st.concat_values.is_empty() {
+                            None
+                        } else {
+                            Some(st.concat_values.join(","))
+                        }
+                    }
+                    MySqlCompatAggregateOp::ArrayAgg => {
+                        if st.concat_values.is_empty() {
+                            None
+                        } else {
+                            let inner = st.concat_values.join(",");
+                            Some(format!("{{{inner}}}"))
                         }
                     }
                     MySqlCompatAggregateOp::BitAnd
@@ -4609,6 +4715,7 @@ async fn mysql_try_grouped_aggregate_query_outcome(
         explain: false,
         default_db: default_db.map(|db| db.to_string()),
         result_format: Some(ResultFormat::RowsJson),
+        as_of_ms: None,
     };
     let result = sql_exec(state, params).await?;
     let (_, rows) =
@@ -4682,7 +4789,9 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                     state.max_value = Some(raw.to_string());
                 }
             }
-            MySqlCompatAggregateOp::GroupConcat => {
+            MySqlCompatAggregateOp::GroupConcat
+            | MySqlCompatAggregateOp::StringAgg
+            | MySqlCompatAggregateOp::ArrayAgg => {
                 if let Some(raw) = aggregate_value {
                     state.concat_values.push(raw.to_string());
                 }
@@ -4748,11 +4857,19 @@ async fn mysql_try_grouped_aggregate_query_outcome(
                         ))
                     }
                 }
-                MySqlCompatAggregateOp::GroupConcat => {
+                MySqlCompatAggregateOp::GroupConcat | MySqlCompatAggregateOp::StringAgg => {
                     if state.concat_values.is_empty() {
                         None
                     } else {
                         Some(state.concat_values.join(","))
+                    }
+                }
+                MySqlCompatAggregateOp::ArrayAgg => {
+                    if state.concat_values.is_empty() {
+                        None
+                    } else {
+                        let inner = state.concat_values.join(",");
+                        Some(format!("{{{inner}}}"))
                     }
                 }
                 MySqlCompatAggregateOp::BitAnd
@@ -4836,6 +4953,7 @@ async fn mysql_try_info_schema_table_storage_query_outcome(
             explain: false,
             default_db: default_db.map(|db| db.to_string()),
             result_format: Some(ResultFormat::RowsJson),
+            as_of_ms: None,
         },
     )
     .await?;
@@ -4967,11 +5085,9 @@ async fn mysql_build_insert_undo_sql(
     let last_insert_id = result
         .get("write")
         .and_then(|v| v.get("last_insert_id"))
-        .and_then(|v| v.as_u64())?;
-    if last_insert_id == 0 {
-        return None;
-    }
-    let SqlPlan::Insert { table, .. } = parse_sql_plan(sql, default_db).ok()? else {
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let SqlPlan::Insert { table, rows, .. } = parse_sql_plan(sql, default_db).ok()? else {
         return None;
     };
     let eng = state.engine.read().await;
@@ -4993,15 +5109,18 @@ async fn mysql_build_insert_undo_sql(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
         });
-    if !auto_increment {
-        return None;
-    }
+    let pk_literal = if auto_increment && last_insert_id != 0 {
+        last_insert_id.to_string()
+    } else {
+        let row = rows.first()?;
+        mysql_render_default_lit(row.get(pk_name)?)
+    };
     Some(format!(
         "DELETE FROM {}.{} WHERE {} = {} LIMIT 1",
         mysql_quote_ident(&table.db),
         mysql_quote_ident(&table.table),
         mysql_quote_ident(pk_name),
-        last_insert_id
+        pk_literal
     ))
 }
 
@@ -5012,6 +5131,7 @@ async fn mysql_rollback_transaction(state: &AppState, undo_sql: &[String]) -> Re
             explain: false,
             default_db: None,
             result_format: Some(ResultFormat::RowsJson),
+            as_of_ms: None,
         };
         sql_exec(state, params).await?;
     }
@@ -5885,6 +6005,7 @@ async fn mysql_exec_subquery_query_outcome(
             explain: false,
             default_db: default_db.map(|db| db.to_string()),
             result_format: Some(ResultFormat::RowsJson),
+            as_of_ms: None,
         },
     )
     .await?;
@@ -6414,6 +6535,7 @@ async fn mysql_try_select_subquery_compat_outcome(
             explain: false,
             default_db: default_db.map(|db| db.to_string()),
             result_format: Some(ResultFormat::RowsJson),
+            as_of_ms: None,
         },
     )
     .await?;
@@ -7114,9 +7236,15 @@ fn mysql_text_row_packet(row: &[Option<String>]) -> Vec<u8> {
 
 fn mysql_stmt_column_type_code(kind: MySqlStmtColumnType) -> u8 {
     match kind {
-        MySqlStmtColumnType::LongLong => 0x08,
+        MySqlStmtColumnType::Bool | MySqlStmtColumnType::LongLong => 0x08,
         MySqlStmtColumnType::Double => 0x05,
-        MySqlStmtColumnType::VarString => 0xfd,
+        MySqlStmtColumnType::Date
+        | MySqlStmtColumnType::Time
+        | MySqlStmtColumnType::DateTime
+        | MySqlStmtColumnType::Json
+        | MySqlStmtColumnType::Bytes
+        | MySqlStmtColumnType::Uuid
+        | MySqlStmtColumnType::VarString => 0xfd,
     }
 }
 
@@ -7129,18 +7257,18 @@ fn mysql_stmt_column_type_for_mysql_literal(lit: &MySqlLiteral) -> MySqlStmtColu
 
 fn mysql_stmt_column_type_for_lit(lit: &Lit) -> MySqlStmtColumnType {
     match lit {
-        Lit::Bool { .. } | Lit::I64 { .. } | Lit::U64 { .. } => MySqlStmtColumnType::LongLong,
+        Lit::Bool { .. } => MySqlStmtColumnType::Bool,
+        Lit::I64 { .. } | Lit::U64 { .. } => MySqlStmtColumnType::LongLong,
         Lit::F64 { .. } => MySqlStmtColumnType::Double,
-        Lit::Null
-        | Lit::Dec { .. }
-        | Lit::Str { .. }
-        | Lit::Date { .. }
-        | Lit::Time { .. }
-        | Lit::Datetime { .. }
-        | Lit::Uuid { .. }
-        | Lit::Bytes { .. }
-        | Lit::Json { .. }
-        | Lit::Embedding { .. } => MySqlStmtColumnType::VarString,
+        Lit::Date { .. } => MySqlStmtColumnType::Date,
+        Lit::Time { .. } => MySqlStmtColumnType::Time,
+        Lit::Datetime { .. } => MySqlStmtColumnType::DateTime,
+        Lit::Json { .. } => MySqlStmtColumnType::Json,
+        Lit::Bytes { .. } => MySqlStmtColumnType::Bytes,
+        Lit::Uuid { .. } => MySqlStmtColumnType::Uuid,
+        Lit::Null | Lit::Dec { .. } | Lit::Str { .. } | Lit::Embedding { .. } => {
+            MySqlStmtColumnType::VarString
+        }
     }
 }
 
@@ -7156,18 +7284,45 @@ fn mysql_stmt_column_type_from_desc_column(column: &Value) -> MySqlStmtColumnTyp
 
 fn mysql_stmt_column_type_from_desc_kind(kind: &str) -> MySqlStmtColumnType {
     match kind {
-        "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
+        "bool" => MySqlStmtColumnType::Bool,
+        "i64" | "u64" => MySqlStmtColumnType::LongLong,
         "f64" => MySqlStmtColumnType::Double,
+        "date" => MySqlStmtColumnType::Date,
+        "time" => MySqlStmtColumnType::Time,
+        "datetime" => MySqlStmtColumnType::DateTime,
+        "json" => MySqlStmtColumnType::Json,
+        "bytes" => MySqlStmtColumnType::Bytes,
+        "uuid" => MySqlStmtColumnType::Uuid,
         _ => MySqlStmtColumnType::VarString,
     }
 }
 
 fn mysql_stmt_column_type_for_type_desc(desc: &TypeDesc) -> MySqlStmtColumnType {
     match desc.kind.as_str() {
-        "bool" | "i64" | "u64" => MySqlStmtColumnType::LongLong,
+        "bool" => MySqlStmtColumnType::Bool,
+        "i64" | "u64" => MySqlStmtColumnType::LongLong,
         "f64" => MySqlStmtColumnType::Double,
+        "date" => MySqlStmtColumnType::Date,
+        "time" => MySqlStmtColumnType::Time,
+        "datetime" => MySqlStmtColumnType::DateTime,
+        "json" => MySqlStmtColumnType::Json,
+        "bytes" => MySqlStmtColumnType::Bytes,
+        "uuid" => MySqlStmtColumnType::Uuid,
         _ => MySqlStmtColumnType::VarString,
     }
+}
+
+fn mysql_stmt_is_textual_column_type(kind: MySqlStmtColumnType) -> bool {
+    matches!(
+        kind,
+        MySqlStmtColumnType::Date
+            | MySqlStmtColumnType::Time
+            | MySqlStmtColumnType::DateTime
+            | MySqlStmtColumnType::Json
+            | MySqlStmtColumnType::Bytes
+            | MySqlStmtColumnType::Uuid
+            | MySqlStmtColumnType::VarString
+    )
 }
 
 fn mysql_stmt_base_table_alias(base: &BaseTableRef) -> &str {
@@ -7366,13 +7521,19 @@ fn mysql_stmt_merge_column_types(
     if left == right {
         return left;
     }
-    if matches!(left, MySqlStmtColumnType::VarString)
-        || matches!(right, MySqlStmtColumnType::VarString)
-    {
+    if mysql_stmt_is_textual_column_type(left) || mysql_stmt_is_textual_column_type(right) {
         return MySqlStmtColumnType::VarString;
     }
     if matches!(left, MySqlStmtColumnType::Double) || matches!(right, MySqlStmtColumnType::Double) {
         return MySqlStmtColumnType::Double;
+    }
+    if matches!(left, MySqlStmtColumnType::LongLong)
+        || matches!(right, MySqlStmtColumnType::LongLong)
+    {
+        return MySqlStmtColumnType::LongLong;
+    }
+    if matches!(left, MySqlStmtColumnType::Bool) || matches!(right, MySqlStmtColumnType::Bool) {
+        return MySqlStmtColumnType::Bool;
     }
     MySqlStmtColumnType::LongLong
 }
@@ -7394,7 +7555,9 @@ fn mysql_stmt_aggregate_result_type(
             }
         }
         MySqlCompatAggregateOp::Min | MySqlCompatAggregateOp::Max => source_type,
-        MySqlCompatAggregateOp::GroupConcat => MySqlStmtColumnType::VarString,
+        MySqlCompatAggregateOp::GroupConcat
+        | MySqlCompatAggregateOp::StringAgg
+        | MySqlCompatAggregateOp::ArrayAgg => MySqlStmtColumnType::VarString,
         MySqlCompatAggregateOp::BitAnd
         | MySqlCompatAggregateOp::BitOr
         | MySqlCompatAggregateOp::BitXor => MySqlStmtColumnType::LongLong,
@@ -7696,8 +7859,14 @@ fn mysql_stmt_scalar_subquery_result_flags(flags: u16) -> u16 {
 
 fn mysql_stmt_placeholder_sql_for_column(column: &MySqlStmtPrepareColumn) -> &'static str {
     match column.column_type {
+        MySqlStmtColumnType::Bool => "FALSE",
         MySqlStmtColumnType::LongLong => "0",
         MySqlStmtColumnType::Double => "SQRT(0)",
+        MySqlStmtColumnType::Date => "CAST('1970-01-01' AS DATE)",
+        MySqlStmtColumnType::Time => "CAST('00:00:00' AS TIME)",
+        MySqlStmtColumnType::DateTime => "CAST('1970-01-01 00:00:00' AS DATETIME)",
+        MySqlStmtColumnType::Json | MySqlStmtColumnType::Uuid => "''",
+        MySqlStmtColumnType::Bytes => "X''",
         MySqlStmtColumnType::VarString => {
             if (column.flags & MYSQL_COL_FLAG_BINARY) != 0 {
                 "X''"
@@ -8061,6 +8230,12 @@ fn mysql_stmt_infer_column_types(
         let mut saw_value = false;
         let mut all_i64 = true;
         let mut all_f64 = true;
+        let mut all_bool = true;
+        let mut all_date = true;
+        let mut all_time = true;
+        let mut all_datetime = true;
+        let mut all_uuid = true;
+        let mut all_json = true;
         for row in rows {
             let Some(cell) = row.get(col_idx).and_then(|v| v.as_deref()) else {
                 continue;
@@ -8072,16 +8247,83 @@ fn mysql_stmt_infer_column_types(
             if cell.parse::<f64>().is_err() {
                 all_f64 = false;
             }
-            if !all_i64 && !all_f64 {
+            // Bool: t/f/true/false/1/0
+            let lower = cell.trim().to_ascii_lowercase();
+            if !matches!(lower.as_str(), "t" | "f" | "true" | "false" | "1" | "0") {
+                all_bool = false;
+            }
+            // Date: YYYY-MM-DD (10 chars)
+            if cell.len() != 10
+                || cell.chars().nth(4) != Some('-')
+                || cell.chars().nth(7) != Some('-')
+                || !cell[..4].chars().all(|c| c.is_ascii_digit())
+                || !cell[5..7].chars().all(|c| c.is_ascii_digit())
+                || !cell[8..10].chars().all(|c| c.is_ascii_digit())
+            {
+                all_date = false;
+            }
+            // Time: HH:MM:SS (8 chars minimum)
+            if !(cell.len() >= 8
+                && cell.chars().nth(2) == Some(':')
+                && cell.chars().nth(5) == Some(':'))
+            {
+                all_time = false;
+            }
+            // DateTime: YYYY-MM-DD[T ]HH:MM:SS
+            if !(cell.len() >= 19
+                && (cell.as_bytes().get(10) == Some(&b'T')
+                    || cell.as_bytes().get(10) == Some(&b' '))
+                && cell.chars().nth(4) == Some('-'))
+            {
+                all_datetime = false;
+            }
+            // UUID: 8-4-4-4-12 hex
+            if cell.len() != 36
+                || cell.chars().nth(8) != Some('-')
+                || cell.chars().nth(13) != Some('-')
+                || !cell.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+            {
+                all_uuid = false;
+            }
+            // JSON: starts with { or [
+            let trimmed = cell.trim();
+            if !((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+            {
+                all_json = false;
+            }
+            // Early exit if only basic types remain possible
+            if !all_i64
+                && !all_f64
+                && !all_bool
+                && !all_date
+                && !all_time
+                && !all_datetime
+                && !all_uuid
+                && !all_json
+            {
                 break;
             }
         }
         *kind = if !saw_value {
             MySqlStmtColumnType::VarString
+        } else if all_bool && !all_i64 {
+            // Only pure bool if not also valid as integers
+            MySqlStmtColumnType::Bool
         } else if all_i64 {
             MySqlStmtColumnType::LongLong
         } else if all_f64 {
             MySqlStmtColumnType::Double
+        } else if all_uuid {
+            MySqlStmtColumnType::Uuid
+        } else if all_datetime {
+            MySqlStmtColumnType::DateTime
+        } else if all_date {
+            MySqlStmtColumnType::Date
+        } else if all_time {
+            MySqlStmtColumnType::Time
+        } else if all_json {
+            MySqlStmtColumnType::Json
         } else {
             MySqlStmtColumnType::VarString
         };
@@ -8104,6 +8346,16 @@ fn mysql_binary_row_packet(
             continue;
         };
         match kind {
+            MySqlStmtColumnType::Bool => {
+                let normalized = match value.trim().to_ascii_lowercase().as_str() {
+                    "1" | "t" | "true" => 1i64,
+                    "0" | "f" | "false" => 0i64,
+                    _ => value
+                        .parse::<i64>()
+                        .map_err(|_| format!("invalid prepared bool result '{value}'"))?,
+                };
+                payload.extend_from_slice(&normalized.to_le_bytes());
+            }
             MySqlStmtColumnType::LongLong => {
                 let parsed = value
                     .parse::<i64>()
@@ -8116,7 +8368,13 @@ fn mysql_binary_row_packet(
                     .map_err(|_| format!("invalid prepared float result '{value}'"))?;
                 payload.extend_from_slice(&parsed.to_le_bytes());
             }
-            MySqlStmtColumnType::VarString => {
+            MySqlStmtColumnType::Date
+            | MySqlStmtColumnType::Time
+            | MySqlStmtColumnType::DateTime
+            | MySqlStmtColumnType::Json
+            | MySqlStmtColumnType::Bytes
+            | MySqlStmtColumnType::Uuid
+            | MySqlStmtColumnType::VarString => {
                 mysql_push_lenenc_bytes(&mut payload, value.as_bytes())
             }
         }
@@ -8847,6 +9105,21 @@ async fn mysql_execute_sql(
             last_insert_id: 0,
         });
     }
+    // SET @@skein.as_of = '<ts>' / NULL / DEFAULT — session-level time-travel snapshot (T181).
+    if let Some((name, value)) = mysql_parse_set_assignment(sql) {
+        if name == "skein.as_of" {
+            match parse_skein_as_of_assignment_value(&value) {
+                Ok(ms) => {
+                    session.skein_as_of_ms = ms;
+                    return Ok(MySqlQueryOutcome::Ok {
+                        affected_rows: 0,
+                        last_insert_id: 0,
+                    });
+                }
+                Err(msg) => return Err((1064, "42000", msg)),
+            }
+        }
+    }
     if mysql_is_session_compat_set(sql) {
         return Ok(MySqlQueryOutcome::Ok {
             affected_rows: 0,
@@ -8884,6 +9157,13 @@ async fn mysql_execute_sql(
             });
         }
         if trimmed_lower.starts_with("drop view ") {
+            return Ok(MySqlQueryOutcome::Ok {
+                affected_rows: 0,
+                last_insert_id: 0,
+            });
+        }
+        // COMMENT ON ... — PG metadata statement, accept and ignore
+        if trimmed_lower.starts_with("comment on ") {
             return Ok(MySqlQueryOutcome::Ok {
                 affected_rows: 0,
                 last_insert_id: 0,
@@ -8969,6 +9249,7 @@ async fn mysql_execute_sql(
                 explain: false,
                 default_db: session.default_db.clone(),
                 result_format: Some(ResultFormat::RowsJson),
+                as_of_ms: None,
             };
             match sql_exec(state, params).await {
                 Ok(_result) => {
@@ -9099,6 +9380,7 @@ async fn mysql_execute_sql(
                     explain: false,
                     default_db: session.default_db.clone(),
                     result_format: Some(ResultFormat::RowsJson),
+                    as_of_ms: None,
                 };
                 match sql_exec(state, params).await {
                     Ok(_) => {
@@ -9146,6 +9428,7 @@ async fn mysql_execute_sql(
                     explain: false,
                     default_db: session.default_db.clone(),
                     result_format: Some(ResultFormat::RowsJson),
+                    as_of_ms: None,
                 };
                 let select_result = sql_exec(state, select_params)
                     .await
@@ -9185,6 +9468,7 @@ async fn mysql_execute_sql(
                             explain: false,
                             default_db: session.default_db.clone(),
                             result_format: Some(ResultFormat::RowsJson),
+                            as_of_ms: None,
                         };
                         match sql_exec(state, params).await {
                             Ok(_) => affected += 1,
@@ -9647,6 +9931,7 @@ async fn mysql_execute_sql(
         explain: false,
         default_db: session.default_db.clone(),
         result_format: Some(ResultFormat::RowsJson),
+        as_of_ms: session.skein_as_of_ms,
     };
     let result = sql_exec(state, params)
         .await
@@ -9850,9 +10135,15 @@ async fn mysql_send_prepare_ok(
     if !result_columns.is_empty() {
         for column in result_columns {
             let len = match column.column_type {
-                MySqlStmtColumnType::LongLong => 20,
+                MySqlStmtColumnType::Bool | MySqlStmtColumnType::LongLong => 20,
                 MySqlStmtColumnType::Double => 24,
-                MySqlStmtColumnType::VarString => 255,
+                MySqlStmtColumnType::Date
+                | MySqlStmtColumnType::Time
+                | MySqlStmtColumnType::DateTime
+                | MySqlStmtColumnType::Json
+                | MySqlStmtColumnType::Bytes
+                | MySqlStmtColumnType::Uuid
+                | MySqlStmtColumnType::VarString => 255,
             };
             let packet = mysql_column_definition_packet_with_type_flags(
                 &column.name,
@@ -9935,9 +10226,15 @@ async fn mysql_send_binary_result_header(
     seq = seq.wrapping_add(1);
     for (idx, name) in columns.iter().enumerate() {
         let len = match column_types[idx] {
-            MySqlStmtColumnType::LongLong => 20,
+            MySqlStmtColumnType::Bool | MySqlStmtColumnType::LongLong => 20,
             MySqlStmtColumnType::Double => 24,
-            MySqlStmtColumnType::VarString => rows
+            MySqlStmtColumnType::Date
+            | MySqlStmtColumnType::Time
+            | MySqlStmtColumnType::DateTime
+            | MySqlStmtColumnType::Json
+            | MySqlStmtColumnType::Bytes
+            | MySqlStmtColumnType::Uuid
+            | MySqlStmtColumnType::VarString => rows
                 .iter()
                 .filter_map(|row| row.get(idx).and_then(|v| v.as_ref()))
                 .map(|value| value.len() as u32)
@@ -10375,8 +10672,18 @@ const PG_DEFAULT_SCHEMA: &str = "public";
 const PG_MAX_IDENTIFIER_LENGTH: &str = "63";
 const PG_DEFAULT_TX_ISOLATION: &str = "read committed";
 
-fn pg_bootstrap_setting_value(name: &str, default_db: Option<&str>) -> Option<String> {
+fn pg_bootstrap_setting_value(
+    name: &str,
+    default_db: Option<&str>,
+    session: Option<&MySqlSessionState>,
+) -> Option<String> {
     let normalized = name.trim().trim_matches('"').to_ascii_lowercase();
+    // Check session-level settings first
+    if let Some(sess) = session {
+        if let Some(val) = sess.pg_settings.get(&normalized) {
+            return Some(val.clone());
+        }
+    }
     match normalized.as_str() {
         "server_version" => Some(pg_wire::PG_SERVER_VERSION.to_string()),
         "server_version_num" => Some(PG_SERVER_VERSION_NUM.to_string()),
@@ -10394,6 +10701,118 @@ fn pg_bootstrap_setting_value(name: &str, default_db: Option<&str>) -> Option<St
         "current_schema" => Some(PG_DEFAULT_SCHEMA.to_string()),
         _ => None,
     }
+}
+
+/// Parse `SET key = value` or `SET key TO value`. Returns (key, value).
+fn pg_parse_set_command(rest: &str) -> Option<(String, String)> {
+    // Handle SET LOCAL / SET SESSION prefix (ignore the scope keyword)
+    let rest = rest
+        .strip_prefix("local ")
+        .or_else(|| rest.strip_prefix("LOCAL "))
+        .or_else(|| rest.strip_prefix("session "))
+        .or_else(|| rest.strip_prefix("SESSION "))
+        .unwrap_or(rest)
+        .trim();
+
+    // Split on " TO " or " = "
+    let (key, raw_value) = if let Some(pos) = rest.find('=') {
+        (rest[..pos].trim(), rest[pos + 1..].trim())
+    } else {
+        let rest_lower = rest.to_ascii_lowercase();
+        if let Some(pos) = rest_lower.find(" to ") {
+            (rest[..pos].trim(), rest[pos + 4..].trim())
+        } else {
+            return None;
+        }
+    };
+
+    if key.is_empty() || raw_value.is_empty() {
+        return None;
+    }
+
+    // Strip surrounding quotes from value
+    let value = if (raw_value.starts_with('\'') && raw_value.ends_with('\''))
+        || (raw_value.starts_with('"') && raw_value.ends_with('"'))
+    {
+        &raw_value[1..raw_value.len() - 1]
+    } else {
+        raw_value
+    };
+
+    Some((key.to_string(), value.to_string()))
+}
+
+/// Extract and strip `RETURNING col1, col2, *` from DML SQL.
+/// Returns the SQL without RETURNING and the column list (if found).
+fn pg_extract_returning(sql: &str) -> (String, Option<Vec<String>>) {
+    let lower = sql.to_ascii_lowercase();
+    // Only strip RETURNING from DML statements
+    let is_dml =
+        lower.starts_with("insert") || lower.starts_with("update") || lower.starts_with("delete");
+    if !is_dml {
+        return (sql.to_string(), None);
+    }
+    // Find RETURNING keyword at top level (not inside strings/parens)
+    if let Some(pos) = find_keyword_top_level(&lower, "returning") {
+        let ret_clause = sql[pos + "returning".len()..].trim();
+        let cols: Vec<String> = ret_clause
+            .split(',')
+            .map(|c| {
+                let c = c.trim();
+                // Handle table-qualified column refs like "t"."col" → col
+                if let Some(dot_pos) = c.rfind('.') {
+                    clean_sql_ident(c[dot_pos + 1..].trim())
+                } else {
+                    clean_sql_ident(c)
+                }
+            })
+            .filter(|c| !c.is_empty())
+            .collect();
+        let remaining = sql[..pos].trim_end().to_string();
+        if cols.is_empty() {
+            (remaining, None)
+        } else {
+            (remaining, Some(cols))
+        }
+    } else {
+        (sql.to_string(), None)
+    }
+}
+
+/// Extract the table name from an INSERT statement (lowercase).
+fn pg_extract_insert_table(sql_lower: &str) -> Option<String> {
+    // INSERT [IGNORE] INTO table_name ...
+    let rest = sql_lower.strip_prefix("insert")?.trim_start();
+    let rest = rest.strip_prefix("ignore").unwrap_or(rest).trim_start();
+    let rest = rest.strip_prefix("into")?.trim_start();
+    // Table name extends until ( or whitespace
+    let end = rest
+        .find(|c: char| c == '(' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    let table = rest[..end].trim().trim_matches('`').trim_matches('"');
+    if table.is_empty() {
+        None
+    } else {
+        Some(table.to_string())
+    }
+}
+
+/// Look up the primary key column for a table. Falls back to "id".
+async fn pg_lookup_pk_column(
+    state: &AppState,
+    table_name: &str,
+    default_db: Option<&str>,
+) -> String {
+    let db = default_db.unwrap_or("skein");
+    let eng = state.engine.read().await;
+    if let Ok(desc) = eng.describe_table(db, table_name) {
+        if let Some(pk_arr) = desc.get("primary_key").and_then(|v| v.as_array()) {
+            if let Some(first) = pk_arr.first().and_then(|v| v.as_str()) {
+                return first.to_string();
+            }
+        }
+    }
+    "id".to_string()
 }
 
 fn pg_parse_current_setting_name(sql_lower: &str) -> Option<&str> {
@@ -10421,6 +10840,7 @@ async fn pg_try_handle_bootstrap_query(
     stream: &mut TcpStream,
     sql: &str,
     default_db: Option<&str>,
+    session: Option<&MySqlSessionState>,
 ) -> anyhow::Result<bool> {
     let sql_lower = sql.to_ascii_lowercase();
 
@@ -10431,7 +10851,7 @@ async fn pg_try_handle_bootstrap_query(
     }
 
     if sql_lower == "select current_database()" {
-        let value = pg_bootstrap_setting_value("current_database", default_db)
+        let value = pg_bootstrap_setting_value("current_database", default_db, session)
             .unwrap_or_else(|| "skein".to_string());
         pg_write_single_text_result(stream, "current_database", &value, "SELECT 1").await?;
         return Ok(true);
@@ -10444,20 +10864,1645 @@ async fn pg_try_handle_bootstrap_query(
     }
 
     if let Some(setting) = sql_lower.strip_prefix("show ") {
-        if let Some(value) = pg_bootstrap_setting_value(setting, default_db) {
+        if let Some(value) = pg_bootstrap_setting_value(setting, default_db, session) {
             pg_write_single_text_result(stream, setting.trim(), &value, "SHOW").await?;
             return Ok(true);
         }
     }
 
     if let Some(setting) = pg_parse_current_setting_name(&sql_lower) {
-        if let Some(value) = pg_bootstrap_setting_value(setting, default_db) {
+        if let Some(value) = pg_bootstrap_setting_value(setting, default_db, session) {
             pg_write_single_text_result(stream, "current_setting", &value, "SELECT 1").await?;
             return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PgSavepoint {
+    name: String,
+    undo_len: usize,
+}
+
+fn pg_parse_named_command(sql: &str, prefix: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let head = trimmed.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let name = trimmed.get(prefix.len()..)?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.trim_matches('"').to_string())
+}
+
+fn pg_parse_savepoint_name(sql: &str) -> Option<String> {
+    pg_parse_named_command(sql, "savepoint ")
+}
+
+fn pg_parse_release_savepoint_name(sql: &str) -> Option<String> {
+    pg_parse_named_command(sql, "release savepoint ")
+}
+
+fn pg_parse_rollback_to_savepoint_name(sql: &str) -> Option<String> {
+    pg_parse_named_command(sql, "rollback to savepoint ")
+        .or_else(|| pg_parse_named_command(sql, "rollback to "))
+}
+
+fn pg_find_savepoint_index(savepoints: &[PgSavepoint], name: &str) -> Option<usize> {
+    savepoints
+        .iter()
+        .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+}
+
+fn pg_tx_status_for_session(session: &MySqlSessionState, failed: bool) -> pg_wire::TxStatus {
+    use crate::pg_wire::TxStatus;
+
+    if failed {
+        TxStatus::Failed
+    } else if session.tx_active {
+        TxStatus::InTransaction
+    } else {
+        TxStatus::Idle
+    }
+}
+
+/// Derive a deterministic 16-byte salt from the token so that SCRAM credentials
+/// are stable across connections without needing persistent storage.
+fn pg_scram_salt_for_token(token: &str) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(format!("skeindb-scram-salt:{}", token).as_bytes());
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&hash[..16]);
+    salt
+}
+
+fn pg_sqlstate_from_mysql_error(code: u16, state: &'static str, message: &str) -> &'static str {
+    let message_lower = message.to_ascii_lowercase();
+
+    match state {
+        "08P01" | "0A000" | "23505" | "25P01" | "25P02" | "28000" | "28P01" | "3B001" | "40001"
+        | "42601" | "42703" | "42P01" => {
+            return state;
+        }
+        _ => {}
+    }
+
+    match code {
+        1062 => return "23505",
+        1064 => return "42601",
+        1146 => return "42P01",
+        1235 => return "0A000",
+        _ => {}
+    }
+
+    match state {
+        "23000" => return "23505",
+        "40001" => return "40001",
+        "42S02" => return "42P01",
+        "42S22" => return "42703",
+        _ => {}
+    }
+
+    if message_lower.contains("duplicate key") || message_lower.contains("duplicate entry") {
+        return "23505";
+    }
+    if message_lower.contains("unknown table")
+        || message_lower.contains("table not found")
+        || message_lower.contains("no such table")
+        || (message_lower.contains("not found") && message_lower.contains("table"))
+    {
+        return "42P01";
+    }
+    if message_lower.contains("unknown column")
+        || message_lower.contains("column not found")
+        || message_lower.contains("no such column")
+        || (message_lower.contains("not found") && message_lower.contains("column"))
+    {
+        return "42703";
+    }
+    if message_lower.contains("unsupported") {
+        return "0A000";
+    }
+    if message_lower.contains("syntax")
+        || message_lower.contains("malformed")
+        || message_lower.contains("invalid ")
+        || message_lower.contains("requires ")
+        || message_lower.contains("missing ")
+        || message_lower.contains("must ")
+    {
+        return "42601";
+    }
+
+    match state {
+        "42000" => "42601",
+        "HY000" => "XX000",
+        _ => "XX000",
+    }
+}
+
+async fn pg_rollback_full_transaction(
+    state: &AppState,
+    session: &mut MySqlSessionState,
+    savepoints: &mut Vec<PgSavepoint>,
+) -> Result<(), MySqlWireError> {
+    if !session.tx_undo_sql.is_empty() {
+        mysql_rollback_transaction(state, &session.tx_undo_sql)
+            .await
+            .map_err(|err| mysql_error_from_rpc(&err))?;
+    }
+    session.tx_active = false;
+    session.tx_undo_sql.clear();
+    savepoints.clear();
+    Ok(())
+}
+
+fn pg_release_savepoint(
+    savepoints: &mut Vec<PgSavepoint>,
+    name: &str,
+) -> Result<(), MySqlWireError> {
+    let Some(index) = pg_find_savepoint_index(savepoints, name) else {
+        return Err((1305, "3B001", format!("savepoint '{name}' does not exist")));
+    };
+    savepoints.truncate(index);
+    Ok(())
+}
+
+async fn pg_rollback_to_savepoint(
+    state: &AppState,
+    session: &mut MySqlSessionState,
+    savepoints: &mut Vec<PgSavepoint>,
+    name: &str,
+) -> Result<(), MySqlWireError> {
+    let Some(index) = pg_find_savepoint_index(savepoints, name) else {
+        return Err((1305, "3B001", format!("savepoint '{name}' does not exist")));
+    };
+
+    let undo_len = savepoints[index].undo_len;
+    if undo_len < session.tx_undo_sql.len() {
+        mysql_rollback_transaction(state, &session.tx_undo_sql[undo_len..])
+            .await
+            .map_err(|err| mysql_error_from_rpc(&err))?;
+        session.tx_undo_sql.truncate(undo_len);
+    }
+    savepoints.truncate(index + 1);
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PgPreparedStatement {
+    sql: String,
+    param_types: Vec<i32>,
+    result_columns: Vec<MySqlStmtPrepareColumn>,
+}
+
+#[derive(Debug, Clone)]
+struct PgPortal {
+    sql: String,
+    params: Vec<Lit>,
+    result_columns: Vec<MySqlStmtPrepareColumn>,
+    result_formats: Vec<i16>,
+}
+
+fn pg_stmt_column_oid_and_size(column_type: MySqlStmtColumnType) -> (i32, i16) {
+    match column_type {
+        MySqlStmtColumnType::Bool => (pg_wire::oid::BOOL, 1),
+        MySqlStmtColumnType::LongLong => (pg_wire::oid::INT8, 8),
+        MySqlStmtColumnType::Double => (pg_wire::oid::FLOAT8, 8),
+        MySqlStmtColumnType::Date => (pg_wire::oid::DATE, 4),
+        MySqlStmtColumnType::Time => (pg_wire::oid::TIME, 8),
+        MySqlStmtColumnType::DateTime => (pg_wire::oid::TIMESTAMP, 8),
+        MySqlStmtColumnType::Json => (pg_wire::oid::JSONB, -1),
+        MySqlStmtColumnType::Bytes => (pg_wire::oid::BYTEA, -1),
+        MySqlStmtColumnType::Uuid => (pg_wire::oid::UUID, 16),
+        MySqlStmtColumnType::VarString => (pg_wire::oid::TEXT, -1),
+    }
+}
+
+fn pg_text_value_for_column(
+    value: Option<&str>,
+    column: Option<&pg_wire::PgColumn>,
+) -> Option<Vec<u8>> {
+    let value = value?;
+    let normalized = match column.map(|column| column.type_oid) {
+        Some(pg_wire::oid::BOOL) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "t" | "true" => "t".to_string(),
+            "0" | "f" | "false" => "f".to_string(),
+            _ => value.to_string(),
+        },
+        Some(pg_wire::oid::BYTEA) => decode_base64_text(value)
+            .map(|bytes| format!("\\x{}", hex_encode(&bytes)))
+            .unwrap_or_else(|| value.to_string()),
+        _ => value.to_string(),
+    };
+    Some(normalized.into_bytes())
+}
+
+fn pg_column_type_to_pg(name: &str, column_type: MySqlStmtColumnType) -> pg_wire::PgColumn {
+    let (type_oid, type_size) = pg_stmt_column_oid_and_size(column_type);
+    pg_wire::PgColumn::text(name, type_oid, type_size)
+}
+
+fn pg_prepare_column_to_pg(column: &MySqlStmtPrepareColumn) -> pg_wire::PgColumn {
+    pg_column_type_to_pg(&column.name, column.column_type)
+}
+
+fn pg_prepare_columns_to_pg(
+    columns: &[String],
+    prepared_columns: &[MySqlStmtPrepareColumn],
+) -> Option<Vec<pg_wire::PgColumn>> {
+    if prepared_columns.len() != columns.len() {
+        return None;
+    }
+
+    Some(
+        columns
+            .iter()
+            .zip(prepared_columns.iter())
+            .map(|(name, column)| pg_column_type_to_pg(name, column.column_type))
+            .collect(),
+    )
+}
+
+fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
+    let (type_oid, type_size) = match name.to_ascii_lowercase().as_str() {
+        "oid" | "datdba" | "dattablespace" | "typnamespace" | "typowner" | "typrelid"
+        | "typelem" | "typarray" | "typbasetype" | "typndims" | "nspowner" | "datid"
+        | "usesysid" | "relnamespace" | "relowner" | "relam" | "reltablespace" | "reloftype"
+        | "attrelid" | "atttypid" | "attcollation" | "indexrelid" | "indrelid" | "connamespace"
+        | "conrelid" | "contypid" | "conindid" | "conparentid" | "confrelid" => (26, 4),
+        "datistemplate"
+        | "datallowconn"
+        | "pending_restart"
+        | "typbyval"
+        | "typispreferred"
+        | "typisdefined"
+        | "typnotnull"
+        | "relhasindex"
+        | "relhasrules"
+        | "relhastriggers"
+        | "relrowsecurity"
+        | "relisshared"
+        | "relispartition"
+        | "relhaspkey"
+        | "relforcerowsecurity"
+        | "attnotnull"
+        | "atthasdef"
+        | "attisdropped"
+        | "attislocal"
+        | "indisunique"
+        | "indisprimary"
+        | "indisexclusion"
+        | "indimmediate"
+        | "indisclustered"
+        | "indisvalid"
+        | "indcheckxmin"
+        | "indisready"
+        | "indislive"
+        | "indisreplident"
+        | "condeferrable"
+        | "condeferred"
+        | "convalidated"
+        | "conislocal"
+        | "connoinherit" => (pg_wire::oid::BOOL, 1),
+        "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
+        "relnatts" | "relchecks" | "attlen" | "attnum" | "attndims" | "atttypmod"
+        | "attinhcount" | "indnatts" | "indnkeyatts" | "coninhcount" => (pg_wire::oid::INT4, 4),
+        "reltuples" => (pg_wire::oid::FLOAT4, 4),
+        _ => return None,
+    };
+    Some(pg_wire::PgColumn::text(name, type_oid, type_size))
+}
+
+fn pg_infer_result_columns_to_pg(
+    sql: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Vec<pg_wire::PgColumn> {
+    let inferred_types = mysql_stmt_infer_column_types(rows, columns.len());
+    let pg_catalog_query = sql.to_ascii_lowercase().contains("pg_catalog.");
+    columns
+        .iter()
+        .zip(inferred_types.into_iter())
+        .map(|(name, column_type)| {
+            if pg_catalog_query {
+                if let Some(column) = pg_catalog_result_column_override(name) {
+                    return column;
+                }
+            }
+            pg_column_type_to_pg(name, column_type)
+        })
+        .collect()
+}
+
+async fn pg_result_columns_to_pg(
+    state: &AppState,
+    sql: &str,
+    default_db: Option<&str>,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+    described_columns: Option<&[MySqlStmtPrepareColumn]>,
+) -> Vec<pg_wire::PgColumn> {
+    if let Some(prepared_columns) = described_columns {
+        if let Some(columns) = pg_prepare_columns_to_pg(columns, prepared_columns) {
+            return columns;
+        }
+    }
+
+    let prepared_columns = mysql_stmt_prepare_columns(state, sql, default_db).await;
+    if let Some(columns) = pg_prepare_columns_to_pg(columns, &prepared_columns) {
+        return columns;
+    }
+
+    pg_infer_result_columns_to_pg(sql, columns, rows)
+}
+
+async fn pg_write_prepare_row_description(
+    stream: &mut TcpStream,
+    columns: &[MySqlStmtPrepareColumn],
+) -> anyhow::Result<()> {
+    if columns.is_empty() {
+        pg_wire::write_no_data(stream).await?;
+    } else {
+        let pg_columns: Vec<pg_wire::PgColumn> =
+            columns.iter().map(pg_prepare_column_to_pg).collect();
+        pg_wire::write_row_description(stream, &pg_columns).await?;
+    }
+    Ok(())
+}
+
+fn pg_max_placeholder_index(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut quote = 0u8;
+    let mut max_idx = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => quote = b,
+            b'$' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if end > start {
+                    let idx = std::str::from_utf8(&bytes[start..end])
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    max_idx = max_idx.max(idx);
+                    i = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+    max_idx
+}
+
+fn pg_default_lit_for_oid(type_oid: i32) -> Lit {
+    match type_oid {
+        pg_wire::oid::BOOL => Lit::Bool { v: false },
+        pg_wire::oid::INT4 | pg_wire::oid::INT8 => Lit::I64 { v: 0 },
+        pg_wire::oid::FLOAT4 | pg_wire::oid::FLOAT8 => Lit::F64 { v: 0.0 },
+        pg_wire::oid::NUMERIC => Lit::Dec { v: "0".to_string() },
+        pg_wire::oid::DATE => Lit::Date {
+            iso: "1970-01-01".to_string(),
+        },
+        pg_wire::oid::TIME => Lit::Time {
+            iso: "00:00:00".to_string(),
+        },
+        pg_wire::oid::TIMESTAMP | pg_wire::oid::TIMESTAMPTZ => Lit::Datetime {
+            iso: "1970-01-01 00:00:00".to_string(),
+        },
+        pg_wire::oid::BYTEA => Lit::Bytes { b64: String::new() },
+        _ => Lit::Str { v: String::new() },
+    }
+}
+
+fn pg_guess_text_param_lit(text: &str) -> Lit {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(lower.as_str(), "true" | "t") {
+        return Lit::Bool { v: true };
+    }
+    if matches!(lower.as_str(), "false" | "f") {
+        return Lit::Bool { v: false };
+    }
+    if trimmed.contains(['.', 'e', 'E']) {
+        if let Ok(value) = trimmed.parse::<f64>() {
+            return Lit::F64 { v: value };
+        }
+    }
+    if trimmed.starts_with('-') {
+        if let Ok(value) = trimmed.parse::<i64>() {
+            return Lit::I64 { v: value };
+        }
+    } else {
+        if let Ok(value) = trimmed.parse::<u64>() {
+            return Lit::U64 { v: value };
+        }
+        if let Ok(value) = trimmed.parse::<i64>() {
+            return Lit::I64 { v: value };
+        }
+    }
+    Lit::Str {
+        v: text.to_string(),
+    }
+}
+
+fn pg_decode_text_param_lit(text: &str, type_oid: i32) -> Lit {
+    match type_oid {
+        pg_wire::oid::BOOL => Lit::Bool {
+            v: matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "true" | "t" | "1"
+            ),
+        },
+        pg_wire::oid::INT4 | pg_wire::oid::INT8 => {
+            if let Ok(value) = text.trim().parse::<i64>() {
+                Lit::I64 { v: value }
+            } else {
+                pg_guess_text_param_lit(text)
+            }
+        }
+        pg_wire::oid::FLOAT4 | pg_wire::oid::FLOAT8 => {
+            if let Ok(value) = text.trim().parse::<f64>() {
+                Lit::F64 { v: value }
+            } else {
+                pg_guess_text_param_lit(text)
+            }
+        }
+        pg_wire::oid::NUMERIC => Lit::Dec {
+            v: text.trim().to_string(),
+        },
+        pg_wire::oid::DATE => Lit::Date {
+            iso: text.to_string(),
+        },
+        pg_wire::oid::TIME => Lit::Time {
+            iso: text.to_string(),
+        },
+        pg_wire::oid::TIMESTAMP | pg_wire::oid::TIMESTAMPTZ => Lit::Datetime {
+            iso: text.to_string(),
+        },
+        pg_wire::oid::BYTEA => {
+            use base64::Engine as _;
+
+            let bytes = text
+                .strip_prefix("\\x")
+                .or_else(|| text.strip_prefix("\\X"))
+                .and_then(decode_hex_text)
+                .unwrap_or_else(|| text.as_bytes().to_vec());
+            Lit::Bytes {
+                b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }
+        }
+        pg_wire::oid::TEXT
+        | pg_wire::oid::VARCHAR
+        | pg_wire::oid::JSON
+        | pg_wire::oid::JSONB
+        | pg_wire::oid::UUID => Lit::Str {
+            v: text.to_string(),
+        },
+        _ => pg_guess_text_param_lit(text),
+    }
+}
+
+fn pg_substitute_stmt_sql(sql: &str, params: &[Lit]) -> Result<String, String> {
+    let bytes = sql.as_bytes();
+    let mut quote = 0u8;
+    let mut out = String::with_capacity(sql.len().saturating_add(params.len() * 4));
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            out.push(b as char);
+            if b == quote {
+                if quote == b'\'' && i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                out.push(b as char);
+                i += 1;
+            }
+            b'$' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if end > start {
+                    let param_idx = std::str::from_utf8(&bytes[start..end])
+                        .map_err(|_| "invalid UTF-8 in PG placeholder".to_string())?
+                        .parse::<usize>()
+                        .map_err(|_| "invalid PG placeholder index".to_string())?;
+                    if param_idx == 0 {
+                        return Err("PG placeholders are 1-based".to_string());
+                    }
+                    let lit = params
+                        .get(param_idx - 1)
+                        .ok_or_else(|| "not enough PG prepared parameters".to_string())?;
+                    out.push_str(&mysql_render_default_lit(lit));
+                    i = end;
+                } else {
+                    out.push('$');
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn pg_read_i16_be(payload: &[u8], offset: &mut usize) -> Result<i16, String> {
+    let bytes = payload
+        .get(*offset..*offset + 2)
+        .ok_or_else(|| "truncated PostgreSQL message".to_string())?;
+    *offset += 2;
+    Ok(i16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn pg_read_i32_be(payload: &[u8], offset: &mut usize) -> Result<i32, String> {
+    let bytes = payload
+        .get(*offset..*offset + 4)
+        .ok_or_else(|| "truncated PostgreSQL message".to_string())?;
+    *offset += 4;
+    Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn pg_validate_format_codes(
+    format_codes: &[i16],
+    value_count: usize,
+    what: &str,
+) -> Result<(), String> {
+    if format_codes.is_empty() || format_codes.len() == 1 || format_codes.len() == value_count {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid {what} format code count: expected 0, 1, or {value_count}; got {}",
+            format_codes.len()
+        ))
+    }
+}
+
+fn pg_format_code_at(format_codes: &[i16], index: usize) -> i16 {
+    match format_codes.len() {
+        0 => 0,
+        1 => format_codes[0],
+        _ => format_codes[index],
+    }
+}
+
+fn pg_command_tag_for_sql(sql_lower: &str, affected_rows: u64) -> String {
+    if sql_lower.starts_with("insert") {
+        format!("INSERT 0 {affected_rows}")
+    } else if sql_lower.starts_with("update") {
+        format!("UPDATE {affected_rows}")
+    } else if sql_lower.starts_with("delete") {
+        format!("DELETE {affected_rows}")
+    } else if sql_lower.starts_with("create database") {
+        "CREATE DATABASE".to_string()
+    } else if sql_lower.starts_with("create table") {
+        "CREATE TABLE".to_string()
+    } else if sql_lower.starts_with("drop database") {
+        "DROP DATABASE".to_string()
+    } else if sql_lower.starts_with("drop table") {
+        "DROP TABLE".to_string()
+    } else if sql_lower.starts_with("alter table") {
+        "ALTER TABLE".to_string()
+    } else {
+        "OK".to_string()
+    }
+}
+
+// ── PG SQL dialect rewriting ────────────────────────────────────────────
+
+/// Rewrite PG-specific SQL syntax into the shared engine's expected dialect.
+/// Handles: :: type casts, $$dollar quoting$$, IS [NOT] DISTINCT FROM,
+/// ARRAY[...] literals, FETCH FIRST n ROWS ONLY, and "double-quoted" → backtick identifiers.
+fn pg_rewrite_sql(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len() + 32);
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // ── Skip single-quoted strings ──
+        if b == b'\'' {
+            out.push('\'');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    out.push('\'');
+                    i += 1;
+                    // doubled quote → escaped, keep going
+                    if i < bytes.len() && bytes[i] == b'\'' {
+                        out.push('\'');
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Dollar-quoted strings: $$...$$, $tag$...$tag$ ──
+        if b == b'$' {
+            // Check if this starts a dollar-quote tag
+            if let Some((tag, body, consumed)) = pg_try_parse_dollar_quote(bytes, i) {
+                let _ = tag; // tag is consumed
+                             // Escape single quotes in the body and emit as single-quoted string
+                out.push('\'');
+                for ch in body.chars() {
+                    if ch == '\'' {
+                        out.push('\'');
+                        out.push('\'');
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out.push('\'');
+                i += consumed;
+                continue;
+            }
+            // Not a dollar-quote (could be $1 param) — pass through
+            out.push('$');
+            i += 1;
+            continue;
+        }
+
+        // ── Double-quoted identifiers → backtick-quoted ──
+        if b == b'"' {
+            out.push('`');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        // Doubled double-quote = escaped
+                        out.push('`');
+                        out.push('`');
+                        i += 2;
+                        continue;
+                    }
+                    out.push('`');
+                    i += 1;
+                    break;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── :: type cast → CAST(... AS ...) ──
+        if b == b':' && i + 1 < bytes.len() && bytes[i + 1] == b':' {
+            // Walk backward to find the expression being cast
+            let cast_expr_start = pg_find_cast_expr_start(&out);
+            let expr_text = out[cast_expr_start..].to_string();
+            out.truncate(cast_expr_start);
+            i += 2; // skip ::
+                    // Read the type name (may include parenthesized precision like varchar(255))
+            let type_name = pg_read_cast_type(bytes, &mut i);
+            out.push_str("CAST(");
+            out.push_str(&expr_text);
+            out.push_str(" AS ");
+            out.push_str(&type_name);
+            out.push(')');
+            continue;
+        }
+
+        // ── IS [NOT] DISTINCT FROM ──
+        if (b == b'i' || b == b'I') && pg_match_keyword_at(bytes, i, "is not distinct from") {
+            // IS NOT DISTINCT FROM a, b → coalesce null-safe equality
+            out.push_str("<=>");
+            i += "is not distinct from".len();
+            continue;
+        }
+        if (b == b'i' || b == b'I') && pg_match_keyword_at(bytes, i, "is distinct from") {
+            // Replace the preceding expression with NOT(... <=> ...)
+            // We emit the keyword-level replacement; the shared engine handles <=> (null_safe_eq)
+            out.push_str("IS DISTINCT FROM");
+            i += "is distinct from".len();
+            continue;
+        }
+
+        // ── ARRAY[...] constructor ──
+        if (b == b'a' || b == b'A') && pg_match_keyword_at(bytes, i, "array[") {
+            i += "array[".len();
+            // Collect everything inside the brackets at top level
+            let (inner, consumed) = pg_collect_bracket_body(bytes, i);
+            i += consumed;
+            // Emit as a PG array literal string: '{...}'
+            out.push('\'');
+            out.push('{');
+            out.push_str(&inner);
+            out.push('}');
+            out.push('\'');
+            continue;
+        }
+
+        // ── FETCH FIRST n ROWS ONLY → LIMIT n ──
+        if (b == b'f' || b == b'F') && pg_match_keyword_at(bytes, i, "fetch first ") {
+            i += "fetch first ".len();
+            // Skip whitespace
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            // Read the number
+            let num_start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let n = if i > num_start {
+                std::str::from_utf8(&bytes[num_start..i]).unwrap_or("1")
+            } else {
+                "1"
+            };
+            // Skip " ROW[S] ONLY"
+            let rest_lower: String = bytes[i..]
+                .iter()
+                .take(20)
+                .map(|b| (*b as char).to_ascii_lowercase())
+                .collect();
+            for suffix in [" rows only", " row only"] {
+                if rest_lower.starts_with(suffix) {
+                    i += suffix.len();
+                    break;
+                }
+            }
+            out.push_str("LIMIT ");
+            out.push_str(n);
+            continue;
+        }
+
+        // ── Default: pass through ──
+        out.push(b as char);
+        i += 1;
+    }
+
+    // Post-pass: rewrite ON CONFLICT → ON DUPLICATE KEY UPDATE / INSERT IGNORE
+    let out = pg_rewrite_on_conflict(&out);
+
+    // Post-pass: rewrite IS DISTINCT FROM into NOT(... <=> ...)
+    // The first pass emits the literal text "IS DISTINCT FROM" which parse_condition_expr
+    // doesn't understand. We convert it here with a simple string replacement.
+    pg_rewrite_is_distinct_from(&out)
+}
+
+/// Try to parse a dollar-quoted string starting at position `start`.
+/// Returns (tag, body, total_bytes_consumed) or None.
+fn pg_try_parse_dollar_quote(bytes: &[u8], start: usize) -> Option<(String, String, usize)> {
+    // Must start with $
+    if bytes[start] != b'$' {
+        return None;
+    }
+    // Find end of opening tag: $tag$ or just $$
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() && bytes[tag_end] != b'$' {
+        let ch = bytes[tag_end];
+        if ch.is_ascii_alphanumeric() || ch == b'_' {
+            tag_end += 1;
+        } else {
+            return None; // not a valid tag character
+        }
+    }
+    if tag_end >= bytes.len() {
+        return None;
+    }
+    // tag_end points to the closing $ of the opening tag
+    let tag = std::str::from_utf8(&bytes[start..=tag_end]).ok()?;
+    let body_start = tag_end + 1;
+    // Find the matching closing tag
+    let mut j = body_start;
+    while j + tag.len() <= bytes.len() {
+        if &bytes[j..j + tag.len()] == tag.as_bytes() {
+            let body = std::str::from_utf8(&bytes[body_start..j]).ok()?;
+            return Some((tag.to_string(), body.to_string(), j + tag.len() - start));
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Walk backward through the output buffer to find the start of the expression being cast.
+/// Handles: identifiers, numbers, closing parens (balanced), and quoted strings.
+fn pg_find_cast_expr_start(out: &str) -> usize {
+    let bytes = out.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut j = bytes.len();
+    // skip trailing whitespace
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if j == 0 {
+        return 0;
+    }
+    let last = bytes[j - 1];
+    if last == b')' {
+        // Walk backward matching parentheses
+        let mut depth = 0i32;
+        let mut k = j;
+        while k > 0 {
+            k -= 1;
+            if bytes[k] == b')' {
+                depth += 1;
+            } else if bytes[k] == b'(' {
+                depth -= 1;
+                if depth == 0 {
+                    // Check if preceded by a function name
+                    let mut fn_start = k;
+                    while fn_start > 0
+                        && (bytes[fn_start - 1].is_ascii_alphanumeric()
+                            || bytes[fn_start - 1] == b'_')
+                    {
+                        fn_start -= 1;
+                    }
+                    return fn_start;
+                }
+            } else if bytes[k] == b'\'' {
+                // Walk backward through a single-quoted string
+                k -= 1;
+                while k > 0 {
+                    if bytes[k] == b'\'' {
+                        if k > 0 && bytes[k - 1] == b'\'' {
+                            k -= 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    k -= 1;
+                }
+            }
+        }
+        return k;
+    }
+    if last == b'\'' {
+        // Single-quoted string: walk backward to opening quote
+        let mut k = j - 1;
+        if k == 0 {
+            return 0;
+        }
+        k -= 1;
+        while k > 0 {
+            if bytes[k] == b'\'' {
+                if k > 0 && bytes[k - 1] == b'\'' {
+                    k -= 2;
+                    continue;
+                }
+                return k;
+            }
+            k -= 1;
+        }
+        return 0;
+    }
+    if last == b'`' {
+        // Backtick-quoted identifier (already rewritten from double-quote)
+        let mut k = j - 1;
+        if k == 0 {
+            return 0;
+        }
+        k -= 1;
+        while k > 0 {
+            if bytes[k] == b'`' {
+                if k > 0 && bytes[k - 1] == b'`' {
+                    k -= 2;
+                    continue;
+                }
+                return k;
+            }
+            k -= 1;
+        }
+        return 0;
+    }
+    // Identifier or number: alnum, underscore, dot
+    let mut k = j;
+    while k > 0
+        && (bytes[k - 1].is_ascii_alphanumeric() || bytes[k - 1] == b'_' || bytes[k - 1] == b'.')
+    {
+        k -= 1;
+    }
+    k
+}
+
+/// Read a PG type name after ::, advancing `i` past it.
+/// Handles simple types, types with precision (e.g., varchar(255)), and multi-word types (e.g., double precision).
+fn pg_read_cast_type(bytes: &[u8], i: &mut usize) -> String {
+    // Skip leading whitespace
+    while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
+        *i += 1;
+    }
+    let start = *i;
+    // Read word characters
+    while *i < bytes.len() && (bytes[*i].is_ascii_alphanumeric() || bytes[*i] == b'_') {
+        *i += 1;
+    }
+    let mut type_name = String::from_utf8_lossy(&bytes[start..*i]).to_string();
+    // Check for multi-word types: "double precision", "timestamp with time zone", etc.
+    let lower = type_name.to_ascii_lowercase();
+    if lower == "double" || lower == "character" || lower == "timestamp" || lower == "time" {
+        let saved = *i;
+        while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+        let word2_start = *i;
+        while *i < bytes.len() && (bytes[*i].is_ascii_alphanumeric() || bytes[*i] == b'_') {
+            *i += 1;
+        }
+        if *i > word2_start {
+            let word2 = String::from_utf8_lossy(&bytes[word2_start..*i]).to_string();
+            let w2_lower = word2.to_ascii_lowercase();
+            if w2_lower == "precision"
+                || w2_lower == "varying"
+                || w2_lower == "with"
+                || w2_lower == "without"
+                || w2_lower == "zone"
+            {
+                type_name.push(' ');
+                type_name.push_str(&word2);
+                // "with time zone" / "without time zone" → keep consuming
+                if w2_lower == "with" || w2_lower == "without" {
+                    let saved2 = *i;
+                    while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
+                        *i += 1;
+                    }
+                    let w3_start = *i;
+                    while *i < bytes.len()
+                        && (bytes[*i].is_ascii_alphanumeric() || bytes[*i] == b'_')
+                    {
+                        *i += 1;
+                    }
+                    if *i > w3_start {
+                        let w3 = String::from_utf8_lossy(&bytes[w3_start..*i]).to_string();
+                        if w3.eq_ignore_ascii_case("time") {
+                            type_name.push(' ');
+                            type_name.push_str(&w3);
+                            // Expect "zone"
+                            while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
+                                *i += 1;
+                            }
+                            let w4_start = *i;
+                            while *i < bytes.len()
+                                && (bytes[*i].is_ascii_alphanumeric() || bytes[*i] == b'_')
+                            {
+                                *i += 1;
+                            }
+                            if *i > w4_start {
+                                let w4 = String::from_utf8_lossy(&bytes[w4_start..*i]).to_string();
+                                type_name.push(' ');
+                                type_name.push_str(&w4);
+                            }
+                        } else {
+                            *i = saved2;
+                        }
+                    } else {
+                        *i = saved2;
+                    }
+                }
+            } else {
+                *i = saved;
+            }
+        } else {
+            *i = saved;
+        }
+    }
+    // Check for type precision: (n) or (n, m)
+    if *i < bytes.len() && bytes[*i] == b'(' {
+        type_name.push('(');
+        *i += 1;
+        while *i < bytes.len() && bytes[*i] != b')' {
+            type_name.push(bytes[*i] as char);
+            *i += 1;
+        }
+        if *i < bytes.len() && bytes[*i] == b')' {
+            type_name.push(')');
+            *i += 1;
+        }
+    }
+    // Map some PG type names to the shared engine's type inventory
+    let tl = type_name.to_ascii_lowercase();
+    match tl.as_str() {
+        "int4" | "int" | "integer" => "SIGNED".to_string(),
+        "int8" | "bigint" => "SIGNED".to_string(),
+        "float4" | "real" => "DOUBLE".to_string(),
+        "float8" | "double precision" => "DOUBLE".to_string(),
+        "bool" | "boolean" => "CHAR".to_string(),
+        "text" | "varchar" | "bpchar" | "name" | "regclass" => "CHAR".to_string(),
+        "json" | "jsonb" => "JSON".to_string(),
+        _ if tl.starts_with("varchar(") => type_name,
+        _ if tl.starts_with("numeric(") => type_name,
+        _ => type_name,
+    }
+}
+
+/// Check if `keyword` (lowercase) matches at position `pos` as a whole keyword.
+fn pg_match_keyword_at(bytes: &[u8], pos: usize, keyword: &str) -> bool {
+    let kw_bytes = keyword.as_bytes();
+    if pos + kw_bytes.len() > bytes.len() {
+        return false;
+    }
+    // Check that the preceding character is not alphanumeric (word boundary)
+    if pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        return false;
+    }
+    // Case-insensitive match
+    for (j, &kc) in kw_bytes.iter().enumerate() {
+        if bytes[pos + j].to_ascii_lowercase() != kc {
+            return false;
+        }
+    }
+    // For keywords not ending with '[' or ' ', check trailing word boundary
+    if !keyword.ends_with('[') && !keyword.ends_with(' ') {
+        let end_pos = pos + kw_bytes.len();
+        if end_pos < bytes.len()
+            && (bytes[end_pos].is_ascii_alphanumeric() || bytes[end_pos] == b'_')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect the body inside matching brackets [...], handling nesting.
+/// Returns (body_text, bytes_consumed_including_closing_bracket).
+fn pg_collect_bracket_body(bytes: &[u8], start: usize) -> (String, usize) {
+    let mut depth = 1u32;
+    let mut i = start;
+    let mut body = String::new();
+    let mut quote = 0u8;
+    while i < bytes.len() && depth > 0 {
+        let b = bytes[i];
+        if quote != 0 {
+            body.push(b as char);
+            if b == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            quote = b'\'';
+            body.push(b as char);
+            i += 1;
+            continue;
+        }
+        if b == b'[' {
+            depth += 1;
+            body.push('[');
+            i += 1;
+            continue;
+        }
+        if b == b']' {
+            depth -= 1;
+            if depth == 0 {
+                i += 1; // consume closing ]
+                break;
+            }
+            body.push(']');
+            i += 1;
+            continue;
+        }
+        body.push(b as char);
+        i += 1;
+    }
+    (body, i - start)
+}
+
+/// Second pass: rewrite "IS DISTINCT FROM" into NOT(lhs <=> rhs).
+/// This handles the case where the first pass emitted the literal text.
+/// Rewrite PG `ON CONFLICT` to MySQL-compatible syntax.
+///
+/// - `ON CONFLICT DO NOTHING` → change INSERT INTO to INSERT IGNORE INTO
+/// - `ON CONFLICT (...) DO UPDATE SET x = EXCLUDED.y` → `ON DUPLICATE KEY UPDATE x = VALUES(y)`
+fn pg_rewrite_on_conflict(sql: &str) -> String {
+    let lower = sql.to_ascii_lowercase();
+    let Some(oc_pos) = lower.find("on conflict") else {
+        return sql.to_string();
+    };
+    let after_oc = &lower[oc_pos + "on conflict".len()..];
+    let after_oc_trimmed = after_oc.trim_start();
+
+    // ON CONFLICT DO NOTHING → INSERT IGNORE INTO
+    if after_oc_trimmed.starts_with("do nothing") {
+        let before = &sql[..oc_pos];
+        let do_nothing_offset =
+            oc_pos + "on conflict".len() + (after_oc.len() - after_oc_trimmed.len()) + 10;
+        let after = sql[do_nothing_offset..].trim_start();
+        let mut result = before.trim_end().to_string();
+        if !after.is_empty() {
+            result.push(' ');
+            result.push_str(after);
+        }
+        // Change INSERT INTO → INSERT IGNORE INTO
+        let result_lower = result.to_ascii_lowercase();
+        if let Some(insert_pos) = result_lower.find("insert into") {
+            result.insert_str(insert_pos + 7, "IGNORE ");
+        }
+        return result;
+    }
+
+    // ON CONFLICT (cols) DO UPDATE SET ... EXCLUDED.col → VALUES(col)
+    if let Some(do_update_offset) = after_oc_trimmed.find("do update set") {
+        let set_start_in_after = do_update_offset + "do update set".len();
+        let set_start_abs = oc_pos
+            + "on conflict".len()
+            + (after_oc.len() - after_oc_trimmed.len())
+            + set_start_in_after;
+        let set_clause = &sql[set_start_abs..];
+        // Replace EXCLUDED.col with VALUES(col) in the SET clause
+        let rewritten_set = pg_replace_excluded_refs(set_clause);
+        let before = sql[..oc_pos].trim_end();
+        return format!(
+            "{} ON DUPLICATE KEY UPDATE {}",
+            before,
+            rewritten_set.trim()
+        );
+    }
+
+    sql.to_string()
+}
+
+/// Replace `EXCLUDED.col` references with `VALUES(col)` in an ON CONFLICT SET clause.
+fn pg_replace_excluded_refs(clause: &str) -> String {
+    let bytes = clause.as_bytes();
+    let mut out = String::with_capacity(clause.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if (bytes[i] == b'e' || bytes[i] == b'E')
+            && i + 9 <= bytes.len()
+            && clause[i..i + 9].eq_ignore_ascii_case("excluded.")
+        {
+            i += 9;
+            // Collect the column name
+            let col_start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'`')
+            {
+                i += 1;
+            }
+            let col = &clause[col_start..i];
+            let col_clean = col.trim_matches('`');
+            out.push_str("VALUES(");
+            out.push_str(col_clean);
+            out.push(')');
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn pg_rewrite_is_distinct_from(sql: &str) -> String {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.contains("is distinct from") {
+        return sql.to_string();
+    }
+    // Simple keyword-level replacement for condition parsing
+    let mut result = sql.to_string();
+    // IS NOT DISTINCT FROM was already replaced with <=> in the first pass.
+    // IS DISTINCT FROM needs to become a comparison the engine can handle.
+    // The shared engine has null_safe_eq (<=>). IS DISTINCT FROM = NOT(a <=> b).
+    // We can't trivially wrap in NOT() without understanding expression boundaries,
+    // so we use a simpler approach: replace "IS DISTINCT FROM" with a custom op token
+    // that parse_condition_expr can handle.
+    // For now, the simplest correct approach is text replacement:
+    // We'll add parser support for "IS DISTINCT FROM" in parse_condition_expr.
+    result
+}
+
+async fn pg_dispatch_sql(
+    state: &AppState,
+    stream: &mut TcpStream,
+    session: &mut MySqlSessionState,
+    tx_status: &mut pg_wire::TxStatus,
+    savepoints: &mut Vec<PgSavepoint>,
+    sql_raw: &str,
+    described_columns: Option<&[MySqlStmtPrepareColumn]>,
+    result_formats: &[i16],
+) -> anyhow::Result<bool> {
+    use crate::pg_wire::TxStatus;
+
+    let sql = sql_raw.trim().trim_end_matches(';').trim();
+    if sql.is_empty() {
+        pg_wire::write_empty_query_response(stream).await?;
+        return Ok(false);
+    }
+
+    let sql_lower = sql.to_ascii_lowercase();
+
+    if *tx_status == TxStatus::Failed {
+        if mysql_is_commit(sql) || mysql_is_rollback(sql) {
+            match pg_rollback_full_transaction(state, session, savepoints).await {
+                Ok(()) => {
+                    pg_wire::write_command_complete(stream, "ROLLBACK").await?;
+                    *tx_status = TxStatus::Idle;
+                    return Ok(false);
+                }
+                Err((code, state_code, message)) => {
+                    pg_wire::write_error_response(
+                        stream,
+                        "ERROR",
+                        pg_sqlstate_from_mysql_error(code, state_code, &message),
+                        &message,
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            }
+        }
+
+        if let Some(name) = pg_parse_rollback_to_savepoint_name(sql) {
+            match pg_rollback_to_savepoint(state, session, savepoints, &name).await {
+                Ok(()) => {
+                    *tx_status = TxStatus::InTransaction;
+                    pg_wire::write_command_complete(stream, "ROLLBACK").await?;
+                    return Ok(false);
+                }
+                Err((code, state_code, message)) => {
+                    pg_wire::write_error_response(
+                        stream,
+                        "ERROR",
+                        pg_sqlstate_from_mysql_error(code, state_code, &message),
+                        &message,
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            }
+        }
+
+        pg_wire::write_error_response(
+            stream,
+            "ERROR",
+            "25P02",
+            "current transaction is aborted, commands ignored until end of transaction block",
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    if sql_lower.starts_with("set ") {
+        // Parse SET key = value  or  SET key TO value
+        let rest = sql[4..].trim();
+        if let Some((key, value)) = pg_parse_set_command(rest) {
+            let key_lower = key.to_ascii_lowercase();
+            session.pg_settings.insert(key_lower.clone(), value.clone());
+            // Notify client of reportable parameter change
+            pg_wire::write_parameter_status(stream, &key_lower, &value).await?;
+        }
+        pg_wire::write_command_complete(stream, "SET").await?;
+        return Ok(false);
+    }
+
+    if sql_lower.starts_with("reset ") {
+        let rest = sql[6..].trim().trim_end_matches(';').trim();
+        let rest_lower = rest.to_ascii_lowercase();
+        if rest_lower == "all" {
+            session.pg_settings = pg_default_settings();
+        } else {
+            let key = rest_lower;
+            let defaults = pg_default_settings();
+            if let Some(val) = defaults.get(&key) {
+                session.pg_settings.insert(key.clone(), val.clone());
+                pg_wire::write_parameter_status(stream, &key, val).await?;
+            } else {
+                session.pg_settings.remove(&key);
+            }
+        }
+        pg_wire::write_command_complete(stream, "RESET").await?;
+        return Ok(false);
+    }
+
+    if mysql_is_begin(sql) {
+        if *tx_status == TxStatus::Idle {
+            session.tx_active = true;
+            session.tx_undo_sql.clear();
+            savepoints.clear();
+        }
+        *tx_status = TxStatus::InTransaction;
+        pg_wire::write_command_complete(stream, "BEGIN").await?;
+        return Ok(false);
+    }
+
+    if mysql_is_commit(sql) || sql.eq_ignore_ascii_case("end") {
+        session.tx_active = false;
+        session.tx_undo_sql.clear();
+        savepoints.clear();
+        *tx_status = TxStatus::Idle;
+        pg_wire::write_command_complete(stream, "COMMIT").await?;
+        return Ok(false);
+    }
+
+    if mysql_is_rollback(sql) {
+        match pg_rollback_full_transaction(state, session, savepoints).await {
+            Ok(()) => {
+                *tx_status = TxStatus::Idle;
+                pg_wire::write_command_complete(stream, "ROLLBACK").await?;
+                return Ok(false);
+            }
+            Err((code, state_code, message)) => {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    pg_sqlstate_from_mysql_error(code, state_code, &message),
+                    &message,
+                )
+                .await?;
+                *tx_status = pg_tx_status_for_session(session, false);
+                return Ok(true);
+            }
+        }
+    }
+
+    if let Some(name) = pg_parse_savepoint_name(sql) {
+        if *tx_status != TxStatus::InTransaction {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                "25P01",
+                "SAVEPOINT can only be used in transaction blocks",
+            )
+            .await?;
+            return Ok(true);
+        }
+        savepoints.push(PgSavepoint {
+            name,
+            undo_len: session.tx_undo_sql.len(),
+        });
+        pg_wire::write_command_complete(stream, "SAVEPOINT").await?;
+        return Ok(false);
+    }
+
+    if let Some(name) = pg_parse_release_savepoint_name(sql) {
+        if *tx_status != TxStatus::InTransaction {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                "25P01",
+                "RELEASE SAVEPOINT can only be used in transaction blocks",
+            )
+            .await?;
+            return Ok(true);
+        }
+        match pg_release_savepoint(savepoints, &name) {
+            Ok(()) => {
+                pg_wire::write_command_complete(stream, "RELEASE").await?;
+                return Ok(false);
+            }
+            Err((code, state_code, message)) => {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    pg_sqlstate_from_mysql_error(code, state_code, &message),
+                    &message,
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+    }
+
+    if let Some(name) = pg_parse_rollback_to_savepoint_name(sql) {
+        if *tx_status != TxStatus::InTransaction {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                "25P01",
+                "ROLLBACK TO SAVEPOINT can only be used in transaction blocks",
+            )
+            .await?;
+            return Ok(true);
+        }
+        match pg_rollback_to_savepoint(state, session, savepoints, &name).await {
+            Ok(()) => {
+                *tx_status = TxStatus::InTransaction;
+                pg_wire::write_command_complete(stream, "ROLLBACK").await?;
+                return Ok(false);
+            }
+            Err((code, state_code, message)) => {
+                pg_wire::write_error_response(
+                    stream,
+                    "ERROR",
+                    pg_sqlstate_from_mysql_error(code, state_code, &message),
+                    &message,
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+    }
+
+    if pg_try_handle_bootstrap_query(stream, sql, session.default_db.as_deref(), Some(&*session))
+        .await?
+    {
+        return Ok(false);
+    }
+
+    // COPY FROM STDIN / COPY TO STDOUT — not yet supported
+    if sql_lower.starts_with("copy ") {
+        pg_wire::write_error_response(stream, "ERROR", "0A000", "COPY is not yet supported")
+            .await?;
+        *tx_status = pg_tx_status_for_session(session, session.tx_active);
+        return Ok(true);
+    }
+
+    // Extract and strip RETURNING clause from DML (PG-specific)
+    let (sql_without_returning, returning_cols) = pg_extract_returning(sql);
+    let sql_for_rewrite = if returning_cols.is_some() {
+        &sql_without_returning
+    } else {
+        sql
+    };
+
+    // Rewrite PG-specific SQL syntax before feeding to the shared engine
+    let rewritten = pg_rewrite_sql(sql_for_rewrite);
+    let sql = &rewritten;
+
+    match mysql_execute_sql(state, sql, session).await {
+        Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
+            let default_db = session.default_db.clone();
+            let mut pg_columns = pg_result_columns_to_pg(
+                state,
+                sql,
+                default_db.as_deref(),
+                &columns,
+                &rows,
+                described_columns,
+            )
+            .await;
+            // Apply result format codes from Bind to PgColumn.format
+            for (idx, col) in pg_columns.iter_mut().enumerate() {
+                col.format = pg_format_code_at(result_formats, idx);
+            }
+            pg_wire::write_row_description(stream, &pg_columns).await?;
+            for row in &rows {
+                let encoded_values: Vec<Option<Vec<u8>>> = row
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        let col = pg_columns.get(idx);
+                        if col.map(|c| c.format) == Some(1) {
+                            // Binary format requested
+                            let type_oid = col.map(|c| c.type_oid).unwrap_or(0);
+                            match value.as_deref() {
+                                None => None,
+                                Some(v) => pg_wire::encode_binary_value(type_oid, v)
+                                    .or_else(|| Some(v.as_bytes().to_vec())),
+                            }
+                        } else {
+                            pg_text_value_for_column(value.as_deref(), col)
+                        }
+                    })
+                    .collect();
+                let values: Vec<Option<&[u8]>> = encoded_values
+                    .iter()
+                    .map(|value| value.as_deref())
+                    .collect();
+                pg_wire::write_data_row(stream, &values).await?;
+            }
+            let tag = format!("SELECT {}", rows.len());
+            pg_wire::write_command_complete(stream, &tag).await?;
+            *tx_status = pg_tx_status_for_session(session, false);
+            Ok(false)
+        }
+        Ok(MySqlQueryOutcome::Ok {
+            affected_rows,
+            last_insert_id,
+        }) => {
+            // INSERT/UPDATE/DELETE with RETURNING — do a follow-up SELECT to get the data
+            if let Some(ref ret_cols) = returning_cols {
+                if affected_rows > 0 && last_insert_id > 0 && sql_lower.starts_with("insert") {
+                    if let Some(table_name) = pg_extract_insert_table(&sql_lower) {
+                        let select_cols = if ret_cols.len() == 1 && ret_cols[0] == "*" {
+                            "*".to_string()
+                        } else {
+                            ret_cols.join(", ")
+                        };
+                        // Look up PK column from engine schema
+                        let pk_col =
+                            pg_lookup_pk_column(state, &table_name, session.default_db.as_deref())
+                                .await;
+                        let follow_up = format!(
+                            "SELECT {} FROM {} WHERE {} = {}",
+                            select_cols, table_name, pk_col, last_insert_id
+                        );
+                        if let Ok(MySqlQueryOutcome::ResultSet { columns, rows }) =
+                            mysql_execute_sql(state, &follow_up, session).await
+                        {
+                            let default_db = session.default_db.clone();
+                            let mut pg_columns = pg_result_columns_to_pg(
+                                state,
+                                &follow_up,
+                                default_db.as_deref(),
+                                &columns,
+                                &rows,
+                                described_columns,
+                            )
+                            .await;
+                            for (idx, col) in pg_columns.iter_mut().enumerate() {
+                                col.format = pg_format_code_at(result_formats, idx);
+                            }
+                            pg_wire::write_row_description(stream, &pg_columns).await?;
+                            for row in &rows {
+                                let encoded_values: Vec<Option<Vec<u8>>> = row
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, value)| {
+                                        let col = pg_columns.get(idx);
+                                        if col.map(|c| c.format) == Some(1) {
+                                            let type_oid = col.map(|c| c.type_oid).unwrap_or(0);
+                                            match value.as_deref() {
+                                                None => None,
+                                                Some(v) => {
+                                                    pg_wire::encode_binary_value(type_oid, v)
+                                                        .or_else(|| Some(v.as_bytes().to_vec()))
+                                                }
+                                            }
+                                        } else {
+                                            pg_text_value_for_column(value.as_deref(), col)
+                                        }
+                                    })
+                                    .collect();
+                                let values: Vec<Option<&[u8]>> = encoded_values
+                                    .iter()
+                                    .map(|value| value.as_deref())
+                                    .collect();
+                                pg_wire::write_data_row(stream, &values).await?;
+                            }
+                            let tag = pg_command_tag_for_sql(&sql_lower, affected_rows);
+                            pg_wire::write_command_complete(stream, &tag).await?;
+                            *tx_status = pg_tx_status_for_session(session, false);
+                            return Ok(false);
+                        }
+                    }
+                }
+                // Fallback for UPDATE/DELETE RETURNING or failed follow-up:
+                // return empty result set with column headers
+                let pg_columns: Vec<pg_wire::PgColumn> = ret_cols
+                    .iter()
+                    .map(|c| pg_wire::PgColumn::text(c, pg_wire::oid::TEXT, -1))
+                    .collect();
+                pg_wire::write_row_description(stream, &pg_columns).await?;
+                let tag = pg_command_tag_for_sql(&sql_lower, affected_rows);
+                pg_wire::write_command_complete(stream, &tag).await?;
+                *tx_status = pg_tx_status_for_session(session, false);
+                return Ok(false);
+            }
+            let tag = pg_command_tag_for_sql(&sql_lower, affected_rows);
+            pg_wire::write_command_complete(stream, &tag).await?;
+            *tx_status = pg_tx_status_for_session(session, false);
+            Ok(false)
+        }
+        Err((code, state_code, message)) => {
+            pg_wire::write_error_response(
+                stream,
+                "ERROR",
+                pg_sqlstate_from_mysql_error(code, state_code, &message),
+                &message,
+            )
+            .await?;
+            *tx_status = pg_tx_status_for_session(session, session.tx_active);
+            Ok(true)
+        }
+    }
 }
 
 async fn handle_pg_connection(
@@ -10496,26 +12541,92 @@ async fn handle_pg_connection(
         .or(Some(&username))
         .map(|s| s.to_string());
 
-    // Authentication: trust when SKEINDB_TOKEN is unset, cleartext password otherwise.
+    // Authentication: trust when SKEINDB_TOKEN is unset, SCRAM-SHA-256 otherwise.
     if let Ok(expected_password) = std::env::var("SKEINDB_TOKEN") {
-        pg_wire::write_auth_cleartext_password(&mut stream).await?;
+        // Derive SCRAM credentials from the token.
+        let scram_salt = pg_scram_salt_for_token(&expected_password);
+        let scram_creds =
+            pg_wire::scram::ScramCredentials::from_password(&expected_password, &scram_salt, 4096);
+
+        // Offer SCRAM-SHA-256 as the SASL mechanism.
+        pg_wire::write_auth_sasl(&mut stream, &[pg_wire::SCRAM_SHA256_NAME]).await?;
+
+        // Step 1: Read SASLInitialResponse (client-first-message)
         let msg = pg_wire::read_message(&mut stream).await?;
         if msg.tag != frontend::PASSWORD_MESSAGE {
-            pg_wire::write_error_response(&mut stream, "FATAL", "28000", "expected password")
-                .await?;
-            return Ok(());
-        }
-        let supplied = pg_wire::parse_query(&msg.payload); // password is C-string
-        if supplied != expected_password {
             pg_wire::write_error_response(
                 &mut stream,
                 "FATAL",
-                "28P01",
-                "password authentication failed",
+                "28000",
+                "expected SASL initial response",
             )
             .await?;
             return Ok(());
         }
+
+        let (mechanism, client_first) = match pg_wire::parse_sasl_initial_response(&msg.payload) {
+            Some(pair) => pair,
+            None => {
+                pg_wire::write_error_response(
+                    &mut stream,
+                    "FATAL",
+                    "08P01",
+                    "malformed SASL initial response",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        if mechanism != pg_wire::SCRAM_SHA256_NAME {
+            pg_wire::write_error_response(
+                &mut stream,
+                "FATAL",
+                "0A000",
+                &format!("unsupported SASL mechanism: {mechanism}"),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // Process client-first, generate server-first.
+        let (scram_state, server_first) =
+            match pg_wire::scram::ScramServer::process_client_first(&client_first, &scram_creds) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    pg_wire::write_error_response(&mut stream, "FATAL", "28000", &err).await?;
+                    return Ok(());
+                }
+            };
+
+        pg_wire::write_auth_sasl_continue(&mut stream, &server_first).await?;
+
+        // Step 2: Read SASLResponse (client-final-message)
+        let msg = pg_wire::read_message(&mut stream).await?;
+        if msg.tag != frontend::PASSWORD_MESSAGE {
+            pg_wire::write_error_response(&mut stream, "FATAL", "28000", "expected SASL response")
+                .await?;
+            return Ok(());
+        }
+
+        let client_final = pg_wire::parse_sasl_response(&msg.payload);
+
+        // Verify client proof, generate server signature.
+        let server_final = match scram_state.process_client_final(&client_final) {
+            Ok(sf) => sf,
+            Err(_) => {
+                pg_wire::write_error_response(
+                    &mut stream,
+                    "FATAL",
+                    "28P01",
+                    "password authentication failed",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        pg_wire::write_auth_sasl_final(&mut stream, &server_final).await?;
     }
 
     pg_wire::write_auth_ok(&mut stream).await?;
@@ -10534,7 +12645,12 @@ async fn handle_pg_connection(
     pg_wire::write_backend_key_data(&mut stream, connection_id as i32, 0).await?;
     pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
 
-    let mut default_db = database;
+    let mut session = MySqlSessionState::new(database, connection_id);
+    let mut tx_status = TxStatus::Idle;
+    let mut savepoints = Vec::new();
+    let mut prepared_statements: HashMap<String, PgPreparedStatement> = HashMap::new();
+    let mut portals: HashMap<String, PgPortal> = HashMap::new();
+    let mut skip_until_sync = false;
 
     // Command loop.
     loop {
@@ -10559,121 +12675,426 @@ async fn handle_pg_connection(
             }
         };
 
+        if skip_until_sync && !matches!(msg.tag, frontend::SYNC | frontend::TERMINATE) {
+            continue;
+        }
+
         match msg.tag {
             frontend::TERMINATE => {
                 return Ok(());
             }
             frontend::QUERY => {
+                prepared_statements.remove("");
+                portals.remove("");
                 let sql_raw = pg_wire::parse_query(&msg.payload);
-                let sql = sql_raw.trim().trim_end_matches(';').trim();
-
-                if sql.is_empty() {
-                    pg_wire::write_empty_query_response(&mut stream).await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
-                    continue;
-                }
-
-                let sql_lower = sql.to_ascii_lowercase();
-
-                // Handle SET / session bootstrap queries as no-ops.
-                if sql_lower.starts_with("set ") || sql_lower.starts_with("reset ") {
-                    pg_wire::write_command_complete(&mut stream, "SET").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
-                    continue;
-                }
-
-                if sql_lower == "begin" || sql_lower == "start transaction" {
-                    pg_wire::write_command_complete(&mut stream, "BEGIN").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::InTransaction).await?;
-                    continue;
-                }
-
-                if sql_lower == "commit" || sql_lower == "end" {
-                    pg_wire::write_command_complete(&mut stream, "COMMIT").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
-                    continue;
-                }
-
-                if sql_lower == "rollback" {
-                    pg_wire::write_command_complete(&mut stream, "ROLLBACK").await?;
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
-                    continue;
-                }
-
-                if pg_try_handle_bootstrap_query(&mut stream, sql, default_db.as_deref()).await? {
-                    pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
-                    continue;
-                }
-
-                // Delegate to the shared SQL execution engine.
-                let exec_sql = sql.to_string();
-                let mut session = MySqlSessionState::new(default_db.clone(), connection_id);
-                match mysql_execute_sql(&state, &exec_sql, &mut session).await {
-                    Ok(MySqlQueryOutcome::ResultSet { columns, rows }) => {
-                        let pg_cols: Vec<pg_wire::PgColumn> = columns
-                            .iter()
-                            .map(|c| pg_wire::PgColumn::text(c, pg_wire::oid::TEXT, -1))
-                            .collect();
-                        pg_wire::write_row_description(&mut stream, &pg_cols).await?;
-                        for row in &rows {
-                            let vals: Vec<Option<&[u8]>> = row
-                                .iter()
-                                .map(|v| v.as_deref().map(|s| s.as_bytes()))
-                                .collect();
-                            pg_wire::write_data_row(&mut stream, &vals).await?;
-                        }
-                        let tag = format!("SELECT {}", rows.len());
-                        pg_wire::write_command_complete(&mut stream, &tag).await?;
-                    }
-                    Ok(MySqlQueryOutcome::Ok {
-                        affected_rows,
-                        last_insert_id: _,
-                    }) => {
-                        let tag = if sql_lower.starts_with("insert") {
-                            format!("INSERT 0 {affected_rows}")
-                        } else if sql_lower.starts_with("update") {
-                            format!("UPDATE {affected_rows}")
-                        } else if sql_lower.starts_with("delete") {
-                            format!("DELETE {affected_rows}")
-                        } else if sql_lower.starts_with("create") {
-                            "CREATE TABLE".to_string()
-                        } else if sql_lower.starts_with("drop") {
-                            "DROP TABLE".to_string()
-                        } else if sql_lower.starts_with("alter") {
-                            "ALTER TABLE".to_string()
-                        } else {
-                            "OK".to_string()
-                        };
-                        pg_wire::write_command_complete(&mut stream, &tag).await?;
-                    }
-                    Err((_code, _state, message)) => {
-                        pg_wire::write_error_response(&mut stream, "ERROR", "42000", &message)
-                            .await?;
-                    }
-                }
-                // Update default_db if session changed it
-                default_db = session.default_db;
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                let _ = pg_dispatch_sql(
+                    &state,
+                    &mut stream,
+                    &mut session,
+                    &mut tx_status,
+                    &mut savepoints,
+                    &sql_raw,
+                    None,
+                    &[],
+                )
+                .await?;
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
             frontend::SYNC => {
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                skip_until_sync = false;
+                portals.remove("");
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
-            frontend::PARSE | frontend::BIND | frontend::DESCRIBE | frontend::EXECUTE => {
-                // Extended query protocol stubs — enough to not crash drivers
-                // that probe these during connection setup. Full implementation
-                // is T411.
-                if msg.tag == frontend::PARSE {
-                    pg_wire::write_parse_complete(&mut stream).await?;
-                } else if msg.tag == frontend::BIND {
-                    pg_wire::write_bind_complete(&mut stream).await?;
-                } else if msg.tag == frontend::DESCRIBE {
-                    pg_wire::write_no_data(&mut stream).await?;
+            frontend::PARSE => {
+                let mut offset = 0usize;
+                let (statement_name, next_offset) =
+                    pg_wire::read_cstring_from(&msg.payload, offset);
+                offset = next_offset;
+                let (sql, next_offset) = pg_wire::read_cstring_from(&msg.payload, offset);
+                offset = next_offset;
+                let param_type_count =
+                    pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?;
+                if param_type_count < 0 {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "negative parameter type count in Parse message",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+                let mut param_types = Vec::with_capacity(param_type_count as usize);
+                for _ in 0..param_type_count as usize {
+                    param_types.push(
+                        pg_read_i32_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?,
+                    );
+                }
+
+                let placeholder_count = pg_max_placeholder_index(&sql);
+                if param_types.len() < placeholder_count {
+                    param_types.resize(placeholder_count, 0);
+                }
+
+                let describe_sql = if placeholder_count == 0 {
+                    sql.clone()
                 } else {
-                    pg_wire::write_command_complete(&mut stream, "OK").await?;
+                    let default_params: Vec<Lit> = param_types
+                        .iter()
+                        .map(|type_oid| pg_default_lit_for_oid(*type_oid))
+                        .collect();
+                    pg_substitute_stmt_sql(&sql, &default_params).unwrap_or_else(|_| sql.clone())
+                };
+                let result_columns = mysql_stmt_prepare_columns(
+                    &state,
+                    &describe_sql,
+                    session.default_db.as_deref(),
+                )
+                .await;
+
+                if statement_name.is_empty() {
+                    portals.remove("");
+                }
+                prepared_statements.insert(
+                    statement_name,
+                    PgPreparedStatement {
+                        sql,
+                        param_types,
+                        result_columns,
+                    },
+                );
+                pg_wire::write_parse_complete(&mut stream).await?;
+            }
+            frontend::BIND => {
+                let mut offset = 0usize;
+                let (portal_name, next_offset) = pg_wire::read_cstring_from(&msg.payload, offset);
+                offset = next_offset;
+                let (statement_name, next_offset) =
+                    pg_wire::read_cstring_from(&msg.payload, offset);
+                offset = next_offset;
+
+                let Some(statement) = prepared_statements.get(&statement_name).cloned() else {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "26000",
+                        &format!("unknown prepared statement '{statement_name}'"),
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                };
+
+                let param_format_count =
+                    pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?;
+                if param_format_count < 0 {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "negative parameter format count in Bind message",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+                let mut param_formats = Vec::with_capacity(param_format_count as usize);
+                for _ in 0..param_format_count as usize {
+                    param_formats.push(
+                        pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?,
+                    );
+                }
+
+                let param_count =
+                    pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?;
+                if param_count < 0 {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "negative parameter count in Bind message",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+                let param_count = param_count as usize;
+                if param_count != statement.param_types.len() {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        &format!(
+                            "bind parameter count mismatch: expected {}, got {param_count}",
+                            statement.param_types.len()
+                        ),
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+                if let Err(message) =
+                    pg_validate_format_codes(&param_formats, param_count, "parameter")
+                {
+                    pg_wire::write_error_response(&mut stream, "ERROR", "08P01", &message).await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+
+                let mut params = Vec::with_capacity(param_count);
+                let mut bind_error = None::<(String, &'static str)>;
+                for idx in 0..param_count {
+                    let value_len = match pg_read_i32_be(&msg.payload, &mut offset) {
+                        Ok(value) => value,
+                        Err(message) => {
+                            bind_error = Some((message, "08P01"));
+                            break;
+                        }
+                    };
+                    if value_len == -1 {
+                        params.push(Lit::Null);
+                        continue;
+                    }
+                    if value_len < -1 {
+                        bind_error = Some((
+                            "invalid negative parameter length in Bind message".to_string(),
+                            "08P01",
+                        ));
+                        break;
+                    }
+                    let format_code = pg_format_code_at(&param_formats, idx);
+                    if format_code != 0 {
+                        bind_error = Some((
+                            "binary parameter formats are not supported yet".to_string(),
+                            "0A000",
+                        ));
+                        break;
+                    }
+                    let end = offset.saturating_add(value_len as usize);
+                    let Some(bytes) = msg.payload.get(offset..end) else {
+                        bind_error = Some((
+                            "truncated parameter payload in Bind message".to_string(),
+                            "08P01",
+                        ));
+                        break;
+                    };
+                    offset = end;
+                    let text = String::from_utf8_lossy(bytes).into_owned();
+                    let type_oid = statement.param_types.get(idx).copied().unwrap_or(0);
+                    params.push(pg_decode_text_param_lit(&text, type_oid));
+                }
+
+                let result_format_count =
+                    pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?;
+                if result_format_count < 0 {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "negative result format count in Bind message",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+                let mut result_formats = Vec::with_capacity(result_format_count as usize);
+                for _ in 0..result_format_count as usize {
+                    result_formats.push(
+                        pg_read_i16_be(&msg.payload, &mut offset).map_err(anyhow::Error::msg)?,
+                    );
+                }
+                if bind_error.is_none() {
+                    if let Err(message) = pg_validate_format_codes(
+                        &result_formats,
+                        statement.result_columns.len(),
+                        "result-column",
+                    ) {
+                        bind_error = Some((message, "08P01"));
+                    }
+                }
+                if let Some((message, sqlstate)) = bind_error {
+                    pg_wire::write_error_response(&mut stream, "ERROR", sqlstate, &message).await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+
+                portals.insert(
+                    portal_name,
+                    PgPortal {
+                        sql: statement.sql,
+                        params,
+                        result_columns: statement.result_columns,
+                        result_formats,
+                    },
+                );
+                pg_wire::write_bind_complete(&mut stream).await?;
+            }
+            frontend::DESCRIBE => {
+                let Some(kind) = msg.payload.first().copied() else {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "Describe message missing target kind",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                };
+                let (name, _) = pg_wire::read_cstring_from(&msg.payload, 1);
+                match kind {
+                    b'S' => {
+                        let Some(statement) = prepared_statements.get(&name) else {
+                            pg_wire::write_error_response(
+                                &mut stream,
+                                "ERROR",
+                                "26000",
+                                &format!("unknown prepared statement '{name}'"),
+                            )
+                            .await?;
+                            skip_until_sync = true;
+                            continue;
+                        };
+                        pg_wire::write_parameter_description(&mut stream, &statement.param_types)
+                            .await?;
+                        pg_write_prepare_row_description(&mut stream, &statement.result_columns)
+                            .await?;
+                    }
+                    b'P' => {
+                        let Some(portal) = portals.get(&name) else {
+                            pg_wire::write_error_response(
+                                &mut stream,
+                                "ERROR",
+                                "34000",
+                                &format!("unknown portal '{name}'"),
+                            )
+                            .await?;
+                            skip_until_sync = true;
+                            continue;
+                        };
+                        pg_write_prepare_row_description(&mut stream, &portal.result_columns)
+                            .await?;
+                    }
+                    _ => {
+                        pg_wire::write_error_response(
+                            &mut stream,
+                            "ERROR",
+                            "08P01",
+                            "Describe target kind must be 'S' or 'P'",
+                        )
+                        .await?;
+                        skip_until_sync = true;
+                        continue;
+                    }
+                }
+            }
+            frontend::EXECUTE => {
+                let (portal_name, mut offset) = pg_wire::read_cstring_from(&msg.payload, 0);
+                let max_rows = match pg_read_i32_be(&msg.payload, &mut offset) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        pg_wire::write_error_response(&mut stream, "ERROR", "08P01", &message)
+                            .await?;
+                        skip_until_sync = true;
+                        continue;
+                    }
+                };
+                if max_rows < 0 {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "Execute row limit must be non-negative",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
+
+                let Some(portal) = portals.get(&portal_name).cloned() else {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "34000",
+                        &format!("unknown portal '{portal_name}'"),
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                };
+                let exec_sql = match pg_substitute_stmt_sql(&portal.sql, &portal.params) {
+                    Ok(sql) => sql,
+                    Err(message) => {
+                        pg_wire::write_error_response(&mut stream, "ERROR", "08P01", &message)
+                            .await?;
+                        skip_until_sync = true;
+                        continue;
+                    }
+                };
+                let had_error = pg_dispatch_sql(
+                    &state,
+                    &mut stream,
+                    &mut session,
+                    &mut tx_status,
+                    &mut savepoints,
+                    &exec_sql,
+                    Some(&portal.result_columns),
+                    &portal.result_formats,
+                )
+                .await?;
+                if had_error {
+                    skip_until_sync = true;
                 }
             }
             frontend::CLOSE => {
+                let Some(kind) = msg.payload.first().copied() else {
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        "08P01",
+                        "Close message missing target kind",
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                };
+                let (name, _) = pg_wire::read_cstring_from(&msg.payload, 1);
+                let removed = match kind {
+                    b'S' => prepared_statements.remove(&name).is_some(),
+                    b'P' => portals.remove(&name).is_some(),
+                    _ => {
+                        pg_wire::write_error_response(
+                            &mut stream,
+                            "ERROR",
+                            "08P01",
+                            "Close target kind must be 'S' or 'P'",
+                        )
+                        .await?;
+                        skip_until_sync = true;
+                        continue;
+                    }
+                };
+                if !removed {
+                    let (sqlstate, object_type) = if kind == b'S' {
+                        ("26000", "prepared statement")
+                    } else {
+                        ("34000", "portal")
+                    };
+                    pg_wire::write_error_response(
+                        &mut stream,
+                        "ERROR",
+                        sqlstate,
+                        &format!("unknown {object_type} '{name}'"),
+                    )
+                    .await?;
+                    skip_until_sync = true;
+                    continue;
+                }
                 pg_wire::write_close_complete(&mut stream).await?;
+            }
+            frontend::FLUSH => {
+                stream.flush().await?;
             }
             _ => {
                 pg_wire::write_error_response(
@@ -10683,7 +13104,7 @@ async fn handle_pg_connection(
                     &format!("unsupported message type: {}", char::from(msg.tag)),
                 )
                 .await?;
-                pg_wire::write_ready_for_query(&mut stream, TxStatus::Idle).await?;
+                pg_wire::write_ready_for_query(&mut stream, tx_status).await?;
             }
         }
     }
@@ -10824,6 +13245,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         .route("/api/v1/sql/exec", post(sql_exec_http_handler))
         .route("/api/v1/q/:query_id", get(prepared_get_handler))
         .route("/api/v1/q/:query_id/events", get(prepared_sse_handler))
+        .route("/api/v1/cdc/sse/:sub_id", get(cdc_sse_handler))
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))
         .route("/console", get(console_handler))
@@ -11129,6 +13551,7 @@ async fn prepared_get_handler(
             None,
             None,
             false,
+            None,
         );
         return match res {
             Ok(r) => {
@@ -11184,6 +13607,7 @@ async fn prepared_get_handler(
                 None,
                 None,
                 false,
+                None,
             )
             .map_err(|e| e.to_string());
         *inflight.result.lock().unwrap() = Some(out.clone());
@@ -11245,25 +13669,14 @@ async fn prepared_sse_handler(
     Path(query_id): Path<String>,
     State(state): State<AppState>,
 ) -> axum::response::Response {
-    let table_key = {
+    let table_keys = {
         let eng = state.engine.read().await;
         let Some(pq) = eng.get_prepared(&query_id) else {
             return (StatusCode::NOT_FOUND, "unknown query_id").into_response();
         };
-        match &*pq.query.body {
-            QueryBody::Select { select } => {
-                if let Some(refs) = &select.from {
-                    if let Some(TableRef::Base(b)) = refs.first() {
-                        format!("{}.{}", b.db, b.table)
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                }
-            }
-            _ => String::new(),
-        }
+        eng.query_dependency_tables(&pq.query)
+            .map(|deps| deps.into_iter().collect::<HashSet<_>>())
+            .unwrap_or_default()
     };
 
     let rx = state.etag_notify.subscribe();
@@ -11273,10 +13686,10 @@ async fn prepared_sse_handler(
     use tokio_stream::StreamExt;
 
     let mapped = stream.filter_map(move |msg| {
-        let tk = table_key.clone();
+        let table_keys = table_keys.clone();
         let qid = qid.clone();
         match msg {
-            Ok(changed_key) if changed_key == tk || tk.is_empty() => {
+            Ok(changed_key) if table_keys.is_empty() || table_keys.contains(&changed_key) => {
                 Some(Ok::<_, std::convert::Infallible>(
                     sse::Event::default().data(
                         serde_json::json!({
@@ -11293,6 +13706,151 @@ async fn prepared_sse_handler(
     });
 
     sse::Sse::new(mapped)
+        .keep_alive(sse::KeepAlive::default())
+        .into_response()
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct CdcSseParams {
+    #[serde(default)]
+    from_offset: Option<u64>,
+}
+
+fn cdc_sse_url(sub_id: &str) -> String {
+    format!("/api/v1/cdc/sse/{sub_id}")
+}
+
+fn parse_last_event_id(headers: &HeaderMap) -> Result<Option<u64>, &'static str> {
+    let Some(value) = headers.get("Last-Event-ID") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| "invalid Last-Event-ID header")?
+        .trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| "invalid Last-Event-ID header")
+}
+
+fn build_cdc_sse_event(change: &ChangeEvent) -> Result<sse::Event, serde_json::Error> {
+    Ok(sse::Event::default()
+        .id(change.seq.to_string())
+        .event(change.op.clone())
+        .data(serde_json::to_string(change)?))
+}
+
+fn build_cdc_sse_resnapshot_event(
+    sub_id: &str,
+    batch: &CdcPollResult,
+) -> Result<sse::Event, serde_json::Error> {
+    Ok(sse::Event::default()
+        .id(batch
+            .resnapshot_from_offset
+            .unwrap_or(batch.next_offset)
+            .to_string())
+        .event("resnapshot")
+        .data(serde_json::to_string(&serde_json::json!({
+            "sub_id": sub_id,
+            "earliest_offset": batch.earliest_offset,
+            "latest_offset": batch.latest_offset,
+            "resnapshot_from_offset": batch.resnapshot_from_offset,
+            "reason": batch.resnapshot_reason.clone(),
+        }))?))
+}
+
+fn advisor_build_failure_reason() -> Option<String> {
+    let Ok(value) = std::env::var("SKEINDB_ADVISOR_FAIL_BUILD") else {
+        return None;
+    };
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    ) {
+        Some("injected advisor build failure".to_string())
+    } else {
+        None
+    }
+}
+
+async fn cdc_sse_handler(
+    Path(sub_id): Path<String>,
+    AxumQuery(params): AxumQuery<CdcSseParams>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let last_event_id = match parse_last_event_id(&headers) {
+        Ok(value) => value,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+
+    let start_offset = {
+        let subs = state.subs.lock().unwrap();
+        let Some(sub) = subs.subs.get(&sub_id) else {
+            return (StatusCode::NOT_FOUND, "unknown sub_id").into_response();
+        };
+        params
+            .from_offset
+            .or(last_event_id)
+            .unwrap_or(sub.acked_offset)
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<sse::Event, std::convert::Infallible>>(16);
+    let stream_state = state.clone();
+    let stream_sub_id = sub_id.clone();
+
+    tokio::spawn(async move {
+        let mut cursor = start_offset;
+        let mut wake_rx = stream_state.etag_notify.subscribe();
+
+        loop {
+            let batch = {
+                let eng = stream_state.engine.read().await;
+                let subs = stream_state.subs.lock().unwrap();
+                eng.cdc_poll(&subs, &stream_sub_id, cursor, CDC_SSE_BATCH_LIMIT)
+            };
+
+            match batch {
+                Ok(batch) => {
+                    if batch.resnapshot_required {
+                        let Ok(sse_event) = build_cdc_sse_resnapshot_event(&stream_sub_id, &batch)
+                        else {
+                            return;
+                        };
+                        let _ = tx.send(Ok(sse_event)).await;
+                        return;
+                    }
+                    if !batch.events.is_empty() {
+                        for event in batch.events {
+                            cursor = event.seq;
+                            let Ok(sse_event) = build_cdc_sse_event(&event) else {
+                                return;
+                            };
+                            if tx.send(Ok(sse_event)).await.is_err() {
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                Err(_) => return,
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(CDC_SSE_FALLBACK_POLL_MS)) => {}
+                wake = wake_rx.recv() => match wake {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
+    });
+
+    sse::Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
         .keep_alive(sse::KeepAlive::default())
         .into_response()
 }
@@ -11382,6 +13940,37 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{:02x}", b));
     }
     out
+}
+
+fn decode_hex_text(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for chunk in value.as_bytes().chunks(2) {
+        let hi = match chunk[0] {
+            b'0'..=b'9' => chunk[0] - b'0',
+            b'a'..=b'f' => chunk[0] - b'a' + 10,
+            b'A'..=b'F' => chunk[0] - b'A' + 10,
+            _ => return None,
+        };
+        let lo = match chunk[1] {
+            b'0'..=b'9' => chunk[1] - b'0',
+            b'a'..=b'f' => chunk[1] - b'a' + 10,
+            b'A'..=b'F' => chunk[1] - b'A' + 10,
+            _ => return None,
+        };
+        bytes.push((hi << 4) | lo);
+    }
+    Some(bytes)
+}
+
+fn decode_base64_text(value: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+
+    base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .ok()
 }
 
 fn query_fingerprint(method: &str, params: Option<&Value>) -> String {
@@ -12462,6 +15051,25 @@ pub(crate) async fn handle_rpc(
                     let p: AdvisorIndexApplyParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
                     let r = eng.advisor_index_apply(p).map_err(to_rpc_error)?;
+                    let action_id = r.action_id.clone();
+                    let should_start = matches!(r.status.as_deref(), Some("queued"));
+                    drop(eng);
+                    if should_start {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(
+                                ADVISOR_APPLY_START_DELAY_MS,
+                            ))
+                            .await;
+                            let injected_failure = advisor_build_failure_reason();
+                            let mut eng = state.engine.write().await;
+                            if let Err(err) =
+                                eng.advisor_complete_index_apply(&action_id, injected_failure.as_deref())
+                            {
+                                tracing::warn!(action_id = %action_id, error = %err, "advisor apply task failed");
+                            }
+                        });
+                    }
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -12744,6 +15352,7 @@ pub(crate) async fn handle_rpc(
                             p.min_causality.as_ref(),
                             if known.is_empty() { None } else { Some(&known) },
                             use_skeinpack,
+                            None,
                         )
                         .map_err(to_rpc_error)?;
 
@@ -12762,11 +15371,14 @@ pub(crate) async fn handle_rpc(
                         cache: Option<QueryCache>,
                         #[serde(default)]
                         wire: Option<WireHints>,
+                        #[serde(default)]
+                        as_of: Option<Lit>,
                     }
                     let p: P = parse_params(params.clone())?;
                     let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
                     let if_none_match = p.cache.as_ref().and_then(|c| c.if_none_match.as_deref());
                     let min_causality = p.cache.as_ref().and_then(|c| c.min_causality.as_ref());
+                    let as_of_ms = lit_to_epoch_ms(p.as_of.as_ref())?;
 
                     let mut known: HashSet<String> = HashSet::new();
                     let mut use_skeinpack = false;
@@ -12801,6 +15413,7 @@ pub(crate) async fn handle_rpc(
                             min_causality,
                             if known.is_empty() { None } else { Some(&known) },
                             use_skeinpack,
+                            as_of_ms,
                         )
                         .map_err(to_rpc_error)?;
 
@@ -12920,24 +15533,11 @@ pub(crate) async fn handle_rpc(
                     let Some(pq) = eng.get_prepared(&p.query_id) else {
                         return Err(RpcError::new("not_found", "unknown query_id"));
                     };
-                    let table_key = match &*pq.query.body {
-                        QueryBody::Select { select } => {
-                            if let Some(refs) = &select.from {
-                                if let Some(TableRef::Base(b)) = refs.first() {
-                                    format!("{}.{}", b.db, b.table)
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                String::new()
-                            }
-                        }
-                        _ => String::new(),
-                    };
+                    let table_keys = eng.query_dependency_tables(&pq.query).unwrap_or_default();
                     Ok(serde_json::json!({
                         "query_id": p.query_id,
                         "sse_url": format!("/api/v1/q/{}/events", p.query_id),
-                        "table_key": table_key
+                        "table_keys": table_keys
                     }))
                 }
 
@@ -13406,6 +16006,100 @@ pub(crate) async fn handle_rpc(
                 }
 
                 // --------------------
+                // maintenance.history.* (T182)
+                // --------------------
+                "maintenance.history.status" => {
+                    let horizon_ms = maintenance_history_params_horizon(state, params.as_ref())?;
+                    let eng = state.engine.read().await;
+                    let report = eng.maintenance_history_status(horizon_ms);
+                    let settings = state.settings.lock().unwrap();
+                    let enabled = settings
+                        .get("history.retention.enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let window_ms = settings
+                        .get("history.retention.window_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let mut out = report
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_else(serde_json::Map::new);
+                    out.insert(
+                        "policy".to_string(),
+                        serde_json::json!({
+                            "enabled": enabled,
+                            "window_ms": window_ms,
+                        }),
+                    );
+                    Ok(Value::Object(out))
+                }
+                "maintenance.history.set_policy" => {
+                    let obj = params
+                        .as_ref()
+                        .and_then(|value| value.as_object())
+                        .cloned()
+                        .ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "maintenance.history.set_policy requires an object params",
+                            )
+                        })?;
+                    let mut patch = serde_json::Map::new();
+                    if let Some(enabled) = obj.get("enabled") {
+                        let enabled = enabled.as_bool().ok_or_else(|| {
+                            RpcError::new("invalid_request", "enabled must be a bool")
+                        })?;
+                        patch.insert(
+                            "history.retention.enabled".to_string(),
+                            Value::Bool(enabled),
+                        );
+                    }
+                    if let Some(window) = obj.get("window_ms") {
+                        let window = window.as_u64().ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "window_ms must be a non-negative integer",
+                            )
+                        })?;
+                        patch.insert(
+                            "history.retention.window_ms".to_string(),
+                            Value::from(window),
+                        );
+                    }
+                    if patch.is_empty() {
+                        return Err(RpcError::new(
+                            "invalid_request",
+                            "maintenance.history.set_policy requires enabled or window_ms",
+                        ));
+                    }
+                    let _ = handle_settings_set(state, Some(Value::Object(patch)))?;
+                    let settings = state.settings.lock().unwrap();
+                    let enabled = settings
+                        .get("history.retention.enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let window_ms = settings
+                        .get("history.retention.window_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    Ok(serde_json::json!({
+                        "policy": {
+                            "enabled": enabled,
+                            "window_ms": window_ms,
+                        }
+                    }))
+                }
+                "maintenance.history.gc" => {
+                    let horizon_ms = maintenance_history_params_horizon(state, params.as_ref())?;
+                    let mut eng = state.engine.write().await;
+                    let report = eng
+                        .maintenance_history_gc(horizon_ms)
+                        .map_err(to_rpc_error)?;
+                    Ok(report)
+                }
+
+                // --------------------
                 // edge.* (research)
                 // --------------------
                 "edge.bundle.request" => {
@@ -13575,8 +16269,26 @@ pub(crate) async fn handle_rpc(
                     let r = eng
                         .cdc_subscribe_table(&mut subs, &p.db, &p.table)
                         .map_err(to_rpc_error)?;
-                    Ok(serde_json::to_value(r)
-                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                    let sse_url = cdc_sse_url(&r.sub_id);
+                    Ok(serde_json::json!({
+                        "sub_id": r.sub_id,
+                        "offset": r.offset,
+                        "sse_url": sse_url,
+                    }))
+                }
+                "cdc.subscribe_query" => {
+                    let p: CdcSubscribeQueryParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let mut subs = state.subs.lock().unwrap();
+                    let r = eng
+                        .cdc_subscribe_query(&mut subs, &p.query_id, &p.args)
+                        .map_err(to_rpc_error)?;
+                    let sse_url = cdc_sse_url(&r.sub_id);
+                    Ok(serde_json::json!({
+                        "sub_id": r.sub_id,
+                        "offset": r.offset,
+                        "sse_url": sse_url,
+                    }))
                 }
                 "cdc.poll" => {
                     let p: CdcPollParams = parse_params(params.clone())?;
@@ -14549,6 +17261,13 @@ struct SqlExecParams {
     default_db: Option<String>,
     #[serde(default)]
     result_format: Option<ResultFormat>,
+    /// Time-travel snapshot timestamp (epoch milliseconds). When set and
+    /// the statement is a SELECT, rows are filtered by the MVCC
+    /// `commit_ts_ms` visibility rule (see docs/TIME_TRAVEL_REPLAY.md
+    /// §1.1). Overridden by any `/*+ SKEIN_AS_OF('...') */` hint found
+    /// in the SQL text (T181).
+    #[serde(default)]
+    as_of_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -14581,6 +17300,7 @@ enum SqlVerb {
     Replace,
     Update,
     Delete,
+    CommentOn,
     Unsupported,
 }
 
@@ -14726,6 +17446,290 @@ fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcErro
     serde_json::from_value(v).map_err(|e| RpcError::new("invalid_request", e.to_string()))
 }
 
+fn lit_to_epoch_ms(lit: Option<&Lit>) -> Result<Option<u64>, RpcError> {
+    let Some(lit) = lit else {
+        return Ok(None);
+    };
+    match lit {
+        Lit::Null => Ok(None),
+        Lit::U64 { v } => Ok(Some(*v)),
+        Lit::I64 { v } => {
+            if *v < 0 {
+                return Err(RpcError::new(
+                    "invalid_request",
+                    "as_of timestamp must be non-negative",
+                ));
+            }
+            Ok(Some(*v as u64))
+        }
+        Lit::F64 { v } => Ok(Some(*v as u64)),
+        _ => Err(RpcError::new(
+            "invalid_request",
+            "as_of must be an integer epoch-millisecond timestamp",
+        )),
+    }
+}
+
+/// Parse an as_of value string (from `SET @@skein.as_of = '...'` or a
+/// `SKEIN_AS_OF('...')` query hint) into epoch milliseconds.
+///
+/// Accepted forms:
+/// * Integer epoch milliseconds (e.g. `1737072000000`).
+/// * ISO-8601 / RFC-3339 timestamps: `YYYY-MM-DD`,
+///   `YYYY-MM-DD[T ]HH:MM[:SS[.fff]][Z|±HH[:MM]]`.
+///
+/// Returns `None` if the input cannot be parsed.
+fn parse_as_of_timestamp(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Integer epoch milliseconds.
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse::<u64>().ok();
+    }
+    // Reject anything that isn't ASCII or has fewer than 10 chars.
+    if !s.is_ascii() || s.len() < 10 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let year: i32 = std::str::from_utf8(&bytes[0..4]).ok()?.parse().ok()?;
+    if bytes[4] != b'-' {
+        return None;
+    }
+    let month: u32 = std::str::from_utf8(&bytes[5..7]).ok()?.parse().ok()?;
+    if bytes[7] != b'-' {
+        return None;
+    }
+    let day: u32 = std::str::from_utf8(&bytes[8..10]).ok()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let mut hour: u32 = 0;
+    let mut minute: u32 = 0;
+    let mut second: u32 = 0;
+    let mut millis: u32 = 0;
+    let mut tz_offset_seconds: i64 = 0;
+
+    let mut idx = 10usize;
+    if idx < bytes.len() {
+        let sep = bytes[idx];
+        if sep == b'T' || sep == b' ' || sep == b't' {
+            idx += 1;
+            if bytes.len() < idx + 5 {
+                return None;
+            }
+            hour = std::str::from_utf8(&bytes[idx..idx + 2])
+                .ok()?
+                .parse()
+                .ok()?;
+            if bytes[idx + 2] != b':' {
+                return None;
+            }
+            minute = std::str::from_utf8(&bytes[idx + 3..idx + 5])
+                .ok()?
+                .parse()
+                .ok()?;
+            idx += 5;
+            if idx < bytes.len() && bytes[idx] == b':' {
+                if bytes.len() < idx + 3 {
+                    return None;
+                }
+                second = std::str::from_utf8(&bytes[idx + 1..idx + 3])
+                    .ok()?
+                    .parse()
+                    .ok()?;
+                idx += 3;
+                if idx < bytes.len() && bytes[idx] == b'.' {
+                    // Fractional seconds: consume up to 9 digits, keep milli precision.
+                    idx += 1;
+                    let start = idx;
+                    while idx < bytes.len() && bytes[idx].is_ascii_digit() && idx - start < 9 {
+                        idx += 1;
+                    }
+                    if idx == start {
+                        return None;
+                    }
+                    let frac = std::str::from_utf8(&bytes[start..idx]).ok()?;
+                    let mut padded = [b'0'; 3];
+                    for (i, b) in frac.as_bytes().iter().take(3).enumerate() {
+                        padded[i] = *b;
+                    }
+                    millis = std::str::from_utf8(&padded).ok()?.parse().ok()?;
+                }
+            }
+            // Timezone suffix.
+            if idx < bytes.len() {
+                match bytes[idx] {
+                    b'Z' | b'z' => {
+                        idx += 1;
+                    }
+                    b'+' | b'-' => {
+                        let sign: i64 = if bytes[idx] == b'-' { -1 } else { 1 };
+                        idx += 1;
+                        if bytes.len() < idx + 2 {
+                            return None;
+                        }
+                        let tz_h: i64 = std::str::from_utf8(&bytes[idx..idx + 2])
+                            .ok()?
+                            .parse()
+                            .ok()?;
+                        idx += 2;
+                        let mut tz_m: i64 = 0;
+                        if idx < bytes.len() && bytes[idx] == b':' {
+                            idx += 1;
+                        }
+                        if idx + 2 <= bytes.len() && bytes[idx].is_ascii_digit() {
+                            tz_m = std::str::from_utf8(&bytes[idx..idx + 2])
+                                .ok()?
+                                .parse()
+                                .ok()?;
+                            idx += 2;
+                        }
+                        tz_offset_seconds = sign * (tz_h * 3600 + tz_m * 60);
+                    }
+                    _ => return None,
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+
+    if idx != bytes.len() {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    // days_from_civil (Howard Hinnant's algorithm) — converts a civil date
+    // to signed days since the Unix epoch (1970-01-01).
+    let y = year - i32::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as i64; // [0, 399]
+    let m = month as i64;
+    let d = day as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era as i64) * 146_097 + doe - 719_468;
+
+    let secs = days * 86_400 + (hour as i64) * 3600 + (minute as i64) * 60 + second as i64;
+    let secs = secs.checked_sub(tz_offset_seconds)?;
+    let total_ms = secs.checked_mul(1000)?.checked_add(millis as i64)?;
+    if total_ms < 0 {
+        return None;
+    }
+    Some(total_ms as u64)
+}
+
+/// Parse the right-hand side of `SET @@skein.as_of = <value>`.
+///
+/// Returns:
+/// * `Ok(None)` — clears the session override (NULL / DEFAULT / '').
+/// * `Ok(Some(ms))` — sets the override to the given epoch millisecond value.
+/// * `Err(_)` — the value could not be parsed.
+fn parse_skein_as_of_assignment_value(raw: &str) -> Result<Option<u64>, String> {
+    let trimmed = raw.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "null" || lower == "default" {
+        return Ok(None);
+    }
+    let inner = parse_sql_string_literal(trimmed).unwrap_or_else(|| trimmed.to_string());
+    if inner.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_as_of_timestamp(&inner)
+        .map(Some)
+        .ok_or_else(|| format!("invalid skein.as_of value: {}", raw))
+}
+
+/// Extract and strip a leading/embedded `SKEIN_AS_OF('<ts>')` hint from a
+/// SELECT statement's optimizer comment (`/*+ ... */`). Returns the
+/// rewritten SQL (hint removed) and the parsed epoch milliseconds when a
+/// hint was present and valid.
+fn extract_skein_as_of_hint(sql: &str) -> (String, Option<u64>) {
+    let Some(open) = sql.find("/*+") else {
+        return (sql.to_string(), None);
+    };
+    let Some(close_rel) = sql[open..].find("*/") else {
+        return (sql.to_string(), None);
+    };
+    let close = open + close_rel;
+    let hint_body = &sql[open + 3..close];
+    let hint_lower = hint_body.to_ascii_lowercase();
+    let needle = "skein_as_of";
+    let Some(pos) = hint_lower.find(needle) else {
+        return (sql.to_string(), None);
+    };
+    let after = hint_body[pos + needle.len()..].trim_start();
+    if !after.starts_with('(') {
+        return (sql.to_string(), None);
+    }
+    let Some(close_paren) = after.find(')') else {
+        return (sql.to_string(), None);
+    };
+    let arg_raw = after[1..close_paren].trim();
+    let arg = parse_sql_string_literal(arg_raw).unwrap_or_else(|| arg_raw.to_string());
+    let Some(ms) = parse_as_of_timestamp(&arg) else {
+        return (sql.to_string(), None);
+    };
+    // Strip the entire hint comment.
+    let mut out = String::with_capacity(sql.len());
+    out.push_str(&sql[..open]);
+    out.push(' ');
+    out.push_str(&sql[close + 2..]);
+    (out, Some(ms))
+}
+
+/// Resolve the `horizon_ms` parameter for `maintenance.history.*` RPCs.
+///
+/// If `params.horizon_ms` is provided, it is used directly. Otherwise, if
+/// the retention policy is enabled (`history.retention.enabled == true`)
+/// with a positive `history.retention.window_ms`, returns
+/// `now - window_ms`. Else returns `None` — for status, all tombstones with
+/// `commit_ts_ms > 0` are counted purgeable; for GC, the entire set is
+/// purged.
+fn maintenance_history_params_horizon(
+    state: &AppState,
+    params: Option<&Value>,
+) -> Result<Option<u64>, RpcError> {
+    if let Some(obj) = params.and_then(|v| v.as_object()) {
+        if let Some(v) = obj.get("horizon_ms") {
+            if v.is_null() {
+                return Ok(None);
+            }
+            let ms = v.as_u64().ok_or_else(|| {
+                RpcError::new(
+                    "invalid_request",
+                    "horizon_ms must be a non-negative integer",
+                )
+            })?;
+            return Ok(Some(ms));
+        }
+    }
+    let settings = state.settings.lock().unwrap();
+    let enabled = settings
+        .get("history.retention.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let window_ms = settings
+        .get("history.retention.window_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    drop(settings);
+    if enabled && window_ms > 0 {
+        let now = now_unix_ms_u64();
+        Ok(Some(now.saturating_sub(window_ms)))
+    } else {
+        Ok(None)
+    }
+}
+
 fn to_rpc_error(e: anyhow::Error) -> RpcError {
     let msg = e.to_string();
     // A few common shorthands used by the prototype engine.
@@ -14822,7 +17826,7 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::ShowColumns
     } else if lower.starts_with("use ") {
         SqlVerb::Use
-    } else if lower.starts_with("create database ") {
+    } else if lower.starts_with("create database ") || lower.starts_with("create schema ") {
         SqlVerb::CreateDatabase
     } else if lower.starts_with("create unique index ") || lower.starts_with("create index ") {
         SqlVerb::CreateIndex
@@ -14846,6 +17850,8 @@ fn sql_detect_verb(sql: &str) -> SqlVerb {
         SqlVerb::Update
     } else if lower.starts_with("delete from ") {
         SqlVerb::Delete
+    } else if lower.starts_with("comment on ") {
+        SqlVerb::CommentOn
     } else {
         SqlVerb::Unsupported
     }
@@ -15738,11 +18744,19 @@ fn mysql_parse_binary_comparison_expr(expr: &str) -> Result<Option<Expr>, RpcErr
             // Check multi-byte operators first
             if i + 1 < bytes.len() {
                 let two = &expr[i..i + 2];
-                if two == ">=" || two == "<=" || two == "!=" || two == "<>" {
+                if two == ">="
+                    || two == "<="
+                    || two == "!="
+                    || two == "<>"
+                    || two == "||"
+                    || two == "~*"
+                {
                     let op_name = match two {
                         ">=" => "ge",
                         "<=" => "le",
                         "!=" | "<>" => "ne",
+                        "||" => "concat_op",
+                        "~*" => "pg_regex_i",
                         _ => unreachable!(),
                     };
                     best = Some((i, 2, op_name));
@@ -15751,11 +18765,17 @@ fn mysql_parse_binary_comparison_expr(expr: &str) -> Result<Option<Expr>, RpcErr
                 }
             }
             // Single-byte comparison operators
-            if b == b'>' || b == b'<' || b == b'=' {
+            // Guard: skip '>' when part of '->' or '->>'
+            if b == b'>' && i > 0 && bytes[i - 1] == b'-' {
+                // part of -> or ->>, skip
+            } else if b == b'>' && i >= 2 && bytes[i - 2] == b'-' && bytes[i - 1] == b'>' {
+                // second > in ->>, skip
+            } else if b == b'>' || b == b'<' || b == b'=' || b == b'~' {
                 let op_name = match b {
                     b'>' => "gt",
                     b'<' => "lt",
                     b'=' => "eq",
+                    b'~' => "pg_regex",
                     _ => unreachable!(),
                 };
                 best = Some((i, 1, op_name));
@@ -15828,6 +18848,11 @@ fn mysql_find_top_level_arithmetic_operator(expr: &str, operators: &[u8]) -> Opt
                 i += 1;
                 continue;
             }
+            // Guard: skip '-' when part of '->' or '->>'
+            if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                i += 1;
+                continue;
+            }
             candidate = Some((i, b));
         }
         i += 1;
@@ -15863,6 +18888,80 @@ fn mysql_parse_binary_arithmetic_expr(
     }
     Ok(Some(Expr::Op {
         op: mysql_arithmetic_op_name(op).to_string(),
+        a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+        b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+        args: None,
+        list: None,
+        lo: None,
+        hi: None,
+    }))
+}
+
+/// Parse PG JSON arrow operators ->> and -> at top level, taking rightmost match.
+fn mysql_parse_pg_json_arrow_expr(expr: &str) -> Result<Option<Expr>, RpcError> {
+    let bytes = expr.as_bytes();
+    let mut quote = 0u8;
+    let mut depth = 0u32;
+    let mut best: Option<(usize, usize, &str)> = None; // (start, len, op_name)
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == quote {
+                if mysql_is_doubled_single_quote(bytes, i, quote) {
+                    i += 2;
+                    continue;
+                }
+                if quote != b'`' && mysql_is_backslash_escaped(bytes, i) {
+                    i += 1;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = b;
+                i += 1;
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 && b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+            if i + 2 < bytes.len() && bytes[i + 2] == b'>' {
+                best = Some((i, 3, "json_arrow_text"));
+                i += 3;
+                continue;
+            } else {
+                best = Some((i, 2, "json_arrow"));
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let Some((pos, len, op_name)) = best else {
+        return Ok(None);
+    };
+    let left = expr[..pos].trim();
+    let right = expr[pos + len..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Op {
+        op: op_name.to_string(),
         a: Some(Box::new(parse_sql_scalar_expr(left)?)),
         b: Some(Box::new(parse_sql_scalar_expr(right)?)),
         args: None,
@@ -16233,6 +19332,10 @@ fn parse_sql_scalar_expr(raw: &str) -> Result<Expr, RpcError> {
     if let Some(expr) = mysql_parse_binary_arithmetic_expr(s, b"*/%")? {
         return Ok(expr);
     }
+    // PG JSON operators: ->> (text) and -> (json), higher precedence than arithmetic
+    if let Some(expr) = mysql_parse_pg_json_arrow_expr(s)? {
+        return Ok(expr);
+    }
     if let Some(rest) = s.strip_prefix('+') {
         let rest = rest.trim_start();
         if !rest.is_empty() {
@@ -16398,6 +19501,47 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
                     hi: None,
                 });
             }
+        }
+    }
+    // IS NOT DISTINCT FROM → null_safe_eq (<=>)
+    if let Some(idx) = find_keyword_top_level(clause, "is not distinct from") {
+        let left = clause[..idx].trim();
+        let right = clause[idx + "is not distinct from".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Ok(Expr::Op {
+                op: "null_safe_eq".to_string(),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
+        }
+    }
+    // IS DISTINCT FROM → NOT(null_safe_eq)
+    if let Some(idx) = find_keyword_top_level(clause, "is distinct from") {
+        let left = clause[..idx].trim();
+        let right = clause[idx + "is distinct from".len()..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            let eq = Expr::Op {
+                op: "null_safe_eq".to_string(),
+                a: Some(Box::new(parse_sql_scalar_expr(left)?)),
+                b: Some(Box::new(parse_sql_scalar_expr(right)?)),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+            return Ok(Expr::Op {
+                op: "not".to_string(),
+                a: Some(Box::new(eq)),
+                b: None,
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            });
         }
     }
     if let Some(idx) = find_keyword_top_level(clause, "not in") {
@@ -16652,10 +19796,23 @@ fn parse_condition_expr(clause: &str) -> Result<Expr, RpcError> {
                 ("<=", "le"),
                 ("<>", "ne"),
                 ("!=", "ne"),
+                ("~*", "pg_regex_i"),
                 ("=", "eq"),
                 (">", "gt"),
                 ("<", "lt"),
+                ("~", "pg_regex"),
             ] {
+                // Guard: skip '>' when part of '->' or '->>'
+                if token == ">" && i > 0 && clause.as_bytes()[i - 1] == b'-' {
+                    continue;
+                }
+                if token == ">"
+                    && i >= 2
+                    && clause.as_bytes()[i - 2] == b'-'
+                    && clause.as_bytes()[i - 1] == b'>'
+                {
+                    continue;
+                }
                 if clause[i..].starts_with(token) {
                     let left = clause[..i].trim();
                     let right = clause[i + token.len()..].trim();
@@ -17489,7 +20646,13 @@ fn parse_use_plan(sql: &str) -> Result<SqlPlan, RpcError> {
 }
 
 fn parse_create_database_plan(sql: &str) -> Result<SqlPlan, RpcError> {
-    let mut tail = sql[15..].trim();
+    // Support both CREATE DATABASE and CREATE SCHEMA (PG alias)
+    let prefix_len = if sql.to_ascii_lowercase().starts_with("create schema ") {
+        "create schema ".len()
+    } else {
+        "create database ".len()
+    };
+    let mut tail = sql[prefix_len..].trim();
     let mut if_not_exists = false;
     let lower = tail.to_ascii_lowercase();
     if lower.starts_with("if not exists ") {
@@ -17555,6 +20718,9 @@ fn sql_type_to_desc(token: &str, unsigned: bool) -> TypeDesc {
         "json" => "json",
         "blob" | "binary" | "varbinary" => "bytes",
         "bool" | "boolean" => "bool",
+        "serial" | "serial4" => "i64",
+        "bigserial" | "serial8" => "i64",
+        "smallserial" | "serial2" => "i64",
         _ => "string",
     };
     TypeDesc {
@@ -17714,7 +20880,12 @@ fn parse_create_table_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         let type_tok = toks[1];
         let unsigned = toks.iter().any(|t| t.eq_ignore_ascii_case("unsigned"));
         let nullable = !p_lower.contains("not null");
-        let auto_increment = p_lower.contains("auto_increment");
+        let type_tok_lower = type_tok.to_ascii_lowercase();
+        let auto_increment = p_lower.contains("auto_increment")
+            || matches!(
+                type_tok_lower.as_str(),
+                "serial" | "serial2" | "serial4" | "serial8" | "bigserial" | "smallserial"
+            );
         let inline_pk = p_lower.contains("primary key");
         let default = parse_column_default_clause(p)?;
         columns.push(SchemaColumnInfo {
@@ -17803,6 +20974,15 @@ fn parse_create_index_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPla
         ));
     }
     tail = tail[6..].trim_start();
+
+    // PG: strip optional CONCURRENTLY keyword (accept but ignore)
+    if tail.to_ascii_lowercase().starts_with("concurrently ") {
+        tail = tail["concurrently ".len()..].trim_start();
+    }
+    // PG: strip optional IF NOT EXISTS
+    if tail.to_ascii_lowercase().starts_with("if not exists ") {
+        tail = tail["if not exists ".len()..].trim_start();
+    }
 
     let on_idx = find_keyword_top_level(tail, "on").ok_or_else(|| {
         RpcError::new(
@@ -18556,7 +21736,7 @@ fn parse_sql_plan(sql: &str, default_db: Option<&str>) -> Result<SqlPlan, RpcErr
         SqlVerb::Replace => parse_insert_plan(normalized, default_db, InsertMode::Replace),
         SqlVerb::Update => parse_update_plan(normalized, default_db),
         SqlVerb::Delete => parse_delete_plan(normalized, default_db),
-        SqlVerb::Unsupported => Err(RpcError::new(
+        SqlVerb::CommentOn | SqlVerb::Unsupported => Err(RpcError::new(
             "not_supported",
             "sql.exec supports SELECT/SHOW/USE/CREATE DATABASE/DROP DATABASE/CREATE TABLE/CREATE INDEX/ALTER TABLE/DROP INDEX/DROP TABLE/INSERT/UPDATE/DELETE",
         )),
@@ -18675,7 +21855,7 @@ fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<boo
             Expr::Lit { lit } => Ok(lit.clone()),
             _ => Err(RpcError::new(
                 "not_supported",
-                "information_schema WHERE supports only column and literal operands",
+                "virtual table WHERE supports only column and literal operands",
             )),
         }
     }
@@ -18782,7 +21962,7 @@ fn eval_info_schema_expr(expr: &Expr, row: &BTreeMap<String, Lit>) -> Result<boo
         } => Ok(*v),
         _ => Err(RpcError::new(
             "not_supported",
-            "information_schema WHERE supports only simple predicates",
+            "virtual table WHERE supports only simple predicates",
         )),
     }
 }
@@ -18830,7 +22010,7 @@ fn project_virtual_row(
             _ => {
                 return Err(RpcError::new(
                     "not_supported",
-                    "information_schema projection supports only columns and literals",
+                    "virtual table projection supports only columns and literals",
                 ))
             }
         };
@@ -18869,7 +22049,7 @@ fn sort_virtual_rows(
         if !matches!(rule.expr, Expr::Col { .. }) {
             return Err(RpcError::new(
                 "not_supported",
-                "information_schema ORDER BY supports only column references",
+                "virtual table ORDER BY supports only column references",
             ));
         }
     }
@@ -19609,6 +22789,19 @@ fn information_schema_select_result(
         ));
     };
 
+    Ok(Some(render_virtual_select_result(
+        rows, projection, where_expr, order_by, limit, &all_cols,
+    )?))
+}
+
+fn render_virtual_select_result(
+    mut rows: Vec<BTreeMap<String, Lit>>,
+    projection: &[SelectItem],
+    where_expr: &Option<Expr>,
+    order_by: &[OrderBy],
+    limit: &Option<LimitClause>,
+    all_cols: &[&str],
+) -> Result<Value, RpcError> {
     if let Some(expr) = where_expr.as_ref() {
         let mut filtered = Vec::with_capacity(rows.len());
         for row in rows.into_iter() {
@@ -19646,12 +22839,1128 @@ fn information_schema_select_result(
         .map(|name| serde_json::json!({ "name": name }))
         .collect::<Vec<_>>();
 
-    Ok(Some(serde_json::json!({
+    Ok(serde_json::json!({
         "data": {
             "columns": columns,
             "rows": out_rows,
         }
-    })))
+    }))
+}
+
+fn pg_catalog_hash_oid(parts: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        part.to_ascii_lowercase().hash(&mut hasher);
+    }
+    16_384u64.saturating_add(hasher.finish() % 1_000_000_000u64)
+}
+
+fn pg_catalog_database_oid(name: &str) -> u64 {
+    match name.to_ascii_lowercase().as_str() {
+        "template1" => 1,
+        "template0" => 4,
+        "postgres" => 5,
+        _ => pg_catalog_hash_oid(&["pg_database", name]),
+    }
+}
+
+fn pg_catalog_namespace_oid(name: &str) -> u64 {
+    match name.to_ascii_lowercase().as_str() {
+        "pg_catalog" => 11,
+        "public" => 2200,
+        "information_schema" => 13_207,
+        _ => pg_catalog_hash_oid(&["pg_namespace", name]),
+    }
+}
+
+fn pg_catalog_type_oid_for_kind(kind: &str) -> i32 {
+    match kind.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" | "tinyint" => pg_wire::oid::BOOL,
+        "int" | "integer" | "int4" | "mediumint" => pg_wire::oid::INT4,
+        "bigint" | "int8" | "serial" | "bigserial" => pg_wire::oid::INT8,
+        "float" | "real" | "float4" => pg_wire::oid::FLOAT4,
+        "double" | "float8" | "double precision" => pg_wire::oid::FLOAT8,
+        "numeric" | "decimal" => pg_wire::oid::NUMERIC,
+        "varchar" | "char" | "character varying" | "character" | "enum" | "set" => {
+            pg_wire::oid::VARCHAR
+        }
+        "text" | "tinytext" | "mediumtext" | "longtext" => pg_wire::oid::TEXT,
+        "blob" | "tinyblob" | "mediumblob" | "longblob" | "binary" | "varbinary" | "bytea" => {
+            pg_wire::oid::BYTEA
+        }
+        "date" => pg_wire::oid::DATE,
+        "time" => pg_wire::oid::TIME,
+        "timestamp" | "datetime" => pg_wire::oid::TIMESTAMP,
+        "timestamptz" => pg_wire::oid::TIMESTAMPTZ,
+        "json" => pg_wire::oid::JSON,
+        "jsonb" => pg_wire::oid::JSONB,
+        "uuid" => pg_wire::oid::UUID,
+        _ => pg_wire::oid::TEXT,
+    }
+}
+
+fn pg_catalog_type_len(type_oid: i32) -> i64 {
+    match type_oid {
+        pg_wire::oid::BOOL => 1,
+        pg_wire::oid::INT4 => 4,
+        pg_wire::oid::INT8 => 8,
+        pg_wire::oid::FLOAT4 => 4,
+        pg_wire::oid::FLOAT8 => 8,
+        pg_wire::oid::DATE => 4,
+        pg_wire::oid::TIME => 8,
+        pg_wire::oid::TIMESTAMP | pg_wire::oid::TIMESTAMPTZ => 8,
+        pg_wire::oid::UUID => 16,
+        _ => -1,
+    }
+}
+
+/// Return space-separated 1-based column positions for `indkey`.
+fn pg_catalog_indkey(key_cols: &[String], all_cols: &[String]) -> String {
+    key_cols
+        .iter()
+        .filter_map(|kc| {
+            all_cols
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(kc))
+                .map(|i| (i + 1).to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Return PG int2vector-style `{1,2}` for `conkey`.
+fn pg_catalog_conkey(key_cols: &[String], all_cols: &[String]) -> String {
+    let inner = key_cols
+        .iter()
+        .filter_map(|kc| {
+            all_cols
+                .iter()
+                .position(|c| c.eq_ignore_ascii_case(kc))
+                .map(|i| (i + 1).to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{inner}}}")
+}
+
+fn pg_catalog_builtin_type_rows() -> Vec<BTreeMap<String, Lit>> {
+    let specs = [
+        ("bool", pg_wire::oid::BOOL, 1i64, true, "B", true, "c", "p"),
+        (
+            "bytea",
+            pg_wire::oid::BYTEA,
+            -1i64,
+            false,
+            "U",
+            false,
+            "i",
+            "x",
+        ),
+        ("date", pg_wire::oid::DATE, 4i64, true, "D", false, "i", "p"),
+        (
+            "float4",
+            pg_wire::oid::FLOAT4,
+            4i64,
+            true,
+            "N",
+            false,
+            "i",
+            "p",
+        ),
+        (
+            "float8",
+            pg_wire::oid::FLOAT8,
+            8i64,
+            true,
+            "N",
+            true,
+            "d",
+            "p",
+        ),
+        ("int4", pg_wire::oid::INT4, 4i64, true, "N", false, "i", "p"),
+        ("int8", pg_wire::oid::INT8, 8i64, true, "N", false, "d", "p"),
+        (
+            "json",
+            pg_wire::oid::JSON,
+            -1i64,
+            false,
+            "U",
+            false,
+            "i",
+            "x",
+        ),
+        (
+            "jsonb",
+            pg_wire::oid::JSONB,
+            -1i64,
+            false,
+            "U",
+            false,
+            "i",
+            "x",
+        ),
+        ("name", 19, 64i64, false, "S", false, "c", "p"),
+        (
+            "numeric",
+            pg_wire::oid::NUMERIC,
+            -1i64,
+            false,
+            "N",
+            false,
+            "i",
+            "m",
+        ),
+        ("oid", 26, 4i64, true, "N", false, "i", "p"),
+        (
+            "text",
+            pg_wire::oid::TEXT,
+            -1i64,
+            false,
+            "S",
+            true,
+            "i",
+            "x",
+        ),
+        (
+            "timestamp",
+            pg_wire::oid::TIMESTAMP,
+            8i64,
+            true,
+            "D",
+            false,
+            "d",
+            "p",
+        ),
+        (
+            "timestamptz",
+            pg_wire::oid::TIMESTAMPTZ,
+            8i64,
+            true,
+            "D",
+            false,
+            "d",
+            "p",
+        ),
+        ("time", pg_wire::oid::TIME, 8i64, true, "D", false, "d", "p"),
+        (
+            "uuid",
+            pg_wire::oid::UUID,
+            16i64,
+            false,
+            "U",
+            false,
+            "c",
+            "p",
+        ),
+        (
+            "varchar",
+            pg_wire::oid::VARCHAR,
+            -1i64,
+            false,
+            "S",
+            false,
+            "i",
+            "x",
+        ),
+    ];
+    let mut rows = Vec::with_capacity(specs.len());
+    for (typname, oid, typlen, typbyval, typcategory, preferred, typalign, typstorage) in specs {
+        let mut row = BTreeMap::new();
+        row.insert("oid".to_string(), Lit::U64 { v: oid as u64 });
+        row.insert(
+            "typname".to_string(),
+            Lit::Str {
+                v: typname.to_string(),
+            },
+        );
+        row.insert(
+            "typnamespace".to_string(),
+            Lit::U64 {
+                v: pg_catalog_namespace_oid("pg_catalog"),
+            },
+        );
+        row.insert("typowner".to_string(), Lit::U64 { v: 10 });
+        row.insert("typlen".to_string(), Lit::I64 { v: typlen });
+        row.insert("typbyval".to_string(), Lit::Bool { v: typbyval });
+        row.insert("typtype".to_string(), Lit::Str { v: "b".to_string() });
+        row.insert(
+            "typcategory".to_string(),
+            Lit::Str {
+                v: typcategory.to_string(),
+            },
+        );
+        row.insert("typispreferred".to_string(), Lit::Bool { v: preferred });
+        row.insert("typisdefined".to_string(), Lit::Bool { v: true });
+        row.insert("typdelim".to_string(), Lit::Str { v: ",".to_string() });
+        row.insert("typrelid".to_string(), Lit::U64 { v: 0 });
+        row.insert("typelem".to_string(), Lit::U64 { v: 0 });
+        row.insert("typarray".to_string(), Lit::U64 { v: 0 });
+        row.insert(
+            "typinput".to_string(),
+            Lit::Str {
+                v: format!("{typname}in"),
+            },
+        );
+        row.insert(
+            "typoutput".to_string(),
+            Lit::Str {
+                v: format!("{typname}out"),
+            },
+        );
+        row.insert(
+            "typalign".to_string(),
+            Lit::Str {
+                v: typalign.to_string(),
+            },
+        );
+        row.insert(
+            "typstorage".to_string(),
+            Lit::Str {
+                v: typstorage.to_string(),
+            },
+        );
+        row.insert("typtypmod".to_string(), Lit::I64 { v: -1 });
+        row.insert("typnotnull".to_string(), Lit::Bool { v: false });
+        row.insert("typbasetype".to_string(), Lit::U64 { v: 0 });
+        row.insert("typndims".to_string(), Lit::U64 { v: 0 });
+        rows.push(row);
+    }
+    rows
+}
+
+fn pg_catalog_select_result(
+    eng: &Engine,
+    table: &BaseTableRef,
+    projection: &[SelectItem],
+    where_expr: &Option<Expr>,
+    order_by: &[OrderBy],
+    limit: &Option<LimitClause>,
+    default_db: Option<&str>,
+) -> Result<Option<Value>, RpcError> {
+    if !table.db.eq_ignore_ascii_case("pg_catalog") {
+        return Ok(None);
+    }
+
+    let current_db = default_db.unwrap_or("skein").to_string();
+    let mut rows: Vec<BTreeMap<String, Lit>> = Vec::new();
+    let all_cols: Vec<&str> = if table.table.eq_ignore_ascii_case("pg_database") {
+        let mut databases = vec![
+            "postgres".to_string(),
+            "template0".to_string(),
+            "template1".to_string(),
+            current_db.clone(),
+        ];
+        databases.extend(eng.list_databases());
+        databases.sort_by_key(|name| name.to_ascii_lowercase());
+        databases.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        for datname in databases {
+            let mut row = BTreeMap::new();
+            let datistemplate = matches!(datname.as_str(), "template0" | "template1");
+            row.insert(
+                "oid".to_string(),
+                Lit::U64 {
+                    v: pg_catalog_database_oid(&datname),
+                },
+            );
+            row.insert("datname".to_string(), Lit::Str { v: datname.clone() });
+            row.insert("datdba".to_string(), Lit::U64 { v: 10 });
+            row.insert("encoding".to_string(), Lit::I64 { v: 6 });
+            row.insert(
+                "datlocprovider".to_string(),
+                Lit::Str { v: "c".to_string() },
+            );
+            row.insert("datistemplate".to_string(), Lit::Bool { v: datistemplate });
+            row.insert(
+                "datallowconn".to_string(),
+                Lit::Bool {
+                    v: !matches!(datname.as_str(), "template0"),
+                },
+            );
+            row.insert("datconnlimit".to_string(), Lit::I64 { v: -1 });
+            row.insert(
+                "datcollate".to_string(),
+                Lit::Str {
+                    v: "C.UTF-8".to_string(),
+                },
+            );
+            row.insert(
+                "datctype".to_string(),
+                Lit::Str {
+                    v: "C.UTF-8".to_string(),
+                },
+            );
+            row.insert("dattablespace".to_string(), Lit::U64 { v: 1663 });
+            rows.push(row);
+        }
+        vec![
+            "oid",
+            "datname",
+            "datdba",
+            "encoding",
+            "datlocprovider",
+            "datistemplate",
+            "datallowconn",
+            "datconnlimit",
+            "datcollate",
+            "datctype",
+            "dattablespace",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_namespace") {
+        for nspname in ["pg_catalog", "public", "information_schema"] {
+            let mut row = BTreeMap::new();
+            row.insert(
+                "oid".to_string(),
+                Lit::U64 {
+                    v: pg_catalog_namespace_oid(nspname),
+                },
+            );
+            row.insert(
+                "nspname".to_string(),
+                Lit::Str {
+                    v: nspname.to_string(),
+                },
+            );
+            row.insert("nspowner".to_string(), Lit::U64 { v: 10 });
+            row.insert("nspacl".to_string(), Lit::Null);
+            rows.push(row);
+        }
+        vec!["oid", "nspname", "nspowner", "nspacl"]
+    } else if table.table.eq_ignore_ascii_case("pg_type") {
+        rows = pg_catalog_builtin_type_rows();
+        vec![
+            "oid",
+            "typname",
+            "typnamespace",
+            "typowner",
+            "typlen",
+            "typbyval",
+            "typtype",
+            "typcategory",
+            "typispreferred",
+            "typisdefined",
+            "typdelim",
+            "typrelid",
+            "typelem",
+            "typarray",
+            "typinput",
+            "typoutput",
+            "typalign",
+            "typstorage",
+            "typtypmod",
+            "typnotnull",
+            "typbasetype",
+            "typndims",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_settings") {
+        for setting_name in [
+            "client_encoding",
+            "datestyle",
+            "default_transaction_isolation",
+            "integer_datetimes",
+            "is_superuser",
+            "max_identifier_length",
+            "server_encoding",
+            "server_version",
+            "server_version_num",
+            "standard_conforming_strings",
+            "timezone",
+            "transaction_isolation",
+        ] {
+            let Some(setting) = pg_bootstrap_setting_value(setting_name, Some(&current_db), None)
+            else {
+                continue;
+            };
+            let vartype = match setting_name {
+                "max_identifier_length" | "server_version_num" => "integer",
+                "integer_datetimes" | "is_superuser" | "standard_conforming_strings" => "bool",
+                _ => "string",
+            };
+            let mut row = BTreeMap::new();
+            row.insert(
+                "name".to_string(),
+                Lit::Str {
+                    v: setting_name.to_string(),
+                },
+            );
+            row.insert("setting".to_string(), Lit::Str { v: setting.clone() });
+            row.insert(
+                "category".to_string(),
+                Lit::Str {
+                    v: "SkeinDB compatibility".to_string(),
+                },
+            );
+            row.insert(
+                "short_desc".to_string(),
+                Lit::Str {
+                    v: format!("Compatibility setting for {setting_name}"),
+                },
+            );
+            row.insert("extra_desc".to_string(), Lit::Null);
+            row.insert(
+                "context".to_string(),
+                Lit::Str {
+                    v: "user".to_string(),
+                },
+            );
+            row.insert(
+                "vartype".to_string(),
+                Lit::Str {
+                    v: vartype.to_string(),
+                },
+            );
+            row.insert(
+                "source".to_string(),
+                Lit::Str {
+                    v: "default".to_string(),
+                },
+            );
+            row.insert("min_val".to_string(), Lit::Null);
+            row.insert("max_val".to_string(), Lit::Null);
+            row.insert("enumvals".to_string(), Lit::Null);
+            row.insert("boot_val".to_string(), Lit::Str { v: setting.clone() });
+            row.insert("reset_val".to_string(), Lit::Str { v: setting });
+            row.insert("sourcefile".to_string(), Lit::Null);
+            row.insert("sourceline".to_string(), Lit::Null);
+            row.insert("pending_restart".to_string(), Lit::Bool { v: false });
+            rows.push(row);
+        }
+        vec![
+            "name",
+            "setting",
+            "category",
+            "short_desc",
+            "extra_desc",
+            "context",
+            "vartype",
+            "source",
+            "min_val",
+            "max_val",
+            "enumvals",
+            "boot_val",
+            "reset_val",
+            "sourcefile",
+            "sourceline",
+            "pending_restart",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_stat_activity") {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "datid".to_string(),
+            Lit::U64 {
+                v: pg_catalog_database_oid(&current_db),
+            },
+        );
+        row.insert("datname".to_string(), Lit::Str { v: current_db });
+        row.insert("pid".to_string(), Lit::I64 { v: 1 });
+        row.insert("leader_pid".to_string(), Lit::Null);
+        row.insert("usesysid".to_string(), Lit::U64 { v: 10 });
+        row.insert(
+            "usename".to_string(),
+            Lit::Str {
+                v: "root".to_string(),
+            },
+        );
+        row.insert(
+            "application_name".to_string(),
+            Lit::Str {
+                v: "skeindb".to_string(),
+            },
+        );
+        row.insert("client_addr".to_string(), Lit::Null);
+        row.insert("client_hostname".to_string(), Lit::Null);
+        row.insert("client_port".to_string(), Lit::Null);
+        row.insert("backend_start".to_string(), Lit::Null);
+        row.insert("xact_start".to_string(), Lit::Null);
+        row.insert("query_start".to_string(), Lit::Null);
+        row.insert("state_change".to_string(), Lit::Null);
+        row.insert("wait_event_type".to_string(), Lit::Null);
+        row.insert("wait_event".to_string(), Lit::Null);
+        row.insert(
+            "state".to_string(),
+            Lit::Str {
+                v: "active".to_string(),
+            },
+        );
+        row.insert("backend_xid".to_string(), Lit::Null);
+        row.insert("backend_xmin".to_string(), Lit::Null);
+        row.insert("query".to_string(), Lit::Str { v: String::new() });
+        row.insert(
+            "backend_type".to_string(),
+            Lit::Str {
+                v: "client backend".to_string(),
+            },
+        );
+        rows.push(row);
+        vec![
+            "datid",
+            "datname",
+            "pid",
+            "leader_pid",
+            "usesysid",
+            "usename",
+            "application_name",
+            "client_addr",
+            "client_hostname",
+            "client_port",
+            "backend_start",
+            "xact_start",
+            "query_start",
+            "state_change",
+            "wait_event_type",
+            "wait_event",
+            "state",
+            "backend_xid",
+            "backend_xmin",
+            "query",
+            "backend_type",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_proc") {
+        vec![
+            "oid",
+            "proname",
+            "pronamespace",
+            "proowner",
+            "prolang",
+            "procost",
+            "prorows",
+            "provariadic",
+            "prosupport",
+            "prokind",
+            "prosecdef",
+            "proleakproof",
+            "proisstrict",
+            "proretset",
+            "provolatile",
+            "proparallel",
+            "pronargs",
+            "pronargdefaults",
+            "prorettype",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_class") {
+        // Enumerate user tables + indexes across all databases via public API.
+        let nsp_public = pg_catalog_namespace_oid("public");
+        let databases = eng.list_databases();
+        for db in &databases {
+            let table_names = match eng.list_tables(db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in &table_names {
+                let desc = match eng.describe_table(db, tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let columns = desc["columns"].as_array();
+                let primary_key: Vec<String> = desc["primary_key"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let indexes = desc["indexes"].as_array();
+                let rel_oid = pg_catalog_hash_oid(&["pg_class", db, tname]);
+                let has_pk = !primary_key.is_empty();
+                let has_indexes = indexes.map(|a| !a.is_empty()).unwrap_or(false);
+                let relnatts = columns.map(|a| a.len() as i64).unwrap_or(0);
+
+                let mut row = BTreeMap::new();
+                row.insert("oid".to_string(), Lit::U64 { v: rel_oid });
+                row.insert("relname".to_string(), Lit::Str { v: tname.clone() });
+                row.insert("relnamespace".to_string(), Lit::U64 { v: nsp_public });
+                row.insert("relowner".to_string(), Lit::U64 { v: 10 });
+                row.insert("relkind".to_string(), Lit::Str { v: "r".to_string() });
+                row.insert("reltuples".to_string(), Lit::I64 { v: -1 });
+                row.insert(
+                    "relhasindex".to_string(),
+                    Lit::Bool {
+                        v: has_pk || has_indexes,
+                    },
+                );
+                row.insert("relhasrules".to_string(), Lit::Bool { v: false });
+                row.insert("relhastriggers".to_string(), Lit::Bool { v: false });
+                row.insert("relrowsecurity".to_string(), Lit::Bool { v: false });
+                row.insert("relam".to_string(), Lit::U64 { v: 2 }); // heap
+                row.insert("reltablespace".to_string(), Lit::U64 { v: 0 });
+                row.insert("reloftype".to_string(), Lit::U64 { v: 0 });
+                row.insert(
+                    "relpersistence".to_string(),
+                    Lit::Str { v: "p".to_string() },
+                );
+                row.insert("relreplident".to_string(), Lit::Str { v: "d".to_string() });
+                row.insert("relisshared".to_string(), Lit::Bool { v: false });
+                row.insert("relispartition".to_string(), Lit::Bool { v: false });
+                row.insert("relnatts".to_string(), Lit::I64 { v: relnatts });
+                row.insert("relchecks".to_string(), Lit::I64 { v: 0 });
+                row.insert("relhaspkey".to_string(), Lit::Bool { v: has_pk });
+                row.insert("relforcerowsecurity".to_string(), Lit::Bool { v: false });
+                row.insert("relacl".to_string(), Lit::Null);
+                row.insert("reloptions".to_string(), Lit::Null);
+                rows.push(row);
+
+                // Emit an index entry for the primary key.
+                if has_pk {
+                    let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, "_pkey"]);
+                    let mut idx_row = BTreeMap::new();
+                    idx_row.insert("oid".to_string(), Lit::U64 { v: idx_oid });
+                    idx_row.insert(
+                        "relname".to_string(),
+                        Lit::Str {
+                            v: format!("{tname}_pkey"),
+                        },
+                    );
+                    idx_row.insert("relnamespace".to_string(), Lit::U64 { v: nsp_public });
+                    idx_row.insert("relowner".to_string(), Lit::U64 { v: 10 });
+                    idx_row.insert("relkind".to_string(), Lit::Str { v: "i".to_string() });
+                    idx_row.insert("reltuples".to_string(), Lit::I64 { v: -1 });
+                    idx_row.insert("relhasindex".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relhasrules".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relhastriggers".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relrowsecurity".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relam".to_string(), Lit::U64 { v: 403 }); // btree
+                    idx_row.insert("reltablespace".to_string(), Lit::U64 { v: 0 });
+                    idx_row.insert("reloftype".to_string(), Lit::U64 { v: 0 });
+                    idx_row.insert(
+                        "relpersistence".to_string(),
+                        Lit::Str { v: "p".to_string() },
+                    );
+                    idx_row.insert("relreplident".to_string(), Lit::Str { v: "n".to_string() });
+                    idx_row.insert("relisshared".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relispartition".to_string(), Lit::Bool { v: false });
+                    idx_row.insert(
+                        "relnatts".to_string(),
+                        Lit::I64 {
+                            v: primary_key.len() as i64,
+                        },
+                    );
+                    idx_row.insert("relchecks".to_string(), Lit::I64 { v: 0 });
+                    idx_row.insert("relhaspkey".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relforcerowsecurity".to_string(), Lit::Bool { v: false });
+                    idx_row.insert("relacl".to_string(), Lit::Null);
+                    idx_row.insert("reloptions".to_string(), Lit::Null);
+                    rows.push(idx_row);
+                }
+
+                // Emit index entries for secondary indexes.
+                if let Some(idx_arr) = indexes {
+                    for idx_val in idx_arr {
+                        let idx_name = idx_val
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unnamed");
+                        let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, idx_name]);
+                        let mut idx_row = BTreeMap::new();
+                        idx_row.insert("oid".to_string(), Lit::U64 { v: idx_oid });
+                        idx_row.insert(
+                            "relname".to_string(),
+                            Lit::Str {
+                                v: idx_name.to_string(),
+                            },
+                        );
+                        idx_row.insert("relnamespace".to_string(), Lit::U64 { v: nsp_public });
+                        idx_row.insert("relowner".to_string(), Lit::U64 { v: 10 });
+                        idx_row.insert("relkind".to_string(), Lit::Str { v: "i".to_string() });
+                        idx_row.insert("reltuples".to_string(), Lit::I64 { v: -1 });
+                        idx_row.insert("relhasindex".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relhasrules".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relhastriggers".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relrowsecurity".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relam".to_string(), Lit::U64 { v: 403 }); // btree
+                        idx_row.insert("reltablespace".to_string(), Lit::U64 { v: 0 });
+                        idx_row.insert("reloftype".to_string(), Lit::U64 { v: 0 });
+                        idx_row.insert(
+                            "relpersistence".to_string(),
+                            Lit::Str { v: "p".to_string() },
+                        );
+                        idx_row.insert("relreplident".to_string(), Lit::Str { v: "n".to_string() });
+                        idx_row.insert("relisshared".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relispartition".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relnatts".to_string(), Lit::I64 { v: 0 });
+                        idx_row.insert("relchecks".to_string(), Lit::I64 { v: 0 });
+                        idx_row.insert("relhaspkey".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relforcerowsecurity".to_string(), Lit::Bool { v: false });
+                        idx_row.insert("relacl".to_string(), Lit::Null);
+                        idx_row.insert("reloptions".to_string(), Lit::Null);
+                        rows.push(idx_row);
+                    }
+                }
+            }
+        }
+        vec![
+            "oid",
+            "relname",
+            "relnamespace",
+            "relowner",
+            "relkind",
+            "reltuples",
+            "relhasindex",
+            "relhasrules",
+            "relhastriggers",
+            "relrowsecurity",
+            "relam",
+            "reltablespace",
+            "reloftype",
+            "relpersistence",
+            "relreplident",
+            "relisshared",
+            "relispartition",
+            "relnatts",
+            "relchecks",
+            "relhaspkey",
+            "relforcerowsecurity",
+            "relacl",
+            "reloptions",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_attribute") {
+        let databases = eng.list_databases();
+        for db in &databases {
+            let table_names = match eng.list_tables(db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in &table_names {
+                let desc = match eng.describe_table(db, tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let rel_oid = pg_catalog_hash_oid(&["pg_class", db, tname]);
+                let cols = match desc["columns"].as_array() {
+                    Some(a) => a,
+                    None => continue,
+                };
+                for (idx, col_val) in cols.iter().enumerate() {
+                    let attnum = (idx + 1) as i64;
+                    let col_name = col_val["name"].as_str().unwrap_or("");
+                    let kind = col_val["type"]["kind"].as_str().unwrap_or("text");
+                    let nullable = col_val["nullable"].as_bool().unwrap_or(true);
+                    let atttypid = pg_catalog_type_oid_for_kind(kind);
+                    let attlen = pg_catalog_type_len(atttypid);
+                    let mut row = BTreeMap::new();
+                    row.insert("attrelid".to_string(), Lit::U64 { v: rel_oid });
+                    row.insert(
+                        "attname".to_string(),
+                        Lit::Str {
+                            v: col_name.to_string(),
+                        },
+                    );
+                    row.insert("atttypid".to_string(), Lit::U64 { v: atttypid as u64 });
+                    row.insert("attlen".to_string(), Lit::I64 { v: attlen });
+                    row.insert("attnum".to_string(), Lit::I64 { v: attnum });
+                    row.insert("attndims".to_string(), Lit::I64 { v: 0 });
+                    row.insert("atttypmod".to_string(), Lit::I64 { v: -1 });
+                    row.insert("attnotnull".to_string(), Lit::Bool { v: !nullable });
+                    row.insert("atthasdef".to_string(), Lit::Bool { v: false });
+                    row.insert("attidentity".to_string(), Lit::Str { v: String::new() });
+                    row.insert("attgenerated".to_string(), Lit::Str { v: String::new() });
+                    row.insert("attisdropped".to_string(), Lit::Bool { v: false });
+                    row.insert("attislocal".to_string(), Lit::Bool { v: true });
+                    row.insert("attinhcount".to_string(), Lit::I64 { v: 0 });
+                    row.insert("attcollation".to_string(), Lit::U64 { v: 0 });
+                    row.insert("attacl".to_string(), Lit::Null);
+                    row.insert("attoptions".to_string(), Lit::Null);
+                    row.insert("attfdwoptions".to_string(), Lit::Null);
+                    rows.push(row);
+                }
+            }
+        }
+        vec![
+            "attrelid",
+            "attname",
+            "atttypid",
+            "attlen",
+            "attnum",
+            "attndims",
+            "atttypmod",
+            "attnotnull",
+            "atthasdef",
+            "attidentity",
+            "attgenerated",
+            "attisdropped",
+            "attislocal",
+            "attinhcount",
+            "attcollation",
+            "attacl",
+            "attoptions",
+            "attfdwoptions",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_index") {
+        let databases = eng.list_databases();
+        for db in &databases {
+            let table_names = match eng.list_tables(db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in &table_names {
+                let desc = match eng.describe_table(db, tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let rel_oid = pg_catalog_hash_oid(&["pg_class", db, tname]);
+                let col_names: Vec<String> = desc["columns"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c["name"].as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let primary_key: Vec<String> = desc["primary_key"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Primary key index.
+                if !primary_key.is_empty() {
+                    let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, "_pkey"]);
+                    let indnatts = primary_key.len() as i64;
+                    let indkey = pg_catalog_indkey(&primary_key, &col_names);
+                    let mut row = BTreeMap::new();
+                    row.insert("indexrelid".to_string(), Lit::U64 { v: idx_oid });
+                    row.insert("indrelid".to_string(), Lit::U64 { v: rel_oid });
+                    row.insert("indnatts".to_string(), Lit::I64 { v: indnatts });
+                    row.insert("indnkeyatts".to_string(), Lit::I64 { v: indnatts });
+                    row.insert("indisunique".to_string(), Lit::Bool { v: true });
+                    row.insert("indisprimary".to_string(), Lit::Bool { v: true });
+                    row.insert("indisexclusion".to_string(), Lit::Bool { v: false });
+                    row.insert("indimmediate".to_string(), Lit::Bool { v: true });
+                    row.insert("indisclustered".to_string(), Lit::Bool { v: false });
+                    row.insert("indisvalid".to_string(), Lit::Bool { v: true });
+                    row.insert("indcheckxmin".to_string(), Lit::Bool { v: false });
+                    row.insert("indisready".to_string(), Lit::Bool { v: true });
+                    row.insert("indislive".to_string(), Lit::Bool { v: true });
+                    row.insert("indisreplident".to_string(), Lit::Bool { v: false });
+                    row.insert("indkey".to_string(), Lit::Str { v: indkey });
+                    row.insert("indexprs".to_string(), Lit::Null);
+                    row.insert("indpred".to_string(), Lit::Null);
+                    rows.push(row);
+                }
+
+                // Secondary indexes.
+                if let Some(idx_arr) = desc["indexes"].as_array() {
+                    for idx_val in idx_arr {
+                        let idx_name = idx_val
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unnamed");
+                        let idx_cols: Vec<String> = idx_val
+                            .get("columns")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let is_unique = idx_val
+                            .get("unique")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, idx_name]);
+                        let indnatts = idx_cols.len() as i64;
+                        let indkey = pg_catalog_indkey(&idx_cols, &col_names);
+                        let mut row = BTreeMap::new();
+                        row.insert("indexrelid".to_string(), Lit::U64 { v: idx_oid });
+                        row.insert("indrelid".to_string(), Lit::U64 { v: rel_oid });
+                        row.insert("indnatts".to_string(), Lit::I64 { v: indnatts });
+                        row.insert("indnkeyatts".to_string(), Lit::I64 { v: indnatts });
+                        row.insert("indisunique".to_string(), Lit::Bool { v: is_unique });
+                        row.insert("indisprimary".to_string(), Lit::Bool { v: false });
+                        row.insert("indisexclusion".to_string(), Lit::Bool { v: false });
+                        row.insert("indimmediate".to_string(), Lit::Bool { v: true });
+                        row.insert("indisclustered".to_string(), Lit::Bool { v: false });
+                        row.insert("indisvalid".to_string(), Lit::Bool { v: true });
+                        row.insert("indcheckxmin".to_string(), Lit::Bool { v: false });
+                        row.insert("indisready".to_string(), Lit::Bool { v: true });
+                        row.insert("indislive".to_string(), Lit::Bool { v: true });
+                        row.insert("indisreplident".to_string(), Lit::Bool { v: false });
+                        row.insert("indkey".to_string(), Lit::Str { v: indkey });
+                        row.insert("indexprs".to_string(), Lit::Null);
+                        row.insert("indpred".to_string(), Lit::Null);
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        vec![
+            "indexrelid",
+            "indrelid",
+            "indnatts",
+            "indnkeyatts",
+            "indisunique",
+            "indisprimary",
+            "indisexclusion",
+            "indimmediate",
+            "indisclustered",
+            "indisvalid",
+            "indcheckxmin",
+            "indisready",
+            "indislive",
+            "indisreplident",
+            "indkey",
+            "indexprs",
+            "indpred",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_constraint") {
+        let nsp_oid = pg_catalog_namespace_oid("public");
+        let databases = eng.list_databases();
+        for db in &databases {
+            let table_names = match eng.list_tables(db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in &table_names {
+                let desc = match eng.describe_table(db, tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let rel_oid = pg_catalog_hash_oid(&["pg_class", db, tname]);
+                let col_names: Vec<String> = desc["columns"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c["name"].as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let primary_key: Vec<String> = desc["primary_key"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Primary key constraint.
+                if !primary_key.is_empty() {
+                    let con_oid = pg_catalog_hash_oid(&["pg_constraint", db, tname, "_pkey"]);
+                    let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, "_pkey"]);
+                    let conkey = pg_catalog_conkey(&primary_key, &col_names);
+                    let mut row = BTreeMap::new();
+                    row.insert("oid".to_string(), Lit::U64 { v: con_oid });
+                    row.insert(
+                        "conname".to_string(),
+                        Lit::Str {
+                            v: format!("{tname}_pkey"),
+                        },
+                    );
+                    row.insert("connamespace".to_string(), Lit::U64 { v: nsp_oid });
+                    row.insert("contype".to_string(), Lit::Str { v: "p".to_string() });
+                    row.insert("condeferrable".to_string(), Lit::Bool { v: false });
+                    row.insert("condeferred".to_string(), Lit::Bool { v: false });
+                    row.insert("convalidated".to_string(), Lit::Bool { v: true });
+                    row.insert("conrelid".to_string(), Lit::U64 { v: rel_oid });
+                    row.insert("contypid".to_string(), Lit::U64 { v: 0 });
+                    row.insert("conindid".to_string(), Lit::U64 { v: idx_oid });
+                    row.insert("conparentid".to_string(), Lit::U64 { v: 0 });
+                    row.insert("confrelid".to_string(), Lit::U64 { v: 0 });
+                    row.insert("confupdtype".to_string(), Lit::Str { v: " ".to_string() });
+                    row.insert("confdeltype".to_string(), Lit::Str { v: " ".to_string() });
+                    row.insert("confmatchtype".to_string(), Lit::Str { v: " ".to_string() });
+                    row.insert("conislocal".to_string(), Lit::Bool { v: true });
+                    row.insert("coninhcount".to_string(), Lit::I64 { v: 0 });
+                    row.insert("connoinherit".to_string(), Lit::Bool { v: true });
+                    row.insert("conkey".to_string(), Lit::Str { v: conkey });
+                    row.insert("confkey".to_string(), Lit::Null);
+                    rows.push(row);
+                }
+
+                // Unique constraints from secondary indexes.
+                if let Some(idx_arr) = desc["indexes"].as_array() {
+                    for idx_val in idx_arr {
+                        let is_unique = idx_val
+                            .get("unique")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if !is_unique {
+                            continue;
+                        }
+                        let idx_name = idx_val
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unnamed");
+                        let idx_cols: Vec<String> = idx_val
+                            .get("columns")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let con_oid = pg_catalog_hash_oid(&["pg_constraint", db, tname, idx_name]);
+                        let idx_oid = pg_catalog_hash_oid(&["pg_class_idx", db, tname, idx_name]);
+                        let conkey = pg_catalog_conkey(&idx_cols, &col_names);
+                        let mut row = BTreeMap::new();
+                        row.insert("oid".to_string(), Lit::U64 { v: con_oid });
+                        row.insert(
+                            "conname".to_string(),
+                            Lit::Str {
+                                v: format!("{idx_name}_unique"),
+                            },
+                        );
+                        row.insert("connamespace".to_string(), Lit::U64 { v: nsp_oid });
+                        row.insert("contype".to_string(), Lit::Str { v: "u".to_string() });
+                        row.insert("condeferrable".to_string(), Lit::Bool { v: false });
+                        row.insert("condeferred".to_string(), Lit::Bool { v: false });
+                        row.insert("convalidated".to_string(), Lit::Bool { v: true });
+                        row.insert("conrelid".to_string(), Lit::U64 { v: rel_oid });
+                        row.insert("contypid".to_string(), Lit::U64 { v: 0 });
+                        row.insert("conindid".to_string(), Lit::U64 { v: idx_oid });
+                        row.insert("conparentid".to_string(), Lit::U64 { v: 0 });
+                        row.insert("confrelid".to_string(), Lit::U64 { v: 0 });
+                        row.insert("confupdtype".to_string(), Lit::Str { v: " ".to_string() });
+                        row.insert("confdeltype".to_string(), Lit::Str { v: " ".to_string() });
+                        row.insert("confmatchtype".to_string(), Lit::Str { v: " ".to_string() });
+                        row.insert("conislocal".to_string(), Lit::Bool { v: true });
+                        row.insert("coninhcount".to_string(), Lit::I64 { v: 0 });
+                        row.insert("connoinherit".to_string(), Lit::Bool { v: true });
+                        row.insert("conkey".to_string(), Lit::Str { v: conkey });
+                        row.insert("confkey".to_string(), Lit::Null);
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        vec![
+            "oid",
+            "conname",
+            "connamespace",
+            "contype",
+            "condeferrable",
+            "condeferred",
+            "convalidated",
+            "conrelid",
+            "contypid",
+            "conindid",
+            "conparentid",
+            "confrelid",
+            "confupdtype",
+            "confdeltype",
+            "confmatchtype",
+            "conislocal",
+            "coninhcount",
+            "connoinherit",
+            "conkey",
+            "confkey",
+        ]
+    } else {
+        return Err(RpcError::new(
+            "not_supported",
+            format!("pg_catalog table '{}' is not supported yet", table.table),
+        ));
+    };
+
+    Ok(Some(render_virtual_select_result(
+        rows, projection, where_expr, order_by, limit, &all_cols,
+    )?))
 }
 
 fn insert_dup_value_from_row(row: &BTreeMap<String, Lit>, value: &InsertDupValue) -> Lit {
@@ -19803,6 +24112,7 @@ fn sql_exec_row_exists(
             None,
             None,
             false,
+            None,
         )
         .map_err(to_rpc_error)?;
     let data = result
@@ -20088,6 +24398,17 @@ async fn mysql_select_total_rows_without_limit(
             )? {
                 return rows_json_result_len(&result);
             }
+            if let Some(result) = pg_catalog_select_result(
+                &eng,
+                table,
+                &projection,
+                &where_expr,
+                &order_by,
+                &no_limit,
+                default_db,
+            )? {
+                return rows_json_result_len(&result);
+            }
         }
     }
 
@@ -20126,6 +24447,7 @@ async fn mysql_select_total_rows_without_limit(
             None,
             None,
             false,
+            None,
         )
         .map_err(to_rpc_error)?;
     let data = result
@@ -20136,7 +24458,12 @@ async fn mysql_select_total_rows_without_limit(
 }
 
 async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcError> {
-    let plan = parse_sql_plan(&params.sql, params.default_db.as_deref())?;
+    // Extract and strip an optional /*+ SKEIN_AS_OF('...') */ hint before
+    // parsing. The hint overrides any session-level as_of set via
+    // `SET @@skein.as_of` (T181).
+    let (sql_for_plan, hint_as_of_ms) = extract_skein_as_of_hint(&params.sql);
+    let as_of_ms = hint_as_of_ms.or(params.as_of_ms);
+    let plan = parse_sql_plan(&sql_for_plan, params.default_db.as_deref())?;
     if params.explain {
         return Ok(serde_json::json!({
             "statement": sql_plan_name(&plan),
@@ -20198,6 +24525,21 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
                             "result": result
                         }));
                     }
+                    if let Some(result) = pg_catalog_select_result(
+                        &eng,
+                        table,
+                        &projection,
+                        &where_expr,
+                        &order_by,
+                        &limit,
+                        params.default_db.as_deref(),
+                    )? {
+                        return Ok(serde_json::json!({
+                            "statement": "select",
+                            "read_only": true,
+                            "result": result
+                        }));
+                    }
                 }
             }
             let table_descs = mysql_stmt_collect_table_descs(&eng, &from)?;
@@ -20227,7 +24569,7 @@ async fn sql_exec(state: &AppState, params: SqlExecParams) -> Result<Value, RpcE
             };
             let fmt = params.result_format.unwrap_or(ResultFormat::RowsJson);
             let result = eng
-                .query_select(&query, &[], fmt, false, None, None, None, false)
+                .query_select(&query, &[], fmt, false, None, None, None, false, as_of_ms)
                 .map_err(to_rpc_error)?;
             Ok(serde_json::json!({
                 "statement": "select",
@@ -20657,6 +24999,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "forensic.export"
             | "maintenance.audit_status"
             | "maintenance.compaction.status"
+            | "maintenance.history.status"
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
@@ -20805,6 +25148,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "query.select",
         "query.patch",
         "query.subscribe",
+        "cdc.subscribe_query",
         "dp.aggregate",
         "dp.budget.set",
         "dp.budget.get",
@@ -20821,6 +25165,9 @@ fn system_capabilities(state: &AppState) -> Value {
         "maintenance.compaction.set_policy",
         "maintenance.compaction.pause",
         "maintenance.compaction.resume",
+        "maintenance.history.status",
+        "maintenance.history.set_policy",
+        "maintenance.history.gc",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",
@@ -20838,6 +25185,7 @@ fn system_capabilities(state: &AppState) -> Value {
         "view.status",
         "view.explain_deps",
         "cdc.subscribe_table",
+        "cdc.subscribe_query",
         "cdc.poll",
         "cdc.ack",
         "cdc.close",
@@ -22281,6 +26629,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sql_exec_time_travel_as_of_hint_filters_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_time_travel_as_of_hint");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        assert!(
+            call_sql_exec_http(&state, json!({"sql": "CREATE DATABASE app"}))
+                .await
+                .ok
+        );
+        assert!(
+            call_sql_exec_http(
+                &state,
+                json!({
+                    "sql": "CREATE TABLE app.items (id BIGINT UNSIGNED NOT NULL, PRIMARY KEY (id))"
+                })
+            )
+            .await
+            .ok
+        );
+        assert!(
+            call_sql_exec_http(
+                &state,
+                json!({"sql": "INSERT INTO app.items (id) VALUES (1)"})
+            )
+            .await
+            .ok
+        );
+        // Sleep > 1ms so the second insert's commit_ts_ms is strictly greater.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let cutoff_ms = now_unix_ms_u64();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(
+            call_sql_exec_http(
+                &state,
+                json!({"sql": "INSERT INTO app.items (id) VALUES (2)"})
+            )
+            .await
+            .ok
+        );
+
+        // Without as_of: both rows visible.
+        let resp_all = call_sql_exec_http(
+            &state,
+            json!({"sql": "SELECT id FROM app.items ORDER BY id"}),
+        )
+        .await;
+        assert!(resp_all.ok);
+        let all_rows = resp_all
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(all_rows.len(), 2);
+
+        // With /*+ SKEIN_AS_OF(<cutoff>) */ hint: only the first row is visible.
+        let hinted_sql = format!(
+            "SELECT /*+ SKEIN_AS_OF({}) */ id FROM app.items ORDER BY id",
+            cutoff_ms
+        );
+        let resp_hint = call_sql_exec_http(&state, json!({"sql": hinted_sql})).await;
+        assert!(resp_hint.ok);
+        let hint_rows = resp_hint
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(hint_rows.len(), 1);
+        assert_eq!(hint_rows[0][0]["v"].as_u64(), Some(1));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sql_exec_information_schema_tables_and_columns_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("sql_exec_information_schema");
         let engine = Engine::open(&dir)?;
@@ -22420,6 +26851,130 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(empty_rows.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sql_exec_pg_catalog_virtual_tables_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("sql_exec_pg_catalog");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
+        assert!(resp.ok);
+
+        let databases = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT datname, datistemplate FROM pg_catalog.pg_database WHERE datname = 'app'"
+            }),
+        )
+        .await;
+        assert!(databases.ok);
+        let database_rows = databases
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(database_rows.len(), 1);
+        assert_eq!(database_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(database_rows[0][1]["v"].as_bool(), Some(false));
+
+        let namespaces = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname = 'public'"
+            }),
+        )
+        .await;
+        assert!(namespaces.ok);
+        let namespace_rows = namespaces
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(namespace_rows.len(), 1);
+        assert_eq!(namespace_rows[0][0]["v"].as_str(), Some("public"));
+
+        let settings = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT name, setting, pending_restart FROM pg_catalog.pg_settings WHERE name = 'server_version_num'"
+            }),
+        )
+        .await;
+        assert!(settings.ok);
+        let setting_rows = settings
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(setting_rows.len(), 1);
+        assert_eq!(setting_rows[0][0]["v"].as_str(), Some("server_version_num"));
+        assert_eq!(setting_rows[0][1]["v"].as_str(), Some("160000"));
+        assert_eq!(setting_rows[0][2]["v"].as_bool(), Some(false));
+
+        let types = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT typname, typlen FROM pg_catalog.pg_type WHERE typname = 'bytea'"
+            }),
+        )
+        .await;
+        assert!(types.ok);
+        let type_rows = types
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(type_rows.len(), 1);
+        assert_eq!(type_rows[0][0]["v"].as_str(), Some("bytea"));
+        assert_eq!(type_rows[0][1]["v"].as_i64(), Some(-1));
+
+        let activity = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT datname, usename, state FROM pg_catalog.pg_stat_activity LIMIT 1"
+            }),
+        )
+        .await;
+        assert!(activity.ok);
+        let activity_rows = activity
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(activity_rows.len(), 1);
+        assert_eq!(activity_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(activity_rows[0][1]["v"].as_str(), Some("root"));
+        assert_eq!(activity_rows[0][2]["v"].as_str(), Some("active"));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -25545,6 +30100,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mysql_set_skein_as_of_session_filters_select() -> anyhow::Result<()> {
+        let dir = temp_dir("mysql_set_skein_as_of_session");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "items",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+        // Sleep so second insert is strictly after cutoff.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let cutoff_ms = now_unix_ms_u64();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 2 })])], None)?;
+
+        let state = build_state(dir.clone(), engine);
+        let mut session = MySqlSessionState::new(Some("app".to_string()), 42);
+
+        // Baseline: both rows visible before any SET.
+        let outcome =
+            mysql_execute_sql(&state, "SELECT id FROM app.items ORDER BY id", &mut session)
+                .await
+                .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        let MySqlQueryOutcome::ResultSet { rows: baseline, .. } = outcome else {
+            panic!("expected result set");
+        };
+        assert_eq!(baseline.len(), 2);
+
+        // SET @@skein.as_of = <cutoff_ms>; only the first row should be visible.
+        let set_sql = format!("SET @@skein.as_of = {}", cutoff_ms);
+        let _ = mysql_execute_sql(&state, &set_sql, &mut session)
+            .await
+            .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        assert_eq!(session.skein_as_of_ms, Some(cutoff_ms));
+
+        let outcome =
+            mysql_execute_sql(&state, "SELECT id FROM app.items ORDER BY id", &mut session)
+                .await
+                .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        let MySqlQueryOutcome::ResultSet { rows: filtered, .. } = outcome else {
+            panic!("expected result set");
+        };
+        assert_eq!(filtered, vec![vec![Some("1".to_string())]]);
+
+        // Clear with NULL; both rows visible again.
+        let _ = mysql_execute_sql(&state, "SET @@skein.as_of = NULL", &mut session)
+            .await
+            .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        assert_eq!(session.skein_as_of_ms, None);
+
+        let outcome =
+            mysql_execute_sql(&state, "SELECT id FROM app.items ORDER BY id", &mut session)
+                .await
+                .map_err(|err| anyhow::anyhow!("{:?}", err))?;
+        let MySqlQueryOutcome::ResultSet { rows: cleared, .. } = outcome else {
+            panic!("expected result set");
+        };
+        assert_eq!(cleared.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mysql_projection_subquery_rewrites_repeated_outer_refs() -> anyhow::Result<()> {
         let dir = temp_dir("mysql_projection_subquery_repeated_outer_refs");
         let mut engine = Engine::open(&dir)?;
@@ -25751,6 +30383,90 @@ mod tests {
             "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
         ));
         assert!(!mysql_is_session_compat_set("SET max_connections = 200"));
+    }
+
+    #[test]
+    fn parse_as_of_timestamp_accepts_iso_and_epoch_forms() {
+        // Epoch ms.
+        assert_eq!(parse_as_of_timestamp("0"), Some(0));
+        assert_eq!(
+            parse_as_of_timestamp("1737072000000"),
+            Some(1_737_072_000_000)
+        );
+        // Date only (UTC midnight).
+        assert_eq!(parse_as_of_timestamp("1970-01-01"), Some(0));
+        assert_eq!(parse_as_of_timestamp("2026-01-01"), Some(1_767_225_600_000));
+        // Full RFC-3339 Zulu.
+        assert_eq!(
+            parse_as_of_timestamp("2026-01-01T00:00:00Z"),
+            Some(1_767_225_600_000)
+        );
+        // With fractional seconds.
+        assert_eq!(
+            parse_as_of_timestamp("2026-01-01T00:00:00.500Z"),
+            Some(1_767_225_600_500)
+        );
+        // Space separator (MySQL style).
+        assert_eq!(
+            parse_as_of_timestamp("2026-01-01 00:00:00"),
+            Some(1_767_225_600_000)
+        );
+        // Positive / negative timezone offsets.
+        assert_eq!(
+            parse_as_of_timestamp("2026-01-01T01:00:00+01:00"),
+            Some(1_767_225_600_000)
+        );
+        assert_eq!(
+            parse_as_of_timestamp("2025-12-31T23:00:00-01:00"),
+            Some(1_767_225_600_000)
+        );
+        // Garbage and empty.
+        assert_eq!(parse_as_of_timestamp(""), None);
+        assert_eq!(parse_as_of_timestamp("yesterday"), None);
+        assert_eq!(parse_as_of_timestamp("2026-13-40"), None);
+    }
+
+    #[test]
+    fn parse_skein_as_of_assignment_value_handles_null_default_and_iso() {
+        assert_eq!(parse_skein_as_of_assignment_value("NULL").unwrap(), None);
+        assert_eq!(parse_skein_as_of_assignment_value("default").unwrap(), None);
+        assert_eq!(parse_skein_as_of_assignment_value("''").unwrap(), None);
+        assert_eq!(
+            parse_skein_as_of_assignment_value("'2026-01-01T00:00:00Z'").unwrap(),
+            Some(1_767_225_600_000)
+        );
+        assert_eq!(
+            parse_skein_as_of_assignment_value("1737072000000").unwrap(),
+            Some(1_737_072_000_000)
+        );
+        assert!(parse_skein_as_of_assignment_value("'not-a-date'").is_err());
+    }
+
+    #[test]
+    fn extract_skein_as_of_hint_strips_hint_and_returns_epoch_ms() {
+        let (sql, ms) =
+            extract_skein_as_of_hint("SELECT /*+ SKEIN_AS_OF('2026-01-01T00:00:00Z') */ * FROM t");
+        assert_eq!(ms, Some(1_767_225_600_000));
+        assert!(
+            !sql.contains("SKEIN_AS_OF"),
+            "hint was not stripped: {}",
+            sql
+        );
+        assert!(sql.to_ascii_lowercase().contains("select"));
+        assert!(sql.contains("FROM t"));
+
+        // Lowercase hint name + integer literal works too.
+        let (_, ms2) = extract_skein_as_of_hint("SELECT /*+ skein_as_of(1234567890) */ 1");
+        assert_eq!(ms2, Some(1_234_567_890));
+
+        // No hint → unchanged SQL, None.
+        let (pass, nope) = extract_skein_as_of_hint("SELECT * FROM t");
+        assert_eq!(pass, "SELECT * FROM t");
+        assert_eq!(nope, None);
+
+        // Invalid ts inside hint → treat as no hint (safe fallback).
+        let (_, bad) = extract_skein_as_of_hint("SELECT /*+ SKEIN_AS_OF('xyz') */ 1");
+        assert_eq!(bad, None);
     }
 
     #[test]
@@ -29939,16 +34655,126 @@ mod tests {
     #[test]
     fn pg_bootstrap_setting_value_supports_common_probes() {
         assert_eq!(
-            pg_bootstrap_setting_value("server_version_num", Some("app")).as_deref(),
+            pg_bootstrap_setting_value("server_version_num", Some("app"), None).as_deref(),
             Some("160000")
         );
         assert_eq!(
-            pg_bootstrap_setting_value("current_database", Some("app")).as_deref(),
+            pg_bootstrap_setting_value("current_database", Some("app"), None).as_deref(),
             Some("app")
         );
         assert_eq!(
-            pg_bootstrap_setting_value("transaction isolation level", None).as_deref(),
+            pg_bootstrap_setting_value("transaction isolation level", None, None).as_deref(),
             Some("read committed")
+        );
+    }
+
+    #[test]
+    fn pg_bootstrap_setting_value_prefers_session() {
+        let mut session = MySqlSessionState::new(Some("mydb".to_string()), 1);
+        session
+            .pg_settings
+            .insert("timezone".into(), "US/Eastern".into());
+        assert_eq!(
+            pg_bootstrap_setting_value("timezone", None, Some(&session)).as_deref(),
+            Some("US/Eastern")
+        );
+        // Falls back to hardcoded when session has no override
+        assert_eq!(
+            pg_bootstrap_setting_value("server_version_num", None, Some(&session)).as_deref(),
+            Some("160000")
+        );
+    }
+
+    #[test]
+    fn pg_parse_set_command_eq_syntax() {
+        let (k, v) = pg_parse_set_command("timezone = 'US/Eastern'").unwrap();
+        assert_eq!(k, "timezone");
+        assert_eq!(v, "US/Eastern");
+    }
+
+    #[test]
+    fn pg_parse_set_command_to_syntax() {
+        let (k, v) = pg_parse_set_command("search_path TO public, pg_catalog").unwrap();
+        assert_eq!(k, "search_path");
+        assert_eq!(v, "public, pg_catalog");
+    }
+
+    #[test]
+    fn pg_parse_set_command_local_prefix() {
+        let (k, v) = pg_parse_set_command("LOCAL timezone = 'UTC'").unwrap();
+        assert_eq!(k, "timezone");
+        assert_eq!(v, "UTC");
+    }
+
+    #[test]
+    fn pg_parse_set_command_double_quotes() {
+        let (k, v) = pg_parse_set_command("application_name = \"myapp\"").unwrap();
+        assert_eq!(k, "application_name");
+        assert_eq!(v, "myapp");
+    }
+
+    #[test]
+    fn pg_parse_set_command_no_value_returns_none() {
+        assert!(pg_parse_set_command("timezone").is_none());
+    }
+
+    #[test]
+    fn pg_default_settings_has_required_keys() {
+        let defaults = pg_default_settings();
+        assert!(defaults.contains_key("server_version"));
+        assert!(defaults.contains_key("client_encoding"));
+        assert!(defaults.contains_key("datestyle"));
+        assert!(defaults.contains_key("timezone"));
+        assert!(defaults.contains_key("standard_conforming_strings"));
+        assert!(defaults.contains_key("search_path"));
+        assert!(defaults.contains_key("application_name"));
+    }
+
+    #[test]
+    fn pg_session_set_and_reset() {
+        let mut session = MySqlSessionState::new(Some("testdb".to_string()), 42);
+        assert_eq!(
+            session.pg_settings.get("timezone").map(|s| s.as_str()),
+            Some("UTC")
+        );
+
+        // Simulate SET
+        session
+            .pg_settings
+            .insert("timezone".into(), "US/Pacific".into());
+        assert_eq!(
+            session.pg_settings.get("timezone").map(|s| s.as_str()),
+            Some("US/Pacific")
+        );
+
+        // Simulate RESET
+        let defaults = pg_default_settings();
+        if let Some(val) = defaults.get("timezone") {
+            session.pg_settings.insert("timezone".into(), val.clone());
+        }
+        assert_eq!(
+            session.pg_settings.get("timezone").map(|s| s.as_str()),
+            Some("UTC")
+        );
+    }
+
+    #[test]
+    fn pg_session_reset_all() {
+        let mut session = MySqlSessionState::new(Some("testdb".to_string()), 42);
+        session
+            .pg_settings
+            .insert("timezone".into(), "US/Pacific".into());
+        session.pg_settings.insert("datestyle".into(), "SQL".into());
+
+        // RESET ALL
+        session.pg_settings = pg_default_settings();
+        assert_eq!(
+            session.pg_settings.get("timezone").map(|s| s.as_str()),
+            Some("UTC")
+        );
+        assert_eq!(
+            session.pg_settings.get("datestyle").map(|s| s.as_str()),
+            Some("ISO, MDY")
         );
     }
 
@@ -29962,5 +34788,1143 @@ mod tests {
             pg_parse_current_setting_name("select current_setting('timezone')"),
             Some("timezone")
         );
+    }
+
+    #[test]
+    fn pg_parse_savepoint_names_roundtrip() {
+        assert_eq!(
+            pg_parse_savepoint_name("SAVEPOINT before_insert"),
+            Some("before_insert".to_string())
+        );
+        assert_eq!(
+            pg_parse_release_savepoint_name("release savepoint before_insert;"),
+            Some("before_insert".to_string())
+        );
+        assert_eq!(
+            pg_parse_rollback_to_savepoint_name("ROLLBACK TO before_insert"),
+            Some("before_insert".to_string())
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_mapping_covers_common_mysql_errors() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1146, "42S02", "table not found"),
+            "42P01"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1054, "42S22", "unknown column 'name'"),
+            "42703"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1062, "23000", "duplicate key"),
+            "23505"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1064, "42000", "malformed WHERE expression"),
+            "42601"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1235, "42000", "unsupported SELECT statement"),
+            "0A000"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1305, "3B001", "savepoint does not exist"),
+            "3B001"
+        );
+    }
+
+    #[test]
+    fn pg_placeholder_substitution_skips_quoted_literals() {
+        assert_eq!(
+            pg_max_placeholder_index("SELECT '$1' AS literal_value, $2, $10"),
+            10
+        );
+
+        let sql = pg_substitute_stmt_sql(
+            "SELECT '$1' AS literal_value, $2, $3",
+            &[
+                Lit::Str {
+                    v: "ignored".to_string(),
+                },
+                Lit::U64 { v: 7 },
+                Lit::Str {
+                    v: "Ada".to_string(),
+                },
+            ],
+        )
+        .expect("substitute PG placeholders");
+        assert_eq!(sql, "SELECT '$1' AS literal_value, 7, 'Ada'");
+    }
+
+    #[test]
+    fn pg_stmt_column_oid_mapping_covers_richer_scalar_types() {
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Bool),
+            (pg_wire::oid::BOOL, 1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Date),
+            (pg_wire::oid::DATE, 4)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Time),
+            (pg_wire::oid::TIME, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::DateTime),
+            (pg_wire::oid::TIMESTAMP, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Json),
+            (pg_wire::oid::JSONB, -1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Bytes),
+            (pg_wire::oid::BYTEA, -1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Uuid),
+            (pg_wire::oid::UUID, 16)
+        );
+    }
+
+    #[test]
+    fn pg_text_value_for_column_normalizes_bool_text() {
+        let column = pg_wire::PgColumn::text("active", pg_wire::oid::BOOL, 1);
+        assert_eq!(
+            pg_text_value_for_column(Some("1"), Some(&column))
+                .and_then(|value| String::from_utf8(value).ok())
+                .as_deref(),
+            Some("t")
+        );
+        assert_eq!(
+            pg_text_value_for_column(Some("false"), Some(&column))
+                .and_then(|value| String::from_utf8(value).ok())
+                .as_deref(),
+            Some("f")
+        );
+    }
+
+    #[test]
+    fn pg_text_value_for_column_normalizes_bytea_text() {
+        let column = pg_wire::PgColumn::text("payload", pg_wire::oid::BYTEA, -1);
+        assert_eq!(
+            pg_text_value_for_column(Some("AAECAw=="), Some(&column))
+                .and_then(|value| String::from_utf8(value).ok())
+                .as_deref(),
+            Some("\\x00010203")
+        );
+    }
+
+    #[test]
+    fn pg_decode_text_param_lit_prefers_oid_hints() {
+        assert_eq!(
+            pg_decode_text_param_lit("42", pg_wire::oid::INT8),
+            Lit::I64 { v: 42 }
+        );
+        assert_eq!(
+            pg_decode_text_param_lit("true", pg_wire::oid::BOOL),
+            Lit::Bool { v: true }
+        );
+        assert_eq!(
+            pg_decode_text_param_lit("3.5", pg_wire::oid::FLOAT8),
+            Lit::F64 { v: 3.5 }
+        );
+        assert_eq!(
+            pg_decode_text_param_lit("\\x00010203", pg_wire::oid::BYTEA),
+            Lit::Bytes {
+                b64: "AAECAw==".to_string(),
+            }
+        );
+        assert_eq!(
+            pg_decode_text_param_lit("Ada", 0),
+            Lit::Str {
+                v: "Ada".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn pg_catalog_type_oid_mapping_covers_common_skein_kinds() {
+        assert_eq!(pg_catalog_type_oid_for_kind("bigint"), pg_wire::oid::INT8);
+        assert_eq!(pg_catalog_type_oid_for_kind("int"), pg_wire::oid::INT4);
+        assert_eq!(
+            pg_catalog_type_oid_for_kind("varchar"),
+            pg_wire::oid::VARCHAR
+        );
+        assert_eq!(pg_catalog_type_oid_for_kind("text"), pg_wire::oid::TEXT);
+        assert_eq!(pg_catalog_type_oid_for_kind("bool"), pg_wire::oid::BOOL);
+        assert_eq!(pg_catalog_type_oid_for_kind("double"), pg_wire::oid::FLOAT8);
+        assert_eq!(
+            pg_catalog_type_oid_for_kind("datetime"),
+            pg_wire::oid::TIMESTAMP
+        );
+        assert_eq!(pg_catalog_type_oid_for_kind("json"), pg_wire::oid::JSON);
+        assert_eq!(pg_catalog_type_oid_for_kind("jsonb"), pg_wire::oid::JSONB);
+        assert_eq!(pg_catalog_type_oid_for_kind("blob"), pg_wire::oid::BYTEA);
+        assert_eq!(pg_catalog_type_oid_for_kind("uuid"), pg_wire::oid::UUID);
+        // Unknown kind falls back to TEXT.
+        assert_eq!(
+            pg_catalog_type_oid_for_kind("custom_unknown"),
+            pg_wire::oid::TEXT
+        );
+    }
+
+    #[test]
+    fn pg_catalog_type_len_returns_fixed_sizes() {
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::BOOL), 1);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::INT4), 4);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::INT8), 8);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::FLOAT8), 8);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::TEXT), -1);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::VARCHAR), -1);
+        assert_eq!(pg_catalog_type_len(pg_wire::oid::UUID), 16);
+    }
+
+    #[test]
+    fn pg_catalog_result_column_override_covers_new_catalog_columns() {
+        // pg_class columns
+        assert!(pg_catalog_result_column_override("relnamespace").is_some());
+        assert!(pg_catalog_result_column_override("relhasindex").is_some());
+        assert!(pg_catalog_result_column_override("relhaspkey").is_some());
+        assert!(pg_catalog_result_column_override("relnatts").is_some());
+        // pg_attribute columns
+        assert!(pg_catalog_result_column_override("attrelid").is_some());
+        assert!(pg_catalog_result_column_override("atttypid").is_some());
+        assert!(pg_catalog_result_column_override("attnotnull").is_some());
+        assert!(pg_catalog_result_column_override("attnum").is_some());
+        // pg_index columns
+        assert!(pg_catalog_result_column_override("indexrelid").is_some());
+        assert!(pg_catalog_result_column_override("indisprimary").is_some());
+        assert!(pg_catalog_result_column_override("indisunique").is_some());
+        // pg_constraint columns
+        assert!(pg_catalog_result_column_override("conrelid").is_some());
+        assert!(pg_catalog_result_column_override("contype").is_none()); // string, not overridden
+        assert!(pg_catalog_result_column_override("convalidated").is_some());
+    }
+
+    #[test]
+    fn parse_sql_scalar_expr_supports_pg_concat_operator() {
+        let expr = parse_sql_scalar_expr("first_name || ' ' || last_name")
+            .expect("parse || concat expression");
+        let Expr::Op { op, a, b, .. } = &expr else {
+            panic!("expected Op for ||, got {:?}", expr);
+        };
+        assert_eq!(op, "concat_op");
+        // rightmost || is at the second ||, so left should be 'first_name || ' ''
+        assert!(matches!(a.as_deref(), Some(Expr::Op { op, .. }) if op == "concat_op"));
+        assert!(matches!(b.as_deref(), Some(Expr::Col { .. })));
+    }
+
+    #[test]
+    fn parse_sql_scalar_expr_supports_pg_regex_operators() {
+        let expr = parse_sql_scalar_expr("name ~ 'pattern'").expect("parse ~ expression");
+        let Expr::Op { op, .. } = &expr else {
+            panic!("expected Op for ~");
+        };
+        assert_eq!(op, "pg_regex");
+
+        let expr_i = parse_sql_scalar_expr("name ~* 'pattern'").expect("parse ~* expression");
+        let Expr::Op { op, .. } = &expr_i else {
+            panic!("expected Op for ~*");
+        };
+        assert_eq!(op, "pg_regex_i");
+    }
+
+    #[test]
+    fn parse_sql_scalar_expr_supports_pg_json_arrow_operators() {
+        let expr = parse_sql_scalar_expr("data->>'key'").expect("parse ->> expression");
+        let Expr::Op { op, a, b, .. } = &expr else {
+            panic!("expected Op for ->>");
+        };
+        assert_eq!(op, "json_arrow_text");
+        assert!(matches!(a.as_deref(), Some(Expr::Col { .. })));
+        assert!(matches!(b.as_deref(), Some(Expr::Lit { .. })));
+
+        let expr2 = parse_sql_scalar_expr("data->'nested'").expect("parse -> expression");
+        let Expr::Op { op, .. } = &expr2 else {
+            panic!("expected Op for ->");
+        };
+        assert_eq!(op, "json_arrow");
+    }
+
+    #[test]
+    fn parse_condition_expr_supports_pg_regex_in_where() {
+        let expr = parse_condition_expr("name ~ 'foo.*'").expect("parse ~ condition");
+        let Expr::Op { op, .. } = &expr else {
+            panic!("expected Op for ~");
+        };
+        assert_eq!(op, "pg_regex");
+
+        let expr_i = parse_condition_expr("name ~* 'bar'").expect("parse ~* condition");
+        let Expr::Op { op, .. } = &expr_i else {
+            panic!("expected Op for ~*");
+        };
+        assert_eq!(op, "pg_regex_i");
+    }
+
+    #[test]
+    fn parse_condition_expr_handles_json_arrow_with_comparison() {
+        // data->>'key' = 'value' should split at = first, not at >
+        let expr =
+            parse_condition_expr("data->>'key' = 'value'").expect("parse ->> with = condition");
+        let Expr::Op { op, a, .. } = &expr else {
+            panic!("expected eq Op");
+        };
+        assert_eq!(op, "eq");
+        // The left side should be a ->> op
+        assert!(matches!(a.as_deref(), Some(Expr::Op { op, .. }) if op == "json_arrow_text"));
+    }
+
+    #[test]
+    fn pg_aggregate_parsing_string_agg() {
+        let result = mysql_parse_aggregate_projection_expr("string_agg(name, ', ')");
+        assert!(result.is_some());
+        let (col, alias, op) = result.unwrap();
+        assert_eq!(col, Some("name".to_string()));
+        assert_eq!(alias, "STRING_AGG(name)");
+        assert!(matches!(op, MySqlCompatAggregateOp::StringAgg));
+    }
+
+    #[test]
+    fn pg_aggregate_parsing_array_agg() {
+        let result = mysql_parse_aggregate_projection_expr("array_agg(score)");
+        assert!(result.is_some());
+        let (col, alias, op) = result.unwrap();
+        assert_eq!(col, Some("score".to_string()));
+        assert_eq!(alias, "ARRAY_AGG(score)");
+        assert!(matches!(op, MySqlCompatAggregateOp::ArrayAgg));
+    }
+
+    // ── pg_rewrite_sql unit tests ──────────────────────────────────────
+    #[test]
+    fn pg_rewrite_sql_cast_simple() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT id::int FROM t"),
+            "SELECT CAST(id AS SIGNED) FROM t"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_cast_text() {
+        assert_eq!(pg_rewrite_sql("SELECT 42::text"), "SELECT CAST(42 AS CHAR)");
+    }
+
+    #[test]
+    fn pg_rewrite_sql_cast_varchar_precision() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT name::varchar(100) FROM t"),
+            "SELECT CAST(name AS varchar(100)) FROM t"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_cast_function_call() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT now()::text"),
+            "SELECT CAST(now() AS CHAR)"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_cast_chained() {
+        // Should handle chained casts: expr::type1::type2
+        let result = pg_rewrite_sql("SELECT val::text::int FROM t");
+        assert_eq!(result, "SELECT CAST(CAST(val AS CHAR) AS SIGNED) FROM t");
+    }
+
+    #[test]
+    fn pg_rewrite_sql_dollar_quote() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT $$hello world$$"),
+            "SELECT 'hello world'"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_dollar_quote_with_tag() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT $tag$body text$tag$"),
+            "SELECT 'body text'"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_dollar_quote_with_single_quote() {
+        assert_eq!(pg_rewrite_sql("SELECT $$it's$$"), "SELECT 'it''s'");
+    }
+
+    #[test]
+    fn pg_rewrite_sql_double_quotes_to_backticks() {
+        assert_eq!(
+            pg_rewrite_sql(r#"SELECT "my_col" FROM "my_table""#),
+            "SELECT `my_col` FROM `my_table`"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_single_quotes_preserved() {
+        // Single-quoted strings must not be altered
+        assert_eq!(
+            pg_rewrite_sql("SELECT 'hello' FROM t"),
+            "SELECT 'hello' FROM t"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_fetch_first_rows_only() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT * FROM t FETCH FIRST 10 ROWS ONLY"),
+            "SELECT * FROM t LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_fetch_first_row_only() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT * FROM t FETCH FIRST 1 ROW ONLY"),
+            "SELECT * FROM t LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_array_constructor() {
+        assert_eq!(pg_rewrite_sql("SELECT ARRAY[1,2,3]"), "SELECT '{1,2,3}'");
+    }
+
+    #[test]
+    fn pg_rewrite_sql_passthrough() {
+        // Normal SQL should pass through unchanged
+        let sql = "SELECT id, name FROM users WHERE id = 1";
+        assert_eq!(pg_rewrite_sql(sql), sql);
+    }
+
+    #[test]
+    fn pg_rewrite_sql_cast_in_where() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT * FROM t WHERE age::int > 18"),
+            "SELECT * FROM t WHERE CAST(age AS SIGNED) > 18"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_string_cast() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT 'abc'::text"),
+            "SELECT CAST('abc' AS CHAR)"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_no_cast_inside_string() {
+        // :: inside a single-quoted string should NOT be rewritten
+        assert_eq!(pg_rewrite_sql("SELECT 'foo::bar'"), "SELECT 'foo::bar'");
+    }
+
+    #[test]
+    fn parse_condition_expr_is_not_distinct_from() {
+        let expr =
+            parse_condition_expr("a IS NOT DISTINCT FROM b").expect("parse is not distinct from");
+        let Expr::Op { op, .. } = &expr else {
+            panic!("expected Op");
+        };
+        assert_eq!(op, "null_safe_eq");
+    }
+
+    #[test]
+    fn parse_condition_expr_is_distinct_from() {
+        let expr = parse_condition_expr("a IS DISTINCT FROM b").expect("parse is distinct from");
+        let Expr::Op { op, a, .. } = &expr else {
+            panic!("expected Op");
+        };
+        assert_eq!(op, "not");
+        // inner should be null_safe_eq
+        let Some(Expr::Op { op: inner_op, .. }) = a.as_deref() else {
+            panic!("expected inner null_safe_eq");
+        };
+        assert_eq!(inner_op, "null_safe_eq");
+    }
+
+    // ── T406: PG DDL tests ─────────────────────────────────────────────
+    #[test]
+    fn pg_ddl_serial_type_maps_to_auto_increment() {
+        let plan = parse_sql_plan(
+            "CREATE TABLE t (id serial PRIMARY KEY, name text)",
+            Some("db"),
+        )
+        .expect("parse serial");
+        let SqlPlan::CreateTable { columns, .. } = &plan else {
+            panic!("expected CreateTable");
+        };
+        let id_col = columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(id_col.auto_increment, "serial should set auto_increment");
+        assert_eq!(id_col.r#type.kind, "i64");
+    }
+
+    #[test]
+    fn pg_ddl_bigserial_type_maps_to_auto_increment() {
+        let plan = parse_sql_plan("CREATE TABLE t (id bigserial PRIMARY KEY)", Some("db"))
+            .expect("parse bigserial");
+        let SqlPlan::CreateTable { columns, .. } = &plan else {
+            panic!("expected CreateTable");
+        };
+        let id_col = columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(id_col.auto_increment, "bigserial should set auto_increment");
+        assert_eq!(id_col.r#type.kind, "i64");
+    }
+
+    #[test]
+    fn pg_ddl_smallserial_type_maps_to_auto_increment() {
+        let plan = parse_sql_plan("CREATE TABLE t (id smallserial PRIMARY KEY)", Some("db"))
+            .expect("parse smallserial");
+        let SqlPlan::CreateTable { columns, .. } = &plan else {
+            panic!("expected CreateTable");
+        };
+        let id_col = columns.iter().find(|c| c.name == "id").unwrap();
+        assert!(
+            id_col.auto_increment,
+            "smallserial should set auto_increment"
+        );
+        assert_eq!(id_col.r#type.kind, "i64");
+    }
+
+    #[test]
+    fn pg_ddl_create_schema_routes_to_create_database() {
+        let plan = parse_sql_plan("CREATE SCHEMA myapp", None).expect("parse create schema");
+        let SqlPlan::CreateDatabase { db, if_not_exists } = &plan else {
+            panic!("expected CreateDatabase for CREATE SCHEMA");
+        };
+        assert_eq!(db, "myapp");
+        assert!(!if_not_exists);
+    }
+
+    #[test]
+    fn pg_ddl_create_schema_if_not_exists() {
+        let plan = parse_sql_plan("CREATE SCHEMA IF NOT EXISTS myapp", None)
+            .expect("parse create schema if not exists");
+        let SqlPlan::CreateDatabase { db, if_not_exists } = &plan else {
+            panic!("expected CreateDatabase");
+        };
+        assert_eq!(db, "myapp");
+        assert!(if_not_exists);
+    }
+
+    #[test]
+    fn pg_ddl_create_index_concurrently_is_accepted() {
+        let plan = parse_sql_plan(
+            "CREATE INDEX CONCURRENTLY idx_name ON db.t (col1)",
+            Some("db"),
+        )
+        .expect("parse create index concurrently");
+        let SqlPlan::CreateIndex {
+            index_name,
+            columns,
+            ..
+        } = &plan
+        else {
+            panic!("expected CreateIndex");
+        };
+        assert_eq!(index_name, "idx_name");
+        assert_eq!(columns, &["col1"]);
+    }
+
+    #[test]
+    fn pg_ddl_create_index_if_not_exists() {
+        let plan = parse_sql_plan(
+            "CREATE INDEX IF NOT EXISTS idx_name ON db.t (col1)",
+            Some("db"),
+        )
+        .expect("parse create index if not exists");
+        let SqlPlan::CreateIndex {
+            index_name,
+            columns,
+            ..
+        } = &plan
+        else {
+            panic!("expected CreateIndex");
+        };
+        assert_eq!(index_name, "idx_name");
+        assert_eq!(columns, &["col1"]);
+    }
+
+    #[test]
+    fn pg_ddl_create_unique_index_concurrently_if_not_exists() {
+        let plan = parse_sql_plan(
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_u ON db.t (col1, col2)",
+            Some("db"),
+        )
+        .expect("parse create unique index concurrently if not exists");
+        let SqlPlan::CreateIndex {
+            index_name,
+            columns,
+            unique,
+            ..
+        } = &plan
+        else {
+            panic!("expected CreateIndex");
+        };
+        assert_eq!(index_name, "idx_u");
+        assert_eq!(columns, &["col1", "col2"]);
+        assert!(unique);
+    }
+
+    #[test]
+    fn pg_ddl_comment_on_is_recognized_as_verb() {
+        let verb = sql_detect_verb("COMMENT ON TABLE users IS 'User accounts'");
+        assert!(matches!(verb, SqlVerb::CommentOn));
+    }
+
+    // ── T416: PG unit tests — wider coverage ────────────────────────────
+
+    // ── SQLSTATE mapping ──
+    #[test]
+    fn pg_sqlstate_duplicate_key_from_mysql_code() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1062, "23000", "Duplicate entry 'a' for key 'PRIMARY'"),
+            "23505"
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_syntax_error_from_mysql_code() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1064, "42000", "You have an error in your SQL syntax"),
+            "42601"
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_undefined_table_from_mysql_code() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(1146, "42S02", "Table 'db.t' doesn't exist"),
+            "42P01"
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_passthrough_native_codes() {
+        // Already-PG codes should pass through
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "42P01", "undefined table"),
+            "42P01"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "23505", "duplicate key"),
+            "23505"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "25P02", "in failed transaction"),
+            "25P02"
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_message_heuristics() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "HY000", "table not found"),
+            "42P01"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "HY000", "column not found"),
+            "42703"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "HY000", "feature unsupported"),
+            "0A000"
+        );
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "HY000", "syntax error near 'foo'"),
+            "42601"
+        );
+    }
+
+    #[test]
+    fn pg_sqlstate_unknown_fallback() {
+        assert_eq!(
+            pg_sqlstate_from_mysql_error(0, "HY000", "something completely unknown"),
+            "XX000"
+        );
+    }
+
+    // ── Type OID mapping ──
+    #[test]
+    fn pg_stmt_column_oid_mapping_covers_all_types() {
+        use pg_wire::oid;
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Bool),
+            (oid::BOOL, 1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::LongLong),
+            (oid::INT8, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Double),
+            (oid::FLOAT8, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Date),
+            (oid::DATE, 4)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Time),
+            (oid::TIME, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::DateTime),
+            (oid::TIMESTAMP, 8)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Json),
+            (oid::JSONB, -1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Bytes),
+            (oid::BYTEA, -1)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::Uuid),
+            (oid::UUID, 16)
+        );
+        assert_eq!(
+            pg_stmt_column_oid_and_size(MySqlStmtColumnType::VarString),
+            (oid::TEXT, -1)
+        );
+    }
+
+    // ── PG text value formatting ──
+    #[test]
+    fn pg_text_value_bool_normalization() {
+        let bool_col = pg_wire::PgColumn::text("flag", pg_wire::oid::BOOL, 1);
+        assert_eq!(
+            pg_text_value_for_column(Some("1"), Some(&bool_col)),
+            Some(b"t".to_vec())
+        );
+        assert_eq!(
+            pg_text_value_for_column(Some("0"), Some(&bool_col)),
+            Some(b"f".to_vec())
+        );
+        assert_eq!(
+            pg_text_value_for_column(Some("true"), Some(&bool_col)),
+            Some(b"t".to_vec())
+        );
+        assert_eq!(
+            pg_text_value_for_column(Some("false"), Some(&bool_col)),
+            Some(b"f".to_vec())
+        );
+    }
+
+    #[test]
+    fn pg_text_value_null_handling() {
+        let text_col = pg_wire::PgColumn::text("name", pg_wire::oid::TEXT, -1);
+        assert_eq!(pg_text_value_for_column(None, Some(&text_col)), None);
+    }
+
+    #[test]
+    fn pg_text_value_no_column_passthrough() {
+        assert_eq!(
+            pg_text_value_for_column(Some("hello"), None),
+            Some(b"hello".to_vec())
+        );
+    }
+
+    // ── sql_type_to_desc PG types ──
+    #[test]
+    fn sql_type_to_desc_pg_types() {
+        let serial = sql_type_to_desc("serial", false);
+        assert_eq!(serial.kind, "i64");
+
+        let bigserial = sql_type_to_desc("bigserial", false);
+        assert_eq!(bigserial.kind, "i64");
+
+        let boolean = sql_type_to_desc("boolean", false);
+        assert_eq!(boolean.kind, "bool");
+
+        let text = sql_type_to_desc("text", false);
+        assert_eq!(text.kind, "string");
+
+        let timestamp = sql_type_to_desc("timestamp", false);
+        assert_eq!(timestamp.kind, "datetime");
+
+        let real = sql_type_to_desc("real", false);
+        assert_eq!(real.kind, "f64");
+
+        let decimal = sql_type_to_desc("decimal", false);
+        assert_eq!(decimal.kind, "f64");
+
+        let json = sql_type_to_desc("json", false);
+        assert_eq!(json.kind, "json");
+
+        let blob = sql_type_to_desc("blob", false);
+        assert_eq!(blob.kind, "bytes");
+    }
+
+    #[test]
+    fn sql_type_to_desc_varchar_max() {
+        let vc = sql_type_to_desc("varchar(255)", false);
+        assert_eq!(vc.kind, "string");
+        assert_eq!(vc.max, Some(255));
+    }
+
+    // ── pg_rewrite_sql additional edge cases ──
+    #[test]
+    fn pg_rewrite_sql_cast_in_function_arg() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT foo(x::int)"),
+            "SELECT foo(CAST(x AS SIGNED))"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_nested_parens_cast() {
+        assert_eq!(
+            pg_rewrite_sql("SELECT (a + b)::text"),
+            "SELECT CAST((a + b) AS CHAR)"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_mixed_features() {
+        // Combine cast, double-quote identifiers, and dollar-quoting
+        let result = pg_rewrite_sql(r#"SELECT "col"::text, $$hello$$ FROM "tbl""#);
+        assert_eq!(result, "SELECT CAST(`col` AS CHAR), 'hello' FROM `tbl`");
+    }
+
+    #[test]
+    fn pg_rewrite_sql_create_table_serial() {
+        // pg_rewrite_sql should pass CREATE TABLE through (serial handled in parser)
+        let sql = "CREATE TABLE t (id serial PRIMARY KEY, name text)";
+        let rewritten = pg_rewrite_sql(sql);
+        // The rewriter doesn't change DDL type keywords — that's handled in parse_create_table_plan
+        assert!(rewritten.contains("serial"));
+    }
+
+    // ── sql_detect_verb PG variations ──
+    #[test]
+    fn sql_detect_verb_create_schema() {
+        assert!(matches!(
+            sql_detect_verb("CREATE SCHEMA mydb"),
+            SqlVerb::CreateDatabase
+        ));
+        assert!(matches!(
+            sql_detect_verb("create schema if not exists mydb"),
+            SqlVerb::CreateDatabase
+        ));
+    }
+
+    #[test]
+    fn sql_detect_verb_drop_schema() {
+        assert!(matches!(
+            sql_detect_verb("DROP SCHEMA mydb"),
+            SqlVerb::DropDatabase
+        ));
+    }
+
+    #[test]
+    fn sql_detect_verb_comment_on_variants() {
+        assert!(matches!(
+            sql_detect_verb("COMMENT ON TABLE t IS 'desc'"),
+            SqlVerb::CommentOn
+        ));
+        assert!(matches!(
+            sql_detect_verb("comment on column t.c is 'desc'"),
+            SqlVerb::CommentOn
+        ));
+    }
+
+    // ── T405: PG DML extension tests ──
+
+    #[test]
+    fn pg_rewrite_on_conflict_do_nothing() {
+        let sql = "INSERT INTO users (name, email) VALUES ('a', 'b') ON CONFLICT DO NOTHING";
+        let rewritten = pg_rewrite_on_conflict(sql);
+        assert!(
+            rewritten.contains("INSERT IGNORE INTO"),
+            "expected INSERT IGNORE, got: {}",
+            rewritten
+        );
+        assert!(
+            !rewritten.contains("ON CONFLICT"),
+            "ON CONFLICT should be stripped"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_on_conflict_do_update() {
+        let sql = "INSERT INTO users (name, email) VALUES ('a', 'b') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name";
+        let rewritten = pg_rewrite_on_conflict(sql);
+        assert!(
+            rewritten.contains("ON DUPLICATE KEY UPDATE"),
+            "expected ON DUPLICATE KEY UPDATE, got: {}",
+            rewritten
+        );
+        assert!(
+            rewritten.contains("VALUES(name)"),
+            "expected EXCLUDED.name → VALUES(name), got: {}",
+            rewritten
+        );
+        assert!(
+            !rewritten.contains("EXCLUDED"),
+            "EXCLUDED should be replaced"
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_on_conflict_multiple_excluded_refs() {
+        let sql = "INSERT INTO t (a, b) VALUES (1, 2) ON CONFLICT (a) DO UPDATE SET a = EXCLUDED.a, b = EXCLUDED.b";
+        let rewritten = pg_rewrite_on_conflict(sql);
+        assert!(rewritten.contains("VALUES(a)"), "got: {}", rewritten);
+        assert!(rewritten.contains("VALUES(b)"), "got: {}", rewritten);
+    }
+
+    #[test]
+    fn pg_rewrite_on_conflict_passthrough_no_conflict() {
+        let sql = "INSERT INTO users (name) VALUES ('a')";
+        let rewritten = pg_rewrite_on_conflict(sql);
+        assert_eq!(rewritten, sql);
+    }
+
+    #[test]
+    fn pg_replace_excluded_refs_basic() {
+        assert_eq!(
+            pg_replace_excluded_refs("name = EXCLUDED.name, val = EXCLUDED.val"),
+            "name = VALUES(name), val = VALUES(val)"
+        );
+    }
+
+    #[test]
+    fn pg_extract_returning_insert() {
+        let (sql, cols) =
+            pg_extract_returning("INSERT INTO t (a, b) VALUES (1, 2) RETURNING id, name");
+        assert_eq!(sql, "INSERT INTO t (a, b) VALUES (1, 2)");
+        assert_eq!(cols, Some(vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn pg_extract_returning_star() {
+        let (sql, cols) = pg_extract_returning("INSERT INTO t (a) VALUES (1) RETURNING *");
+        assert_eq!(sql, "INSERT INTO t (a) VALUES (1)");
+        assert_eq!(cols, Some(vec!["*".to_string()]));
+    }
+
+    #[test]
+    fn pg_extract_returning_qualified_col() {
+        let (_, cols) = pg_extract_returning("INSERT INTO t (a) VALUES (1) RETURNING \"t\".\"id\"");
+        assert_eq!(cols, Some(vec!["id".to_string()]));
+    }
+
+    #[test]
+    fn pg_extract_returning_no_clause() {
+        let (sql, cols) = pg_extract_returning("INSERT INTO t (a) VALUES (1)");
+        assert_eq!(sql, "INSERT INTO t (a) VALUES (1)");
+        assert!(cols.is_none());
+    }
+
+    #[test]
+    fn pg_extract_returning_select_ignored() {
+        let (sql, cols) = pg_extract_returning("SELECT * FROM t");
+        assert_eq!(sql, "SELECT * FROM t");
+        assert!(cols.is_none());
+    }
+
+    #[test]
+    fn pg_extract_insert_table_basic() {
+        assert_eq!(
+            pg_extract_insert_table("insert into users (name) values ('a')"),
+            Some("users".to_string())
+        );
+    }
+
+    #[test]
+    fn pg_extract_insert_table_ignore() {
+        assert_eq!(
+            pg_extract_insert_table("insert ignore into users (name) values ('a')"),
+            Some("users".to_string())
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_on_conflict_end_to_end() {
+        let sql = "INSERT INTO orders (id, total) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET total = EXCLUDED.total";
+        let rewritten = pg_rewrite_sql(sql);
+        assert!(
+            rewritten.contains("ON DUPLICATE KEY UPDATE"),
+            "expected ON DUPLICATE KEY UPDATE, got: {}",
+            rewritten
+        );
+        assert!(
+            rewritten.contains("VALUES(total)"),
+            "expected VALUES(total), got: {}",
+            rewritten
+        );
+    }
+
+    #[test]
+    fn pg_rewrite_sql_on_conflict_do_nothing_end_to_end() {
+        let sql = "INSERT INTO orders (id, total) VALUES (1, 100) ON CONFLICT DO NOTHING";
+        let rewritten = pg_rewrite_sql(sql);
+        assert!(
+            rewritten.contains("INSERT IGNORE INTO"),
+            "expected INSERT IGNORE, got: {}",
+            rewritten
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T407: Enhanced type inference (mysql_stmt_infer_column_types)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn infer_column_types_integer() {
+        let rows = vec![vec![Some("42".to_string())], vec![Some("-7".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::LongLong]);
+    }
+
+    #[test]
+    fn infer_column_types_float() {
+        let rows = vec![vec![Some("3.14".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Double]);
+    }
+
+    #[test]
+    fn infer_column_types_bool() {
+        let rows = vec![
+            vec![Some("true".to_string())],
+            vec![Some("false".to_string())],
+        ];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Bool]);
+    }
+
+    #[test]
+    fn infer_column_types_date() {
+        let rows = vec![vec![Some("2024-01-15".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Date]);
+    }
+
+    #[test]
+    fn infer_column_types_time() {
+        let rows = vec![vec![Some("14:30:00".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Time]);
+    }
+
+    #[test]
+    fn infer_column_types_datetime() {
+        let rows = vec![vec![Some("2024-01-15 14:30:00".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::DateTime]);
+    }
+
+    #[test]
+    fn infer_column_types_datetime_iso() {
+        let rows = vec![vec![Some("2024-01-15T14:30:00".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::DateTime]);
+    }
+
+    #[test]
+    fn infer_column_types_uuid() {
+        let rows = vec![vec![Some(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        )]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Uuid]);
+    }
+
+    #[test]
+    fn infer_column_types_json_object() {
+        let rows = vec![vec![Some(r#"{"key":"value"}"#.to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Json]);
+    }
+
+    #[test]
+    fn infer_column_types_json_array() {
+        let rows = vec![vec![Some("[1,2,3]".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Json]);
+    }
+
+    #[test]
+    fn infer_column_types_string_fallback() {
+        let rows = vec![vec![Some("hello world".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::VarString]);
+    }
+
+    #[test]
+    fn infer_column_types_null_only_defaults_string() {
+        let rows = vec![vec![None], vec![None]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::VarString]);
+    }
+
+    #[test]
+    fn infer_column_types_mixed_int_float_promotes() {
+        // If one row is int and another is float, should infer Double
+        let rows = vec![vec![Some("42".to_string())], vec![Some("3.14".to_string())]];
+        let types = mysql_stmt_infer_column_types(&rows, 1);
+        assert_eq!(types, vec![MySqlStmtColumnType::Double]);
+    }
+
+    // -----------------------------------------------------------------------
+    // T407: PgPortal includes result_formats
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pg_portal_stores_result_formats() {
+        let portal = PgPortal {
+            sql: "SELECT 1".to_string(),
+            params: vec![],
+            result_columns: vec![],
+            result_formats: vec![0, 1],
+        };
+        assert_eq!(portal.result_formats, vec![0, 1]);
+    }
+
+    #[test]
+    fn pg_format_code_at_broadcast_single() {
+        // Single format code applies to all columns
+        assert_eq!(pg_format_code_at(&[1], 0), 1);
+        assert_eq!(pg_format_code_at(&[1], 5), 1);
+    }
+
+    #[test]
+    fn pg_format_code_at_empty_defaults_text() {
+        assert_eq!(pg_format_code_at(&[], 0), 0);
+        assert_eq!(pg_format_code_at(&[], 10), 0);
+    }
+
+    #[test]
+    fn pg_format_code_at_per_column() {
+        let codes = vec![0i16, 1, 0, 1];
+        assert_eq!(pg_format_code_at(&codes, 0), 0);
+        assert_eq!(pg_format_code_at(&codes, 1), 1);
+        assert_eq!(pg_format_code_at(&codes, 2), 0);
+        assert_eq!(pg_format_code_at(&codes, 3), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // T401: SCRAM salt derivation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pg_scram_salt_deterministic() {
+        let salt1 = pg_scram_salt_for_token("my-secret");
+        let salt2 = pg_scram_salt_for_token("my-secret");
+        assert_eq!(salt1, salt2);
+        assert_eq!(salt1.len(), 16);
+    }
+
+    #[test]
+    fn pg_scram_salt_varies_by_token() {
+        let salt1 = pg_scram_salt_for_token("token-a");
+        let salt2 = pg_scram_salt_for_token("token-b");
+        assert_ne!(salt1, salt2);
     }
 }

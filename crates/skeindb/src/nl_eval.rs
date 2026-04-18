@@ -189,6 +189,7 @@ fn execute_query(
         None,
         None,
         false,
+        None,
     )?;
     Ok(result.data.unwrap_or(serde_json::Value::Null))
 }

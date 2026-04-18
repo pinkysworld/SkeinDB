@@ -31,6 +31,41 @@ async fn quic_test_guard() -> OwnedSemaphorePermit {
     sem.acquire_owned().await.expect("acquire quic test permit")
 }
 
+async fn wait_for_quic_advisor_history_entry(
+    client: &QuicClient,
+    db: &str,
+    table: &str,
+    action_id: &str,
+    expected_status: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let resp = client
+            .rpc(
+                "advisor.history",
+                json!({
+                    "table": {"db": db, "table": table},
+                    "limit": 20
+                }),
+            )
+            .await?;
+        let entries = resp.result.unwrap_or_default()["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(entry) = entries.into_iter().find(|entry| {
+            entry.get("id").and_then(|value| value.as_str()) == Some(action_id)
+                && entry.get("status").and_then(|value| value.as_str()) == Some(expected_status)
+        }) {
+            return Ok(entry);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(anyhow!(
+        "timed out waiting for advisor action {action_id} to reach status {expected_status}"
+    ))
+}
+
 #[tokio::test]
 async fn quic_rpc_ping_roundtrip() -> anyhow::Result<()> {
     let _guard = quic_test_guard().await;
@@ -320,12 +355,23 @@ async fn quic_advisor_index_synthesize() -> anyhow::Result<()> {
         )
         .await?;
     assert!(resp.ok);
+    let action_id = resp
+        .result
+        .as_ref()
+        .and_then(|value| value.get("action_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing advisor action_id"))?
+        .to_string();
     let status = resp
         .result
         .as_ref()
         .and_then(|r| r.get("status"))
         .and_then(|v| v.as_str());
-    assert_eq!(status, Some("built"));
+    assert_eq!(status, Some("queued"));
+    let completed =
+        wait_for_quic_advisor_history_entry(&client, "app", "users", &action_id, "completed")
+            .await?;
+    assert_eq!(completed["result_status"].as_str(), Some("built"));
 
     let resp = client
         .rpc(

@@ -1049,7 +1049,20 @@ Params: `{ "db":"mydb", "table":"users" }`
 Result:
 
 ```json
-{"sub_id":"sub_...","offset":123}
+{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_..."}
+```
+
+#### cdc.subscribe_query
+Params:
+
+```json
+{"query_id":"q_...","args":[]}
+```
+
+Result:
+
+```json
+{"sub_id":"sub_...","offset":123,"sse_url":"/api/v1/cdc/sse/sub_..."}
 ```
 
 #### cdc.poll
@@ -1063,10 +1076,38 @@ Result:
 
 ```json
 {
-  "events":[{"seq":124,"db":"mydb","table":"users","op":"update","pk":[{"t":"u64","v":1}]}],
-  "next_offset":124
+  "events":[{"seq":124,"db":"mydb","table":"users","op":"update","pk":[{"t":"u64","v":1}],"commit_ts_ms":1710000000000,"lsn":124}],
+  "next_offset":124,
+  "earliest_offset":120,
+  "latest_offset":124,
+  "resnapshot_required":false
 }
 ```
+
+When a consumer falls behind the retained horizon, the result becomes:
+
+```json
+{
+  "events":[],
+  "next_offset":199,
+  "earliest_offset":200,
+  "latest_offset":245,
+  "resnapshot_required":true,
+  "resnapshot_from_offset":199,
+  "resnapshot_reason":"wal_horizon_exceeded"
+}
+```
+
+#### CDC SSE transport
+
+`GET /api/v1/cdc/sse/{sub_id}` streams the same event payloads as `cdc.poll` over Server-Sent Events.
+
+Reconnect options:
+
+- `Last-Event-ID: <seq>`
+- `GET /api/v1/cdc/sse/{sub_id}?from_offset=<seq>`
+
+If the reconnect cursor falls behind the retained horizon, the stream emits `event: resnapshot` with the same recovery metadata returned by `cdc.poll` and then closes.
 
 ### 10.9 dp.* (experimental)
 
@@ -1902,7 +1943,7 @@ Result:
 ```
 
 #### advisor.apply_index (experimental)
-Build and register an in-memory secondary index for the suggestion and record the action.
+Queue an in-memory secondary-index build for the suggestion and record the action.
 
 Params:
 
@@ -1918,10 +1959,12 @@ Params:
 Result:
 
 ```json
-{"accepted":true,"action_id":"adv_0000000000000001","status":"built"}
+{"accepted":true,"action_id":"adv_0000000000000001","status":"queued","progress_pct":0}
 ```
 
-Status values: `built`, `rebuilt`, `exists`.
+Initial status values: `queued`, `exists`.
+
+Follow `advisor.history` for terminal lifecycle state and result metadata.
 
 #### advisor.dismiss (experimental)
 Dismiss an index suggestion (suppressed from future synthesize output). Drops any advisor-built in-memory index.
@@ -1963,9 +2006,13 @@ Result:
       "table":{"db":"mydb","table":"users"},
       "columns":["city","created_at"],
       "include":["name"],
-      "action":"dismiss",
+      "action":"apply",
       "created_at_ms":0,
-      "note":"not selective enough"
+      "note":"accepted for rollout",
+      "status":"completed",
+      "progress_pct":100,
+      "result_status":"built",
+      "updated_at_ms":0
     }
   ]
 }

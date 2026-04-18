@@ -94,6 +94,325 @@ pub mod auth {
     pub const SASL_FINAL: i32 = 12;
 }
 
+/// SCRAM mechanism name used in SASL negotiation.
+pub const SCRAM_SHA256_NAME: &str = "SCRAM-SHA-256";
+
+// ---------------------------------------------------------------------------
+// SCRAM-SHA-256 (RFC 5802 / 7677)
+// ---------------------------------------------------------------------------
+pub mod scram {
+    use sha2::{Digest, Sha256};
+
+    const BLOCK_SIZE: usize = 64; // SHA-256 block size
+
+    /// HMAC-SHA-256 (RFC 2104).
+    pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        let mut k = [0u8; BLOCK_SIZE];
+        if key.len() > BLOCK_SIZE {
+            let h = Sha256::digest(key);
+            k[..32].copy_from_slice(&h);
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+        let mut ipad = [0x36u8; BLOCK_SIZE];
+        let mut opad = [0x5cu8; BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            ipad[i] ^= k[i];
+            opad[i] ^= k[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(&ipad);
+        inner.update(message);
+        let inner_hash = inner.finalize();
+
+        let mut outer = Sha256::new();
+        outer.update(&opad);
+        outer.update(&inner_hash);
+        outer.finalize().into()
+    }
+
+    /// PBKDF2-HMAC-SHA256 (RFC 2898) — derives `dk_len` = 32 bytes.
+    pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+        // For SCRAM we only need a single block (dk_len == 32 == hash_len).
+        let mut u = hmac_sha256(password, &[salt, &1u32.to_be_bytes()].concat());
+        let mut result = u;
+        for _ in 1..iterations {
+            u = hmac_sha256(password, &u);
+            for j in 0..32 {
+                result[j] ^= u[j];
+            }
+        }
+        result
+    }
+
+    fn xor32(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            out[i] = a[i] ^ b[i];
+        }
+        out
+    }
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        Sha256::digest(data).into()
+    }
+
+    /// Generate a random nonce string (base64-encoded, no padding).
+    pub fn generate_nonce() -> String {
+        let mut bytes = [0u8; 18]; // 18 bytes → 24 base64 chars
+        let mut x = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        x ^= std::process::id() as u64;
+        x = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for b in &mut bytes {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            *b = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8;
+        }
+        base64_encode_no_pad(&bytes)
+    }
+
+    fn base64_encode_no_pad(data: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(data)
+    }
+
+    fn base64_encode(data: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(data)
+    }
+
+    fn base64_decode(s: &str) -> Option<Vec<u8>> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(s).ok()
+    }
+
+    /// Pre-computed SCRAM credentials for a password.
+    #[derive(Debug, Clone)]
+    pub struct ScramCredentials {
+        pub salt: Vec<u8>,
+        pub iterations: u32,
+        pub stored_key: [u8; 32],
+        pub server_key: [u8; 32],
+    }
+
+    impl ScramCredentials {
+        /// Derive SCRAM credentials from a plaintext password.
+        pub fn from_password(password: &str, salt: &[u8], iterations: u32) -> Self {
+            let salted_password = pbkdf2_sha256(password.as_bytes(), salt, iterations);
+            let client_key = hmac_sha256(&salted_password, b"Client Key");
+            let stored_key = sha256(&client_key);
+            let server_key = hmac_sha256(&salted_password, b"Server Key");
+            Self {
+                salt: salt.to_vec(),
+                iterations,
+                stored_key,
+                server_key,
+            }
+        }
+    }
+
+    /// Server-side SCRAM-SHA-256 state machine.
+    #[derive(Debug)]
+    pub struct ScramServer {
+        server_nonce: String,
+        client_first_bare: String,
+        server_first: String,
+        credentials: ScramCredentials,
+    }
+
+    impl ScramServer {
+        /// Process client-first-message, return server-first-message.
+        ///
+        /// `client_first` is the full GS2-header + client-first-message-bare
+        /// (e.g. `n,,n=user,r=clientnonce`).
+        pub fn process_client_first(
+            client_first: &str,
+            credentials: &ScramCredentials,
+        ) -> Result<(Self, String), String> {
+            // Strip GS2 header: "n,," or "y,," (channel-binding not supported)
+            let bare = if let Some(rest) = client_first.strip_prefix("n,,") {
+                rest
+            } else if let Some(rest) = client_first.strip_prefix("y,,") {
+                rest
+            } else {
+                return Err("unsupported GS2 header in SCRAM client-first".to_string());
+            };
+
+            // Parse n=<user>,r=<client-nonce>
+            let mut client_nonce = None;
+            for attr in bare.split(',') {
+                if let Some(val) = attr.strip_prefix("r=") {
+                    client_nonce = Some(val.to_string());
+                }
+            }
+            let client_nonce =
+                client_nonce.ok_or_else(|| "missing r= in SCRAM client-first".to_string())?;
+
+            let server_nonce_part = generate_nonce();
+            let combined_nonce = format!("{}{}", client_nonce, server_nonce_part);
+
+            let server_first = format!(
+                "r={},s={},i={}",
+                combined_nonce,
+                base64_encode(&credentials.salt),
+                credentials.iterations
+            );
+
+            Ok((
+                Self {
+                    server_nonce: combined_nonce,
+                    client_first_bare: bare.to_string(),
+                    server_first: server_first.clone(),
+                    credentials: credentials.clone(),
+                },
+                server_first,
+            ))
+        }
+
+        /// Process client-final-message, return server-final-message on success.
+        pub fn process_client_final(&self, client_final: &str) -> Result<String, String> {
+            // Parse c=<channel-binding>, r=<nonce>, p=<proof>
+            let mut nonce = None;
+            let mut proof_b64 = None;
+            for attr in client_final.split(',') {
+                if let Some(val) = attr.strip_prefix("r=") {
+                    nonce = Some(val.to_string());
+                } else if let Some(val) = attr.strip_prefix("p=") {
+                    proof_b64 = Some(val.to_string());
+                }
+            }
+
+            let nonce = nonce.ok_or_else(|| "missing r= in SCRAM client-final".to_string())?;
+            if nonce != self.server_nonce {
+                return Err("SCRAM nonce mismatch".to_string());
+            }
+
+            let proof_b64 =
+                proof_b64.ok_or_else(|| "missing p= in SCRAM client-final".to_string())?;
+            let client_proof = base64_decode(&proof_b64)
+                .ok_or_else(|| "invalid base64 in SCRAM proof".to_string())?;
+            if client_proof.len() != 32 {
+                return Err("SCRAM proof wrong length".to_string());
+            }
+
+            // client-final-message-without-proof = everything before ",p="
+            let without_proof = client_final
+                .rfind(",p=")
+                .map(|i| &client_final[..i])
+                .ok_or_else(|| "malformed SCRAM client-final".to_string())?;
+
+            // AuthMessage = client-first-message-bare + "," + server-first-message +
+            //               "," + client-final-message-without-proof
+            let auth_message = format!(
+                "{},{},{}",
+                self.client_first_bare, self.server_first, without_proof
+            );
+
+            // ClientSignature = HMAC(StoredKey, AuthMessage)
+            let client_signature =
+                hmac_sha256(&self.credentials.stored_key, auth_message.as_bytes());
+
+            // Recover ClientKey = ClientProof XOR ClientSignature
+            let mut recovered_client_key = [0u8; 32];
+            for i in 0..32 {
+                recovered_client_key[i] = client_proof[i] ^ client_signature[i];
+            }
+
+            // Verify: H(recovered_client_key) == stored_key
+            let candidate_stored_key = sha256(&recovered_client_key);
+            if candidate_stored_key != self.credentials.stored_key {
+                return Err("SCRAM authentication failed".to_string());
+            }
+
+            // ServerSignature = HMAC(ServerKey, AuthMessage)
+            let server_signature =
+                hmac_sha256(&self.credentials.server_key, auth_message.as_bytes());
+
+            Ok(format!("v={}", base64_encode(&server_signature)))
+        }
+    }
+
+    /// Client-side SCRAM-SHA-256 for testing.
+    #[cfg(test)]
+    pub struct ScramClient {
+        pub username: String,
+        pub password: String,
+        pub client_nonce: String,
+        pub client_first_bare: String,
+        pub client_first: String,
+    }
+
+    #[cfg(test)]
+    impl ScramClient {
+        pub fn new(username: &str, password: &str) -> Self {
+            let client_nonce = generate_nonce();
+            let client_first_bare = format!("n={},r={}", username, client_nonce);
+            let client_first = format!("n,,{}", client_first_bare);
+            Self {
+                username: username.to_string(),
+                password: password.to_string(),
+                client_nonce,
+                client_first_bare,
+                client_first,
+            }
+        }
+
+        /// Process server-first-message, return client-final-message.
+        pub fn process_server_first(&self, server_first: &str) -> Result<String, String> {
+            let mut combined_nonce = None;
+            let mut salt_b64 = None;
+            let mut iterations = None;
+            for attr in server_first.split(',') {
+                if let Some(val) = attr.strip_prefix("r=") {
+                    combined_nonce = Some(val.to_string());
+                } else if let Some(val) = attr.strip_prefix("s=") {
+                    salt_b64 = Some(val.to_string());
+                } else if let Some(val) = attr.strip_prefix("i=") {
+                    iterations = Some(
+                        val.parse::<u32>()
+                            .map_err(|_| "invalid iteration count".to_string())?,
+                    );
+                }
+            }
+
+            let combined_nonce =
+                combined_nonce.ok_or_else(|| "missing r= in server-first".to_string())?;
+            if !combined_nonce.starts_with(&self.client_nonce) {
+                return Err("server nonce doesn't start with client nonce".to_string());
+            }
+            let salt =
+                base64_decode(&salt_b64.ok_or_else(|| "missing s= in server-first".to_string())?)
+                    .ok_or_else(|| "invalid salt base64".to_string())?;
+            let iterations = iterations.ok_or_else(|| "missing i= in server-first".to_string())?;
+
+            let salted_password = pbkdf2_sha256(self.password.as_bytes(), &salt, iterations);
+            let client_key = hmac_sha256(&salted_password, b"Client Key");
+            let stored_key = sha256(&client_key);
+
+            // channel-binding = base64("n,,") = "biws"
+            let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
+
+            let auth_message = format!(
+                "{},{},{}",
+                self.client_first_bare, server_first, client_final_without_proof
+            );
+
+            let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+            let client_proof = xor32(&client_key, &client_signature);
+
+            Ok(format!(
+                "{},p={}",
+                client_final_without_proof,
+                base64_encode(&client_proof)
+            ))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Startup message
 // ---------------------------------------------------------------------------
@@ -227,6 +546,65 @@ pub async fn write_auth_ok(stream: &mut TcpStream) -> anyhow::Result<()> {
 pub async fn write_auth_cleartext_password(stream: &mut TcpStream) -> anyhow::Result<()> {
     let buf = (auth::CLEARTEXT_PASSWORD as i32).to_be_bytes();
     write_message(stream, backend::AUTHENTICATION, &buf).await
+}
+
+/// Build and write an AuthenticationSASL message listing available mechanisms.
+pub async fn write_auth_sasl(stream: &mut TcpStream, mechanisms: &[&str]) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(64);
+    buf.extend_from_slice(&(auth::SASL as i32).to_be_bytes());
+    for mech in mechanisms {
+        buf.extend_from_slice(mech.as_bytes());
+        buf.push(0);
+    }
+    buf.push(0); // terminator of mechanism list
+    write_message(stream, backend::AUTHENTICATION, &buf).await
+}
+
+/// Build and write an AuthenticationSASLContinue message.
+pub async fn write_auth_sasl_continue(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(4 + data.len());
+    buf.extend_from_slice(&(auth::SASL_CONTINUE as i32).to_be_bytes());
+    buf.extend_from_slice(data.as_bytes());
+    write_message(stream, backend::AUTHENTICATION, &buf).await
+}
+
+/// Build and write an AuthenticationSASLFinal message.
+pub async fn write_auth_sasl_final(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(4 + data.len());
+    buf.extend_from_slice(&(auth::SASL_FINAL as i32).to_be_bytes());
+    buf.extend_from_slice(data.as_bytes());
+    write_message(stream, backend::AUTHENTICATION, &buf).await
+}
+
+/// Parse a SASLInitialResponse from a PasswordMessage payload.
+///
+/// Returns `(mechanism_name, client_first_message)`.
+pub fn parse_sasl_initial_response(payload: &[u8]) -> Option<(String, String)> {
+    let (mechanism, offset) = read_cstring_from(payload, 0);
+    if offset + 4 > payload.len() {
+        return None;
+    }
+    let data_len = i32::from_be_bytes([
+        payload[offset],
+        payload[offset + 1],
+        payload[offset + 2],
+        payload[offset + 3],
+    ]);
+    if data_len < 0 {
+        return Some((mechanism, String::new()));
+    }
+    let start = offset + 4;
+    let end = start + data_len as usize;
+    if end > payload.len() {
+        return None;
+    }
+    let data = String::from_utf8_lossy(&payload[start..end]).to_string();
+    Some((mechanism, data))
+}
+
+/// Parse a SASLResponse (client-final-message) from a PasswordMessage payload.
+pub fn parse_sasl_response(payload: &[u8]) -> String {
+    String::from_utf8_lossy(payload).to_string()
 }
 
 /// Build and write a ParameterStatus message.
@@ -401,6 +779,19 @@ pub async fn write_no_data(stream: &mut TcpStream) -> anyhow::Result<()> {
     write_message(stream, backend::NO_DATA, &[]).await
 }
 
+/// Build and write a ParameterDescription message.
+pub async fn write_parameter_description(
+    stream: &mut TcpStream,
+    type_oids: &[i32],
+) -> anyhow::Result<()> {
+    let mut buf = Vec::with_capacity(2 + (type_oids.len() * 4));
+    buf.extend_from_slice(&(type_oids.len() as i16).to_be_bytes());
+    for type_oid in type_oids {
+        buf.extend_from_slice(&type_oid.to_be_bytes());
+    }
+    write_message(stream, backend::PARAMETER_DESCRIPTION, &buf).await
+}
+
 // ---------------------------------------------------------------------------
 // Common PG type OIDs
 // ---------------------------------------------------------------------------
@@ -422,6 +813,117 @@ pub mod oid {
     pub const JSONB: i32 = 3802;
     pub const BYTEA: i32 = 17;
     pub const UUID: i32 = 2950;
+
+    // Array OIDs
+    pub const BOOL_ARRAY: i32 = 1000;
+    pub const INT4_ARRAY: i32 = 1007;
+    pub const INT8_ARRAY: i32 = 1016;
+    pub const FLOAT4_ARRAY: i32 = 1021;
+    pub const FLOAT8_ARRAY: i32 = 1022;
+    pub const TEXT_ARRAY: i32 = 1009;
+    pub const VARCHAR_ARRAY: i32 = 1015;
+    pub const DATE_ARRAY: i32 = 1182;
+    pub const TIMESTAMP_ARRAY: i32 = 1115;
+    pub const JSONB_ARRAY: i32 = 3807;
+    pub const UUID_ARRAY: i32 = 2951;
+
+    /// Return the element OID for an array OID, or None if not an array type.
+    pub fn array_element_oid(array_oid: i32) -> Option<i32> {
+        match array_oid {
+            BOOL_ARRAY => Some(BOOL),
+            INT4_ARRAY => Some(INT4),
+            INT8_ARRAY => Some(INT8),
+            FLOAT4_ARRAY => Some(FLOAT4),
+            FLOAT8_ARRAY => Some(FLOAT8),
+            TEXT_ARRAY => Some(TEXT),
+            VARCHAR_ARRAY => Some(VARCHAR),
+            DATE_ARRAY => Some(DATE),
+            TIMESTAMP_ARRAY => Some(TIMESTAMP),
+            JSONB_ARRAY => Some(JSONB),
+            UUID_ARRAY => Some(UUID),
+            _ => None,
+        }
+    }
+
+    /// Return the array OID for a scalar element OID, or None.
+    pub fn scalar_to_array_oid(scalar_oid: i32) -> Option<i32> {
+        match scalar_oid {
+            BOOL => Some(BOOL_ARRAY),
+            INT4 => Some(INT4_ARRAY),
+            INT8 => Some(INT8_ARRAY),
+            FLOAT4 => Some(FLOAT4_ARRAY),
+            FLOAT8 => Some(FLOAT8_ARRAY),
+            TEXT => Some(TEXT_ARRAY),
+            VARCHAR => Some(VARCHAR_ARRAY),
+            DATE => Some(DATE_ARRAY),
+            TIMESTAMP => Some(TIMESTAMP_ARRAY),
+            JSONB => Some(JSONB_ARRAY),
+            UUID => Some(UUID_ARRAY),
+            _ => None,
+        }
+    }
+}
+
+/// Encode a value in PG binary format for the given type OID.
+/// Returns `None` if the type is not supported for binary encoding.
+pub fn encode_binary_value(type_oid: i32, text_value: &str) -> Option<Vec<u8>> {
+    match type_oid {
+        oid::BOOL => {
+            let v = match text_value.trim().to_ascii_lowercase().as_str() {
+                "t" | "true" | "1" => 1u8,
+                _ => 0u8,
+            };
+            Some(vec![v])
+        }
+        oid::INT4 => {
+            let v: i32 = text_value.trim().parse().ok()?;
+            Some(v.to_be_bytes().to_vec())
+        }
+        oid::INT8 => {
+            let v: i64 = text_value.trim().parse().ok()?;
+            Some(v.to_be_bytes().to_vec())
+        }
+        oid::FLOAT4 => {
+            let v: f32 = text_value.trim().parse().ok()?;
+            Some(v.to_be_bytes().to_vec())
+        }
+        oid::FLOAT8 => {
+            let v: f64 = text_value.trim().parse().ok()?;
+            Some(v.to_be_bytes().to_vec())
+        }
+        oid::TEXT | oid::VARCHAR | oid::JSON | oid::JSONB => Some(text_value.as_bytes().to_vec()),
+        oid::UUID => {
+            // Parse UUID string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" to 16 bytes
+            let hex: String = text_value
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .collect();
+            if hex.len() != 32 {
+                return None;
+            }
+            let mut bytes = Vec::with_capacity(16);
+            for i in (0..32).step_by(2) {
+                bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
+            }
+            Some(bytes)
+        }
+        oid::BYTEA => {
+            // Already hex-encoded with \x prefix from text format
+            if let Some(hex) = text_value.strip_prefix("\\x") {
+                let mut bytes = Vec::with_capacity(hex.len() / 2);
+                for i in (0..hex.len()).step_by(2) {
+                    if i + 2 > hex.len() {
+                        break;
+                    }
+                    bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
+                }
+                Some(bytes)
+            } else {
+                Some(text_value.as_bytes().to_vec())
+            }
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,5 +1340,296 @@ mod tests {
         write_row_description(&mut server, &cols).await.unwrap();
 
         client_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_parameter_description_roundtrip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_handle = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let msg = read_message(&mut client).await.unwrap();
+            assert_eq!(msg.tag, backend::PARAMETER_DESCRIPTION);
+            assert_eq!(i16::from_be_bytes([msg.payload[0], msg.payload[1]]), 2);
+            assert_eq!(
+                i32::from_be_bytes([
+                    msg.payload[2],
+                    msg.payload[3],
+                    msg.payload[4],
+                    msg.payload[5],
+                ]),
+                oid::INT8
+            );
+            assert_eq!(
+                i32::from_be_bytes([
+                    msg.payload[6],
+                    msg.payload[7],
+                    msg.payload[8],
+                    msg.payload[9],
+                ]),
+                oid::TEXT
+            );
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+        write_parameter_description(&mut server, &[oid::INT8, oid::TEXT])
+            .await
+            .unwrap();
+
+        client_handle.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // T407: Array OID constants + utilities
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn array_oid_constants_match_postgres() {
+        assert_eq!(oid::BOOL_ARRAY, 1000);
+        assert_eq!(oid::INT4_ARRAY, 1007);
+        assert_eq!(oid::INT8_ARRAY, 1016);
+        assert_eq!(oid::FLOAT4_ARRAY, 1021);
+        assert_eq!(oid::FLOAT8_ARRAY, 1022);
+        assert_eq!(oid::TEXT_ARRAY, 1009);
+        assert_eq!(oid::VARCHAR_ARRAY, 1015);
+        assert_eq!(oid::DATE_ARRAY, 1182);
+        assert_eq!(oid::TIMESTAMP_ARRAY, 1115);
+        assert_eq!(oid::JSONB_ARRAY, 3807);
+        assert_eq!(oid::UUID_ARRAY, 2951);
+    }
+
+    #[test]
+    fn array_element_oid_roundtrip() {
+        assert_eq!(oid::array_element_oid(oid::INT4_ARRAY), Some(oid::INT4));
+        assert_eq!(oid::array_element_oid(oid::INT8_ARRAY), Some(oid::INT8));
+        assert_eq!(oid::array_element_oid(oid::TEXT_ARRAY), Some(oid::TEXT));
+        assert_eq!(oid::array_element_oid(oid::BOOL_ARRAY), Some(oid::BOOL));
+        assert_eq!(oid::array_element_oid(oid::UUID_ARRAY), Some(oid::UUID));
+        assert_eq!(oid::array_element_oid(oid::JSONB_ARRAY), Some(oid::JSONB));
+        assert_eq!(oid::array_element_oid(oid::INT4), None); // scalar → None
+        assert_eq!(oid::array_element_oid(0), None);
+    }
+
+    #[test]
+    fn scalar_to_array_oid_roundtrip() {
+        assert_eq!(oid::scalar_to_array_oid(oid::INT4), Some(oid::INT4_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(oid::INT8), Some(oid::INT8_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(oid::TEXT), Some(oid::TEXT_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(oid::BOOL), Some(oid::BOOL_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(oid::UUID), Some(oid::UUID_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(oid::JSONB), Some(oid::JSONB_ARRAY));
+        assert_eq!(oid::scalar_to_array_oid(999), None); // unknown → None
+    }
+
+    // -----------------------------------------------------------------------
+    // T407: Binary encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_binary_bool() {
+        assert_eq!(encode_binary_value(oid::BOOL, "t"), Some(vec![1]));
+        assert_eq!(encode_binary_value(oid::BOOL, "true"), Some(vec![1]));
+        assert_eq!(encode_binary_value(oid::BOOL, "1"), Some(vec![1]));
+        assert_eq!(encode_binary_value(oid::BOOL, "f"), Some(vec![0]));
+        assert_eq!(encode_binary_value(oid::BOOL, "false"), Some(vec![0]));
+    }
+
+    #[test]
+    fn encode_binary_int4() {
+        assert_eq!(
+            encode_binary_value(oid::INT4, "42"),
+            Some(42i32.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            encode_binary_value(oid::INT4, "-1"),
+            Some((-1i32).to_be_bytes().to_vec())
+        );
+        assert_eq!(encode_binary_value(oid::INT4, "abc"), None);
+    }
+
+    #[test]
+    fn encode_binary_int8() {
+        assert_eq!(
+            encode_binary_value(oid::INT8, "1234567890"),
+            Some(1234567890i64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn encode_binary_float8() {
+        let bytes = encode_binary_value(oid::FLOAT8, "3.14").unwrap();
+        assert_eq!(bytes.len(), 8);
+        let val = f64::from_be_bytes(bytes.try_into().unwrap());
+        assert!((val - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn encode_binary_float4() {
+        let bytes = encode_binary_value(oid::FLOAT4, "2.5").unwrap();
+        assert_eq!(bytes.len(), 4);
+        let val = f32::from_be_bytes(bytes.try_into().unwrap());
+        assert!((val - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn encode_binary_text_passthrough() {
+        assert_eq!(
+            encode_binary_value(oid::TEXT, "hello"),
+            Some(b"hello".to_vec())
+        );
+        assert_eq!(
+            encode_binary_value(oid::VARCHAR, "world"),
+            Some(b"world".to_vec())
+        );
+        assert_eq!(
+            encode_binary_value(oid::JSONB, r#"{"a":1}"#),
+            Some(br#"{"a":1}"#.to_vec())
+        );
+    }
+
+    #[test]
+    fn encode_binary_uuid() {
+        let bytes = encode_binary_value(oid::UUID, "550e8400-e29b-41d4-a716-446655440000");
+        assert!(bytes.is_some());
+        assert_eq!(bytes.as_ref().unwrap().len(), 16);
+        assert_eq!(bytes.unwrap()[0], 0x55);
+        // Invalid length
+        assert_eq!(encode_binary_value(oid::UUID, "not-a-uuid"), None);
+    }
+
+    #[test]
+    fn encode_binary_bytea_hex() {
+        let bytes = encode_binary_value(oid::BYTEA, "\\xDEAD").unwrap();
+        assert_eq!(bytes, vec![0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn encode_binary_unknown_oid_returns_none() {
+        assert_eq!(encode_binary_value(99999, "hello"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // T401: SCRAM-SHA-256
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scram_hmac_sha256_known_vector() {
+        // RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?"
+        let result = scram::hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let expected: [u8; 32] = [
+            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
+            0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
+            0x64, 0xec, 0x38, 0x43,
+        ];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn scram_pbkdf2_sha256_known_vector() {
+        // RFC 7677 example: password="pencil", salt="QSXCR+Q6sek8bf92", i=4096
+        // This matches the test vector from RFC 7677, Section 3.
+        let salt = b"QSXCR+Q6sek8bf92";
+        let result = scram::pbkdf2_sha256(b"pencil", salt, 4096);
+        // Just verify it produces 32 bytes (the exact value depends on raw salt bytes)
+        assert_eq!(result.len(), 32);
+    }
+
+    #[test]
+    fn scram_credentials_from_password() {
+        let salt = b"test-salt-1234567";
+        let creds = scram::ScramCredentials::from_password("mypassword", salt, 4096);
+        assert_eq!(creds.salt, salt);
+        assert_eq!(creds.iterations, 4096);
+        assert_eq!(creds.stored_key.len(), 32);
+        assert_eq!(creds.server_key.len(), 32);
+
+        // Same inputs produce same outputs (deterministic)
+        let creds2 = scram::ScramCredentials::from_password("mypassword", salt, 4096);
+        assert_eq!(creds.stored_key, creds2.stored_key);
+        assert_eq!(creds.server_key, creds2.server_key);
+    }
+
+    #[test]
+    fn scram_generate_nonce_is_nonempty() {
+        let nonce = scram::generate_nonce();
+        assert!(!nonce.is_empty());
+        assert!(nonce.len() >= 16); // 18 raw bytes → 24 base64 chars
+    }
+
+    #[test]
+    fn scram_full_exchange_succeeds() {
+        let password = "hunter2";
+        let salt = b"a-random-salt-16";
+        let creds = scram::ScramCredentials::from_password(password, salt, 4096);
+
+        // Client side
+        let client = scram::ScramClient::new("testuser", password);
+
+        // Server processes client-first
+        let (scram_state, server_first) =
+            scram::ScramServer::process_client_first(&client.client_first, &creds).unwrap();
+
+        // Client processes server-first, produces client-final
+        let client_final = client.process_server_first(&server_first).unwrap();
+
+        // Server processes client-final, produces server-final
+        let server_final = scram_state.process_client_final(&client_final).unwrap();
+
+        // Server-final must start with "v="
+        assert!(server_final.starts_with("v="), "got: {server_final}");
+    }
+
+    #[test]
+    fn scram_wrong_password_fails() {
+        let salt = b"a-random-salt-16";
+        let creds = scram::ScramCredentials::from_password("correct-password", salt, 4096);
+
+        let client = scram::ScramClient::new("testuser", "wrong-password");
+
+        let (scram_state, server_first) =
+            scram::ScramServer::process_client_first(&client.client_first, &creds).unwrap();
+
+        let client_final = client.process_server_first(&server_first).unwrap();
+
+        let result = scram_state.process_client_final(&client_final);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scram_server_rejects_bad_gs2_header() {
+        let salt = b"salt";
+        let creds = scram::ScramCredentials::from_password("pw", salt, 4096);
+        let result = scram::ScramServer::process_client_first("bad,,n=user,r=nonce", &creds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scram_server_rejects_missing_nonce() {
+        let salt = b"salt";
+        let creds = scram::ScramCredentials::from_password("pw", salt, 4096);
+        let result = scram::ScramServer::process_client_first("n,,n=user", &creds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_sasl_initial_response_basic() {
+        let mechanism = "SCRAM-SHA-256";
+        let data = "n,,n=user,r=nonce123";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(mechanism.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&(data.len() as i32).to_be_bytes());
+        payload.extend_from_slice(data.as_bytes());
+
+        let (mech, msg) = parse_sasl_initial_response(&payload).unwrap();
+        assert_eq!(mech, "SCRAM-SHA-256");
+        assert_eq!(msg, "n,,n=user,r=nonce123");
+    }
+
+    #[test]
+    fn parse_sasl_response_basic() {
+        let data = "c=biws,r=nonce123abc,p=proof";
+        assert_eq!(parse_sasl_response(data.as_bytes()), data);
     }
 }

@@ -1,15 +1,17 @@
 # Change Data Capture (CDC) and dependency-driven changefeeds
 
 Status: Partial implementation
-Last updated: 2026-03-27
+Last updated: 2026-04-16
 
 Current runtime baseline:
 - `cdc.subscribe_table` creates table subscriptions over the RPC API.
-- `cdc.poll` long-polls row-level change events from the current in-memory change log.
+- `cdc.subscribe_query` creates dependency-driven subscriptions for prepared queries and emits invalidation events with the current query ETag.
+- `cdc.poll` reads from the retained persisted change log and returns `earliest_offset` / `latest_offset` plus `resnapshot_required` metadata when a consumer falls behind the retained horizon.
+- `GET /api/v1/cdc/sse/{sub_id}` streams the same subscription events over SSE, with replay from the retained change log, bounded batch delivery, reconnect via `Last-Event-ID` or `from_offset`, and a terminal `resnapshot` control event when the reconnect cursor falls behind retention.
 - `cdc.ack` advances an in-memory consumer cursor per subscription.
 - `cdc.close` removes the subscription handle.
 - SkeinAdmin now includes a dedicated CDC page for `cdc.subscribe_table` / `cdc.poll` / `cdc.ack` / `cdc.close`, with session-local lag visualization derived from `next_offset - acked_offset`.
-- `cdc.subscribe_query`, SSE/WebSocket delivery, WAL-backed retention, and resnapshot handling are still open backlog items.
+- WebSocket delivery and durable consumer cursors are still open backlog items.
 
 SkeinDB's MySQL compatibility mode is valuable for adoption, but modern web and data pipelines often need a "push" interface for changes.
 This document specifies a CDC subsystem that provides:
@@ -33,11 +35,15 @@ Non-goals (v1):
 
 Each CDC event includes:
 - `offset`: monotonically increasing sequence (per stream)
-- `commit_ts` and (optional) `lsn`
+- `commit_ts_ms` and (optional) `lsn`
 - `db`, `table`
 - `op`: insert | update | delete
 - `pk`: primary key values
 - `before` and `after` images (optional, configurable)
+
+Current runtime scope:
+- row-level table events persist `commit_ts_ms` and `lsn = seq`
+- query invalidation events reuse the triggering table event metadata and override `op = "invalidate"`
 
 ## 3. Streams
 
@@ -56,15 +62,24 @@ Each CDC event includes:
   - new_etag
   - changed_keys summary (optional)
 
+Current runtime scope:
+- dependency sets are conservative and table-based, reusing the same prepared-query dependency metadata used for query ETags
+- invalidation events are delivered through `cdc.poll` with `op = "invalidate"`, the triggering `db` / `table`, and optional `query_id` / `etag` fields
+- subscriptions are bound to a prepared `query_id` plus its positional args
+
 This gives applications a direct way to update caches and UIs.
 
 ## 4. Delivery mechanisms
 
 Current runtime support:
 - Long poll: `cdc.poll` (RPC)
+- SSE: `GET /api/v1/cdc/sse/{sub_id}`
+  - emits the same JSON event payloads as `cdc.poll`
+  - replays from `?from_offset=<seq>` or `Last-Event-ID: <seq>`
+  - drains the retained change log in bounded batches so slow consumers can reconnect without losing events inside the retained horizon
+  - emits `event: resnapshot` with recovery metadata when the reconnect cursor falls behind retention
 
 Planned follow-ons:
-- SSE: `GET /api/v1/cdc/sse/{sub_id}`
 - WebSocket with backpressure
 
 ## 5. Exactly-once vs at-least-once
@@ -72,7 +87,9 @@ Planned follow-ons:
 - Default delivery is at-least-once.
 - Consumers ACK offsets via `cdc.ack`.
 - Current runtime tracks acked offsets in memory per subscription and suppresses redelivery for older offsets.
-- Retention windows, durable cursors, and backpressure policies remain follow-on work.
+- SSE reconnects are driven by event `id = seq`; clients can resume by supplying `Last-Event-ID` or `from_offset`.
+- When a consumer falls behind the retained horizon, `cdc.poll` returns `resnapshot_required = true` and SSE emits a `resnapshot` control event instead of replaying a partial stream.
+- Durable cursors and richer backpressure policies remain follow-on work.
 
 ## 6. Retention
 
@@ -81,7 +98,9 @@ Planned target design:
 - if WAL is truncated before a consumer catches up, the subscription must resnapshot
 
 Current runtime note:
-- table subscriptions read from the live in-memory change log and do not yet expose WAL-horizon / resnapshot semantics
+- the persisted retained change log is the current WAL-equivalent replay surface for subscriptions
+- retention is bounded by a configurable event horizon (`SKEINDB_CDC_RETENTION_EVENTS`, default `4096`)
+- when `from_offset` (or `Last-Event-ID`) is older than `earliest_offset - 1`, the server requires the consumer to resnapshot before resuming
 
 ## 7. SkeinQL surface
 
@@ -91,6 +110,9 @@ Methods:
 - `cdc.poll`
 - `cdc.ack`
 - `cdc.close`
+
+HTTP transport:
+- `GET /api/v1/cdc/sse/{sub_id}`
 
 ## 8. Observability
 
@@ -104,4 +126,7 @@ Expose:
 - ordering preserved per stream
 - offsets monotonic
 - acknowledged offsets suppress redelivery for older polls
+- SSE resumes from `Last-Event-ID` / `from_offset`
+- retained-horizon loss returns `resnapshot_required` for `cdc.poll`
+- retained-horizon loss emits `event: resnapshot` for SSE reconnects
 - closed subscriptions return `not_found`

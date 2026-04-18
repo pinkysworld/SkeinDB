@@ -87,13 +87,23 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
         "head \"https://github.com/pinkysworld/SkeinDB.git\", branch: \"main\"",
         "depends_on \"rust\" => :build",
         "crates/skeindb",
+        "service do",
+        "def post_install",
+        "def caveats",
+        "free_port",
+        "assert_equal \"ok\"",
+        "system.ping",
+        "assert_match \"pong\"",
     ] {
         assert!(formula.contains(marker), "formula should contain {marker}");
     }
 
     for marker in [
-        "releases/download/v{version}/skeindb-{version}-source.tar.gz",
+        "releases/download/v__VERSION__/skeindb-__VERSION__-source.tar.gz",
         "std_cargo_args(path: \"crates/skeindb\")",
+        "livecheck do",
+        "service do",
+        "def caveats",
     ] {
         assert!(
             formula_script.contains(marker),
@@ -163,6 +173,21 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
         ),
         "rendered formula should contain the requested sha256"
     );
+
+    for marker in [
+        "service do",
+        "livecheck do",
+        "def post_install",
+        "def caveats",
+        "free_port",
+        "system.ping",
+        "assert_match \"pong\"",
+    ] {
+        assert!(
+            rendered.contains(marker),
+            "rendered formula should contain {marker}"
+        );
+    }
 
     fs::remove_dir_all(outdir).ok();
 }

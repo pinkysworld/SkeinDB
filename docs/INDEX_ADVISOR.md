@@ -1,13 +1,15 @@
 # Self-tuning Index Advisor (Telemetry-driven)
 
 Status: Partial implementation
-Last updated: 2026-03-27
+Last updated: 2026-04-16
 
 Current runtime baseline:
 - Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
 - `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, and `advisor.history` are live.
+- Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
+- `advisor.apply_index` now queues background in-memory secondary-index builds, returns `queued` or `exists`, and `advisor.history` records lifecycle state (`queued`, `building`, `completed`, `failed`, `cancelled`) with progress percentages plus optional result/rollback metadata.
 - SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
-- Online build progress, rollback-on-failure orchestration, and measured latency deltas are still open work.
+- Measured before/after latency deltas remain open work.
 
 Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.
@@ -108,12 +110,13 @@ Workflow:
    - observed scan pressure from recent workload telemetry
    - an expected-after access-path summary
 2) Admin clicks "Apply"
-3) Engine builds and registers the prototype secondary index
-4) History records the action for later review
+3) Engine records a queued advisor action and completes the build in the background
+4) History records queued/building/completed-or-failed state for later review
+5) Failed builds record rollback state before the suggestion can surface again
 
 Note:
 - The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
-- Online build progress remains backlog work.
+- Progress reporting is lifecycle-level (`queued` -> `building` -> terminal state), not per-row physical build accounting.
 
 An optional "auto-apply" mode can exist for development environments.
 
@@ -129,7 +132,7 @@ Recommended methods:
   { "table": {"db":"mydb","table":"users"}, "limit": 20, "min_queries": 3, "min_rows": 32 }
   ```
 
-- `advisor.apply_index` (builds and registers an in-memory secondary index in the prototype)
+- `advisor.apply_index` (queues an in-memory secondary-index build in the prototype)
   - indexes rebuild lazily on first use after table changes
 - `advisor.dismiss` (suppresses the suggestion and drops any advisor-built index)
 - `advisor.history`
@@ -154,7 +157,7 @@ Recommended methods:
 Telemetry persistence (prototype):
 - Set `SKEINDB_ADVISOR_PERSIST=1` to persist advisor patterns/history on disk.
 - Files: `advisor_patterns.json` + `advisor_history.json`.
-- Applied advisor indexes are restored from the history log on startup.
+- Applied advisor indexes are restored from the history log on startup when their latest apply action reached a terminal success state.
 
 ## 6) Metrics
 
@@ -174,7 +177,7 @@ Note: `advisor_estimated_saved_ms_total` is a placeholder in the prototype.
 - [x] IA02: Candidate generation + duplication checks
 - [x] IA03: Benefit estimation level 0
 - [x] IA04: SkeinQL endpoints + SkeinAdmin UI page
-- [ ] IA05: Online index build progress + measured before/after reporting
+- [ ] IA05: Measured before/after reporting for advisor-applied indexes
 
 ---
 

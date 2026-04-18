@@ -44,6 +44,36 @@ Garbage collection removes:
 - row versions older than the retention horizon,
 - and ValueStore objects that are unreferenced by any retained row version.
 
+#### 1.3.1 `maintenance.history.*` RPC surface (T182)
+
+The retention policy is configured through the `settings.*` subsystem and the
+following three RPC methods (matching the `maintenance.compaction.*` layout):
+
+| Method | Direction | Description |
+| --- | --- | --- |
+| `maintenance.history.status` | read-only | Returns live/tombstone/purgeable row counts per table, the `oldest_tombstone_commit_ts_ms`, the effective `horizon_ms`, and the persisted retention policy. Included in the read-only RPC allowlist. |
+| `maintenance.history.set_policy` | write | Persists `history.retention.enabled` (bool) and `history.retention.window_ms` (u64). When enabled, an absent explicit `horizon_ms` in subsequent calls resolves to `now_ms - window_ms`. |
+| `maintenance.history.gc` | write | Permanently removes MVCC tombstones whose `commit_ts_ms <= horizon_ms`. Accepts an explicit `horizon_ms` parameter; otherwise uses the policy-derived horizon. |
+
+Horizon resolution precedence:
+
+1. Explicit `params.horizon_ms` (if provided, wins outright).
+2. `history.retention.enabled == true` and `history.retention.window_ms > 0` → `now_ms - window_ms`.
+3. Otherwise `None` (status reports all tombstones as purgeable; GC purges all timestamped tombstones).
+
+Safety rule: tombstones with `commit_ts_ms == 0` are **never** purged. These
+originate from the pre-T180 era when tombstones did not carry a commit
+timestamp; retaining them avoids accidentally resurrecting rows whose
+deletion point cannot be proven. Operators should monitor the status
+surface's `oldest_tombstone_commit_ts_ms` to confirm the steady state.
+
+After a successful GC pass per table the engine:
+
+1. Rebuilds the primary-key index (`pk_index`) since retained-row indices shift.
+2. Bumps `schema.table_version` so secondary indexes refresh lazily on next use.
+3. Clears cached vector indexes (stored row indices are stale).
+4. Persists the table to disk (best-effort; the first error is returned as `history_gc_partial` after the in-memory pass completes).
+
 ### 1.4 SQL compatibility surface
 
 Because SQL/MySQL is a compatibility ingress, SkeinDB exposes time travel to SQL clients without requiring new SQL syntax:

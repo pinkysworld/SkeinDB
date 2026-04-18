@@ -1000,6 +1000,9 @@ pub struct AdvisorIndexApplyResult {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1044,6 +1047,24 @@ pub struct AdvisorHistoryEntry {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_status: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1968,9 +1989,46 @@ pub struct CdcSubscribeTableParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcSubscribeQueryParams {
+    pub query_id: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CdcSubscribeResult {
     pub sub_id: String,
     pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcEvent {
+    pub seq: u64,
+    pub db: String,
+    pub table: String,
+    pub op: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<Vec<Lit>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default)]
+    pub commit_ts_ms: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsn: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1985,6 +2043,27 @@ pub struct CdcPollParams {
 pub struct CdcAckParams {
     pub sub_id: String,
     pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdcPollResult {
+    pub events: Vec<CdcEvent>,
+    pub next_offset: u64,
+
+    #[serde(default)]
+    pub earliest_offset: u64,
+
+    #[serde(default)]
+    pub latest_offset: u64,
+
+    #[serde(default)]
+    pub resnapshot_required: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resnapshot_from_offset: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resnapshot_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

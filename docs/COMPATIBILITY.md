@@ -125,6 +125,9 @@ Add queries there first, then implement.
 
 The MySQL integration suite now executes that corpus end-to-end over the wire listener,
 so the checked-in corpus is the enforced baseline for compatibility work.
+The PostgreSQL baseline now also has a dedicated live-wire corpus at `tests/compat/pg_corpus.sql`
+with a matching integration test, so PG startup probes, shared-engine SQL, and savepoint behavior
+have a checked-in regression driver too.
 That corpus now includes WordPress-style bootstrap, metadata, duplicate-key, default-value,
 pagination/count, grouped aggregate compatibility, projection-grouped `GROUP BY` de-dup + `FOUND_ROWS`,
 parenthesized `AND` / `OR` filter queries, broader MySQL scalar-function coverage, baseline arithmetic
@@ -198,9 +201,11 @@ The implementation is intentionally narrow but test-backed.
 ### Current baseline
 - **Wire protocol:** PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `RowDescription`, `DataRow`, `CommandComplete`, and `ErrorResponse`
 - **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; cleartext-password auth path when it is set
-- **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries and a `SELECT version()` compatibility response
-- **Transaction handling:** `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
-- **Extended query protocol:** stub acknowledgements only; full Parse/Bind/Describe/Execute semantics remain open
+- **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries, a `SELECT version()` compatibility response, and typed `RowDescription` metadata for the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline when the shared engine exposes those schema or literal types
+- **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_type`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- **Transaction handling:** PostgreSQL-style `ReadyForQuery` state (`I` / `T` / `E`), failed-transaction-block behavior, and undo-log-backed `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
+- **Extended query protocol:** text-format `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, named statements + portals, `$1` placeholders, sync-based recovery after extended-query errors, and typed `RowDescription` metadata for the same `INT8` / `FLOAT8` / `TEXT` baseline
+- **PG regression corpus:** dedicated `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
 
 ### Architecture
 Both MySQL and PostgreSQL frontends parse SQL into the shared `SqlPlan` / SkeinQL IR layer, so the execution engine is fully protocol-agnostic.
@@ -218,8 +223,9 @@ HTTP  (8080) ──┘
 ### Still open
 - SCRAM-SHA-256 authentication
 - PG session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, richer `ReadyForQuery` state)
+- richer PG type OID coverage beyond the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline, binary format support, and partial portal suspension
 - PG SQL dialect extensions such as `RETURNING`, dollar-quoting, `::` casts, `ILIKE`, arrays, and `ON CONFLICT`
-- `pg_catalog` virtual tables and driver bootstrap compatibility
-- PostgreSQL SQLSTATE parity and broader driver/framework coverage
+- broader `pg_catalog` virtual tables and driver bootstrap compatibility
+- broader driver/framework coverage
 
 See `docs/PG_COMPAT.md` for the tested scope, examples, and backlog map.

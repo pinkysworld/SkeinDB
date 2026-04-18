@@ -8,7 +8,7 @@ Current runtime baseline:
 - `query.select` and `query.execute_prepared` can return query ETags and honor `if_none_match`.
 - `query.prepare` plus `GET /api/v1/q/{query_id}` is live and returns HTTP ETag headers with `304 Not Modified` on matches.
 - `query.patch` reuses the same query-level ETag surface for delta refreshes.
-- `query.subscribe` / push invalidation is still planned.
+- `query.subscribe` exposes an SSE endpoint for prepared-query invalidation, and `cdc.subscribe_query` exposes the same dependency-driven invalidation model over both polling and `GET /api/v1/cdc/sse/{sub_id}` with query ETags.
 
 Goal:
 Make SkeinDB a web-native database by supporting cache-coherent reads using HTTP validators.
