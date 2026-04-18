@@ -24,7 +24,7 @@ Phase 0 verification checklist:
 - [x] T003 evidence: RecordFrame append/decode/iterate + truncation/CRC tests in `crates/skeindb-core/src/lib.rs` and file-backed iteration in `crates/skeindb-core/tests/phase0_format.rs`
 
 ## Phase 1 — Storage core
-- [ ] T010: MANIFEST.log reader/writer
+- [x] T010: MANIFEST.log reader/writer. Latest: `crates/skeindb-core/src/manifest.rs` now provides a typed append-only MANIFEST implementation over `FileHeader(FileKind::Manifest)` + `RecordFrame` payloads with five v1 record variants (`AddFile`, `RemoveFile`, `SetCurrentVersion`, `SetLastLsn`, `CleanShutdown`), replayable `ManifestState` derivation, and file-backed `ManifestWriter`/`ManifestReader` APIs. Unit tests cover record encode/decode for all variants, unknown-tag/file-kind rejection, state-apply behavior (add/update/remove), file roundtrip, writer reopen replay, and bad-header rejection.
 - [ ] T011: WAL writer/reader + recovery
 - [ ] T012: ValueStore (.vseg) append/read + ValueID
 - [ ] T013: Sorted runs (.run) + simple LSM (memtable + level0)

@@ -96,6 +96,34 @@ RecordFrame:
   crc32c   u32 (LE)
   payload  [len] bytes
 
+### 4.1 MANIFEST.log payload records (format v1)
+
+Each MANIFEST record is wrapped in a `RecordFrame`. The payload body starts
+with a `rec_type` tag, then uses VarU fields.
+
+ManifestRecordV1 payloads:
+
+- `rec_type = 0x01` (`AddFile`)
+  - `file_kind` u8 (`1=wal,2=rowseg,3=valseg,4=run`)
+  - `file_id` VarU (u32 domain)
+  - `level` VarU (u32 domain)
+- `rec_type = 0x02` (`RemoveFile`)
+  - `file_kind` u8
+  - `file_id` VarU (u32 domain)
+- `rec_type = 0x03` (`SetCurrentVersion`)
+  - `version` VarU (u64)
+- `rec_type = 0x04` (`SetLastLsn`)
+  - `lsn` VarU (u64)
+- `rec_type = 0x05` (`CleanShutdown`)
+  - `unix_s` VarU (u64)
+
+Replayed semantics:
+
+- `AddFile` adds or updates a live file entry (`kind`,`file_id`) with its level.
+- `RemoveFile` deletes that entry from the live set.
+- `SetCurrentVersion`, `SetLastLsn`, and `CleanShutdown` update their
+  corresponding scalar state fields.
+
 ---
 
 ## 5) Pointers

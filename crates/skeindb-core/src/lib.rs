@@ -12,6 +12,7 @@
 
 use thiserror::Error;
 
+pub mod manifest;
 pub mod valuestore;
 
 #[derive(Debug, Error)]
