@@ -25,7 +25,7 @@ Phase 0 verification checklist:
 
 ## Phase 1 — Storage core
 - [x] T010: MANIFEST.log reader/writer. Latest: `crates/skeindb-core/src/manifest.rs` now provides a typed append-only MANIFEST implementation over `FileHeader(FileKind::Manifest)` + `RecordFrame` payloads with five v1 record variants (`AddFile`, `RemoveFile`, `SetCurrentVersion`, `SetLastLsn`, `CleanShutdown`), replayable `ManifestState` derivation, and file-backed `ManifestWriter`/`ManifestReader` APIs. Unit tests cover record encode/decode for all variants, unknown-tag/file-kind rejection, state-apply behavior (add/update/remove), file roundtrip, writer reopen replay, and bad-header rejection.
-- [ ] T011: WAL writer/reader + recovery
+- [x] T011: WAL writer/reader + recovery. Latest: `crates/skeindb-core/src/wal.rs` now implements `FileHeader(FileKind::Wal)` + `RecordFrame` WAL files with typed v1 body records (`BEGIN_TXN`, `MUTATION`, `COMMIT_TXN`, `ABORT_TXN`) layered on the existing WAL header prefix, strict read-all and lenient committed-transaction recovery, and a file-backed `WalWriter` that truncates torn/corrupt tails before appending. Recovery emits only committed txns in log order, discards aborted txns, and reports truncated tail bytes. Unit tests cover v1/v2 record decode/roundtrip, unknown record rejection, committed-only recovery, torn-tail truncation on reopen, and bad-header rejection; integration tests cover file-backed roundtrip and truncated-tail recovery.
 - [ ] T012: ValueStore (.vseg) append/read + ValueID
 - [ ] T013: Sorted runs (.run) + simple LSM (memtable + level0)
 - [ ] T014: RowSeg (.rseg) + RowVersion encoding

@@ -14,6 +14,7 @@ use thiserror::Error;
 
 pub mod manifest;
 pub mod valuestore;
+pub mod wal;
 
 #[derive(Debug, Error)]
 pub enum CoreError {

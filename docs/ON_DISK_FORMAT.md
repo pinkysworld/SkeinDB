@@ -225,6 +225,24 @@ Commit rule:
 - A txn is committed iff a valid COMMIT_TXN record exists.
 - Recovery replays only committed txns in LSN order.
 
+Current v1 WAL body types:
+
+- `rec_type = 0x01` (`BEGIN_TXN`)
+  - no body payload
+- `rec_type = 0x02` (`MUTATION`)
+  - `op_bytes` = Bytes (VarU length + opaque payload)
+- `rec_type = 0x03` (`COMMIT_TXN`)
+  - no body payload
+- `rec_type = 0x04` (`ABORT_TXN`)
+  - no body payload
+
+Recovery rules for the v1 body vocabulary:
+
+- A txn is replayable only if a valid `COMMIT_TXN` was decoded for that `txn_id`.
+- `ABORT_TXN` discards any staged mutations for that `txn_id`.
+- A torn or corrupt tail stops the scan at the last valid frame; recovery keeps
+  all earlier valid committed txns and discards the invalid tail bytes.
+
 ---
 
 ## 10) Compaction and GC
