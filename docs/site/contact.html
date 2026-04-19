@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contact — SkeinDB</title>
+<meta name="description" content="Contact SkeinDB for commercial support, migration help, named research-track sponsorships, or custom engineering engagements.">
+<meta property="og:title" content="SkeinDB — Contact">
+<meta property="og:description" content="Get in touch about commercial support, migrations, named sponsorships, or custom engagements. We reply within two business days.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#09090b;--bg-card:#18181b;--bg-card-hover:#1f1f23;
+    --border:#27272a;--text:#fafafa;--text-secondary:#a1a1aa;--text-dim:#71717a;
+    --accent:#6366f1;--accent-light:#818cf8;--green:#10b981;--cyan:#06b6d4;--amber:#f59e0b;
+    --radius:12px;--radius-sm:8px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.65;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-light);text-decoration:none}
+  a:hover{color:var(--cyan)}
+
+  nav{position:sticky;top:0;z-index:100;background:rgba(9,9,11,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 2rem}
+  .nav-inner{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+  .nav-logo{font-size:1.1rem;font-weight:800;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent-light),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .nav-links{display:flex;gap:1.5rem;align-items:center}
+  .nav-links a{color:var(--text-secondary);font-size:.85rem;font-weight:500}
+  .nav-links a:hover,.nav-links a.active{color:var(--text)}
+  .nav-links a.nav-docs-cta{color:var(--accent-light);font-weight:600;padding:4px 12px;border-radius:6px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2)}
+  .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500}
+  .nav-gh svg{width:16px;height:16px;fill:currentColor}
+
+  .wrap{max-width:1100px;margin:0 auto;padding:4rem 2rem}
+  h1{font-size:clamp(2rem,4vw,2.8rem);font-weight:800;letter-spacing:-.03em;margin-bottom:.6rem}
+  h1 .grad{background:linear-gradient(135deg,var(--accent-light),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .lead{color:var(--text-secondary);max-width:680px;font-size:1.05rem;margin-bottom:2.5rem}
+
+  .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:2rem;align-items:start}
+  @media (max-width:860px){.grid{grid-template-columns:1fr}}
+
+  /* form */
+  form{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:2rem;display:flex;flex-direction:column;gap:1rem}
+  label{font-size:.8rem;font-weight:600;color:var(--text-secondary);letter-spacing:.02em;text-transform:uppercase}
+  .field{display:flex;flex-direction:column;gap:.4rem}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+  @media (max-width:600px){.row{grid-template-columns:1fr}}
+  input,select,textarea{background:#0c0c0f;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.7rem .85rem;color:var(--text);font-size:.92rem;font-family:inherit;transition:border-color .2s;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:140px}
+  .hint{font-size:.78rem;color:var(--text-dim);margin-top:.25rem}
+  .form-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:.5rem}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:11px 22px;border-radius:10px;font-size:.9rem;font-weight:600;cursor:pointer;border:none;font-family:inherit;transition:transform .15s,box-shadow .2s;text-decoration:none}
+  .btn:hover{transform:translateY(-1px)}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;box-shadow:0 4px 20px rgba(99,102,241,.25)}
+  .btn-primary:hover{box-shadow:0 6px 30px rgba(99,102,241,.4)}
+  .btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+  .btn-secondary:hover{border-color:var(--accent)}
+  .consent{display:flex;gap:.6rem;align-items:flex-start;font-size:.82rem;color:var(--text-secondary)}
+  .consent input{margin-top:3px}
+
+  /* sidebar */
+  .side{display:flex;flex-direction:column;gap:1rem}
+  .channel{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1.35rem 1.5rem}
+  .channel h3{font-size:.95rem;font-weight:700;margin-bottom:.4rem;display:flex;align-items:center;gap:8px}
+  .channel p{font-size:.85rem;color:var(--text-secondary);margin-bottom:.6rem;line-height:1.6}
+  .channel a{font-size:.86rem;font-weight:600}
+  .kvs{display:grid;grid-template-columns:auto 1fr;gap:.35rem 1rem;font-size:.85rem}
+  .kvs dt{color:var(--text-dim)}
+  .kvs dd{color:var(--text-secondary)}
+
+  .note{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:var(--radius);padding:1rem 1.25rem;font-size:.85rem;color:var(--text-secondary)}
+  .note strong{color:var(--amber)}
+
+  footer{border-top:1px solid var(--border);padding:2rem;text-align:center;color:var(--text-dim);font-size:.82rem;margin-top:3rem}
+  footer a{color:var(--accent-light)}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#research">Research</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="pricing.html">Pricing</a>
+      <a href="contact.html" class="active">Contact</a>
+      <a href="licensing.html">Licensing</a>
+      <a href="docs.html" class="nav-docs-cta">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <h1>Let&rsquo;s <span class="grad">talk SkeinDB</span></h1>
+  <p class="lead">
+    Commercial support, migrations, named research-track sponsorships, or a custom engineering engagement —
+    send us the basics and we&rsquo;ll reply within <strong>two business days</strong> (Europe / CET).
+  </p>
+
+  <div class="grid">
+
+    <!-- FORM -->
+    <form id="contactForm"
+          action="https://github.com/pinkysworld/SkeinDB/issues/new"
+          method="get"
+          target="_blank">
+      <!-- The form submits a pre-filled GitHub issue on the public repository.
+           Sensitive details can always be sent via email or the private channel below. -->
+      <input type="hidden" name="labels" value="commercial">
+
+      <div class="row">
+        <div class="field">
+          <label for="name">Your name</label>
+          <input id="name" name="name" type="text" autocomplete="name" required>
+        </div>
+        <div class="field">
+          <label for="company">Company / team</label>
+          <input id="company" name="company" type="text" autocomplete="organization">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required>
+          <span class="hint">We only use this to reply to you.</span>
+        </div>
+        <div class="field">
+          <label for="plan">Interested in</label>
+          <select id="plan" name="plan">
+            <option value="general">Something else / general enquiry</option>
+            <option value="starter">Starter support (€299 / mo)</option>
+            <option value="business">Business support (€1,200 / mo)</option>
+            <option value="enterprise">Enterprise support (€3,900 / mo)</option>
+            <option value="custom">Custom / 24×7</option>
+            <option value="migration">Migration sprint (MySQL → SkeinDB)</option>
+            <option value="workshop">Workshop / training</option>
+            <option value="sponsorship">Named research-track sponsorship</option>
+            <option value="hosted">Private hosted pilot</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- GitHub uses `template=` to pre-select an issue template. Kept fixed here. -->
+      <input type="hidden" name="template" value="commercial_inquiry.md">
+
+      <div class="field">
+        <label for="title">Short title</label>
+        <input id="title" name="title" type="text" placeholder="e.g. Starter support for internal analytics workload">
+      </div>
+
+      <div class="field">
+        <label for="body">What can we help with?</label>
+        <textarea id="body" name="body" placeholder="Context about your workload (rows, QPS, environment), what you&rsquo;re looking for, and your timeline. Rough is fine — we&rsquo;ll follow up with the right questions." required></textarea>
+        <span class="hint">This message will be used to pre-fill a GitHub issue on submit. Don&rsquo;t include secrets, credentials, or personal data.</span>
+      </div>
+
+      <label class="consent">
+        <input type="checkbox" required>
+        <span>I understand my message will open a public GitHub issue. For confidential enquiries I&rsquo;ll use one of the private channels on the right instead.</span>
+      </label>
+
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">
+          Open a GitHub inquiry →
+        </button>
+        <a class="btn btn-secondary" href="mailto:commercial@skeindb.dev?subject=SkeinDB%20commercial%20enquiry">Email us instead</a>
+      </div>
+    </form>
+
+    <!-- SIDEBAR -->
+    <aside class="side">
+      <div class="channel">
+        <h3>📧 Email</h3>
+        <p>For confidential commercial, security, or contractual matters.</p>
+        <a href="mailto:commercial@skeindb.dev">commercial@skeindb.dev</a>
+      </div>
+      <div class="channel">
+        <h3>🔒 Security disclosures</h3>
+        <p>Responsible disclosure for vulnerabilities. PGP key on request; please don&rsquo;t file security bugs as public issues.</p>
+        <a href="mailto:security@skeindb.dev">security@skeindb.dev</a>
+      </div>
+      <div class="channel">
+        <h3>💬 GitHub</h3>
+        <p>Public questions, bug reports, and feature requests. Best channel for technical discussion.</p>
+        <a href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank" rel="noopener">github.com/pinkysworld/SkeinDB/issues</a>
+      </div>
+      <div class="channel">
+        <h3>❤ Sponsor</h3>
+        <p>Support the project without a commercial plan.</p>
+        <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener">GitHub Sponsors</a> ·
+        <a href="https://www.paypal.com/paypalme/mippinky" target="_blank" rel="noopener">PayPal</a>
+      </div>
+      <div class="channel">
+        <h3>📋 At a glance</h3>
+        <dl class="kvs">
+          <dt>Response time</dt><dd>Within 2 business days</dd>
+          <dt>Working hours</dt><dd>Mon–Fri, 09–18 CET</dd>
+          <dt>Languages</dt><dd>English, German</dd>
+          <dt>Location</dt><dd>European Union</dd>
+          <dt>Invoicing</dt><dd>EUR · SEPA or card</dd>
+        </dl>
+      </div>
+      <div class="note">
+        <strong>Tip:</strong> if your enquiry is purely technical (a bug, a missing SQL feature, a protocol deviation), filing it on GitHub lets other users benefit from the answer and typically gets you a response faster than email.
+      </div>
+    </aside>
+
+  </div>
+</main>
+
+<footer>
+  SkeinDB &middot; <a href="index.html">Home</a> &middot; <a href="pricing.html">Pricing</a> &middot; <a href="licensing.html">Licensing</a> &middot; <a href="docs.html">Docs</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB">GitHub</a>
+</footer>
+
+<script>
+  // Pre-select the plan from ?plan=... query string for a friendlier flow.
+  (function(){
+    const params = new URLSearchParams(window.location.search);
+    const plan = params.get('plan');
+    if (!plan) return;
+    const sel = document.getElementById('plan');
+    for (const opt of sel.options) {
+      if (opt.value === plan) { opt.selected = true; break; }
+    }
+    const title = document.getElementById('title');
+    if (title && !title.value) {
+      const label = sel.options[sel.selectedIndex].text.replace(/\s*\(.*\)\s*/, '');
+      title.value = 'Enquiry: ' + label;
+    }
+  })();
+</script>
+
+</body>
+</html>

@@ -1458,10 +1458,10 @@ mod tests {
 
     #[test]
     fn encode_binary_float8() {
-        let bytes = encode_binary_value(oid::FLOAT8, "3.14").unwrap();
+        let bytes = encode_binary_value(oid::FLOAT8, "3.125").unwrap();
         assert_eq!(bytes.len(), 8);
         let val = f64::from_be_bytes(bytes.try_into().unwrap());
-        assert!((val - 3.14).abs() < 1e-10);
+        assert!((val - 3.125).abs() < 1e-10);
     }
 
     #[test]

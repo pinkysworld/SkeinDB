@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support &amp; Pricing — SkeinDB</title>
+<meta name="description" content="SkeinDB commercial support plans: concrete monthly pricing for Starter, Business, and Enterprise tiers. Named research sponsorships, migration sprints, and custom engagements on request.">
+<meta name="keywords" content="SkeinDB support, database support pricing, SkeinDB commercial, SLA, migration support, named sponsorship">
+<meta property="og:title" content="SkeinDB — Support &amp; Pricing">
+<meta property="og:description" content="Open-source core, optional paid support. Starter €299/mo · Business €1,200/mo · Enterprise €3,900/mo · Custom engagements on request.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#09090b;--bg-card:#18181b;--bg-card-hover:#1f1f23;
+    --border:#27272a;--border-accent:#3f3f46;
+    --text:#fafafa;--text-secondary:#a1a1aa;--text-dim:#71717a;
+    --accent:#6366f1;--accent-light:#818cf8;
+    --green:#10b981;--amber:#f59e0b;--cyan:#06b6d4;--rose:#f43f5e;--purple:#a855f7;
+    --radius:12px;--radius-sm:8px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--text);line-height:1.65;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-light);text-decoration:none;transition:color .2s}
+  a:hover{color:var(--cyan)}
+
+  /* --- NAV (shared look with index) --- */
+  nav{position:sticky;top:0;z-index:100;background:rgba(9,9,11,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 2rem}
+  .nav-inner{max-width:1200px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+  .nav-logo{font-size:1.1rem;font-weight:800;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent-light),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-decoration:none}
+  .nav-links{display:flex;gap:1.5rem;align-items:center}
+  .nav-links a{color:var(--text-secondary);font-size:.85rem;font-weight:500}
+  .nav-links a:hover,.nav-links a.active{color:var(--text)}
+  .nav-links a.nav-docs-cta{color:var(--accent-light);font-weight:600;padding:4px 12px;border-radius:6px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2)}
+  .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500}
+  .nav-gh:hover{border-color:var(--accent);background:var(--bg-card-hover);color:var(--text)}
+  .nav-gh svg{width:16px;height:16px;fill:currentColor}
+
+  /* --- HERO --- */
+  .hero{max-width:1100px;margin:0 auto;padding:5rem 2rem 2rem;text-align:center;position:relative}
+  .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:600px;height:600px;background:radial-gradient(circle,rgba(99,102,241,.12) 0%,transparent 70%);pointer-events:none}
+  .hero-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);padding:6px 16px;border-radius:20px;font-size:.78rem;font-weight:500;color:var(--accent-light);margin-bottom:1.25rem}
+  .hero h1{font-size:clamp(2rem,5vw,3.2rem);font-weight:900;letter-spacing:-.03em;line-height:1.1;margin-bottom:1rem}
+  .hero h1 .grad{background:linear-gradient(135deg,var(--accent-light),var(--cyan),var(--green));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .hero p{max-width:680px;margin:0 auto 1.75rem;font-size:1.05rem;color:var(--text-secondary);line-height:1.7}
+
+  /* --- SECTIONS --- */
+  section{max-width:1200px;margin:0 auto;padding:3rem 2rem}
+  .section-header{text-align:center;margin-bottom:2.5rem}
+  .section-header h2{font-size:1.9rem;font-weight:800;letter-spacing:-.02em;margin-bottom:.5rem}
+  .section-header p{color:var(--text-secondary);max-width:640px;margin:0 auto;font-size:.95rem}
+
+  /* --- PRICING GRID --- */
+  .tiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1.25rem;align-items:stretch}
+  .tier{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1.75rem;display:flex;flex-direction:column;gap:1rem;transition:border-color .2s,transform .15s}
+  .tier:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .tier.featured{border-color:var(--accent);box-shadow:0 8px 40px rgba(99,102,241,.15);position:relative}
+  .tier.featured::before{content:'Most popular';position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,var(--accent),var(--accent-light));color:#fff;padding:3px 12px;border-radius:20px;font-size:.7rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+  .tier h3{font-size:1.1rem;font-weight:700}
+  .tier .price{font-size:2rem;font-weight:900;letter-spacing:-.02em;line-height:1}
+  .tier .price small{font-size:.9rem;font-weight:500;color:var(--text-dim);margin-left:4px}
+  .tier .price.contact{font-size:1.3rem;color:var(--accent-light)}
+  .tier ul{list-style:none;display:flex;flex-direction:column;gap:.5rem;flex:1;margin-top:.5rem}
+  .tier ul li{font-size:.87rem;color:var(--text-secondary);display:flex;gap:.5rem;align-items:flex-start;line-height:1.5}
+  .tier ul li::before{content:'✓';color:var(--green);font-weight:700;flex-shrink:0}
+  .tier ul li.muted{color:var(--text-dim)}
+  .tier ul li.muted::before{content:'–';color:var(--text-dim)}
+  .tier .btn{text-align:center;padding:10px 16px;border-radius:8px;font-size:.88rem;font-weight:600;display:inline-block;transition:all .2s}
+  .tier .btn-primary{background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff}
+  .tier .btn-primary:hover{box-shadow:0 6px 24px rgba(99,102,241,.35)}
+  .tier .btn-secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+  .tier .btn-secondary:hover{border-color:var(--accent);color:var(--accent-light)}
+
+  /* --- COMPARISON TABLE --- */
+  table.compare{width:100%;border-collapse:collapse;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-top:1rem}
+  table.compare th,table.compare td{padding:.85rem 1rem;text-align:left;border-bottom:1px solid var(--border);font-size:.88rem}
+  table.compare th{background:#111;color:var(--text);font-weight:600;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}
+  table.compare td{color:var(--text-secondary)}
+  table.compare td:first-child{color:var(--text);font-weight:500}
+  table.compare tr:last-child td{border-bottom:none}
+  table.compare .yes{color:var(--green);font-weight:600}
+  table.compare .no{color:var(--text-dim)}
+
+  /* --- ADD-ONS --- */
+  .addons{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem}
+  .addon{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1.4rem;transition:border-color .2s}
+  .addon:hover{border-color:var(--accent)}
+  .addon h3{font-size:1rem;font-weight:700;margin-bottom:.4rem}
+  .addon .addon-price{font-size:.95rem;font-weight:700;color:var(--accent-light);margin:.35rem 0}
+  .addon p{font-size:.85rem;color:var(--text-secondary);line-height:1.6}
+
+  /* --- FAQ --- */
+  .faq{display:grid;gap:.6rem;max-width:820px;margin:0 auto}
+  .faq details{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;transition:border-color .2s}
+  .faq details[open]{border-color:var(--accent)}
+  .faq summary{cursor:pointer;font-weight:600;font-size:.95rem;list-style:none;display:flex;justify-content:space-between;align-items:center}
+  .faq summary::after{content:'+';color:var(--text-dim);font-size:1.3rem;font-weight:400;transition:transform .2s}
+  .faq details[open] summary::after{transform:rotate(45deg)}
+  .faq details p{margin-top:.7rem;font-size:.88rem;color:var(--text-secondary);line-height:1.7}
+
+  /* --- CTA --- */
+  .cta-card{background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(6,182,212,.08));border:1px solid rgba(99,102,241,.3);border-radius:var(--radius);padding:2.5rem 2rem;text-align:center}
+  .cta-card h2{font-size:1.6rem;font-weight:800;letter-spacing:-.02em;margin-bottom:.5rem}
+  .cta-card p{color:var(--text-secondary);max-width:560px;margin:0 auto 1.5rem}
+  .cta-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:10px;font-size:.88rem;font-weight:600;text-decoration:none;transition:transform .15s,box-shadow .2s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),#4f46e5);color:#fff;box-shadow:0 4px 20px rgba(99,102,241,.25)}
+  .btn-primary:hover{box-shadow:0 6px 30px rgba(99,102,241,.4);color:#fff}
+  .btn-secondary{background:var(--bg-card);border:1px solid var(--border);color:var(--text)}
+  .btn-secondary:hover{border-color:var(--accent);color:var(--text)}
+
+  /* --- FOOTER --- */
+  footer{border-top:1px solid var(--border);padding:3rem 2rem 2rem;margin-top:3rem}
+  .footer-inner{max-width:1200px;margin:0 auto;display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:2rem}
+  .footer-brand{max-width:280px}
+  .footer-brand .nav-logo{font-size:1rem;display:inline-block;margin-bottom:.5rem}
+  .footer-brand p{font-size:.78rem;color:var(--text-dim);line-height:1.6}
+  .footer-col h4{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-secondary);margin-bottom:.75rem}
+  .footer-col a{display:block;color:var(--text-dim);font-size:.82rem;padding:3px 0}
+  .footer-col a:hover{color:var(--accent-light)}
+  .footer-bottom{max-width:1200px;margin:2rem auto 0;padding-top:1.5rem;border-top:1px solid var(--border);text-align:center}
+  .footer-bottom p{color:var(--text-dim);font-size:.78rem}
+  .footer-bottom a{color:var(--accent-light)}
+
+  .small{font-size:.8rem;color:var(--text-dim);text-align:center;max-width:680px;margin:1.25rem auto 0}
+
+  @media (max-width:768px){
+    .nav-links{display:none}
+    .tiers{grid-template-columns:1fr}
+    .hero{padding:3.5rem 1.5rem 1.5rem}
+    .footer-inner{flex-direction:column;gap:1.5rem}
+    table.compare{display:block;overflow-x:auto}
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#research">Research</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="pricing.html" class="active">Pricing</a>
+      <a href="licensing.html">Licensing</a>
+      <a href="docs.html" class="nav-docs-cta">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">💼 Open core · Paid support only when you need it</div>
+  <h1>Support plans that <span class="grad">scale with you</span></h1>
+  <p>
+    SkeinDB is, and will stay, <strong>Apache-2.0 open source</strong>. The database, admin console, and every research feature are free to use in production.
+    Paid plans add <em>response times, named contacts, and priority engineering</em> — nothing more, nothing less.
+  </p>
+</section>
+
+<!-- TIERS -->
+<section id="tiers">
+  <div class="tiers">
+
+    <div class="tier">
+      <h3>Community</h3>
+      <div class="price">€0<small>/forever</small></div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">For developers, researchers, and self-hosted production teams who are happy with community support.</p>
+      <ul>
+        <li>Full SkeinDB binary (Apache-2.0)</li>
+        <li>All 20 research tracks</li>
+        <li>GitHub Issues &amp; Discussions</li>
+        <li>Best-effort responses</li>
+        <li class="muted">No SLA</li>
+        <li class="muted">No private channel</li>
+      </ul>
+      <a class="btn btn-secondary" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+
+    <div class="tier">
+      <h3>Starter</h3>
+      <div class="price">€299<small>/month</small></div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">Your first production deployment. One project, one responsive maintainer on email.</p>
+      <ul>
+        <li>Everything in Community</li>
+        <li>Email support (business hours CET)</li>
+        <li>Next-business-day response</li>
+        <li>Up to <strong>1 production deployment</strong></li>
+        <li>Config &amp; upgrade review, twice a year</li>
+        <li>Listed as a Starter customer on request</li>
+      </ul>
+      <a class="btn btn-primary" href="contact.html?plan=starter">Contact sales</a>
+    </div>
+
+    <div class="tier featured">
+      <h3>Business</h3>
+      <div class="price">€1,200<small>/month</small></div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">Growing teams who need predictable turn-around and a direct line to engineering.</p>
+      <ul>
+        <li>Everything in Starter</li>
+        <li>Email <strong>+ shared Slack/Teams</strong></li>
+        <li><strong>Same-business-day</strong> response</li>
+        <li>Up to <strong>5 production deployments</strong></li>
+        <li>Quarterly roadmap &amp; upgrade call</li>
+        <li>Priority bug triage on the public tree</li>
+        <li>Migration &amp; schema review (2 / year)</li>
+      </ul>
+      <a class="btn btn-primary" href="contact.html?plan=business">Contact sales</a>
+    </div>
+
+    <div class="tier">
+      <h3>Enterprise</h3>
+      <div class="price">€3,900<small>/month</small></div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">Regulated teams and critical workloads. Named engineer, faster clock, architecture partner.</p>
+      <ul>
+        <li>Everything in Business</li>
+        <li>Email + chat + <strong>scheduled video</strong></li>
+        <li><strong>4-business-hour</strong> first response</li>
+        <li><strong>Unlimited production deployments</strong></li>
+        <li>Named engineer as primary contact</li>
+        <li>Monthly architecture &amp; capacity review</li>
+        <li>Roadmap input on prioritisation</li>
+        <li>Security advisory pre-notification</li>
+      </ul>
+      <a class="btn btn-primary" href="contact.html?plan=enterprise">Contact sales</a>
+    </div>
+
+    <div class="tier">
+      <h3>Custom &amp; 24×7</h3>
+      <div class="price contact">Let&rsquo;s talk</div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">On-prem, regulated, global, or mission-critical. Tailored SLAs including follow-the-sun pager rotation.</p>
+      <ul>
+        <li>Everything in Enterprise</li>
+        <li>Tailored SLA (down to 1-hour / 24×7)</li>
+        <li>Pager rotation with named team</li>
+        <li>On-site deployment assistance</li>
+        <li>Private fork maintenance</li>
+        <li>Custom feature engagements</li>
+        <li>Dedicated compliance &amp; audit support</li>
+      </ul>
+      <a class="btn btn-secondary" href="contact.html?plan=custom">Request a quote</a>
+    </div>
+
+  </div>
+
+  <p class="small">
+    Prices are in Euro, exclusive of VAT. Annual prepayment receives a <strong>20 % discount</strong> (two months free).
+    Plans can be upgraded or downgraded with one full calendar month&rsquo;s notice. No lock-in.
+  </p>
+</section>
+
+<!-- COMPARISON -->
+<section id="compare">
+  <div class="section-header">
+    <h2>What&rsquo;s in each plan</h2>
+    <p>The same open-source binary runs on every tier. Plans only change how we respond to you.</p>
+  </div>
+  <table class="compare">
+    <thead>
+      <tr>
+        <th>Capability</th>
+        <th>Community</th>
+        <th>Starter</th>
+        <th>Business</th>
+        <th>Enterprise</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Apache-2.0 binary &amp; source</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+      <tr><td>First response SLA</td><td class="no">None</td><td>Next business day</td><td>Same business day</td><td>4 business hours</td></tr>
+      <tr><td>Support channels</td><td>GitHub</td><td>Email</td><td>Email + chat</td><td>Email + chat + video</td></tr>
+      <tr><td>Covered production deployments</td><td>—</td><td>1</td><td>5</td><td>Unlimited</td></tr>
+      <tr><td>Named engineering contact</td><td class="no">—</td><td class="no">—</td><td>Rotating</td><td class="yes">Named</td></tr>
+      <tr><td>Architecture / capacity review</td><td class="no">—</td><td>2 / year</td><td>Quarterly</td><td>Monthly</td></tr>
+      <tr><td>Roadmap input</td><td>Public issues</td><td>Public issues</td><td>Quarterly call</td><td>Prioritised</td></tr>
+      <tr><td>Security advisory pre-notification</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="yes">Yes</td></tr>
+      <tr><td>24×7 pager</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td>Add-on</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ADD-ONS -->
+<section id="addons">
+  <div class="section-header">
+    <h2>Add-ons &amp; professional services</h2>
+    <p>Project-scoped engagements you can attach to any plan — or buy standalone.</p>
+  </div>
+  <div class="addons">
+    <div class="addon">
+      <h3>Named research-track sponsorship</h3>
+      <div class="addon-price">from €1,500 / month</div>
+      <p>Fund one of the <a href="index.html#research">20 research tracks</a> (e.g. Wasm UDFs, oblivious execution, QUIC). Your attribution appears in release notes and in the track&rsquo;s documentation page.</p>
+    </div>
+    <div class="addon">
+      <h3>Migration sprint (MySQL&nbsp;→&nbsp;SkeinDB)</h3>
+      <div class="addon-price">€15,000 fixed fee</div>
+      <p>Two-week remote engagement: schema review, compatibility telemetry run, application dry-run on SkeinDB, and a migration playbook with rollback procedure.</p>
+    </div>
+    <div class="addon">
+      <h3>On-site / remote workshop</h3>
+      <div class="addon-price">€8,000 / day</div>
+      <p>Hands-on training for your engineering team on SkeinDB internals, SkeinQL, MVCC, MySQL compat layer, or any research track. Travel expenses billed at cost.</p>
+    </div>
+    <div class="addon">
+      <h3>Private hosted pilot</h3>
+      <div class="addon-price">NDA &amp; quote</div>
+      <p>Single-tenant SkeinDB instance operated by us for your evaluation period. Intended as a bridge to Enterprise self-host or to the upcoming managed SkeinDB offering.</p>
+    </div>
+    <div class="addon">
+      <h3>24×7 pager rotation</h3>
+      <div class="addon-price">from €2,500 / month</div>
+      <p>On-call rotation with 1-hour acknowledgement target. Only available as an add-on to the Enterprise or Custom plans with a documented runbook in place.</p>
+    </div>
+    <div class="addon">
+      <h3>Custom feature engagement</h3>
+      <div class="addon-price">Quote per scope</div>
+      <p>Upstream-friendly feature work scoped as a fixed-fee engagement. Default outcome is a merged Apache-2.0 contribution; private forks available on request.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section id="faq">
+  <div class="section-header">
+    <h2>Frequently asked questions</h2>
+  </div>
+  <div class="faq">
+    <details>
+      <summary>Is any feature locked behind a paid plan?</summary>
+      <p>No. Every capability — MVCC storage, MySQL + PostgreSQL wire, SkeinAdmin, all 20 research tracks, clustering, audit WAL — ships in the open-source binary under Apache-2.0. Paid plans only change our <em>response time and channels</em>.</p>
+    </details>
+    <details>
+      <summary>Can I use SkeinDB in a commercial product without a support plan?</summary>
+      <p>Yes. Apache-2.0 grants you commercial use, modification, redistribution, and an explicit patent grant. See the <a href="licensing.html">Licensing page</a> for details. A support plan is only useful if you want a defined SLA and a direct contact.</p>
+    </details>
+    <details>
+      <summary>Do you offer a free trial of the paid support plans?</summary>
+      <p>We offer a <strong>30-day evaluation</strong> of the Starter or Business tiers for teams that are actively running SkeinDB on a production workload. <a href="contact.html?plan=evaluation">Ask us about it</a>.</p>
+    </details>
+    <details>
+      <summary>Who is behind SkeinDB?</summary>
+      <p>SkeinDB is built by Michél Nguyen (<a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">ORCID</a>) with contributions from community members. Commercial engagements are currently operated as an independent practice; invoicing details are provided on signature.</p>
+    </details>
+    <details>
+      <summary>How do I pay?</summary>
+      <p>Bank transfer (SEPA) or credit card via our billing partner after an order form is signed. Invoices are issued monthly or annually depending on plan. Non-EU customers receive an invoice without VAT where reverse-charge applies.</p>
+    </details>
+    <details>
+      <summary>What about compliance — SOC 2, ISO 27001, HIPAA?</summary>
+      <p>SkeinDB is a database you operate yourself, so compliance is scoped to <em>your</em> environment. We help Enterprise and Custom customers with artifacts (architecture diagrams, threat model, audit-WAL configuration, data-handling statement). A managed offering with its own compliance posture is on the roadmap.</p>
+    </details>
+    <details>
+      <summary>Do you offer hosted / managed SkeinDB?</summary>
+      <p>Not generally available yet. A private hosted pilot is offered as an add-on for Enterprise and Custom customers. General availability is on the roadmap after the 1.0 on-disk format freeze.</p>
+    </details>
+    <details>
+      <summary>Do I get to influence the roadmap?</summary>
+      <p>Business plans include a quarterly call where your priorities are reviewed. Enterprise plans include documented prioritisation: your items move up the engineering queue unless they conflict with the open-source project&rsquo;s direction. We won&rsquo;t accept roadmap items that would fragment the ecosystem.</p>
+    </details>
+    <details>
+      <summary>How can I support the project if I&rsquo;m not ready for a paid plan?</summary>
+      <p>Anything helps: <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener">GitHub Sponsors</a>, <a href="https://www.paypal.com/paypalme/mippinky" target="_blank" rel="noopener">PayPal</a>, starring the repo, filing high-quality issues, or sponsoring a single research track. See the <a href="licensing.html">Licensing &amp; sponsorship</a> page for the full list.</p>
+    </details>
+  </div>
+</section>
+
+<!-- CTA -->
+<section>
+  <div class="cta-card">
+    <h2>Ready to talk?</h2>
+    <p>Tell us about your workload and we&rsquo;ll reply within two business days with a scoped proposal. No pushy sales, no hidden add-ons.</p>
+    <div class="cta-actions">
+      <a class="btn btn-primary" href="contact.html">Contact sales</a>
+      <a class="btn btn-secondary" href="https://github.com/pinkysworld/SkeinDB/issues/new?labels=commercial&amp;template=commercial_inquiry.md" target="_blank" rel="noopener">Open a GitHub inquiry</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <span class="nav-logo">SkeinDB</span>
+      <p>A single-binary database engine with cell-interned MVCC, 20 research tracks, and a web-native admin stack.</p>
+    </div>
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="index.html#features">Features</a>
+      <a href="index.html#quickstart">Quick Start</a>
+      <a href="index.html#architecture">Architecture</a>
+      <a href="roadmap.html">Roadmap</a>
+    </div>
+    <div class="footer-col">
+      <h4>Business</h4>
+      <a href="pricing.html">Support &amp; Pricing</a>
+      <a href="licensing.html">Licensing</a>
+      <a href="contact.html">Contact</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener">Sponsor</a>
+    </div>
+    <div class="footer-col">
+      <h4>Documentation</h4>
+      <a href="docs.html">All Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank" rel="noopener">Getting Started</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank" rel="noopener">SkeinQL Reference</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank" rel="noopener">Issues</a>
+      <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Author (ORCID)</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <p>SkeinDB &mdash; Built by <a href="https://orcid.org/0000-0001-6834-4422" target="_blank" rel="noopener">Michél Nguyen</a> · Apache-2.0 · Paid support is an independent engagement.</p>
+  </div>
+</footer>
+
+</body>
+</html>
