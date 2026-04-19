@@ -13,6 +13,7 @@
 use thiserror::Error;
 
 pub mod manifest;
+pub mod rowdir;
 pub mod rowseg;
 pub mod run;
 pub mod valuestore;

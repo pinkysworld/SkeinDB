@@ -1,6 +1,10 @@
 # SkeinDB
 
-Last updated: 2026-04-16
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
+[![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
+
+Last updated: 2026-04-19.
 
 SkeinDB is a single-binary database server that combines:
 
@@ -242,9 +246,13 @@ Most useful day-to-day docs:
 If SkeinDB is useful to you and you want to help keep it moving:
 
 - GitHub Sponsors is the main option: <https://github.com/sponsors/pinkysworld>
-- If PayPal is easier, you can use `mip@gmx.biz`.
+- If PayPal is easier, you can use `mip@gmx.biz` (or <https://www.paypal.com/paypalme/mippinky>).
 
-See [SUPPORT.md](/Users/michelpicker/Library/Mobile%20Documents/com~apple~CloudDocs/Projekte/DB/SUPPORT.md).
+For teams running SkeinDB in production, see [COMMERCIAL.md](COMMERCIAL.md)
+for commercial support tiers, training, named research-track sponsorships,
+and the roadmap for hosted SkeinDB + enterprise add-on modules (after 1.0).
+
+See [SUPPORT.md](SUPPORT.md) for a shorter community-support overview.
 
 ---
 

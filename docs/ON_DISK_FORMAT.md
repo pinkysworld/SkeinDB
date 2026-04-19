@@ -229,6 +229,23 @@ Current `skeindb-core` implementation status for T013:
 - `RunReader` supports full scans and point lookups by binary-searching the loaded index block.
 - `SimpleLsm` provides a minimal memtable + level0 implementation: puts land in a `BTreeMap`, flushes create new `run-######.run` files, and reads consult level0 runs newest-first.
 
+### 8.1 RowDir runs (T015)
+
+`RowDir` (`crates/skeindb-core/src/rowdir.rs`) reuses the `.run` format to
+persist the `row_id → FilePtr` head-pointer directory with no new on-disk
+format:
+
+- Keys are 8-byte big-endian `row_id`, so ascending byte order matches
+  ascending numeric order.
+- Values are `[tag:u8][payload]`:
+  - `tag = 0` — live entry; payload is the 12-byte `FilePtr` (`file_id:u32 LE`
+    + `offset:u64 LE`) pointing at the head of the row's version chain in
+    a `.rseg` file.
+  - `tag = 1` — tombstone; no payload.
+- On `load_from_run`, live entries upsert the in-memory map and tombstones
+  remove the entry entirely, so newer-generation tombstones shadow older-
+  generation live entries during merges.
+
 ---
 
 ## 9) WAL (.log)
