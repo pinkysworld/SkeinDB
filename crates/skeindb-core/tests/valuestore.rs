@@ -1,7 +1,23 @@
 use skeindb_core::valuestore::{
-    BloomFilter, DeltaPolicy, ModelRefreshPolicy, ValueId, ValueStore, ValueStoreConfig,
+    BloomFilter, DeltaPolicy, ModelRefreshPolicy, ValueEntry, ValueId, ValueSegmentReader,
+    ValueSegmentWriter, ValueStore, ValueStoreConfig,
 };
-use skeindb_core::ValueKind;
+use skeindb_core::{value_id, FileHeader, FileKind, ValueKind};
+
+fn temp_path(label: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.push(format!(
+        "skeindb_core_vseg_{}_{}_{}",
+        label,
+        std::process::id(),
+        ts
+    ));
+    path
+}
 
 fn next_u64(seed: &mut u64) -> u64 {
     *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -348,4 +364,106 @@ fn bloom_filter_integrated_with_valuestore() {
     assert_eq!(count, 2);
     assert!(size > 0);
     assert!(fpr < 0.01);
+}
+
+#[test]
+fn value_segment_roundtrip_preserves_ids_and_delta_materialization() {
+    let path = temp_path("roundtrip");
+    let config = ValueStoreConfig {
+        delta_policy: DeltaPolicy {
+            enabled: true,
+            min_bytes: 1,
+            max_chain: 8,
+            min_savings_ratio: 0.9,
+            snapshot_interval: 0,
+            max_skip: 4,
+        },
+        ..ValueStoreConfig::default()
+    };
+    let mut store = ValueStore::new(config.clone());
+
+    let base = b"hello-delta-base".to_vec();
+    let base_id = store.put(ValueKind::Cell, base.clone());
+    let mut updated = base.clone();
+    updated[6] = b'X';
+    let delta_id = store.put_with_delta(ValueKind::Cell, updated.clone(), Some(base_id));
+
+    let embedding_id = [9u8; 16];
+    store.put_with_id(ValueKind::Embedding, embedding_id, b"vec-blob".to_vec());
+
+    store.write_segment_file(&path).expect("write vseg");
+
+    let mut loaded = ValueStore::load_segment_file(&path, config).expect("load vseg");
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded.get(&base_id).expect("base").bytes, base);
+    assert_eq!(
+        loaded.get(&embedding_id).expect("embedding").bytes,
+        b"vec-blob"
+    );
+    assert_eq!(loaded.get(&delta_id).expect("delta").kind, ValueKind::Delta);
+    assert_eq!(loaded.materialize(&delta_id).expect("materialize"), updated);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn value_segment_writer_reopen_appends_records() {
+    let path = temp_path("append_reopen");
+    let id1 = value_id(b"one");
+    let id2 = value_id(b"two");
+
+    {
+        let mut writer = ValueSegmentWriter::create(&path).expect("create writer");
+        writer
+            .append(
+                id1,
+                &ValueEntry {
+                    kind: ValueKind::Cell,
+                    bytes: b"one".to_vec(),
+                    delta: None,
+                },
+            )
+            .expect("append one");
+        writer.sync().expect("sync one");
+    }
+    {
+        let mut writer = ValueSegmentWriter::open(&path).expect("reopen writer");
+        writer
+            .append(
+                id2,
+                &ValueEntry {
+                    kind: ValueKind::Cell,
+                    bytes: b"two".to_vec(),
+                    delta: None,
+                },
+            )
+            .expect("append two");
+        writer.sync().expect("sync two");
+    }
+
+    let entries = ValueSegmentReader::open(&path)
+        .expect("open reader")
+        .read_all()
+        .expect("read all");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id, id1);
+    assert_eq!(entries[0].entry.bytes, b"one");
+    assert_eq!(entries[1].id, id2);
+    assert_eq!(entries[1].entry.bytes, b"two");
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn value_segment_reader_rejects_non_valseg_header() {
+    let path = temp_path("bad_header");
+    std::fs::write(
+        &path,
+        FileHeader::new(FileKind::Manifest, 0, 1_700_000_000).encode(),
+    )
+    .expect("write manifest header");
+
+    assert!(ValueSegmentReader::open(&path).is_err());
+
+    let _ = std::fs::remove_file(path);
 }

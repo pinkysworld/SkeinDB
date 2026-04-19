@@ -178,6 +178,13 @@ VE1
 GroupObject bytes GO1:
 - See v0.1 GO1 spec (GroupObject is the dedup unit for a group of columns)
 
+Current `skeindb-core` implementation status for T012:
+
+- `.vseg` files are append-only and use `FileHeader(file_kind=ValSeg)` followed by framed VE1 records.
+- `ValueSegmentWriter` / `ValueSegmentReader` currently support `codec=0` (RAW).
+- `codec=1` (ZSTD) is reserved in the format but not yet implemented by the core reader/writer.
+- DELTA entries persist `DELTA1` inside `raw_bytes`; skip patches are runtime-only metadata and are rebuilt lazily rather than stored on disk.
+
 ---
 
 ## 8) Sorted runs (.run)

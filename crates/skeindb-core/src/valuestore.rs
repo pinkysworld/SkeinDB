@@ -1,23 +1,76 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::{decode_varu, encode_varu, value_id, CoreError, ValueKind};
+use crate::{
+    append_record_frame, decode_record_frame, decode_varu, encode_varu, value_id, CoreError,
+    FileHeader, FileKind, FormatError, ValueKind, FILE_HEADER_LEN,
+};
 
 pub type ValueId = [u8; 16];
+
+const VSEG_RECORD_TYPE: u8 = 0x20;
+const VSEG_RECORD_VERSION: u8 = 1;
+const DELTA1_CODEC_COPY_ADD: u8 = 0;
 
 #[derive(Debug, Error)]
 pub enum ValueStoreError {
     #[error("value not found")]
     NotFound,
+    #[error("value segment file does not start with a valid FileHeader of kind ValSeg")]
+    BadHeader,
+    #[error("invalid value segment record type {0:#04x}")]
+    InvalidSegmentRecordType(u8),
+    #[error("unsupported value segment record version {0}")]
+    UnsupportedSegmentRecordVersion(u8),
+    #[error("unsupported value segment codec {0}")]
+    UnsupportedValueCodec(u8),
+    #[error("unsupported delta codec {0}")]
+    UnsupportedDeltaCodec(u8),
+    #[error("invalid value kind {0}")]
+    InvalidValueKind(u8),
+    #[error("duplicate ValueId encountered while loading a value segment")]
+    DuplicateValueId,
+    #[error("invalid value segment entry: {0}")]
+    InvalidSegmentEntry(&'static str),
     #[error("invalid delta patch")]
     InvalidDelta,
     #[error("delta reconstruction length mismatch")]
     DeltaLengthMismatch,
     #[error("delta base missing")]
     MissingDeltaBase,
+    #[error(transparent)]
+    Format(#[from] FormatError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("core decode error: {0}")]
     Core(#[from] CoreError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ValueSegmentCodec {
+    Raw = 0,
+    Zstd = 1,
+}
+
+impl ValueSegmentCodec {
+    fn from_u8(v: u8) -> Result<Self, ValueStoreError> {
+        match v {
+            0 => Ok(Self::Raw),
+            1 => Ok(Self::Zstd),
+            _ => Err(ValueStoreError::UnsupportedValueCodec(v)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ValueSegmentEntry {
+    pub id: ValueId,
+    pub entry: ValueEntry,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +398,7 @@ impl BloomFilter {
 #[derive(Debug)]
 pub struct ValueStore {
     entries: Vec<ValueEntry>,
+    entry_ids: Vec<ValueId>,
     index: HashMap<ValueId, usize>,
     sorted_keys: Vec<ValueId>,
     sorted_entries: Vec<usize>,
@@ -362,6 +416,7 @@ impl ValueStore {
     pub fn new(config: ValueStoreConfig) -> Self {
         Self {
             entries: Vec::new(),
+            entry_ids: Vec::new(),
             index: HashMap::new(),
             sorted_keys: Vec::new(),
             sorted_entries: Vec::new(),
@@ -444,6 +499,7 @@ impl ValueStore {
         }
 
         let idx = self.entries.len();
+        self.entry_ids.push(id);
         self.entries.push(ValueEntry {
             kind,
             bytes,
@@ -534,6 +590,7 @@ impl ValueStore {
         };
 
         let idx = self.entries.len();
+        self.entry_ids.push(id);
         self.entries.push(entry);
         self.index.insert(id, idx);
         self.bloom.insert(&id);
@@ -1060,12 +1117,117 @@ impl ValueStore {
             .filter_map(|e| e.delta.as_ref())
             .map(|d| d.skip.iter().map(|s| s.patch.len()).sum::<usize>())
             .sum();
+        let id_bytes = self.entry_ids.len() * std::mem::size_of::<ValueId>();
         let index_bytes =
             self.index.len() * (std::mem::size_of::<ValueId>() + std::mem::size_of::<usize>());
         let sorted_bytes = self.sorted_keys.len() * std::mem::size_of::<ValueId>()
             + self.sorted_entries.len() * std::mem::size_of::<usize>();
         let model_bytes = self.learned.as_ref().map(|m| m.approx_bytes()).unwrap_or(0);
-        entry_bytes + skip_bytes + index_bytes + sorted_bytes + model_bytes
+        entry_bytes + skip_bytes + id_bytes + index_bytes + sorted_bytes + model_bytes
+    }
+
+    pub fn write_segment_file(&self, path: impl AsRef<Path>) -> Result<(), ValueStoreError> {
+        let mut writer = ValueSegmentWriter::create(path)?;
+        for (id, entry) in self.entry_ids.iter().copied().zip(self.entries.iter()) {
+            writer.append(id, entry)?;
+        }
+        writer.sync()?;
+        Ok(())
+    }
+
+    pub fn load_segment_file(
+        path: impl AsRef<Path>,
+        config: ValueStoreConfig,
+    ) -> Result<Self, ValueStoreError> {
+        ValueSegmentReader::open(path)?.load_store(config)
+    }
+
+    fn insert_loaded_entry(
+        &mut self,
+        id: ValueId,
+        entry: ValueEntry,
+    ) -> Result<(), ValueStoreError> {
+        if self.index.contains_key(&id) {
+            return Err(ValueStoreError::DuplicateValueId);
+        }
+        let idx = self.entries.len();
+        self.entry_ids.push(id);
+        self.entries.push(entry);
+        self.index.insert(id, idx);
+        self.bloom.insert(&id);
+        Ok(())
+    }
+
+    fn recompute_loaded_delta_metadata(&mut self) -> Result<(), ValueStoreError> {
+        let ids = self.entry_ids.clone();
+        let mut memo = HashMap::new();
+        for id in ids.iter().copied() {
+            let depth = self.rebuild_loaded_delta_depth(id, &mut memo, &mut HashSet::new())?;
+            if let Some(idx) = self.index.get(&id).copied() {
+                if let Some(delta) = self.entries[idx].delta.as_mut() {
+                    delta.depth = depth;
+                    delta.skip.clear();
+                }
+            }
+        }
+
+        self.delta_stats = DeltaStats::default();
+        for id in ids.iter() {
+            if let Some(idx) = self.index.get(id).copied() {
+                let entry = &self.entries[idx];
+                if entry.kind == ValueKind::Delta {
+                    let delta = entry.delta.as_ref().ok_or(ValueStoreError::InvalidDelta)?;
+                    self.delta_stats.values_written =
+                        self.delta_stats.values_written.saturating_add(1);
+                    self.delta_stats.bytes_saved = self
+                        .delta_stats
+                        .bytes_saved
+                        .saturating_add(delta.full_len.saturating_sub(entry.bytes.len()) as u64);
+                    self.delta_stats.total_depth = self
+                        .delta_stats
+                        .total_depth
+                        .saturating_add(delta.depth as u64);
+                    let _ = self.materialize_internal(id, false, false)?;
+                }
+            }
+        }
+
+        if self.config.enable_learned_index {
+            self.refresh_learned_index();
+        }
+
+        Ok(())
+    }
+
+    fn rebuild_loaded_delta_depth(
+        &self,
+        id: ValueId,
+        memo: &mut HashMap<ValueId, usize>,
+        visiting: &mut HashSet<ValueId>,
+    ) -> Result<usize, ValueStoreError> {
+        if let Some(depth) = memo.get(&id).copied() {
+            return Ok(depth);
+        }
+        if !visiting.insert(id) {
+            return Err(ValueStoreError::InvalidDelta);
+        }
+
+        let depth = match self.entry_by_id(&id) {
+            Some(entry) if entry.kind == ValueKind::Delta => {
+                let delta = entry.delta.as_ref().ok_or(ValueStoreError::InvalidDelta)?;
+                if self.entry_by_id(&delta.base).is_none() {
+                    return Err(ValueStoreError::MissingDeltaBase);
+                }
+                self.rebuild_loaded_delta_depth(delta.base, memo, visiting)?
+                    .saturating_add(1)
+            }
+            Some(_) => 0,
+            None => return Err(ValueStoreError::NotFound),
+        };
+
+        visiting.remove(&id);
+        memo.insert(id, depth);
+        Ok(depth)
     }
 
     fn rebuild_sorted_keys(&mut self) {
@@ -1340,6 +1502,270 @@ fn build_skip_patches(
     }
 
     skip
+}
+
+pub struct ValueSegmentWriter {
+    path: PathBuf,
+    file: File,
+}
+
+impl ValueSegmentWriter {
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, ValueStoreError> {
+        Self::open_impl(path, true)
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ValueStoreError> {
+        Self::open_impl(path, false)
+    }
+
+    fn open_impl(path: impl AsRef<Path>, truncate_existing: bool) -> Result<Self, ValueStoreError> {
+        let path = path.as_ref().to_path_buf();
+        let existed = path.exists();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(truncate_existing)
+            .open(&path)?;
+
+        if !existed || truncate_existing || file.metadata()?.len() == 0 {
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&FileHeader::new(FileKind::ValSeg, 0, now_unix_s()).encode())?;
+            file.flush()?;
+        } else {
+            validate_vseg_header(&mut file)?;
+        }
+
+        file.seek(SeekFrom::End(0))?;
+        Ok(Self { path, file })
+    }
+
+    pub fn append(&mut self, id: ValueId, entry: &ValueEntry) -> Result<(), ValueStoreError> {
+        let payload = encode_vseg_entry(id, entry)?;
+        let mut frame = Vec::with_capacity(payload.len() + 8);
+        append_record_frame(&mut frame, &payload)?;
+        self.file.write_all(&frame)?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    pub fn sync(&self) -> Result<(), ValueStoreError> {
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub struct ValueSegmentReader {
+    path: PathBuf,
+}
+
+impl ValueSegmentReader {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ValueStoreError> {
+        let path = path.as_ref().to_path_buf();
+        let mut file = OpenOptions::new().read(true).open(&path)?;
+        validate_vseg_header(&mut file)?;
+        Ok(Self { path })
+    }
+
+    pub fn read_all(&self) -> Result<Vec<ValueSegmentEntry>, ValueStoreError> {
+        let mut file = OpenOptions::new().read(true).open(&self.path)?;
+        file.seek(SeekFrom::Start(FILE_HEADER_LEN as u64))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let mut rest = bytes.as_slice();
+        let mut entries = Vec::new();
+        while !rest.is_empty() {
+            let payload = decode_record_frame(&mut rest)?;
+            entries.push(decode_vseg_entry(&payload)?);
+        }
+        Ok(entries)
+    }
+
+    pub fn load_store(&self, config: ValueStoreConfig) -> Result<ValueStore, ValueStoreError> {
+        let entries = self.read_all()?;
+        let mut store = ValueStore::new(config);
+        for entry in entries {
+            store.insert_loaded_entry(entry.id, entry.entry)?;
+        }
+        store.recompute_loaded_delta_metadata()?;
+        Ok(store)
+    }
+}
+
+fn validate_vseg_header(file: &mut File) -> Result<(), ValueStoreError> {
+    let len = file.metadata()?.len();
+    if len < FILE_HEADER_LEN as u64 {
+        return Err(ValueStoreError::BadHeader);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut header = [0u8; FILE_HEADER_LEN];
+    file.read_exact(&mut header)
+        .map_err(|_| ValueStoreError::BadHeader)?;
+    let header = FileHeader::decode(&header)?;
+    if header.file_kind != FileKind::ValSeg {
+        return Err(ValueStoreError::BadHeader);
+    }
+    Ok(())
+}
+
+fn encode_vseg_entry(id: ValueId, entry: &ValueEntry) -> Result<Vec<u8>, ValueStoreError> {
+    let mut out = vec![
+        VSEG_RECORD_TYPE,
+        VSEG_RECORD_VERSION,
+        entry.kind as u8,
+        ValueSegmentCodec::Raw as u8,
+    ];
+    out.extend_from_slice(&id);
+
+    let (raw_len, stored_bytes) = match entry.kind {
+        ValueKind::Delta => {
+            let delta = entry.delta.as_ref().ok_or(ValueStoreError::InvalidDelta)?;
+            (delta.full_len, encode_delta1_bytes(delta, &entry.bytes)?)
+        }
+        _ => (entry.bytes.len(), entry.bytes.clone()),
+    };
+
+    out.extend_from_slice(&encode_varu(raw_len as u64));
+    out.extend_from_slice(&encode_varu(stored_bytes.len() as u64));
+    out.extend_from_slice(&stored_bytes);
+    Ok(out)
+}
+
+fn decode_vseg_entry(payload: &[u8]) -> Result<ValueSegmentEntry, ValueStoreError> {
+    if payload.len() < 20 {
+        return Err(ValueStoreError::Format(FormatError::UnexpectedEof));
+    }
+    if payload[0] != VSEG_RECORD_TYPE {
+        return Err(ValueStoreError::InvalidSegmentRecordType(payload[0]));
+    }
+    if payload[1] != VSEG_RECORD_VERSION {
+        return Err(ValueStoreError::UnsupportedSegmentRecordVersion(payload[1]));
+    }
+
+    let kind = value_kind_from_u8(payload[2])?;
+    let codec = ValueSegmentCodec::from_u8(payload[3])?;
+    if codec != ValueSegmentCodec::Raw {
+        return Err(ValueStoreError::UnsupportedValueCodec(payload[3]));
+    }
+
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&payload[4..20]);
+
+    let mut rest = &payload[20..];
+    let raw_len = decode_varu(&mut rest)? as usize;
+    let stored_len = decode_varu(&mut rest)? as usize;
+    if rest.len() < stored_len {
+        return Err(ValueStoreError::Format(FormatError::UnexpectedEof));
+    }
+    let stored_bytes = rest[..stored_len].to_vec();
+    rest = &rest[stored_len..];
+    if !rest.is_empty() {
+        return Err(ValueStoreError::InvalidSegmentEntry(
+            "trailing bytes after VE1 payload",
+        ));
+    }
+
+    let entry = match kind {
+        ValueKind::Delta => {
+            let (delta, patch_bytes) = decode_delta1_bytes(raw_len, &stored_bytes)?;
+            ValueEntry {
+                kind,
+                bytes: patch_bytes,
+                delta: Some(delta),
+            }
+        }
+        _ => {
+            if raw_len != stored_bytes.len() {
+                return Err(ValueStoreError::InvalidSegmentEntry(
+                    "raw_len does not match stored raw bytes",
+                ));
+            }
+            ValueEntry {
+                kind,
+                bytes: stored_bytes,
+                delta: None,
+            }
+        }
+    };
+
+    Ok(ValueSegmentEntry { id, entry })
+}
+
+fn encode_delta1_bytes(delta: &DeltaEntry, patch_bytes: &[u8]) -> Result<Vec<u8>, ValueStoreError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&delta.base);
+    out.push(DELTA1_CODEC_COPY_ADD);
+    out.extend_from_slice(&encode_varu(delta.full_len as u64));
+    out.extend_from_slice(&encode_varu(patch_bytes.len() as u64));
+    out.extend_from_slice(patch_bytes);
+    Ok(out)
+}
+
+fn decode_delta1_bytes(
+    raw_len: usize,
+    stored_bytes: &[u8],
+) -> Result<(DeltaEntry, Vec<u8>), ValueStoreError> {
+    if stored_bytes.len() < 17 {
+        return Err(ValueStoreError::Format(FormatError::UnexpectedEof));
+    }
+    let mut base = [0u8; 16];
+    base.copy_from_slice(&stored_bytes[..16]);
+    let delta_codec = stored_bytes[16];
+    if delta_codec != DELTA1_CODEC_COPY_ADD {
+        return Err(ValueStoreError::UnsupportedDeltaCodec(delta_codec));
+    }
+    let mut rest = &stored_bytes[17..];
+    let full_len = decode_varu(&mut rest)? as usize;
+    if full_len != raw_len {
+        return Err(ValueStoreError::InvalidSegmentEntry(
+            "delta full_len does not match VE1 raw_len",
+        ));
+    }
+    let patch_len = decode_varu(&mut rest)? as usize;
+    if rest.len() < patch_len {
+        return Err(ValueStoreError::Format(FormatError::UnexpectedEof));
+    }
+    let patch_bytes = rest[..patch_len].to_vec();
+    rest = &rest[patch_len..];
+    if !rest.is_empty() {
+        return Err(ValueStoreError::InvalidSegmentEntry(
+            "trailing bytes after DELTA1 payload",
+        ));
+    }
+
+    Ok((
+        DeltaEntry {
+            base,
+            full_len,
+            depth: 0,
+            skip: Vec::new(),
+        },
+        patch_bytes,
+    ))
+}
+
+fn value_kind_from_u8(v: u8) -> Result<ValueKind, ValueStoreError> {
+    match v {
+        1 => Ok(ValueKind::Cell),
+        2 => Ok(ValueKind::Group),
+        3 => Ok(ValueKind::BlobChunk),
+        4 => Ok(ValueKind::BlobManifest),
+        5 => Ok(ValueKind::Delta),
+        6 => Ok(ValueKind::Embedding),
+        _ => Err(ValueStoreError::InvalidValueKind(v)),
+    }
+}
+
+fn now_unix_s() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn ancestor_at_distance(
