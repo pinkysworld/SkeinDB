@@ -215,6 +215,13 @@ Footer:
   index_offset u64
   file_crc32c u32 (optional)
 
+Current `skeindb-core` implementation status for T013:
+
+- `.run` files are immutable and use `FileHeader(file_kind=Run)` followed by one or more `DataBlock`s, a single `IndexBlock`, and a footer.
+- `RunWriter` requires strictly increasing keys and splits data blocks by a configurable target block size.
+- `RunReader` supports full scans and point lookups by binary-searching the loaded index block.
+- `SimpleLsm` provides a minimal memtable + level0 implementation: puts land in a `BTreeMap`, flushes create new `run-######.run` files, and reads consult level0 runs newest-first.
+
 ---
 
 ## 9) WAL (.log)

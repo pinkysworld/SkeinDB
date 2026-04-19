@@ -13,6 +13,7 @@
 use thiserror::Error;
 
 pub mod manifest;
+pub mod run;
 pub mod valuestore;
 pub mod wal;
 
