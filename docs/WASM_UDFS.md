@@ -1,7 +1,7 @@
 # Wasm UDFs with Capabilities and Safe Cancellation
 
 Status: Draft
-Last updated: 2026-01-17
+Last updated: 2026-04-19
 
 Goal:
 Allow extensions (scalar UDFs, aggregates, table functions) in a sandboxed runtime with strict resource limits, explicit capabilities, and safe cancellation.
@@ -66,14 +66,24 @@ Keep ABI minimal and explicit.
 
 Arguments and results use a compact tagged encoding (similar to SkeinQL typed literals), serialized into a byte buffer.
 
+Row sets use a similarly compact nested encoding:
+
+- `row_count: varu`
+- per row: `value_count: varu`
+- per value: tagged value bytes
+
 ### 4.2 Function signatures
 
 Exported functions (examples):
 - skein_scalar(ptr: u32, len: u32) -> u64
+- skein_aggregate(ptr: u32, len: u32) -> u64
+- skein_table(ptr: u32, len: u32) -> u64
 
 Where:
 - the host writes args into module memory at (ptr,len)
-- the module writes result into module memory and returns a packed (ptr,len) in u64
+- aggregate modules receive a row-set buffer and return one encoded value
+- table modules receive an args buffer and return an encoded row-set buffer
+- the module writes result rows/values into module memory and returns a packed (ptr,len) in u64
 
 This avoids exposing host pointers and keeps memory ownership clear.
 
@@ -147,6 +157,14 @@ Current `skeindb-core` implementation status for T082:
 - `max_fuel = 0` now means "no explicit fuel budget" rather than "run forever": the wall-clock deadline still provides safe cancellation.
 - Cancellation errors are surfaced distinctly from generic traps: out-of-fuel maps to `FuelExhausted`, and epoch interruption maps to `TimeoutExceeded`.
 - Integration coverage now includes deterministic fuel exhaustion, host timeout cancellation, and a recovery path showing later UDF executions still succeed after a cancelled one.
+
+Current `skeindb-core` implementation status for T083:
+
+- Aggregate and table Wasm execution now share the same sandbox runtime in `crates/skeindb-core/src/wasm_udf.rs` as scalar UDFs, so memory limits, output limits, capability checks, fuel budgets, and wall-clock cancellation all apply uniformly.
+- Aggregate modules are executed via `execute_aggregate_udf(...)`, which sends a one-shot encoded row batch to the module entrypoint and expects one encoded scalar result back.
+- Table modules are executed via `execute_table_udf(...)`, which sends scalar args to the module entrypoint and expects an encoded row set back.
+- Shared `encode_rows(...)` and `decode_rows(...)` helpers now define the row-batch ABI used by aggregate inputs and table outputs.
+- Integration coverage now includes an aggregate module that sums row values and a table module that materializes rows from input arguments.
 
 ---
 

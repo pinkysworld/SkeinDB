@@ -6,31 +6,38 @@ use skeindb_core::wasm_catalog::{
     WASM_UDF_ABI_V1,
 };
 use skeindb_core::wasm_udf::{
-    execute_scalar_udf, execute_scalar_udf_with_options, ScalarUdfExecutionOptions, WasmUdfError,
-    WasmValue,
+    execute_aggregate_udf, execute_scalar_udf, execute_scalar_udf_with_options, execute_table_udf,
+    ScalarUdfExecutionOptions, TableUdfExecutionResult, WasmUdfError, WasmValue,
 };
 
-fn install_request(
-    module_id: &str,
-    bytes: &[u8],
-    allowed_hostcalls: Vec<&str>,
+#[derive(Clone, Copy)]
+struct InstallLimits {
     max_fuel: u64,
     max_memory_bytes: u64,
     max_output_bytes: u64,
+}
+
+fn install_request(
+    module_id: &str,
+    kind: WasmModuleKind,
+    entrypoint: &str,
+    bytes: &[u8],
+    allowed_hostcalls: Vec<&str>,
+    limits: InstallLimits,
 ) -> WasmModuleInstallRequest {
     WasmModuleInstallRequest {
         module_id: module_id.to_string(),
         name: Some(module_id.to_string()),
-        kind: WasmModuleKind::Scalar,
+        kind,
         abi: WASM_UDF_ABI_V1.to_string(),
-        entrypoint: "skein_scalar".to_string(),
+        entrypoint: entrypoint.to_string(),
         capabilities: WasmModuleCapabilities {
             allowed_hostcalls: allowed_hostcalls.into_iter().map(str::to_string).collect(),
             allowed_tables: Vec::new(),
             deterministic: true,
-            max_fuel,
-            max_memory_bytes,
-            max_output_bytes,
+            max_fuel: limits.max_fuel,
+            max_memory_bytes: limits.max_memory_bytes,
+            max_output_bytes: limits.max_output_bytes,
         },
         wasm_bytes: bytes.to_vec(),
         overwrite: false,
@@ -143,6 +150,72 @@ fn infinite_loop_module() -> Vec<u8> {
     .unwrap()
 }
 
+fn aggregate_sum_module() -> Vec<u8> {
+    wat::parse_str(
+                r#"(module
+                        (memory (export "memory") 1 1)
+                        (func (export "skein_alloc") (param i32) (result i32)
+                            (i32.const 0)
+                        )
+                        (func (export "skein_aggregate") (param $ptr i32) (param $len i32) (result i64)
+                            (local $cursor i32)
+                            (local $remaining i32)
+                            (local $sum i64)
+                            (local.set $remaining (i32.load8_u (local.get $ptr)))
+                            (local.set $cursor (i32.add (local.get $ptr) (i32.const 1)))
+                            (block $done
+                                (loop $rows
+                                    (br_if $done (i32.eqz (local.get $remaining)))
+                                    (local.set $cursor (i32.add (local.get $cursor) (i32.const 1)))
+                                    (local.set $cursor (i32.add (local.get $cursor) (i32.const 1)))
+                                    (local.set $sum
+                                        (i64.add (local.get $sum) (i64.load (local.get $cursor))))
+                                    (local.set $cursor (i32.add (local.get $cursor) (i32.const 8)))
+                                    (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
+                                    (br $rows)
+                                )
+                            )
+                            (i32.store8 (i32.const 256) (i32.const 4))
+                            (i64.store (i32.const 257) (local.get $sum))
+                            (i64.or
+                                (i64.shl (i64.extend_i32_u (i32.const 256)) (i64.const 32))
+                                (i64.extend_i32_u (i32.const 9))
+                            )
+                        )
+                )"#,
+        )
+        .unwrap()
+}
+
+fn table_rows_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module
+                        (memory (export "memory") 1 1)
+                        (func (export "skein_alloc") (param i32) (result i32)
+                            (i32.const 0)
+                        )
+                        (func (export "skein_table") (param $ptr i32) (param $len i32) (result i64)
+                            (local $first i64)
+                            (local $second i64)
+                            (local.set $first (i64.load (i32.add (local.get $ptr) (i32.const 2))))
+                            (local.set $second (i64.load (i32.add (local.get $ptr) (i32.const 11))))
+                            (i32.store8 (i32.const 256) (i32.const 2))
+                            (i32.store8 (i32.const 257) (i32.const 1))
+                            (i32.store8 (i32.const 258) (i32.const 4))
+                            (i64.store (i32.const 259) (local.get $first))
+                            (i32.store8 (i32.const 267) (i32.const 1))
+                            (i32.store8 (i32.const 268) (i32.const 4))
+                            (i64.store (i32.const 269) (local.get $second))
+                            (i64.or
+                                (i64.shl (i64.extend_i32_u (i32.const 256)) (i64.const 32))
+                                (i64.extend_i32_u (i32.const 21))
+                            )
+                        )
+                )"#,
+    )
+    .unwrap()
+}
+
 #[test]
 fn scalar_udf_executes_constant_value() {
     let mut store = ValueStore::new(ValueStoreConfig::default());
@@ -152,11 +225,15 @@ fn scalar_udf_executes_constant_value() {
             &mut store,
             install_request(
                 "const42",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &constant_u64_module(42),
                 vec![],
-                10_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -174,7 +251,18 @@ fn scalar_udf_rejects_disallowed_hostcall() {
     catalog
         .install(
             &mut store,
-            install_request("log_no", &log_debug_module(), vec![], 10_000, 64 * 1024, 64),
+            install_request(
+                "log_no",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
+                &log_debug_module(),
+                vec![],
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
+            ),
             1,
         )
         .unwrap();
@@ -192,11 +280,15 @@ fn scalar_udf_allows_log_debug_hostcall_when_declared() {
             &mut store,
             install_request(
                 "log_yes",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &log_debug_module(),
                 vec!["log.debug"],
-                10_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -216,11 +308,15 @@ fn scalar_udf_enforces_max_output_bytes() {
             &mut store,
             install_request(
                 "big",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &oversized_output_module(),
                 vec![],
-                10_000,
-                64 * 1024,
-                8,
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 8,
+                },
             ),
             1,
         )
@@ -242,11 +338,15 @@ fn scalar_udf_memory_growth_beyond_limit_fails() {
             &mut store,
             install_request(
                 "grow",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &growth_failure_module(),
                 vec![],
-                10_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -265,11 +365,15 @@ fn scalar_udf_cancels_when_fuel_budget_exhausted() {
             &mut store,
             install_request(
                 "spin_fuel",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &infinite_loop_module(),
                 vec![],
-                1_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 1_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -291,11 +395,15 @@ fn scalar_udf_cancels_when_wall_clock_timeout_expires() {
             &mut store,
             install_request(
                 "spin_time",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &infinite_loop_module(),
                 vec![],
-                0,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 0,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -326,11 +434,15 @@ fn scalar_udf_recovers_after_cancelled_call() {
             &mut store,
             install_request(
                 "spin_once",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &infinite_loop_module(),
                 vec![],
-                1_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 1_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -340,11 +452,15 @@ fn scalar_udf_recovers_after_cancelled_call() {
             &mut store,
             install_request(
                 "const_after",
+                WasmModuleKind::Scalar,
+                "skein_scalar",
                 &constant_u64_module(42),
                 vec![],
-                10_000,
-                64 * 1024,
-                64,
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
             ),
             1,
         )
@@ -358,4 +474,76 @@ fn scalar_udf_recovers_after_cancelled_call() {
 
     let result = execute_scalar_udf(&catalog, &mut store, "const_after", &[]).unwrap();
     assert_eq!(result.value, WasmValue::U64(42));
+}
+
+#[test]
+fn aggregate_udf_sums_row_values() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "sum_rows",
+                WasmModuleKind::Aggregate,
+                "skein_aggregate",
+                &aggregate_sum_module(),
+                vec![],
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
+            ),
+            1,
+        )
+        .unwrap();
+
+    let rows = vec![
+        vec![WasmValue::U64(3)],
+        vec![WasmValue::U64(5)],
+        vec![WasmValue::U64(8)],
+    ];
+    let result = execute_aggregate_udf(&catalog, &mut store, "sum_rows", &rows).unwrap();
+    assert_eq!(result.value, WasmValue::U64(16));
+    assert!(result.logs.is_empty());
+}
+
+#[test]
+fn table_udf_returns_rows() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "rows_from_args",
+                WasmModuleKind::Table,
+                "skein_table",
+                &table_rows_module(),
+                vec![],
+                InstallLimits {
+                    max_fuel: 10_000,
+                    max_memory_bytes: 64 * 1024,
+                    max_output_bytes: 64,
+                },
+            ),
+            1,
+        )
+        .unwrap();
+
+    let result = execute_table_udf(
+        &catalog,
+        &mut store,
+        "rows_from_args",
+        &[WasmValue::U64(2), WasmValue::U64(9)],
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        TableUdfExecutionResult {
+            rows: vec![vec![WasmValue::U64(2)], vec![WasmValue::U64(9)]],
+            logs: Vec::new(),
+        }
+    );
 }

@@ -1,10 +1,11 @@
-//! Scalar Wasm UDF execution sandbox with resource limits and safe
-//! cancellation (T082).
+//! Scalar, aggregate, and table Wasm UDF execution sandbox with resource
+//! limits and safe cancellation (T083).
 //!
 //! Scope for this slice:
 //!
-//! - execute scalar UDF modules stored in [`crate::wasm_catalog::WasmModuleCatalog`]
-//!   and referenced via [`crate::valuestore::ValueStore`]
+//! - execute scalar, aggregate, and table UDF modules stored in
+//!   [`crate::wasm_catalog::WasmModuleCatalog`] and referenced via
+//!   [`crate::valuestore::ValueStore`]
 //! - enforce memory/output-byte limits and optional fuel budgets from the
 //!   module capabilities
 //! - enforce a bounded wall-clock timeout via epoch interruption
@@ -13,7 +14,7 @@
 //!   randomness imports are exposed
 //!
 //! Not in scope here:
-//! - aggregate or table-function execution (T083)
+//! - host table access or streaming/table-iterator ABIs
 
 use std::collections::HashSet;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -24,7 +25,9 @@ use thiserror::Error;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::valuestore::ValueStore;
-use crate::wasm_catalog::{WasmCatalogError, WasmModuleCatalog, WasmModuleKind, WASM_UDF_ABI_V1};
+use crate::wasm_catalog::{
+    WasmCatalogError, WasmModuleCatalog, WasmModuleKind, WasmModuleRecord, WASM_UDF_ABI_V1,
+};
 use crate::{decode_varu, encode_varu, CoreError};
 
 const DEFAULT_MAX_MEMORY_BYTES: u64 = 1024 * 1024;
@@ -60,10 +63,11 @@ pub enum WasmAbiError {
 pub enum WasmUdfError {
     #[error("module not found: {0}")]
     ModuleNotFound(String),
-    #[error("module {module_id} is not a scalar UDF ({kind:?})")]
+    #[error("module {module_id} has wrong UDF kind: expected {expected:?}, got {actual:?}")]
     WrongModuleKind {
         module_id: String,
-        kind: WasmModuleKind,
+        expected: WasmModuleKind,
+        actual: WasmModuleKind,
     },
     #[error("unsupported Wasm UDF ABI: {0}")]
     UnsupportedAbi(String),
@@ -99,10 +103,20 @@ pub struct ScalarUdfExecutionResult {
     pub logs: Vec<String>,
 }
 
+pub type AggregateUdfExecutionResult = ScalarUdfExecutionResult;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableUdfExecutionResult {
+    pub rows: Vec<Vec<WasmValue>>,
+    pub logs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarUdfExecutionOptions {
     pub wall_clock_timeout: Option<Duration>,
 }
+
+pub type WasmUdfExecutionOptions = ScalarUdfExecutionOptions;
 
 impl Default for ScalarUdfExecutionOptions {
     fn default() -> Self {
@@ -148,6 +162,35 @@ pub fn decode_scalar_result(bytes: &[u8]) -> Result<WasmValue, WasmAbiError> {
     Ok(value)
 }
 
+pub fn encode_rows(rows: &[Vec<WasmValue>]) -> Vec<u8> {
+    let mut out = encode_varu(rows.len() as u64);
+    for row in rows {
+        out.extend_from_slice(&encode_varu(row.len() as u64));
+        for value in row {
+            encode_value(&mut out, value);
+        }
+    }
+    out
+}
+
+pub fn decode_rows(bytes: &[u8]) -> Result<Vec<Vec<WasmValue>>, WasmAbiError> {
+    let mut cursor = bytes;
+    let row_count = decode_varu(&mut cursor)? as usize;
+    let mut rows = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        let value_count = decode_varu(&mut cursor)? as usize;
+        let mut row = Vec::with_capacity(value_count);
+        for _ in 0..value_count {
+            row.push(decode_value(&mut cursor)?);
+        }
+        rows.push(row);
+    }
+    if !cursor.is_empty() {
+        return Err(WasmAbiError::TrailingBytes);
+    }
+    Ok(rows)
+}
+
 pub fn execute_scalar_udf(
     catalog: &WasmModuleCatalog,
     value_store: &mut ValueStore,
@@ -168,22 +211,103 @@ pub fn execute_scalar_udf_with_options(
     value_store: &mut ValueStore,
     module_id: &str,
     args: &[WasmValue],
-    options: ScalarUdfExecutionOptions,
+    options: WasmUdfExecutionOptions,
 ) -> Result<ScalarUdfExecutionResult, WasmUdfError> {
-    let record = catalog
-        .get(module_id)
-        .cloned()
-        .ok_or_else(|| WasmUdfError::ModuleNotFound(module_id.to_string()))?;
-    if record.kind != WasmModuleKind::Scalar {
-        return Err(WasmUdfError::WrongModuleKind {
-            module_id: record.module_id,
-            kind: record.kind,
-        });
-    }
-    if record.abi != WASM_UDF_ABI_V1 {
-        return Err(WasmUdfError::UnsupportedAbi(record.abi));
-    }
+    let raw = execute_module_entrypoint(
+        catalog,
+        value_store,
+        module_id,
+        WasmModuleKind::Scalar,
+        &encode_scalar_args(args),
+        options,
+    )?;
+    Ok(ScalarUdfExecutionResult {
+        value: decode_scalar_result(&raw.output)?,
+        logs: raw.logs,
+    })
+}
 
+pub fn execute_aggregate_udf(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    rows: &[Vec<WasmValue>],
+) -> Result<AggregateUdfExecutionResult, WasmUdfError> {
+    execute_aggregate_udf_with_options(
+        catalog,
+        value_store,
+        module_id,
+        rows,
+        ScalarUdfExecutionOptions::default(),
+    )
+}
+
+pub fn execute_aggregate_udf_with_options(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    rows: &[Vec<WasmValue>],
+    options: WasmUdfExecutionOptions,
+) -> Result<AggregateUdfExecutionResult, WasmUdfError> {
+    let raw = execute_module_entrypoint(
+        catalog,
+        value_store,
+        module_id,
+        WasmModuleKind::Aggregate,
+        &encode_rows(rows),
+        options,
+    )?;
+    Ok(AggregateUdfExecutionResult {
+        value: decode_scalar_result(&raw.output)?,
+        logs: raw.logs,
+    })
+}
+
+pub fn execute_table_udf(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    args: &[WasmValue],
+) -> Result<TableUdfExecutionResult, WasmUdfError> {
+    execute_table_udf_with_options(
+        catalog,
+        value_store,
+        module_id,
+        args,
+        ScalarUdfExecutionOptions::default(),
+    )
+}
+
+pub fn execute_table_udf_with_options(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    args: &[WasmValue],
+    options: WasmUdfExecutionOptions,
+) -> Result<TableUdfExecutionResult, WasmUdfError> {
+    let raw = execute_module_entrypoint(
+        catalog,
+        value_store,
+        module_id,
+        WasmModuleKind::Table,
+        &encode_scalar_args(args),
+        options,
+    )?;
+    Ok(TableUdfExecutionResult {
+        rows: decode_rows(&raw.output)?,
+        logs: raw.logs,
+    })
+}
+
+fn execute_module_entrypoint(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    expected_kind: WasmModuleKind,
+    input: &[u8],
+    options: WasmUdfExecutionOptions,
+) -> Result<RawUdfExecutionResult, WasmUdfError> {
+    let record = resolve_record(catalog, module_id, expected_kind)?;
     let wasm_bytes = catalog.module_bytes(value_store, module_id)?;
     let max_memory_bytes = if record.capabilities.max_memory_bytes == 0 {
         DEFAULT_MAX_MEMORY_BYTES
@@ -284,13 +408,12 @@ pub fn execute_scalar_udf_with_options(
         .get_typed_func::<(u32, u32), u64>(&mut store, &record.entrypoint)
         .map_err(|_| WasmUdfError::MissingEntrypoint(record.entrypoint.clone()))?;
 
-    let input = encode_scalar_args(args);
     let input_len = u32::try_from(input.len()).map_err(|_| WasmUdfError::MemoryAccess)?;
     let input_ptr = alloc
         .call(&mut store, input_len)
         .map_err(|e| classify_execution_error(e, max_fuel, options.wall_clock_timeout))?;
     memory
-        .write(&mut store, input_ptr as usize, &input)
+        .write(&mut store, input_ptr as usize, input)
         .map_err(|_| WasmUdfError::MemoryAccess)?;
 
     let packed = entrypoint
@@ -309,11 +432,37 @@ pub fn execute_scalar_udf_with_options(
     memory
         .read(&store, output_ptr as usize, &mut output)
         .map_err(|_| WasmUdfError::MemoryAccess)?;
-    let value = decode_scalar_result(&output)?;
     let logs = store.data().logs.clone();
     drop(timeout_guard);
 
-    Ok(ScalarUdfExecutionResult { value, logs })
+    Ok(RawUdfExecutionResult { output, logs })
+}
+
+fn resolve_record(
+    catalog: &WasmModuleCatalog,
+    module_id: &str,
+    expected_kind: WasmModuleKind,
+) -> Result<WasmModuleRecord, WasmUdfError> {
+    let record = catalog
+        .get(module_id)
+        .cloned()
+        .ok_or_else(|| WasmUdfError::ModuleNotFound(module_id.to_string()))?;
+    if record.kind != expected_kind {
+        return Err(WasmUdfError::WrongModuleKind {
+            module_id: record.module_id.clone(),
+            expected: expected_kind,
+            actual: record.kind.clone(),
+        });
+    }
+    if record.abi != WASM_UDF_ABI_V1 {
+        return Err(WasmUdfError::UnsupportedAbi(record.abi));
+    }
+    Ok(record)
+}
+
+struct RawUdfExecutionResult {
+    output: Vec<u8>,
+    logs: Vec<String>,
 }
 
 fn validate_imports(
@@ -517,11 +666,32 @@ mod tests {
     }
 
     #[test]
+    fn rows_roundtrip() {
+        let rows = vec![
+            vec![WasmValue::U64(1), WasmValue::String("a".to_string())],
+            vec![WasmValue::Null, WasmValue::Bool(true)],
+        ];
+        let encoded = encode_rows(&rows);
+        let decoded = decode_rows(&encoded).unwrap();
+        assert_eq!(decoded, rows);
+    }
+
+    #[test]
     fn scalar_result_rejects_trailing_bytes() {
         let mut encoded = encode_scalar_result(&WasmValue::U64(5));
         encoded.push(0);
         assert!(matches!(
             decode_scalar_result(&encoded),
+            Err(WasmAbiError::TrailingBytes)
+        ));
+    }
+
+    #[test]
+    fn rows_reject_trailing_bytes() {
+        let mut encoded = encode_rows(&[vec![WasmValue::U64(5)]]);
+        encoded.push(0);
+        assert!(matches!(
+            decode_rows(&encoded),
             Err(WasmAbiError::TrailingBytes)
         ));
     }
