@@ -246,6 +246,21 @@ format:
   remove the entry entirely, so newer-generation tombstones shadow older-
   generation live entries during merges.
 
+### 8.2 MVCC visibility (T016)
+
+Current `skeindb-core` visibility rules over `.rseg` chains:
+
+- Readers walk `prev_ptr` from a known head `FilePtr` until they find the
+  first version visible at the chosen snapshot.
+- A version is visible iff `begin_ts != 0 && begin_ts <= snapshot_ts &&
+  (end_ts == 0 || end_ts > snapshot_ts)`.
+- `Snapshot::latest()` behaves like reading at `+INF`, so the current head
+  version wins when it is committed and not superseded.
+- `begin_ts == 0` means staged / not yet committed and is skipped, allowing a
+  previous committed version in the chain to remain visible.
+- If the first visible version is a delete marker (`flags & IS_DELETE != 0`),
+  the row is considered deleted at that snapshot.
+
 ---
 
 ## 9) WAL (.log)
