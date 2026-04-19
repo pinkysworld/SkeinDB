@@ -139,7 +139,14 @@ Current `skeindb-core` implementation status for T081:
   - output size cap from `max_output_bytes` (also defaulting to a conservative limit when omitted)
 - Capability-gated hostcalls are supported for the current `skein.log_debug` hostcall mapped from `allowed_hostcalls = ["log.debug"]`.
 - Filesystem, network, clock, and randomness remain unavailable because no such imports are defined.
-- Fuel-based cancellation and wall-clock timeouts are still open in T082.
+
+Current `skeindb-core` implementation status for T082:
+
+- Scalar Wasm execution now applies manifest fuel budgets when `max_fuel > 0`, using Wasmtime fuel metering to terminate deterministic infinite loops with an explicit `FuelExhausted` UDF error.
+- The host also wraps each scalar call in a bounded wall-clock deadline using epoch interruption. The default timeout is conservative (`1s`) and embedders/tests can override it through `execute_scalar_udf_with_options(...)`.
+- `max_fuel = 0` now means "no explicit fuel budget" rather than "run forever": the wall-clock deadline still provides safe cancellation.
+- Cancellation errors are surfaced distinctly from generic traps: out-of-fuel maps to `FuelExhausted`, and epoch interruption maps to `TimeoutExceeded`.
+- Integration coverage now includes deterministic fuel exhaustion, host timeout cancellation, and a recovery path showing later UDF executions still succeed after a cancelled one.
 
 ---
 

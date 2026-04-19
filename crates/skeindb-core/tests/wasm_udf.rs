@@ -1,14 +1,20 @@
+use std::time::Duration;
+
 use skeindb_core::valuestore::{ValueStore, ValueStoreConfig};
 use skeindb_core::wasm_catalog::{
     WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
     WASM_UDF_ABI_V1,
 };
-use skeindb_core::wasm_udf::{execute_scalar_udf, WasmUdfError, WasmValue};
+use skeindb_core::wasm_udf::{
+    execute_scalar_udf, execute_scalar_udf_with_options, ScalarUdfExecutionOptions, WasmUdfError,
+    WasmValue,
+};
 
 fn install_request(
     module_id: &str,
     bytes: &[u8],
     allowed_hostcalls: Vec<&str>,
+    max_fuel: u64,
     max_memory_bytes: u64,
     max_output_bytes: u64,
 ) -> WasmModuleInstallRequest {
@@ -22,7 +28,7 @@ fn install_request(
             allowed_hostcalls: allowed_hostcalls.into_iter().map(str::to_string).collect(),
             allowed_tables: Vec::new(),
             deterministic: true,
-            max_fuel: 0,
+            max_fuel,
             max_memory_bytes,
             max_output_bytes,
         },
@@ -119,6 +125,24 @@ fn growth_failure_module() -> Vec<u8> {
     .unwrap()
 }
 
+fn infinite_loop_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"(module
+                        (memory (export "memory") 1 1)
+                        (func (export "skein_alloc") (param i32) (result i32)
+                            (i32.const 0)
+                        )
+                        (func (export "skein_scalar") (param i32 i32) (result i64)
+                            (loop $spin
+                                (br $spin)
+                            )
+                            (i64.const 0)
+                        )
+                )"#,
+    )
+    .unwrap()
+}
+
 #[test]
 fn scalar_udf_executes_constant_value() {
     let mut store = ValueStore::new(ValueStoreConfig::default());
@@ -126,7 +150,14 @@ fn scalar_udf_executes_constant_value() {
     catalog
         .install(
             &mut store,
-            install_request("const42", &constant_u64_module(42), vec![], 64 * 1024, 64),
+            install_request(
+                "const42",
+                &constant_u64_module(42),
+                vec![],
+                10_000,
+                64 * 1024,
+                64,
+            ),
             1,
         )
         .unwrap();
@@ -143,7 +174,7 @@ fn scalar_udf_rejects_disallowed_hostcall() {
     catalog
         .install(
             &mut store,
-            install_request("log_no", &log_debug_module(), vec![], 64 * 1024, 64),
+            install_request("log_no", &log_debug_module(), vec![], 10_000, 64 * 1024, 64),
             1,
         )
         .unwrap();
@@ -163,6 +194,7 @@ fn scalar_udf_allows_log_debug_hostcall_when_declared() {
                 "log_yes",
                 &log_debug_module(),
                 vec!["log.debug"],
+                10_000,
                 64 * 1024,
                 64,
             ),
@@ -182,7 +214,14 @@ fn scalar_udf_enforces_max_output_bytes() {
     catalog
         .install(
             &mut store,
-            install_request("big", &oversized_output_module(), vec![], 64 * 1024, 8),
+            install_request(
+                "big",
+                &oversized_output_module(),
+                vec![],
+                10_000,
+                64 * 1024,
+                8,
+            ),
             1,
         )
         .unwrap();
@@ -201,11 +240,122 @@ fn scalar_udf_memory_growth_beyond_limit_fails() {
     catalog
         .install(
             &mut store,
-            install_request("grow", &growth_failure_module(), vec![], 64 * 1024, 64),
+            install_request(
+                "grow",
+                &growth_failure_module(),
+                vec![],
+                10_000,
+                64 * 1024,
+                64,
+            ),
             1,
         )
         .unwrap();
 
     let err = execute_scalar_udf(&catalog, &mut store, "grow", &[]).unwrap_err();
     assert!(matches!(err, WasmUdfError::Execution(_)));
+}
+
+#[test]
+fn scalar_udf_cancels_when_fuel_budget_exhausted() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "spin_fuel",
+                &infinite_loop_module(),
+                vec![],
+                1_000,
+                64 * 1024,
+                64,
+            ),
+            1,
+        )
+        .unwrap();
+
+    let err = execute_scalar_udf(&catalog, &mut store, "spin_fuel", &[]).unwrap_err();
+    assert!(matches!(
+        err,
+        WasmUdfError::FuelExhausted { max_fuel: 1_000 }
+    ));
+}
+
+#[test]
+fn scalar_udf_cancels_when_wall_clock_timeout_expires() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "spin_time",
+                &infinite_loop_module(),
+                vec![],
+                0,
+                64 * 1024,
+                64,
+            ),
+            1,
+        )
+        .unwrap();
+
+    let err = execute_scalar_udf_with_options(
+        &catalog,
+        &mut store,
+        "spin_time",
+        &[],
+        ScalarUdfExecutionOptions {
+            wall_clock_timeout: Some(Duration::from_millis(10)),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        WasmUdfError::TimeoutExceeded { timeout_ms: 10 }
+    ));
+}
+
+#[test]
+fn scalar_udf_recovers_after_cancelled_call() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "spin_once",
+                &infinite_loop_module(),
+                vec![],
+                1_000,
+                64 * 1024,
+                64,
+            ),
+            1,
+        )
+        .unwrap();
+    catalog
+        .install(
+            &mut store,
+            install_request(
+                "const_after",
+                &constant_u64_module(42),
+                vec![],
+                10_000,
+                64 * 1024,
+                64,
+            ),
+            1,
+        )
+        .unwrap();
+
+    let err = execute_scalar_udf(&catalog, &mut store, "spin_once", &[]).unwrap_err();
+    assert!(matches!(
+        err,
+        WasmUdfError::FuelExhausted { max_fuel: 1_000 }
+    ));
+
+    let result = execute_scalar_udf(&catalog, &mut store, "const_after", &[]).unwrap();
+    assert_eq!(result.value, WasmValue::U64(42));
 }

@@ -1,19 +1,24 @@
-//! Scalar Wasm UDF execution sandbox with resource limits (T081).
+//! Scalar Wasm UDF execution sandbox with resource limits and safe
+//! cancellation (T082).
 //!
 //! Scope for this slice:
 //!
 //! - execute scalar UDF modules stored in [`crate::wasm_catalog::WasmModuleCatalog`]
 //!   and referenced via [`crate::valuestore::ValueStore`]
-//! - enforce memory and output-byte limits from the module capabilities
+//! - enforce memory/output-byte limits and optional fuel budgets from the
+//!   module capabilities
+//! - enforce a bounded wall-clock timeout via epoch interruption
 //! - expose a tiny capability-gated hostcall surface (`log.debug`)
 //! - keep execution side-effect free by default; no filesystem/network/clock/
 //!   randomness imports are exposed
 //!
 //! Not in scope here:
-//! - instruction fuel / timeout cancellation (T082)
 //! - aggregate or table-function execution (T083)
 
 use std::collections::HashSet;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use thiserror::Error;
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -24,6 +29,7 @@ use crate::{decode_varu, encode_varu, CoreError};
 
 const DEFAULT_MAX_MEMORY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 64 * 1024;
+const DEFAULT_WALL_CLOCK_TIMEOUT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WasmValue {
@@ -71,6 +77,10 @@ pub enum WasmUdfError {
     MissingAllocator,
     #[error("module missing scalar entrypoint export: {0}")]
     MissingEntrypoint(String),
+    #[error("scalar UDF exhausted max_fuel ({max_fuel})")]
+    FuelExhausted { max_fuel: u64 },
+    #[error("scalar UDF exceeded wall-clock timeout ({timeout_ms} ms)")]
+    TimeoutExceeded { timeout_ms: u64 },
     #[error("scalar UDF output exceeds max_output_bytes ({len} > {max})")]
     OutputTooLarge { len: u32, max: u64 },
     #[error("failed to access guest memory")]
@@ -87,6 +97,19 @@ pub enum WasmUdfError {
 pub struct ScalarUdfExecutionResult {
     pub value: WasmValue,
     pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScalarUdfExecutionOptions {
+    pub wall_clock_timeout: Option<Duration>,
+}
+
+impl Default for ScalarUdfExecutionOptions {
+    fn default() -> Self {
+        Self {
+            wall_clock_timeout: Some(Duration::from_millis(DEFAULT_WALL_CLOCK_TIMEOUT_MS)),
+        }
+    }
 }
 
 pub fn encode_scalar_args(args: &[WasmValue]) -> Vec<u8> {
@@ -131,6 +154,22 @@ pub fn execute_scalar_udf(
     module_id: &str,
     args: &[WasmValue],
 ) -> Result<ScalarUdfExecutionResult, WasmUdfError> {
+    execute_scalar_udf_with_options(
+        catalog,
+        value_store,
+        module_id,
+        args,
+        ScalarUdfExecutionOptions::default(),
+    )
+}
+
+pub fn execute_scalar_udf_with_options(
+    catalog: &WasmModuleCatalog,
+    value_store: &mut ValueStore,
+    module_id: &str,
+    args: &[WasmValue],
+    options: ScalarUdfExecutionOptions,
+) -> Result<ScalarUdfExecutionResult, WasmUdfError> {
     let record = catalog
         .get(module_id)
         .cloned()
@@ -156,6 +195,7 @@ pub fn execute_scalar_udf(
     } else {
         record.capabilities.max_output_bytes
     };
+    let max_fuel = record.capabilities.max_fuel;
     let allowed_hostcalls: HashSet<String> = record
         .capabilities
         .allowed_hostcalls
@@ -166,6 +206,8 @@ pub fn execute_scalar_udf(
     let mut config = Config::new();
     config.wasm_multi_memory(false);
     config.wasm_component_model(false);
+    config.consume_fuel(max_fuel > 0);
+    config.epoch_interruption(options.wall_clock_timeout.is_some());
     let engine = Engine::new(&config).map_err(|e| WasmUdfError::Execution(e.to_string()))?;
     let module =
         Module::new(&engine, &wasm_bytes).map_err(|e| WasmUdfError::Execution(e.to_string()))?;
@@ -216,10 +258,22 @@ pub fn execute_scalar_udf(
         },
     );
     store.limiter(|state| &mut state.limits);
+    if max_fuel > 0 {
+        store
+            .set_fuel(max_fuel)
+            .map_err(|e| WasmUdfError::Execution(e.to_string()))?;
+    }
+    let timeout_guard = if let Some(timeout) = options.wall_clock_timeout {
+        store.epoch_deadline_trap();
+        store.set_epoch_deadline(1);
+        Some(TimeoutGuard::spawn(engine.clone(), timeout))
+    } else {
+        None
+    };
 
     let instance = linker
         .instantiate(&mut store, &module)
-        .map_err(|e| WasmUdfError::Execution(e.to_string()))?;
+        .map_err(|e| classify_execution_error(e, max_fuel, options.wall_clock_timeout))?;
     let memory = instance
         .get_memory(&mut store, "memory")
         .ok_or(WasmUdfError::MissingMemory)?;
@@ -234,14 +288,14 @@ pub fn execute_scalar_udf(
     let input_len = u32::try_from(input.len()).map_err(|_| WasmUdfError::MemoryAccess)?;
     let input_ptr = alloc
         .call(&mut store, input_len)
-        .map_err(|e| WasmUdfError::Execution(e.to_string()))?;
+        .map_err(|e| classify_execution_error(e, max_fuel, options.wall_clock_timeout))?;
     memory
         .write(&mut store, input_ptr as usize, &input)
         .map_err(|_| WasmUdfError::MemoryAccess)?;
 
     let packed = entrypoint
         .call(&mut store, (input_ptr, input_len))
-        .map_err(|e| WasmUdfError::Execution(e.to_string()))?;
+        .map_err(|e| classify_execution_error(e, max_fuel, options.wall_clock_timeout))?;
     let output_ptr = (packed >> 32) as u32;
     let output_len = packed as u32;
     if u64::from(output_len) > max_output_bytes {
@@ -257,6 +311,7 @@ pub fn execute_scalar_udf(
         .map_err(|_| WasmUdfError::MemoryAccess)?;
     let value = decode_scalar_result(&output)?;
     let logs = store.data().logs.clone();
+    drop(timeout_guard);
 
     Ok(ScalarUdfExecutionResult { value, logs })
 }
@@ -372,9 +427,64 @@ fn take_len_prefixed(cursor: &mut &[u8]) -> Result<Vec<u8>, WasmAbiError> {
     Ok(bytes)
 }
 
+fn classify_execution_error(
+    error: wasmtime::Error,
+    max_fuel: u64,
+    wall_clock_timeout: Option<Duration>,
+) -> WasmUdfError {
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        match *trap {
+            wasmtime::Trap::OutOfFuel => {
+                return WasmUdfError::FuelExhausted { max_fuel };
+            }
+            wasmtime::Trap::Interrupt => {
+                return WasmUdfError::TimeoutExceeded {
+                    timeout_ms: wall_clock_timeout.map(duration_to_ms).unwrap_or(0),
+                };
+            }
+            _ => {}
+        }
+    }
+    WasmUdfError::Execution(error.to_string())
+}
+
+fn duration_to_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 struct SandboxState {
     limits: StoreLimits,
     logs: Vec<String>,
+}
+
+struct TimeoutGuard {
+    done_tx: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl TimeoutGuard {
+    fn spawn(engine: Engine, timeout: Duration) -> Self {
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = thread::spawn(move || match done_rx.recv_timeout(timeout) {
+            Err(RecvTimeoutError::Timeout) => engine.increment_epoch(),
+            Err(RecvTimeoutError::Disconnected) | Ok(()) => {}
+        });
+        Self {
+            done_tx: Some(done_tx),
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for TimeoutGuard {
+    fn drop(&mut self) {
+        if let Some(done_tx) = self.done_tx.take() {
+            let _ = done_tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[cfg(test)]
