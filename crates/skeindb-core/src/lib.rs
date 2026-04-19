@@ -20,6 +20,7 @@ pub mod run;
 pub mod valuestore;
 pub mod wal;
 pub mod wasm_catalog;
+pub mod wasm_udf;
 
 #[derive(Debug, Error)]
 pub enum CoreError {

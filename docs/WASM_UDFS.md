@@ -126,7 +126,20 @@ Current `skeindb-core` implementation status for T080:
 - `WasmModuleCatalog` persists UDF metadata to `wasm_catalog.json` (format v1), separate from the older merge-specific `merge_wasm_registry.json` prototype.
 - Catalog entries track module id, optional name, UDF kind, ABI, entrypoint symbol, `ValueId`, byte size, creation time, and capability metadata.
 - The catalog supports install/list/get/drop plus byte materialization back through `ValueStore`.
-- No Wasm execution, sandboxing, or cancellation is implemented yet; those remain T081/T082.
+
+Current `skeindb-core` implementation status for T081:
+
+- Scalar Wasm UDF execution is now available in `crates/skeindb-core/src/wasm_udf.rs` via `execute_scalar_udf(...)`.
+- The current core execution ABI is `skein.wasm.udf.v1` with:
+  - exported `memory`
+  - exported allocator `skein_alloc(len: u32) -> u32`
+  - scalar entrypoint export (usually `skein_scalar(ptr: u32, len: u32) -> u64`) returning `ptr<<32 | len`
+- Resource limits enforced today:
+  - memory cap from `max_memory_bytes` (defaulting to a conservative sandbox limit when omitted)
+  - output size cap from `max_output_bytes` (also defaulting to a conservative limit when omitted)
+- Capability-gated hostcalls are supported for the current `skein.log_debug` hostcall mapped from `allowed_hostcalls = ["log.debug"]`.
+- Filesystem, network, clock, and randomness remain unavailable because no such imports are defined.
+- Fuel-based cancellation and wall-clock timeouts are still open in T082.
 
 ---
 
