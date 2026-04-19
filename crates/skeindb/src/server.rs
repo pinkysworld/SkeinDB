@@ -2552,7 +2552,7 @@ fn mysql_parse_aggregate_projection_expr(
     if aggregate_lower.starts_with("string_agg(") && aggregate_lower.ends_with(')') {
         let inner = aggregate_expr["string_agg(".len()..aggregate_expr.len() - 1].trim();
         let parts = split_csv_top_level(inner);
-        if parts.len() >= 1 {
+        if !parts.is_empty() {
             let col_part = parts[0].trim();
             let (col, table) = parse_sql_column_ref(col_part)?;
             let select_expr = table.map(|t| format!("{t}.{col}")).unwrap_or(col.clone());
@@ -10676,11 +10676,10 @@ async fn handle_mysql_connection(
             }
             0x09 => {
                 // COM_STATISTICS
-                let stats = format!(
-                    "Uptime: 1  Threads: 1  Questions: 1  Slow queries: 0  \
+                let stats = "Uptime: 1  Threads: 1  Questions: 1  Slow queries: 0  \
                      Opens: 0  Flush tables: 0  Open tables: 0  \
                      Queries per second avg: 0.000"
-                );
+                    .to_string();
                 mysql_write_packet(&mut stream, cmd_seq.wrapping_add(1), stats.as_bytes()).await?;
             }
             _ => {
@@ -11215,7 +11214,7 @@ fn pg_infer_result_columns_to_pg(
     let pg_catalog_query = sql.to_ascii_lowercase().contains("pg_catalog.");
     columns
         .iter()
-        .zip(inferred_types.into_iter())
+        .zip(inferred_types)
         .map(|(name, column_type)| {
             if pg_catalog_query {
                 if let Some(column) = pg_catalog_result_column_override(name) {
@@ -12125,7 +12124,7 @@ fn pg_rewrite_is_distinct_from(sql: &str) -> String {
         return sql.to_string();
     }
     // Simple keyword-level replacement for condition parsing
-    let mut result = sql.to_string();
+
     // IS NOT DISTINCT FROM was already replaced with <=> in the first pass.
     // IS DISTINCT FROM needs to become a comparison the engine can handle.
     // The shared engine has null_safe_eq (<=>). IS DISTINCT FROM = NOT(a <=> b).
@@ -12134,7 +12133,7 @@ fn pg_rewrite_is_distinct_from(sql: &str) -> String {
     // that parse_condition_expr can handle.
     // For now, the simplest correct approach is text replacement:
     // We'll add parser support for "IS DISTINCT FROM" in parse_condition_expr.
-    result
+    sql.to_string()
 }
 
 async fn pg_dispatch_sql(
@@ -13972,7 +13971,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn decode_hex_text(value: &str) -> Option<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
@@ -14270,10 +14269,7 @@ fn observe_workload_features(state: &AppState, lower: &str) {
     }
     let mut counters = state.counters.lock().unwrap();
     for key in features {
-        let entry = counters
-            .workload_features
-            .entry(key)
-            .or_insert_with(WorkloadFeatureCounter::default);
+        let entry = counters.workload_features.entry(key).or_default();
         entry.frequency += 1;
         entry.last_seen_ms = now_ms;
     }
@@ -14296,7 +14292,7 @@ fn extract_table_from_sql(lower: &str) -> Option<String> {
 /// Extract column names from predicate expressions like "col1 = ? AND col2 > 5".
 fn extract_columns_from_predicates(clause: &str) -> Vec<String> {
     let mut cols = Vec::new();
-    for part in clause.split(|c: char| c == '=' || c == '<' || c == '>') {
+    for part in clause.split(['=', '<', '>']) {
         let trimmed = part.trim();
         // Take last token before operator which is the column reference.
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
@@ -14304,7 +14300,7 @@ fn extract_columns_from_predicates(clause: &str) -> Vec<String> {
         if let Some(token) = tokens.last() {
             let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
             if !clean.is_empty()
-                && !clean.parse::<f64>().is_ok()
+                && clean.parse::<f64>().is_err()
                 && clean != "and"
                 && clean != "or"
                 && clean != "not"
@@ -14336,7 +14332,7 @@ fn extract_column_list(clause: &str) -> Vec<String> {
         // Take just the column reference (handle "table.col").
         let token = cleaned.split_whitespace().next().unwrap_or("");
         let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
-        if !clean.is_empty() && !clean.parse::<f64>().is_ok() {
+        if !clean.is_empty() && clean.parse::<f64>().is_err() {
             // If table.col, take just the column part.
             let col_part = clean.rsplit('.').next().unwrap_or(clean);
             cols.push(col_part.to_string());
@@ -15144,7 +15140,7 @@ pub(crate) async fn handle_rpc(
                     let mut flags: Vec<skeindb_skeinql::methods::FeatureFlagEntry> = counters
                         .feature_flags
                         .iter()
-                        .filter(|(_, v)| p.category.as_ref().map_or(true, |c| c == &v.category))
+                        .filter(|(_, v)| p.category.as_ref().is_none_or(|c| c == &v.category))
                         .map(|(name, v)| skeindb_skeinql::methods::FeatureFlagEntry {
                             name: name.clone(),
                             category: v.category.clone(),
@@ -15197,10 +15193,10 @@ pub(crate) async fn handle_rpc(
                         .workload_features
                         .iter()
                         .filter(|(k, _)| {
-                            filter_table.as_ref().map_or(true, |t| &k.table == t)
+                            filter_table.as_ref().is_none_or(|t| &k.table == t)
                                 && filter_type
                                     .as_ref()
-                                    .map_or(true, |ft| &k.feature_type == ft)
+                                    .is_none_or(|ft| &k.feature_type == ft)
                         })
                         .map(|(k, v)| {
                             serde_json::json!({
@@ -22936,14 +22932,14 @@ fn render_virtual_select_result(
     let mut out_rows = Vec::new();
     let mut out_cols: Option<Vec<String>> = None;
     for row in rows.iter() {
-        let (cols, vals) = project_virtual_row(row, projection, &all_cols)?;
+        let (cols, vals) = project_virtual_row(row, projection, all_cols)?;
         if out_cols.is_none() {
             out_cols = Some(cols);
         }
         out_rows.push(vals);
     }
     if out_cols.is_none() {
-        let (cols, _) = project_virtual_row(&BTreeMap::new(), projection, &all_cols)?;
+        let (cols, _) = project_virtual_row(&BTreeMap::new(), projection, all_cols)?;
         out_cols = Some(cols);
     }
     let columns = out_cols

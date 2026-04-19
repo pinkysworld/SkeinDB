@@ -160,6 +160,13 @@ RV1
 Flags:
 - bit0 IS_DELETE
 
+Current `skeindb-core` implementation status for T014:
+
+- `.rseg` files are append-only and use `FileHeader(file_kind=RowSeg)` followed by `RecordFrame`-wrapped RV1 payloads.
+- `RowSegmentWriter::append` returns a `FilePtr { file_id, offset }` pointing at the start of the emitted `RecordFrame`, so callers can chain `prev_ptr` for MVCC version histories.
+- `RowGroupRef` is encoded as `group_ref_kind=0` (inline bytes) or `group_ref_kind=1` (16-byte ValueID).
+- `RowSegmentReader` supports sequential full scans (`read_all`) and random-access lookup by offset (`read_at`); decode strictly rejects unknown record types/versions, unknown group ref kinds, and trailing bytes.
+
 ---
 
 ## 7) Value segments (.vseg)

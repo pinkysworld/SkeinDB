@@ -1300,10 +1300,7 @@ impl Engine {
     }
 
     pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
-        self.catalog
-            .databases
-            .entry(db.to_string())
-            .or_insert_with(Database::default);
+        self.catalog.databases.entry(db.to_string()).or_default();
         self.persist_catalog()
     }
 
@@ -6188,7 +6185,7 @@ impl Engine {
             db: params.view.db.clone(),
             table: params.view.table.clone(),
         };
-        if let Ok(_) = self.get_schema(&params.view.db, &params.view.table) {
+        if self.get_schema(&params.view.db, &params.view.table).is_ok() {
             anyhow::bail!("invalid_request: table already exists");
         }
         if self.views.contains_key(&key) {
@@ -7850,8 +7847,8 @@ impl Engine {
                     db: db.clone(),
                     table: table.clone(),
                 };
-                if !versions.contains_key(&key) {
-                    versions.insert(key, 1);
+                if let std::collections::hash_map::Entry::Vacant(e) = versions.entry(key) {
+                    e.insert(1);
                     touched = true;
                 }
             }
@@ -11446,7 +11443,7 @@ fn eval_expr(
                     let mut formatted = String::new();
                     let len = digits.len();
                     for (i, ch) in digits.chars().enumerate() {
-                        if i > 0 && (len - i) % 3 == 0 {
+                        if i > 0 && (len - i).is_multiple_of(3) {
                             formatted.push(',');
                         }
                         formatted.push(ch);
@@ -11771,7 +11768,7 @@ fn eval_expr(
                             'R' => '6',
                             _ => '0',
                         };
-                        if digit != '0' && code.chars().last() != Some(digit) {
+                        if digit != '0' && !code.ends_with(digit) {
                             code.push(digit);
                         }
                         if code.len() == 4 {
@@ -11839,7 +11836,7 @@ fn eval_expr(
                     for arg in fargs.iter() {
                         let val = eval_expr(arg, row, ctx, args)?;
                         if let Some(code) = lit_to_i64(&val) {
-                            if code >= 0 && code <= 0x10FFFF {
+                            if (0..=0x10FFFF).contains(&code) {
                                 if let Some(c) = char::from_u32(code as u32) {
                                     result.push(c);
                                 }
@@ -12592,7 +12589,7 @@ fn eval_expr(
                     let Some(day_of_year) = lit_to_i64(&doy_lit) else {
                         return Ok(Lit::Null);
                     };
-                    if day_of_year < 1 || year < 0 || year > 9999 {
+                    if day_of_year < 1 || !(0..=9999).contains(&year) {
                         return Ok(Lit::Null);
                     }
                     // Calculate date from year and day-of-year
@@ -12764,7 +12761,7 @@ fn eval_expr(
                         v: type_name.to_string(),
                     })
                 }
-                "pg_format" if fargs.len() >= 1 => {
+                "pg_format" if !fargs.is_empty() => {
                     let fmt = eval_expr(&fargs[0], row, ctx, args)?;
                     let Some(fmt_str) = lit_to_string_for_like(&fmt) else {
                         return Ok(Lit::Null);
@@ -15600,7 +15597,7 @@ fn compute_oblivious_padding(policy: &ObliviousPolicy, actual_rows: u64) -> Obli
 
     if let Some(multiple) = policy.pad_to_multiple {
         if multiple > 0 && actual_rows > 0 {
-            target_rows = ((actual_rows + multiple - 1) / multiple) * multiple;
+            target_rows = actual_rows.div_ceil(multiple) * multiple;
         }
     }
 
@@ -16599,7 +16596,7 @@ fn bloom_maybe_contains(bits: &[u8], m_bits: u64, k: u32, salt: Option<&str>, ke
     for i in 0..k {
         let mut buf = Vec::with_capacity(salt_bytes.len() + 4 + key.len());
         buf.extend_from_slice(salt_bytes);
-        buf.extend_from_slice(&(i as u32).to_le_bytes());
+        buf.extend_from_slice(&i.to_le_bytes());
         buf.extend_from_slice(key);
 
         let id = value_id(&buf);

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Roadmap — SkeinDB</title>
+<meta name="description" content="SkeinDB engineering roadmap: storage core, MVCC, MySQL/PostgreSQL compatibility, research tracks, and upcoming milestones.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#09090b; --bg-card:#18181b; --border:#27272a; --text:#fafafa;
+    --text-secondary:#a1a1aa; --text-dim:#71717a; --accent:#6366f1;
+    --accent-light:#818cf8; --green:#10b981; --amber:#f59e0b; --cyan:#06b6d4; --rose:#f43f5e;
+    --radius:12px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-light);text-decoration:none}
+  a:hover{color:var(--cyan)}
+  nav{position:sticky;top:0;z-index:100;background:rgba(9,9,11,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 2rem}
+  .nav-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+  .nav-logo{font-size:1.1rem;font-weight:800;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent-light),var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+  .nav-links{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap}
+  .nav-links a{color:var(--text-secondary);font-size:.92rem;font-weight:500}
+  .nav-links a:hover{color:var(--text)}
+  .nav-links a.active{color:var(--text)}
+  main{max-width:1100px;margin:0 auto;padding:3rem 2rem 6rem}
+  h1{font-size:clamp(1.8rem,4vw,2.6rem);font-weight:800;letter-spacing:-.03em;margin-bottom:.5rem}
+  h2{font-size:1.4rem;font-weight:700;margin:2.5rem 0 1rem;letter-spacing:-.02em}
+  h3{font-size:1.05rem;font-weight:600;margin:1.2rem 0 .6rem;color:var(--text)}
+  p{color:var(--text-secondary);max-width:78ch;margin:.75rem 0}
+  .hero-meta{color:var(--text-dim);font-size:.9rem;margin-bottom:2rem}
+  .phase{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem 1.5rem;margin:1rem 0}
+  .phase-head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+  .phase h3{margin:0}
+  .pill{display:inline-block;padding:.2rem .65rem;border-radius:999px;font-size:.72rem;font-weight:600;letter-spacing:.03em;text-transform:uppercase}
+  .pill-done{background:rgba(16,185,129,.12);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+  .pill-active{background:rgba(99,102,241,.15);color:var(--accent-light);border:1px solid rgba(99,102,241,.35)}
+  .pill-planned{background:rgba(161,161,170,.08);color:var(--text-secondary);border:1px solid var(--border)}
+  ul.tasks{list-style:none;margin:.75rem 0 0;padding:0}
+  ul.tasks li{padding:.35rem 0;border-bottom:1px dashed var(--border);color:var(--text-secondary);font-size:.92rem;display:flex;gap:.5rem;align-items:baseline}
+  ul.tasks li:last-child{border-bottom:none}
+  ul.tasks li .tid{font-family:'JetBrains Mono',monospace;color:var(--text-dim);font-size:.78rem;min-width:3.5rem}
+  ul.tasks li .status{font-size:.78rem;font-weight:600}
+  .s-done{color:var(--green)}
+  .s-open{color:var(--amber)}
+  footer{max-width:1100px;margin:0 auto;padding:2rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.85rem;text-align:center}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#architecture">Architecture</a>
+      <a href="index.html#research">Research</a>
+      <a href="roadmap.html" class="active">Roadmap</a>
+      <a href="licensing.html">Licensing</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+<main>
+  <h1>Engineering roadmap</h1>
+  <p class="hero-meta">Last updated 2026-04-19. Tracked in <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PROJECT_BACKLOG.md">docs/PROJECT_BACKLOG.md</a>.</p>
+  <p>SkeinDB is shipped one small, test-backed slice at a time. Each phase below groups a logical area; every item in the backlog ships with unit + integration tests and documentation updates before it is merged.</p>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 0 — Repo setup</h3><span class="pill pill-done">Done</span></div>
+    <ul class="tasks">
+      <li><span class="tid">T001</span><span class="status s-done">done</span>Encoding primitives (VarU, Bytes/String, CRC32C)</li>
+      <li><span class="tid">T002</span><span class="status s-done">done</span>FileHeader read/write</li>
+      <li><span class="tid">T003</span><span class="status s-done">done</span>RecordFrame append/iterate</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 1 — Storage core</h3><span class="pill pill-active">Active</span></div>
+    <ul class="tasks">
+      <li><span class="tid">T010</span><span class="status s-done">done</span>MANIFEST.log reader/writer</li>
+      <li><span class="tid">T011</span><span class="status s-done">done</span>WAL writer/reader + recovery</li>
+      <li><span class="tid">T012</span><span class="status s-done">done</span>ValueStore (.vseg) append/read + ValueID</li>
+      <li><span class="tid">T013</span><span class="status s-done">done</span>Sorted runs (.run) + simple LSM</li>
+      <li><span class="tid">T014</span><span class="status s-done">done</span>RowSeg (.rseg) + RowVersion encoding</li>
+      <li><span class="tid">T015</span><span class="status s-open">open</span>RowDir (row_id → head ptr)</li>
+      <li><span class="tid">T016</span><span class="status s-open">open</span>MVCC visibility</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 2 — SQL + virtual metadata</h3><span class="pill pill-done">Done</span></div>
+    <ul class="tasks">
+      <li><span class="tid">T020</span><span class="status s-done">done</span>Catalog schema + TableDef</li>
+      <li><span class="tid">T021</span><span class="status s-done">done</span>information_schema.tables / columns</li>
+      <li><span class="tid">T022</span><span class="status s-done">done</span>Minimal executor: CREATE TABLE, INSERT, SELECT</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 3 — MySQL protocol</h3><span class="pill pill-done">Done</span></div>
+    <p>Baseline handshake, COM_QUERY, COM_STMT parity, WordPress-class workload coverage, and an extensive scalar/date-time/JSON function set. Follow-up parity work continues through corpus growth.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 4 — Web console</h3><span class="pill pill-done">Done</span></div>
+    <p>HTTP API (<code>/api/v1/sql/exec</code>), schema browser, SQL editor, data browse/edit + CSV/JSON import/export, users/privileges + status dashboard.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 5 — SkeinQL native API</h3><span class="pill pill-done">Done</span></div>
+    <p>Native SkeinQL RPC (<code>/api/v1/rpc</code>) with schema.*, query.*, tx.*, system.*.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 6 — Cache-coherent HTTP queries</h3><span class="pill pill-done">Done</span></div>
+    <p>Row ETags, If-Match/If-None-Match, query.prepare, SSE subscriptions.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 7 — Delta-chained values</h3><span class="pill pill-done">Done</span></div>
+    <p>DELTA value kind, selection policy + metrics, compaction rebase bounded by chain depth.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 8 — Wasm extensions</h3><span class="pill pill-planned">Planned</span></div>
+    <ul class="tasks">
+      <li><span class="tid">T080</span><span class="status s-open">open</span>Module store + UDF catalog</li>
+      <li><span class="tid">T081</span><span class="status s-open">open</span>Scalar UDF sandbox</li>
+      <li><span class="tid">T082</span><span class="status s-open">open</span>Safe cancellation (fuel/time)</li>
+      <li><span class="tid">T083</span><span class="status s-open">open</span>Aggregate + table-function UDFs</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 9 — Tamper-evident WAL audit</h3><span class="pill pill-done">Done</span></div>
+    <p>WALHeader v2, hash chaining, checkpoint anchors, verify CLI/API.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 10 — Hybrid row/column snapshots</h3><span class="pill pill-planned">Planned</span></div>
+    <ul class="tasks">
+      <li><span class="tid">T100</span><span class="status s-open">open</span>Snapshot builder + .cseg writer</li>
+      <li><span class="tid">T101</span><span class="status s-open">open</span>Column scan operator</li>
+      <li><span class="tid">T102</span><span class="status s-open">open</span>Optimizer rule for column snapshots</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 11 — Compatibility telemetry</h3><span class="pill pill-done">Done</span></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 12 — SkeinAdmin standalone console</h3><span class="pill pill-done">Done</span></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 13 — Observability &amp; server load stats</h3><span class="pill pill-done">Done</span></div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><h3>Phase 14 — Cluster management</h3><span class="pill pill-active">Active</span></div>
+    <p>Node identity, replication transport, CAS pull, read-only replicas, cluster.* RPCs, sharding metadata router (single-shard txns).</p>
+  </div>
+
+  <h2>How to follow</h2>
+  <p>The most authoritative state is the GitHub repository. Pinned reading order:</p>
+  <ul class="tasks">
+    <li><a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PROJECT_BACKLOG.md">docs/PROJECT_BACKLOG.md</a> — live backlog with dated &ldquo;Latest&rdquo; notes per task</li>
+    <li><a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TRUE_STATUS_MATRIX.md">docs/TRUE_STATUS_MATRIX.md</a> — implemented vs partial matrix</li>
+    <li><a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RESEARCH_BACKLOG.md">docs/RESEARCH_BACKLOG.md</a> — research tracks</li>
+    <li><a href="https://github.com/pinkysworld/SkeinDB/commits/main">git log</a> — commit-level granularity</li>
+  </ul>
+</main>
+<footer>
+  SkeinDB &middot; <a href="licensing.html">Licensing &amp; sponsorship</a> &middot; <a href="docs.html">Docs</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB">GitHub</a>
+</footer>
+</body>
+</html>

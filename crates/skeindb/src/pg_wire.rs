@@ -121,13 +121,13 @@ pub mod scram {
             opad[i] ^= k[i];
         }
         let mut inner = Sha256::new();
-        inner.update(&ipad);
+        inner.update(ipad);
         inner.update(message);
         let inner_hash = inner.finalize();
 
         let mut outer = Sha256::new();
-        outer.update(&opad);
-        outer.update(&inner_hash);
+        outer.update(opad);
+        outer.update(inner_hash);
         outer.finalize().into()
     }
 
@@ -445,7 +445,7 @@ pub async fn read_startup_message(
 ) -> anyhow::Result<Option<StartupMessage>> {
     // First 4 bytes: message length (includes self).
     let len = stream.read_i32().await? as usize;
-    if len < 8 || len > 10240 {
+    if !(8..=10240).contains(&len) {
         anyhow::bail!("startup message length out of range: {len}");
     }
     let payload_len = len - 4; // we already read the 4-byte length
@@ -538,20 +538,20 @@ pub async fn write_message(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> a
 /// Build and write an AuthenticationOk message.
 pub async fn write_auth_ok(stream: &mut TcpStream) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4);
-    buf.extend_from_slice(&(auth::OK as i32).to_be_bytes());
+    buf.extend_from_slice(&auth::OK.to_be_bytes());
     write_message(stream, backend::AUTHENTICATION, &buf).await
 }
 
 /// Build and write an AuthenticationCleartextPassword request.
 pub async fn write_auth_cleartext_password(stream: &mut TcpStream) -> anyhow::Result<()> {
-    let buf = (auth::CLEARTEXT_PASSWORD as i32).to_be_bytes();
+    let buf = auth::CLEARTEXT_PASSWORD.to_be_bytes();
     write_message(stream, backend::AUTHENTICATION, &buf).await
 }
 
 /// Build and write an AuthenticationSASL message listing available mechanisms.
 pub async fn write_auth_sasl(stream: &mut TcpStream, mechanisms: &[&str]) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(64);
-    buf.extend_from_slice(&(auth::SASL as i32).to_be_bytes());
+    buf.extend_from_slice(&auth::SASL.to_be_bytes());
     for mech in mechanisms {
         buf.extend_from_slice(mech.as_bytes());
         buf.push(0);
@@ -563,7 +563,7 @@ pub async fn write_auth_sasl(stream: &mut TcpStream, mechanisms: &[&str]) -> any
 /// Build and write an AuthenticationSASLContinue message.
 pub async fn write_auth_sasl_continue(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4 + data.len());
-    buf.extend_from_slice(&(auth::SASL_CONTINUE as i32).to_be_bytes());
+    buf.extend_from_slice(&auth::SASL_CONTINUE.to_be_bytes());
     buf.extend_from_slice(data.as_bytes());
     write_message(stream, backend::AUTHENTICATION, &buf).await
 }
@@ -571,7 +571,7 @@ pub async fn write_auth_sasl_continue(stream: &mut TcpStream, data: &str) -> any
 /// Build and write an AuthenticationSASLFinal message.
 pub async fn write_auth_sasl_final(stream: &mut TcpStream, data: &str) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4 + data.len());
-    buf.extend_from_slice(&(auth::SASL_FINAL as i32).to_be_bytes());
+    buf.extend_from_slice(&auth::SASL_FINAL.to_be_bytes());
     buf.extend_from_slice(data.as_bytes());
     write_message(stream, backend::AUTHENTICATION, &buf).await
 }

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Licensing &amp; sponsorship — SkeinDB</title>
+<meta name="description" content="SkeinDB is licensed under Apache-2.0. Learn how to sponsor development, fund research tracks, and request commercial support.">
+<link rel="icon" type="image/svg+xml" href="../docs/site/favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#09090b;--bg-card:#18181b;--border:#27272a;--text:#fafafa;--text-secondary:#a1a1aa;--text-dim:#71717a;--accent:#6366f1;--accent-light:#818cf8;--green:#10b981;--amber:#f59e0b;--cyan:#06b6d4;--rose:#f43f5e;--radius:12px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-light);text-decoration:none}
+  a:hover{color:var(--cyan)}
+  nav{position:sticky;top:0;z-index:100;background:rgba(9,9,11,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 2rem}
+  .nav-inner{max-width:1100px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:56px}
+  .nav-logo{font-size:1.1rem;font-weight:800;letter-spacing:-.02em;background:linear-gradient(135deg,var(--accent-light),var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+  .nav-links{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap}
+  .nav-links a{color:var(--text-secondary);font-size:.92rem;font-weight:500}
+  .nav-links a:hover,.nav-links a.active{color:var(--text)}
+  main{max-width:1100px;margin:0 auto;padding:3rem 2rem 6rem}
+  h1{font-size:clamp(1.8rem,4vw,2.6rem);font-weight:800;letter-spacing:-.03em;margin-bottom:.5rem}
+  h2{font-size:1.4rem;font-weight:700;margin:2.5rem 0 1rem;letter-spacing:-.02em}
+  h3{font-size:1.05rem;font-weight:600;margin:1.2rem 0 .6rem}
+  p{color:var(--text-secondary);max-width:78ch;margin:.75rem 0}
+  ul{margin:.5rem 0 .5rem 1.25rem;color:var(--text-secondary)}
+  ul li{margin:.35rem 0}
+  .lead{color:var(--text);font-size:1.08rem;max-width:78ch}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.25rem 0}
+  .card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem 1.4rem}
+  .card h3{margin-top:0}
+  .pill{display:inline-block;padding:.2rem .65rem;border-radius:999px;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.03em;background:rgba(99,102,241,.15);color:var(--accent-light);border:1px solid rgba(99,102,241,.35)}
+  .pill-green{background:rgba(16,185,129,.12);color:var(--green);border-color:rgba(16,185,129,.3)}
+  .pill-amber{background:rgba(245,158,11,.12);color:var(--amber);border-color:rgba(245,158,11,.3)}
+  code{font-family:'JetBrains Mono',monospace;background:#111;border:1px solid var(--border);padding:.1em .4em;border-radius:6px;font-size:.9em}
+  table{width:100%;border-collapse:collapse;margin:1rem 0;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+  th,td{text-align:left;padding:.7rem 1rem;border-bottom:1px solid var(--border);font-size:.92rem;color:var(--text-secondary)}
+  th{background:#111;color:var(--text);font-weight:600}
+  tr:last-child td{border-bottom:none}
+  .note{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:var(--radius);padding:1rem 1.25rem;margin:1.5rem 0;color:var(--text)}
+  .cta{display:inline-block;padding:.6rem 1.1rem;background:var(--accent);color:#fff;border-radius:8px;font-weight:600;margin-top:.5rem}
+  .cta:hover{background:var(--accent-light);color:#fff}
+  footer{max-width:1100px;margin:0 auto;padding:2rem;border-top:1px solid var(--border);color:var(--text-dim);font-size:.85rem;text-align:center}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="index.html#features">Features</a>
+      <a href="index.html#architecture">Architecture</a>
+      <a href="index.html#research">Research</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="licensing.html" class="active">Licensing</a>
+      <a href="../docs/site/docs.html">Docs</a>
+      <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+<main>
+  <h1>Licensing &amp; sponsorship</h1>
+  <p class="lead">SkeinDB is, and will remain, free and open-source software under the <strong>Apache License 2.0</strong>. This page explains what that means in practice, how the project sustains itself, and what paid tiers are available.</p>
+
+  <h2>The license</h2>
+  <p>The entire SkeinDB source tree is distributed under <a href="https://github.com/pinkysworld/SkeinDB/blob/main/LICENSE">Apache-2.0</a>. This lets you:</p>
+  <ul>
+    <li>Use SkeinDB in commercial and closed-source products.</li>
+    <li>Modify and redistribute the source (keeping the license notice).</li>
+    <li>Embed it in appliances, SaaS, edge devices, or internal tools.</li>
+    <li>Benefit from the Apache-2.0 explicit patent grant — important for database workloads.</li>
+  </ul>
+  <p>We considered AGPLv3, SSPL, and source-available variants (BSL/Elastic). For now we are deliberately staying with <strong>Apache-2.0</strong> because it maximizes trust and adoption in the early phase, which is where the project benefits most from contributors and design feedback. If we later decide to add a commercial add-on layer, it will be a <em>separately licensed</em> module, not a retroactive license change on the core.</p>
+
+  <div class="note">
+    <strong>Short recommendation:</strong> keep Apache-2.0 for the core. Monetize around it (support, hosted, commercial add-ons, sponsorship), never by taking away rights that are already granted.
+  </div>
+
+  <h2>Ways to fund the project</h2>
+  <p>These are grouped from lowest-friction to highest commitment. All options coexist with the Apache-2.0 core.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>GitHub Sponsors / OpenCollective <span class="pill pill-green">Easy</span></h3>
+      <p>Monthly recurring sponsorship tiers ($5 / $25 / $100 / $500). Lowest friction, works globally, signals demand to future contributors. Add a "Sponsor" button to the repo and to this page.</p>
+    </div>
+    <div class="card">
+      <h3>Named research track sponsorships <span class="pill">Medium</span></h3>
+      <p>SkeinDB has 20 research tracks (delta-chained values, ETag validators, oblivious execution, QUIC transport, Wasm UDFs, etc.). A sponsor funds one track (e.g. "Wasm UDF sandbox — sponsored by <em>Acme Corp</em>") and gets attribution in the relevant doc + release notes.</p>
+    </div>
+    <div class="card">
+      <h3>Commercial support contracts <span class="pill">Medium</span></h3>
+      <p>Bronze / Silver / Gold tiers: SLA-backed email + chat support, priority bug triage, migration assistance, and a direct line to the maintainers. Revenue roughly tracks number of production deployments.</p>
+    </div>
+    <div class="card">
+      <h3>Hosted / managed SkeinDB <span class="pill pill-amber">Longer term</span></h3>
+      <p>A hosted offering (single-node, HA, or multi-tenant) that runs the same open-source binary. Classic "open core + SaaS" pattern. This is the highest upside but requires ops investment; likely post-1.0.</p>
+    </div>
+    <div class="card">
+      <h3>Commercial add-on modules <span class="pill pill-amber">Later</span></h3>
+      <p>Optional, separately-licensed enterprise modules (e.g. advanced RBAC, SSO/SAML, multi-region replication UI, compliance bundles). Core stays Apache-2.0; add-ons ship as separate binaries or crates under a commercial EULA.</p>
+    </div>
+    <div class="card">
+      <h3>Training &amp; consulting <span class="pill">Low setup</span></h3>
+      <p>Paid workshops ("SkeinDB internals", "SkeinQL for backend engineers"), architecture reviews, and time-boxed engineering engagements. Useful early: fills the gap before any recurring revenue exists.</p>
+    </div>
+    <div class="card">
+      <h3>Grants &amp; research funding <span class="pill">Opportunistic</span></h3>
+      <p>SkeinDB&rsquo;s research surface (MVCC + oblivious execution + tamper-evident WAL + Wasm UDFs) is a natural fit for applied-research grants and open-source foundations (e.g. NLnet, Sovereign Tech Fund).</p>
+    </div>
+    <div class="card">
+      <h3>Merch &amp; community <span class="pill pill-green">Easy</span></h3>
+      <p>Small but positive brand signal: stickers, t-shirts, hoodies via a print-on-demand store. Not a revenue engine, but it&rsquo;s a frictionless way for supporters to contribute and spread the word.</p>
+    </div>
+  </div>
+
+  <h2>Suggested phased approach</h2>
+  <table>
+    <thead><tr><th>Phase</th><th>Trigger</th><th>Turn on</th></tr></thead>
+    <tbody>
+      <tr><td>1. Today</td><td>Pre-1.0, small audience</td><td>GitHub Sponsors button, donations link on this page, clear LICENSE.</td></tr>
+      <tr><td>2. Soon</td><td>First 3–5 production users ask for support</td><td>Commercial support tiers + priority-issue SLA, optional consulting.</td></tr>
+      <tr><td>3. After 1.0</td><td>Stable on-disk format, running clusters</td><td>Hosted offering (single-tenant dev tier free), first commercial add-on module.</td></tr>
+      <tr><td>4. Growth</td><td>Meaningful MRR from #3</td><td>Full enterprise bundle, partner program, optional research grants.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What not to do</h2>
+  <ul>
+    <li><strong>Don&rsquo;t switch the core off Apache-2.0 retroactively.</strong> It erodes trust and splits the ecosystem.</li>
+    <li><strong>Don&rsquo;t make benchmarks, tests, or docs proprietary.</strong> They are the credibility of the project.</li>
+    <li><strong>Don&rsquo;t gatekeep bug fixes behind a paid tier.</strong> Gate <em>roadmap priority</em> and <em>response time</em>, not correctness.</li>
+    <li><strong>Don&rsquo;t ship telemetry to the mothership by default.</strong> SkeinDB is a database &mdash; silent data egress is an immediate disqualifier for serious users.</li>
+  </ul>
+
+  <h2>Sponsor today</h2>
+  <p>If your company already relies on SkeinDB, or is evaluating it, the easiest way to support the project is a monthly sponsorship. Even small recurring amounts make roadmap planning much more predictable.</p>
+  <p>
+    <a class="cta" href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener">Become a GitHub Sponsor →</a>
+  </p>
+  <p>For commercial support, training, or custom engineering, reach out via the <a href="https://github.com/pinkysworld/SkeinDB/issues/new?labels=commercial">commercial inquiry issue template</a>.</p>
+</main>
+<footer>
+  SkeinDB &middot; Apache-2.0 &middot; <a href="roadmap.html">Roadmap</a> &middot; <a href="../docs/site/docs.html">Docs</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB">GitHub</a>
+</footer>
+</body>
+</html>
