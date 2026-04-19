@@ -120,6 +120,14 @@ SQL compatibility (optional):
 Store modules as immutable blobs in the ValueStore.
 Reference them from catalog metadata.
 
+Current `skeindb-core` implementation status for T080:
+
+- Wasm module bytes can now be stored immutably in `ValueStore` as `ValueKind::BlobChunk` entries.
+- `WasmModuleCatalog` persists UDF metadata to `wasm_catalog.json` (format v1), separate from the older merge-specific `merge_wasm_registry.json` prototype.
+- Catalog entries track module id, optional name, UDF kind, ABI, entrypoint symbol, `ValueId`, byte size, creation time, and capability metadata.
+- The catalog supports install/list/get/drop plus byte materialization back through `ValueStore`.
+- No Wasm execution, sandboxing, or cancellation is implemented yet; those remain T081/T082.
+
 ---
 
 ## 8) Testing requirements

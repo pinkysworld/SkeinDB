@@ -19,6 +19,7 @@ pub mod rowseg;
 pub mod run;
 pub mod valuestore;
 pub mod wal;
+pub mod wasm_catalog;
 
 #[derive(Debug, Error)]
 pub enum CoreError {

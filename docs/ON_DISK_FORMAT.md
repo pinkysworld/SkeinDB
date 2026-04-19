@@ -25,6 +25,7 @@ data/
   dp_audit.json               (prototype DP audit log, format v1)
   oblivious_policies.json     (prototype oblivious policy store, format v1)
   forensic_chain.json         (prototype forensic hash chain, format v3)
+  wasm_catalog.json           (prototype Wasm UDF catalog, format v1)
   merge_policies.json         (prototype merge policies, format v1)
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
   views.json                  (prototype materialized views, format v1)
@@ -425,7 +426,48 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.4 tables/<db>/<table>.json (format v2)
+### 11.4 wasm_catalog.json
+
+Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
+embedded here; they live in the `ValueStore` and are referenced by `value_id`.
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "modules": [
+    {
+      "module_id": "math_abs",
+      "name": "math abs",
+      "kind": "scalar",
+      "abi": "skein.wasm.udf.v1",
+      "entrypoint": "skein_scalar",
+      "value_id": "0123abcd0123abcd0123abcd0123abcd",
+      "size_bytes": 1234,
+      "capabilities": {
+        "allowed_hostcalls": ["log.debug"],
+        "allowed_tables": [
+          { "db": "app", "table": "users", "read": true, "write": false }
+        ],
+        "deterministic": true,
+        "max_fuel": 1000,
+        "max_memory_bytes": 65536,
+        "max_output_bytes": 4096
+      },
+      "created_at_ms": 1730000000000
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Added in v0.3 as an optional metadata file for Phase 8 T080.
+- The catalog stores only typed metadata plus `value_id`; the Wasm bytes are
+  stored separately in `.vseg` data managed by `ValueStore`.
+- Unknown `format_version` values are rejected by the current core loader.
+
+### 11.5 tables/<db>/<table>.json (format v2)
 
 Prototype row persistence for `tables/<db>/<table>.json` now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.
@@ -476,7 +518,7 @@ Rules:
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 
-### 11.4 tables/<db>/<table>.rseg (prototype segment container v1)
+### 11.6 tables/<db>/<table>.rseg (prototype segment container v1)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
 
@@ -501,7 +543,7 @@ Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
 - If both files are missing or unreadable, the table loads as empty.
 
-### 11.5 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
+### 11.7 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
 
 Optional persisted cache for the engine's reusable secondary-index state.
 

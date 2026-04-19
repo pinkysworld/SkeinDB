@@ -75,7 +75,7 @@ Phase 0 verification checklist:
 - [x] T072: Compaction rebase (limit delta chain depth)
 
 ## Phase 8 - Wasm extensions
-- [ ] T080: Module store + catalog metadata for UDFs (docs/WASM_UDFS.md)
+- [x] T080: Module store + catalog metadata for UDFs (docs/WASM_UDFS.md). Latest: `crates/skeindb-core/src/wasm_catalog.rs` now stores Wasm modules as immutable `ValueKind::BlobChunk` values inside `ValueStore` and tracks typed metadata in a `WasmModuleCatalog` persisted as `wasm_catalog.json` (format v1). Catalog entries include `module_id`, optional `name`, UDF kind (`scalar` / `aggregate` / `table`), ABI string, entrypoint symbol, `ValueId`, size, creation timestamp, and capability metadata (`allowed_hostcalls`, per-table read/write permissions, determinism, fuel/memory/output budgets). The core API supports install/list/get/drop, overwrite-on-install, module-byte materialization back out of `ValueStore`, strict validation for empty ids/entrypoints/ABIs/modules, and strict JSON load validation for unsupported format versions or malformed `value_id` hex. Unit tests cover install/overwrite/drop flows, invalid-request rejection, and value-id hex roundtrip; integration tests cover catalog + `.vseg` roundtrip preserving both metadata and module bytes plus JSON-load rejection for bad format versions and malformed `value_id` strings.
 - [ ] T081: Scalar UDF execution sandbox with resource limits
 - [ ] T082: Safe cancellation (fuel/time budget) + tests
 - [ ] T083: Aggregate and table-function UDFs

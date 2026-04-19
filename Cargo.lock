@@ -1534,6 +1534,8 @@ version = "0.3.0"
 dependencies = [
  "blake3",
  "crc32c",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
