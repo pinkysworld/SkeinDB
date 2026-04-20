@@ -61,8 +61,11 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
     for marker in [
         "description = \"Single-binary database server",
         "homepage = \"https://github.com/pinkysworld/SkeinDB\"",
+        "readme = \"../../README.md\"",
         "[package.metadata.deb]",
         "target/release/skeindb",
+        "[\"../../README.md\", \"usr/share/doc/skeindb/README.md\", \"644\"]",
+        "[\"../../LICENSE\", \"usr/share/doc/skeindb/LICENSE\", \"644\"]",
     ] {
         assert!(
             cargo.contains(marker),
@@ -140,6 +143,19 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
     assert!(backlog.contains("T419"));
     assert!(backlog.contains("T420"));
     assert!(status.contains("Phase 26 Distribution"));
+
+    let maintainer_line = cargo
+        .lines()
+        .find(|line| line.trim_start().starts_with("maintainer = \""))
+        .expect("cargo metadata should define maintainer");
+    assert!(
+        maintainer_line.contains('<') && maintainer_line.contains('>'),
+        "Debian maintainer metadata must include a name and email address"
+    );
+    assert!(
+        !cargo.contains("extended-description-file ="),
+        "cargo-deb extended-description-file is resolved from the invocation directory; rely on package.readme instead"
+    );
 
     let Some(python) = python_command() else {
         eprintln!("python interpreter not found; static packaging checks completed");
