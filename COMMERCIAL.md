@@ -14,15 +14,20 @@ hosted/enterprise tier.
 
 ## TL;DR
 
-| Option                        | Target audience                         | Status       |
-|-------------------------------|-----------------------------------------|--------------|
-| GitHub Sponsors               | Individuals, hobby users, small teams   | **Available** |
-| PayPal                        | One-off donations                       | **Available** |
-| Commercial support contracts  | Teams running SkeinDB in production     | Available on request |
-| Training & consulting         | Teams adopting SkeinDB / SkeinQL        | Available on request |
-| Named research-track sponsor  | Companies funding a specific track      | Available on request |
-| Hosted / managed SkeinDB      | Teams who want "just give me a DB URL"  | After 1.0     |
-| Commercial add-on modules     | Enterprise SSO/SAML, advanced RBAC, etc.| After 1.0     |
+| Option                        | Target audience                         | Status                |
+|-------------------------------|-----------------------------------------|-----------------------|
+| GitHub Sponsors               | Individuals, hobby users, small teams   | **Available**         |
+| PayPal                        | One-off donations                       | **Available**         |
+| Starter / Business / Enterprise support | Teams running SkeinDB in production | Indicative pricing published |
+| Training & consulting         | Teams adopting SkeinDB / SkeinQL        | Available on request  |
+| Named research-track sponsor  | Companies funding a specific track      | Available on request  |
+| Hosted / managed SkeinDB      | Teams who want "just give me a DB URL"  | After 1.0             |
+| Commercial add-on modules     | Enterprise SSO/SAML, advanced RBAC, etc.| After 1.0             |
+
+Indicative monthly pricing is published on the website at
+[`site/pricing.html`](site/pricing.html): **Starter €299 / month**,
+**Business €1,200 / month**, **Enterprise €3,900 / month**. Final scope,
+taxes, billing terms, and any 24×7 coverage are still agreed case-by-case.
 
 ---
 
@@ -53,11 +58,14 @@ For organizations running SkeinDB in production we offer paid support with
 defined response times. Everything in the support contract is scoped around
 the open-source SkeinDB — no code is held back.
 
-| Tier     | Response time (business hours) | Channels             | Scope                                                              |
-|----------|-------------------------------|----------------------|---------------------------------------------------------------------|
-| Bronze   | Next business day              | Email                 | Questions, config review, bug triage on the open-source tree.       |
-| Silver   | Same business day              | Email + shared chat   | Bronze + priority triage on reported bugs + quarterly roadmap call. |
-| Gold     | 4 business hours               | Email + chat + video  | Silver + named engineer + migration/design reviews.                 |
+| Tier       | Indicative monthly price | Response time (business hours) | Channels              | Scope                                                               |
+|------------|--------------------------|-------------------------------|-----------------------|---------------------------------------------------------------------|
+| Starter    | €299 / month             | Next business day              | Email                 | Questions, config review, bug triage on the open-source tree.       |
+| Business   | €1,200 / month           | Same business day              | Email + shared chat   | Starter + priority triage on reported bugs + quarterly roadmap call. |
+| Enterprise | €3,900 / month           | 4 business hours               | Email + chat + video  | Business + named engineer + migration/design reviews.               |
+
+Custom / 24×7 engagements are available separately where pager coverage,
+on-site work, or private-fork maintenance are actually needed.
 
 Not included (contact us for a separate engagement):
 

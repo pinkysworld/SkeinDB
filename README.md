@@ -248,9 +248,9 @@ If SkeinDB is useful to you and you want to help keep it moving:
 - GitHub Sponsors is the main option: <https://github.com/sponsors/pinkysworld>
 - If PayPal is easier, you can use `mip@gmx.biz` (or <https://www.paypal.com/paypalme/mippinky>).
 
-For teams running SkeinDB in production we offer paid support plans with concrete
-monthly pricing (Starter €299 / Business €1,200 / Enterprise €3,900) plus custom
-and 24×7 engagements. See the full tier table, add-ons, and FAQ on
+For teams running SkeinDB in production we publish indicative support plans
+(Starter €299 / Business €1,200 / Enterprise €3,900) plus custom and 24×7
+engagement options. See the full tier table, add-ons, and FAQ on
 [site/pricing.html](site/pricing.html), the contact form on
 [site/contact.html](site/contact.html), or the long-form overview in
 [COMMERCIAL.md](COMMERCIAL.md).
