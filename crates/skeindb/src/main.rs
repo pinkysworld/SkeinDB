@@ -347,7 +347,7 @@ enum Commands {
         data: String,
     },
 
-    /// Build a column snapshot (placeholder)
+    /// Build a column snapshot and write manifest + .cseg files
     SnapshotBuild {
         /// Data directory
         #[arg(long, default_value = "./data")]

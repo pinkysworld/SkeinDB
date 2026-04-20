@@ -626,13 +626,19 @@ Snapshot files are independent from WAL/rows/vals and can be deleted/rebuilt.
 Suggested snapshot file kind:
 - file_kind = 6 (snapshot)
 
-Prototype metadata (scaffold):
+Prototype metadata:
 - `snapshots.json` stores column snapshot metadata + row values.
 - JSON includes `format_version` (current: 1) and a per-snapshot `table_version`.
 - On startup, snapshots are loaded only when `table_version` matches the catalog.
 
-Within snapshots/, column segments may use their own header format.
-See docs/COLUMN_SNAPSHOTS.md for cseg v0.1.
+Sidecar snapshot artifacts:
+- `snapshots/snap-<snapshot_id>/manifest.json` stores snapshot identity, projection, table version, row count, and per-segment metadata.
+- `snapshots/snap-<snapshot_id>/col-XXXX.cseg` stores one projected or primary-key column per file.
+- `.cseg` files use magic `SKNCSEG1`, `format_version = 1`, a column kind byte (`pk` vs value), `snapshot_ts`, row count, db/table/column names, a null bitmap, and row-ordered non-null `Lit` payloads.
+
+The runtime still treats `snapshots.json` as the startup cache; the sidecar snapshot directory is rebuilt best-effort on persist.
+
+See docs/COLUMN_SNAPSHOTS.md for cseg v1.
 
 ## A.4 Index advisor telemetry (prototype)
 

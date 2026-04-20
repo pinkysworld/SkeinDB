@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
+#[cfg(test)]
+use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
@@ -809,6 +811,11 @@ enum DpAggAccumulator {
 // -----------------------------
 
 const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+const SNAPSHOT_MANIFEST_FORMAT_VERSION: u32 = 1;
+const SNAPSHOT_CSEG_FORMAT_VERSION: u32 = 1;
+const SNAPSHOT_CSEG_MAGIC: [u8; 8] = *b"SKNCSEG1";
+const SNAPSHOT_CSEG_KIND_VALUE: u8 = 0;
+const SNAPSHOT_CSEG_KIND_PK: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ColumnSnapshotDisk {
@@ -821,6 +828,34 @@ struct ColumnSnapshotDisk {
     pub snapshot_ts: u64,
     pub table_version: u64,
     pub rows: Vec<SnapshotRowDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ColumnSnapshotManifestDisk {
+    pub format_version: u32,
+    pub id: String,
+    pub db: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub pk_columns: Vec<String>,
+    pub snapshot_ts: u64,
+    pub table_version: u64,
+    pub row_count: u64,
+    pub segments: Vec<ColumnSnapshotSegmentDisk>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ColumnSnapshotSegmentDisk {
+    pub column: String,
+    pub is_pk: bool,
+    pub file: String,
+    pub row_count: u64,
+    pub non_null_count: u64,
+    pub encoding: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_value: Option<Lit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_value: Option<Lit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7438,6 +7473,10 @@ impl Engine {
         self.data_dir.join("snapshots.json")
     }
 
+    fn snapshots_dir_path(&self) -> PathBuf {
+        self.data_dir.join("snapshots")
+    }
+
     fn load_snapshots_best_effort(&mut self) {
         let path = self.snapshots_path();
         let list: Vec<ColumnSnapshotDisk> = load_json(&path).unwrap_or_default();
@@ -7447,10 +7486,76 @@ impl Engine {
     }
 
     fn persist_snapshots_best_effort(&self) {
-        if let Ok(manager) = self.snapshots.lock() {
-            let list = manager.to_disk();
-            let _ = save_json(&self.snapshots_path(), &list);
+        let list = if let Ok(manager) = self.snapshots.lock() {
+            manager.to_disk()
+        } else {
+            return;
+        };
+        let _ = save_json(&self.snapshots_path(), &list);
+        self.persist_snapshot_segments_best_effort(&list);
+    }
+
+    fn persist_snapshot_segments_best_effort(&self, snapshots: &[ColumnSnapshotDisk]) {
+        let root = self.snapshots_dir_path();
+        if fs::create_dir_all(&root).is_err() {
+            return;
         }
+
+        let mut keep = HashSet::new();
+        for snapshot in snapshots.iter() {
+            let dir_name = snapshot_dir_name(&snapshot.id);
+            keep.insert(dir_name.clone());
+            let dir = root.join(&dir_name);
+            let _ = self.persist_snapshot_segment_dir(snapshot, &dir);
+        }
+
+        let Ok(entries) = fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !keep.contains(&name) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    fn persist_snapshot_segment_dir(
+        &self,
+        snapshot: &ColumnSnapshotDisk,
+        dir: &Path,
+    ) -> anyhow::Result<()> {
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir)?;
+
+        let mut segments = Vec::new();
+        for (idx, (column, is_pk)) in snapshot_storage_columns(snapshot).into_iter().enumerate() {
+            let file = format!("col-{:04}.cseg", idx + 1);
+            let path = dir.join(&file);
+            let values = snapshot_column_values(snapshot, &column, is_pk)?;
+            let segment = write_snapshot_cseg(&path, snapshot, &column, is_pk, &file, &values)?;
+            segments.push(segment);
+        }
+
+        let manifest = ColumnSnapshotManifestDisk {
+            format_version: SNAPSHOT_MANIFEST_FORMAT_VERSION,
+            id: snapshot.id.clone(),
+            db: snapshot.db.clone(),
+            table: snapshot.table.clone(),
+            columns: snapshot.columns.clone(),
+            pk_columns: snapshot.pk_columns.clone(),
+            snapshot_ts: snapshot.snapshot_ts,
+            table_version: snapshot.table_version,
+            row_count: snapshot.rows.len() as u64,
+            segments,
+        };
+        save_json(&dir.join("manifest.json"), &manifest)
     }
 
     fn advisor_patterns_path(&self) -> PathBuf {
@@ -8044,12 +8149,13 @@ impl Engine {
             r#as: None,
         };
         let (_, tdata) = self.get_table(&table_ref)?;
+        let visibility_ts_ms = snapshot_ts_to_commit_ts_ms(snapshot_ts);
 
         let mut rows = Vec::new();
         let mut pk_index = HashMap::new();
 
         for entry in tdata.rows.iter() {
-            if entry.deleted {
+            if !row_visible_at(entry, Some(visibility_ts_ms)) {
                 continue;
             }
             let pk = extract_pk(schema, &entry.row)?;
@@ -19529,6 +19635,18 @@ fn snapshot_id(db: &str, table: &str, snapshot_ts: u64, columns: &[String]) -> S
     hex16(&id)
 }
 
+fn snapshot_dir_name(snapshot_id: &str) -> String {
+    format!("snap-{snapshot_id}")
+}
+
+fn snapshot_ts_to_commit_ts_ms(snapshot_ts: u64) -> u64 {
+    if snapshot_ts >= 10_000_000_000_000 {
+        snapshot_ts / 1_000
+    } else {
+        snapshot_ts
+    }
+}
+
 fn normalize_columns(columns: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -19665,6 +19783,229 @@ fn snapshot_values(columns: &[String], row: &RowObject) -> Vec<Lit> {
         .iter()
         .map(|col| row.get(col).cloned().unwrap_or(Lit::Null))
         .collect()
+}
+
+fn snapshot_storage_columns(snapshot: &ColumnSnapshotDisk) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for col in snapshot.pk_columns.iter() {
+        if seen.insert(col.clone()) {
+            out.push((col.clone(), true));
+        }
+    }
+    for col in snapshot.columns.iter() {
+        if seen.insert(col.clone()) {
+            out.push((col.clone(), false));
+        }
+    }
+    out
+}
+
+fn snapshot_column_values(
+    snapshot: &ColumnSnapshotDisk,
+    column: &str,
+    is_pk: bool,
+) -> anyhow::Result<Vec<Lit>> {
+    let pk_idx = if is_pk {
+        Some(
+            snapshot
+                .pk_columns
+                .iter()
+                .position(|col| col == column)
+                .ok_or_else(|| anyhow::anyhow!("snapshot missing pk column: {column}"))?,
+        )
+    } else {
+        None
+    };
+    let value_idx = if is_pk {
+        None
+    } else {
+        Some(
+            snapshot
+                .columns
+                .iter()
+                .position(|col| col == column)
+                .ok_or_else(|| anyhow::anyhow!("snapshot missing value column: {column}"))?,
+        )
+    };
+
+    let mut out = Vec::with_capacity(snapshot.rows.len());
+    for row in snapshot.rows.iter() {
+        let value = match (pk_idx, value_idx) {
+            (Some(idx), None) => row.pk.get(idx).cloned().unwrap_or(Lit::Null),
+            (None, Some(idx)) => row.values.get(idx).cloned().unwrap_or(Lit::Null),
+            _ => Lit::Null,
+        };
+        out.push(value);
+    }
+    Ok(out)
+}
+
+fn encode_null_bitmap(values: &[Lit]) -> Vec<u8> {
+    let mut bitmap = vec![0u8; values.len().div_ceil(8)];
+    for (idx, value) in values.iter().enumerate() {
+        if matches!(value, Lit::Null) {
+            bitmap[idx / 8] |= 1 << (idx % 8);
+        }
+    }
+    bitmap
+}
+
+#[cfg(test)]
+fn null_bitmap_is_null(bitmap: &[u8], idx: usize) -> bool {
+    let byte = idx / 8;
+    if byte >= bitmap.len() {
+        return false;
+    }
+    (bitmap[byte] & (1 << (idx % 8))) != 0
+}
+
+fn write_snapshot_cseg(
+    path: &Path,
+    snapshot: &ColumnSnapshotDisk,
+    column: &str,
+    is_pk: bool,
+    file: &str,
+    values: &[Lit],
+) -> anyhow::Result<ColumnSnapshotSegmentDisk> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&SNAPSHOT_CSEG_MAGIC);
+    bytes.extend_from_slice(&SNAPSHOT_CSEG_FORMAT_VERSION.to_le_bytes());
+    bytes.push(if is_pk {
+        SNAPSHOT_CSEG_KIND_PK
+    } else {
+        SNAPSHOT_CSEG_KIND_VALUE
+    });
+    bytes.extend_from_slice(&snapshot.snapshot_ts.to_le_bytes());
+    bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+
+    let db_bytes = snapshot.db.as_bytes();
+    bytes.extend_from_slice(&encode_varu(db_bytes.len() as u64));
+    bytes.extend_from_slice(db_bytes);
+
+    let table_bytes = snapshot.table.as_bytes();
+    bytes.extend_from_slice(&encode_varu(table_bytes.len() as u64));
+    bytes.extend_from_slice(table_bytes);
+
+    let column_bytes = column.as_bytes();
+    bytes.extend_from_slice(&encode_varu(column_bytes.len() as u64));
+    bytes.extend_from_slice(column_bytes);
+
+    let null_bitmap = encode_null_bitmap(values);
+    bytes.extend_from_slice(&encode_varu(null_bitmap.len() as u64));
+    bytes.extend_from_slice(&null_bitmap);
+
+    let non_null_count = values
+        .iter()
+        .filter(|value| !matches!(value, Lit::Null))
+        .count() as u64;
+    for value in values.iter() {
+        if matches!(value, Lit::Null) {
+            continue;
+        }
+        let payload = serde_json::to_vec(value)?;
+        bytes.extend_from_slice(&encode_varu(payload.len() as u64));
+        bytes.extend_from_slice(&payload);
+    }
+
+    fs::write(path, bytes)?;
+    Ok(ColumnSnapshotSegmentDisk {
+        column: column.to_string(),
+        is_pk,
+        file: file.to_string(),
+        row_count: values.len() as u64,
+        non_null_count,
+        encoding: "plain+null_bitmap".to_string(),
+        min_value: None,
+        max_value: None,
+    })
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+struct DecodedSnapshotCseg {
+    db: String,
+    table: String,
+    column: String,
+    is_pk: bool,
+    snapshot_ts: u64,
+    values: Vec<Lit>,
+}
+
+#[cfg(test)]
+fn take_bytes<'a>(input: &mut &'a [u8], len: usize) -> anyhow::Result<&'a [u8]> {
+    if input.len() < len {
+        anyhow::bail!("unexpected EOF");
+    }
+    let (head, tail) = input.split_at(len);
+    *input = tail;
+    Ok(head)
+}
+
+#[cfg(test)]
+fn read_u32_le(input: &mut &[u8]) -> anyhow::Result<u32> {
+    let bytes = take_bytes(input, 4)?;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap_or([0u8; 4])))
+}
+
+#[cfg(test)]
+fn read_u64_le(input: &mut &[u8]) -> anyhow::Result<u64> {
+    let bytes = take_bytes(input, 8)?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap_or([0u8; 8])))
+}
+
+#[cfg(test)]
+fn read_varu_string(input: &mut &[u8]) -> anyhow::Result<String> {
+    let len = decode_varu(input)? as usize;
+    let bytes = take_bytes(input, len)?;
+    String::from_utf8(bytes.to_vec()).map_err(|err| anyhow::anyhow!("invalid utf8: {err}"))
+}
+
+#[cfg(test)]
+fn read_snapshot_cseg(path: &Path) -> anyhow::Result<DecodedSnapshotCseg> {
+    let bytes = fs::read(path)?;
+    let mut input = bytes.as_slice();
+
+    let magic = take_bytes(&mut input, SNAPSHOT_CSEG_MAGIC.len())?;
+    if magic != SNAPSHOT_CSEG_MAGIC {
+        anyhow::bail!("invalid cseg magic");
+    }
+    let format_version = read_u32_le(&mut input)?;
+    if format_version != SNAPSHOT_CSEG_FORMAT_VERSION {
+        anyhow::bail!("unsupported cseg version: {format_version}");
+    }
+    let kind = take_bytes(&mut input, 1)?[0];
+    let snapshot_ts = read_u64_le(&mut input)?;
+    let row_count = read_u64_le(&mut input)? as usize;
+    let db = read_varu_string(&mut input)?;
+    let table = read_varu_string(&mut input)?;
+    let column = read_varu_string(&mut input)?;
+    let null_bitmap_len = decode_varu(&mut input)? as usize;
+    let null_bitmap = take_bytes(&mut input, null_bitmap_len)?;
+
+    let mut values = Vec::with_capacity(row_count);
+    for idx in 0..row_count {
+        if null_bitmap_is_null(null_bitmap, idx) {
+            values.push(Lit::Null);
+            continue;
+        }
+        let len = decode_varu(&mut input)? as usize;
+        let payload = take_bytes(&mut input, len)?;
+        let value: Lit = serde_json::from_slice(payload)?;
+        values.push(value);
+    }
+    if !input.is_empty() {
+        anyhow::bail!("trailing cseg bytes");
+    }
+
+    Ok(DecodedSnapshotCseg {
+        db,
+        table,
+        column,
+        is_pk: kind == SNAPSHOT_CSEG_KIND_PK,
+        snapshot_ts,
+        values,
+    })
 }
 
 fn extract_pk_from_cols(pk_cols: &[String], row: &RowObject) -> anyhow::Result<Vec<Lit>> {
@@ -22940,6 +23281,151 @@ mod tests {
             .stats
             .hits;
         assert!(hits > 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_build_writes_cseg_manifest_and_respects_snapshot_ts() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_cseg_build");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let snapshot_ts = now_micros();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 3 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Paris".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.data_delete(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            ),
+            None,
+            &[],
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["id".to_string(), "city".to_string()]),
+            snapshot_ts,
+        )?;
+
+        let list: Vec<ColumnSnapshotDisk> =
+            load_json(&dir.join("snapshots.json")).unwrap_or_default();
+        assert_eq!(list.len(), 1);
+
+        let snapshot = &list[0];
+        let snapshot_dir = dir.join("snapshots").join(snapshot_dir_name(&snapshot.id));
+        assert!(snapshot_dir.exists());
+
+        let manifest: ColumnSnapshotManifestDisk =
+            load_json(&snapshot_dir.join("manifest.json")).expect("missing snapshot manifest");
+        assert_eq!(manifest.row_count, 2);
+        assert_eq!(manifest.segments.len(), 2);
+
+        let id_segment = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.column == "id" && segment.is_pk)
+            .expect("missing pk segment");
+        let city_segment = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.column == "city" && !segment.is_pk)
+            .expect("missing city segment");
+
+        let ids = read_snapshot_cseg(&snapshot_dir.join(&id_segment.file))?;
+        let cities = read_snapshot_cseg(&snapshot_dir.join(&city_segment.file))?;
+        assert_eq!(ids.values, vec![Lit::U64 { v: 1 }, Lit::U64 { v: 2 }]);
+        assert_eq!(
+            cities.values,
+            vec![
+                Lit::Str {
+                    v: "Oslo".to_string(),
+                },
+                Lit::Str {
+                    v: "Tokyo".to_string(),
+                },
+            ]
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -27321,6 +27807,96 @@ mod tests {
             .rows
             .len();
         assert_eq!(snapshot_rows, 1);
+
+        let list: Vec<ColumnSnapshotDisk> =
+            load_json(&dir.join("snapshots.json")).unwrap_or_default();
+        assert_eq!(list.len(), 1);
+        let snapshot_dir = dir.join("snapshots").join(snapshot_dir_name(&list[0].id));
+        let manifest: ColumnSnapshotManifestDisk =
+            load_json(&snapshot_dir.join("manifest.json")).expect("missing snapshot manifest");
+        let city_segment = manifest
+            .segments
+            .iter()
+            .find(|segment| segment.column == "city" && !segment.is_pk)
+            .expect("missing city segment");
+        let city = read_snapshot_cseg(&snapshot_dir.join(&city_segment.file))?;
+        assert_eq!(
+            city.values,
+            vec![Lit::Str {
+                v: "Berlin".to_string(),
+            }]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_cseg_roundtrip_preserves_typed_literals() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_cseg_roundtrip");
+        fs::create_dir_all(&dir)?;
+
+        let values = vec![
+            Lit::Null,
+            Lit::Bool { v: true },
+            Lit::I64 { v: -7 },
+            Lit::U64 { v: 42 },
+            Lit::F64 { v: 1.5 },
+            Lit::Dec {
+                v: "12.34".to_string(),
+            },
+            Lit::Str {
+                v: "hello".to_string(),
+            },
+            Lit::Bytes {
+                b64: "AAEC".to_string(),
+            },
+            Lit::Json {
+                v: serde_json::json!({"ok": true, "n": 3}),
+            },
+            Lit::Embedding {
+                dims: 2,
+                v: vec![1.0, 2.5],
+                model: Some("test-model".to_string()),
+            },
+            Lit::Date {
+                iso: "2026-04-19".to_string(),
+            },
+            Lit::Time {
+                iso: "12:34:56Z".to_string(),
+            },
+            Lit::Datetime {
+                iso: "2026-04-19T12:34:56Z".to_string(),
+            },
+            Lit::Uuid {
+                v: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            },
+        ];
+
+        let snapshot = ColumnSnapshotDisk {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            id: "test-snapshot".to_string(),
+            db: "app".to_string(),
+            table: "mixed".to_string(),
+            columns: vec!["value".to_string()],
+            pk_columns: vec!["id".to_string()],
+            snapshot_ts: 123_456_789,
+            table_version: 1,
+            rows: Vec::new(),
+        };
+
+        let path = dir.join("col-0001.cseg");
+        let meta = write_snapshot_cseg(&path, &snapshot, "value", false, "col-0001.cseg", &values)?;
+        assert_eq!(meta.row_count, values.len() as u64);
+        assert_eq!(meta.non_null_count, values.len() as u64 - 1);
+
+        let decoded = read_snapshot_cseg(&path)?;
+        assert_eq!(decoded.db, "app");
+        assert_eq!(decoded.table, "mixed");
+        assert_eq!(decoded.column, "value");
+        assert!(!decoded.is_pk);
+        assert_eq!(decoded.snapshot_ts, 123_456_789);
+        assert_eq!(decoded.values, values);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

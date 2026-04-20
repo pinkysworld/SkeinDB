@@ -86,7 +86,7 @@ Phase 0 verification checklist:
 - [x] T092: audit verify CLI/API + console page. Latest: SkeinAdmin's Forensics panel now exposes `maintenance.audit_status` and `maintenance.audit_verify` alongside the prototype `forensic.query` / `forensic.verify` / `forensic.export` tools.
 
 ## Phase 10 - Hybrid row/column snapshots
-- [ ] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md)
+- [x] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md). Latest: snapshot builds now honor `snapshot_ts`, persist `manifest.json` + `.cseg` sidecars under `data/snapshots/`, and keep those artifacts in sync during incremental refresh.
 - [ ] T101: Snapshot reader + column scan operator
 - [ ] T102: Optimizer rule: use column snapshots for covered ranges
 
