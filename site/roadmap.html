@@ -171,9 +171,10 @@
 
   <div class="phase">
     <div class="phase-head"><h3>Phase 15 — Additional performance improvements</h3><span class="pill pill-active">Active</span></div>
-    <p>T150 is in place: interned-column schema flags now persist separately from the catalog, and single-table scan paths can precompile `eq`/`ne`/`in` predicates over those columns into ValueID comparisons before the full expression evaluator runs.</p>
+    <p>T150 and T151 are in place: interned-column schema flags now persist separately from the catalog, single-table scan paths can precompile `eq`/`ne`/`in` predicates over those columns into ValueID comparisons, and the row/snapshot executors now build row context only for the columns the query still needs after filtering.</p>
     <ul class="tasks">
       <li><span class="tid">T150</span><span class="status s-done">done</span>Schema flag for interned columns + ValueID-first predicate ops</li>
+      <li><span class="tid">T151</span><span class="status s-done">done</span>Late materialization (decode only projected columns)</li>
     </ul>
   </div>
 

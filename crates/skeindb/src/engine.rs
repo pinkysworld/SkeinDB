@@ -9686,6 +9686,13 @@ fn try_execute_select_base_table(
     let columns = projection_columns(projection);
     let order = &query.order_by;
     let predicate_plan = compile_interned_predicate_for_base(engine, base, predicate, args);
+    let query_ctx_columns =
+        collect_single_table_query_columns(&alias, projection, predicate, order);
+    let materialized_ctx_columns = if predicate_plan.is_some() {
+        collect_single_table_projection_order_columns(&alias, projection, order)
+    } else {
+        query_ctx_columns.clone()
+    };
 
     let has_limit = query
         .limit
@@ -9722,7 +9729,11 @@ fn try_execute_select_base_table(
                                         continue;
                                     }
                                 } else {
-                                    let built = row_ctx_from_row(&alias, &entry.row);
+                                    let built = build_row_ctx(
+                                        &alias,
+                                        &entry.row,
+                                        query_ctx_columns.as_deref(),
+                                    );
                                     if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)?
                                     {
                                         continue;
@@ -9731,7 +9742,13 @@ fn try_execute_select_base_table(
                                 }
                             }
 
-                            let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
+                            let ctx = ctx.unwrap_or_else(|| {
+                                build_row_ctx(
+                                    &alias,
+                                    &entry.row,
+                                    materialized_ctx_columns.as_deref(),
+                                )
+                            });
                             let mut out_row = Vec::new();
                             for item in projection.iter() {
                                 out_row.push(eval_expr(
@@ -9792,7 +9809,7 @@ fn try_execute_select_base_table(
                     return Ok(());
                 }
             } else {
-                let built = row_ctx_from_row(&alias, &entry.row);
+                let built = build_row_ctx(&alias, &entry.row, query_ctx_columns.as_deref());
                 if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
                     return Ok(());
                 }
@@ -9800,7 +9817,9 @@ fn try_execute_select_base_table(
             }
         }
 
-        let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
+        let ctx = ctx.unwrap_or_else(|| {
+            build_row_ctx(&alias, &entry.row, materialized_ctx_columns.as_deref())
+        });
         let mut out_row = Vec::new();
         for item in projection.iter() {
             out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
@@ -10153,8 +10172,18 @@ fn execute_select_with_keys(
     // Columns (same as execute_select)
     let columns = projection_columns(projection);
     let predicate_plan = compile_interned_predicate_for_base(engine, base, r#where.as_ref(), args);
-
     let order = &query.order_by;
+    let query_ctx_columns = snapshot_info
+        .as_ref()
+        .map(|info| info.required_cols.clone())
+        .or_else(|| {
+            collect_single_table_query_columns(&alias, projection, r#where.as_ref(), order)
+        });
+    let materialized_ctx_columns = if predicate_plan.is_some() {
+        collect_single_table_projection_order_columns(&alias, projection, order)
+    } else {
+        query_ctx_columns.clone()
+    };
     let candidates = query
         .limit
         .as_ref()
@@ -10196,7 +10225,7 @@ fn execute_select_with_keys(
                     return Ok(());
                 }
             } else {
-                let built = row_ctx_from_row(&alias, &entry.row);
+                let built = build_row_ctx(&alias, &entry.row, query_ctx_columns.as_deref());
                 if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
                     return Ok(());
                 }
@@ -10204,7 +10233,9 @@ fn execute_select_with_keys(
             }
         }
 
-        let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
+        let ctx = ctx.unwrap_or_else(|| {
+            build_row_ctx(&alias, &entry.row, materialized_ctx_columns.as_deref())
+        });
         let pk = extract_pk(schema, &entry.row)?;
 
         // Projection
@@ -10416,6 +10447,12 @@ fn try_execute_select_snapshot(
         compile_interned_predicate_for_base(engine, &info.base, r#where.as_ref(), args);
 
     let order = &query.order_by;
+    let materialized_ctx_columns = if predicate_plan.is_some() {
+        collect_single_table_projection_order_columns(&info.alias, projection, order)
+            .unwrap_or_else(|| info.required_cols.clone())
+    } else {
+        info.required_cols.clone()
+    };
     let mut rows = Vec::new();
     let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
     for row_idx in 0..scan.row_count {
@@ -10430,7 +10467,8 @@ fn try_execute_select_snapshot(
                     continue;
                 }
             } else {
-                let built = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+                let built =
+                    build_snapshot_row_ctx(&info.alias, &scan, row_idx, Some(&info.required_cols));
                 if !eval_predicate(pred, &RowObject::new(), Some(&built), args)? {
                     continue;
                 }
@@ -10438,7 +10476,9 @@ fn try_execute_select_snapshot(
             }
         }
 
-        let ctx = ctx.unwrap_or_else(|| snapshot_scan_row_ctx(&info.alias, &scan, row_idx));
+        let ctx = ctx.unwrap_or_else(|| {
+            build_snapshot_row_ctx(&info.alias, &scan, row_idx, Some(&materialized_ctx_columns))
+        });
 
         let mut out_row = Vec::new();
         for item in projection.iter() {
@@ -10497,6 +10537,12 @@ fn try_execute_select_with_keys_snapshot(
         compile_interned_predicate_for_base(engine, &info.base, r#where.as_ref(), args);
 
     let order = &query.order_by;
+    let materialized_ctx_columns = if predicate_plan.is_some() {
+        collect_single_table_projection_order_columns(&info.alias, projection, order)
+            .unwrap_or_else(|| info.required_cols.clone())
+    } else {
+        info.required_cols.clone()
+    };
     let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new();
     for row_idx in 0..scan.row_count {
         let mut ctx = None;
@@ -10510,7 +10556,8 @@ fn try_execute_select_with_keys_snapshot(
                     continue;
                 }
             } else {
-                let built = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+                let built =
+                    build_snapshot_row_ctx(&info.alias, &scan, row_idx, Some(&info.required_cols));
                 if !eval_predicate(pred, &RowObject::new(), Some(&built), args)? {
                     continue;
                 }
@@ -10518,7 +10565,9 @@ fn try_execute_select_with_keys_snapshot(
             }
         }
 
-        let ctx = ctx.unwrap_or_else(|| snapshot_scan_row_ctx(&info.alias, &scan, row_idx));
+        let ctx = ctx.unwrap_or_else(|| {
+            build_snapshot_row_ctx(&info.alias, &scan, row_idx, Some(&materialized_ctx_columns))
+        });
 
         let mut out_row = Vec::new();
         for item in projection.iter() {
@@ -10974,6 +11023,22 @@ fn snapshot_scan_row_ctx(alias: &str, scan: &SnapshotColumnScan, row_idx: usize)
     ctx
 }
 
+fn snapshot_scan_row_ctx_columns(
+    alias: &str,
+    scan: &SnapshotColumnScan,
+    row_idx: usize,
+    columns: &[String],
+) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for col in columns.iter() {
+        let Some(val) = snapshot_scan_value(scan, row_idx, col) else {
+            continue;
+        };
+        ctx.insert(format!("{}.{}", alias, col), val);
+    }
+    ctx
+}
+
 fn snapshot_scan_value(scan: &SnapshotColumnScan, row_idx: usize, column: &str) -> Option<Lit> {
     scan.column_values
         .get(column)
@@ -10996,6 +11061,36 @@ fn row_ctx_from_row(alias: &str, row: &RowObject) -> RowCtx {
         ctx.insert(format!("{}.{}", alias, col), val.clone());
     }
     ctx
+}
+
+fn row_ctx_from_row_columns(alias: &str, row: &RowObject, columns: &[String]) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for col in columns.iter() {
+        let Some(val) = row.get(col) else {
+            continue;
+        };
+        ctx.insert(format!("{}.{}", alias, col), val.clone());
+    }
+    ctx
+}
+
+fn build_snapshot_row_ctx(
+    alias: &str,
+    scan: &SnapshotColumnScan,
+    row_idx: usize,
+    columns: Option<&[String]>,
+) -> RowCtx {
+    match columns {
+        Some(columns) => snapshot_scan_row_ctx_columns(alias, scan, row_idx, columns),
+        None => snapshot_scan_row_ctx(alias, scan, row_idx),
+    }
+}
+
+fn build_row_ctx(alias: &str, row: &RowObject, columns: Option<&[String]>) -> RowCtx {
+    match columns {
+        Some(columns) => row_ctx_from_row_columns(alias, row, columns),
+        None => row_ctx_from_row(alias, row),
+    }
 }
 
 fn view_row_ctx(alias: &str, columns: &[String], row: &ViewRow) -> RowCtx {
@@ -21157,6 +21252,56 @@ fn query_snapshot_info(query: &Query) -> Option<QuerySnapshotInfo> {
         alias,
         required_cols: cols,
     })
+}
+
+fn collect_single_table_query_columns(
+    alias: &str,
+    projection: &[SelectItem],
+    predicate: Option<&Expr>,
+    order: &[OrderBy],
+) -> Option<Vec<String>> {
+    let mut exprs = projection.iter().map(|item| &item.expr).collect::<Vec<_>>();
+    if let Some(predicate) = predicate {
+        exprs.push(predicate);
+    }
+    exprs.extend(order.iter().map(|item| &item.expr));
+    collect_single_table_expr_columns(alias, exprs)
+}
+
+fn collect_single_table_projection_order_columns(
+    alias: &str,
+    projection: &[SelectItem],
+    order: &[OrderBy],
+) -> Option<Vec<String>> {
+    let mut exprs = projection.iter().map(|item| &item.expr).collect::<Vec<_>>();
+    exprs.extend(order.iter().map(|item| &item.expr));
+    collect_single_table_expr_columns(alias, exprs)
+}
+
+fn collect_single_table_expr_columns(alias: &str, exprs: Vec<&Expr>) -> Option<Vec<String>> {
+    let mut refs: Vec<(Option<String>, String)> = Vec::new();
+    let mut has_subquery = false;
+    for expr in exprs {
+        collect_expr_cols(expr, &mut refs, &mut has_subquery);
+    }
+    if has_subquery {
+        return None;
+    }
+
+    let mut cols = Vec::new();
+    let mut seen = HashSet::new();
+    for (table, col) in refs.into_iter() {
+        if let Some(table) = table {
+            if table != alias {
+                return None;
+            }
+        }
+        if seen.insert(col.clone()) {
+            cols.push(col);
+        }
+    }
+    cols.sort();
+    Some(cols)
 }
 
 fn query_index_infos(query: &Query) -> Vec<IndexQueryInfo> {
@@ -33838,6 +33983,297 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
         Ok(())
     }
+
+    #[test]
+    fn late_materialization_column_collection_drops_predicate_only_refs() {
+        let projection = vec![SelectItem {
+            expr: Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            r#as: None,
+        }];
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "name".to_string(),
+                table: None,
+            },
+            Expr::Param { param: 0 },
+        );
+        let order = vec![OrderBy {
+            expr: Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+
+        assert_eq!(
+            collect_single_table_query_columns("users", &projection, Some(&predicate), &order),
+            Some(vec![
+                "city".to_string(),
+                "id".to_string(),
+                "name".to_string()
+            ])
+        );
+        assert_eq!(
+            collect_single_table_projection_order_columns("users", &projection, &order),
+            Some(vec!["city".to_string(), "id".to_string()])
+        );
+    }
+
+    #[test]
+    fn row_ctx_from_row_columns_only_materializes_requested_values() {
+        let row = row(&[
+            ("id", Lit::U64 { v: 7 }),
+            (
+                "name",
+                Lit::Str {
+                    v: "Alice".to_string(),
+                },
+            ),
+            (
+                "city",
+                Lit::Str {
+                    v: "Berlin".to_string(),
+                },
+            ),
+        ]);
+
+        let ctx = row_ctx_from_row_columns("users", &row, &["id".to_string(), "city".to_string()]);
+        assert_eq!(ctx.len(), 2);
+        assert_eq!(ctx.get("users.id"), Some(&Lit::U64 { v: 7 }));
+        assert_eq!(
+            ctx.get("users.city"),
+            Some(&Lit::Str {
+                v: "Berlin".to_string(),
+            })
+        );
+        assert!(!ctx.contains_key("users.name"));
+    }
+
+    #[test]
+    fn execute_select_with_interned_filter_and_projection_subset() -> anyhow::Result<()> {
+        let dir = temp_dir("late_materialization_select_base");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Alice".to_string(),
+                        },
+                    ),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Berlin".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Bob".to_string(),
+                        },
+                    ),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_set_column_interned(&table, "name", true)?;
+
+        let query = base_query(
+            &table.db,
+            &table.table,
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+
+        let (columns, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+            None,
+        )?;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 1 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_select_with_interned_filter_and_projection_subset() -> anyhow::Result<()> {
+        let dir = temp_dir("late_materialization_select_snapshot");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Alice".to_string(),
+                        },
+                    ),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Berlin".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Bob".to_string(),
+                        },
+                    ),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_set_column_interned(&table, "name", true)?;
+        engine.build_column_snapshot(
+            &table.db,
+            &table.table,
+            Some(vec!["name".to_string(), "id".to_string()]),
+            now_micros(),
+        )?;
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let query = base_query(
+            &table.db,
+            &table.table,
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+
+        let (columns, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+            None,
+        )?;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 1 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
     fn history_gc_retains_pre_t180_tombstones() -> anyhow::Result<()> {
         let dir = temp_dir("history_gc_pre_t180");
         let mut engine = Engine::open(&dir)?;
