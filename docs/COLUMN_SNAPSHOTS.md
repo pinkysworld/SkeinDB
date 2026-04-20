@@ -97,6 +97,11 @@ Planner chooses:
   - aggregation-heavy
   - uses a subset of columns available in snapshot
 
+Current prototype:
+- Simple single-table SELECT execution can now read required columns directly from `manifest.json` + `.cseg` sidecars.
+- Primary-key columns are always eligible because they are stored as dedicated segments even when they are not part of the projected snapshot column list.
+- Execution is still row-wise after load: predicates, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
+
 Hybrid plan:
 - scan column snapshots for cold partitions
 - scan row store for newest partitions
@@ -157,4 +162,5 @@ Key adaptation points:
 Prototype (scaffold status):
 - Cost model, pattern tracking, and online controller are implemented for single-table SELECTs.
 - Snapshots persist in `snapshots.json`, emit sidecar `.cseg` artifacts, and are loaded best-effort on startup when `table_version` still matches.
-- Snapshot reader planning/execution remains follow-up work in T101/T102.
+- Snapshot reader + column scan execution are in place for simple single-table SELECTs.
+- Broader optimizer routing and hybrid merge planning remain follow-up work in T102.

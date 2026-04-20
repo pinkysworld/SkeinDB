@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
-#[cfg(test)]
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
@@ -993,9 +992,22 @@ struct SnapshotPlan {
 }
 
 #[derive(Debug, Clone)]
-struct SnapshotView {
+struct SnapshotSelection {
+    id: String,
+    db: String,
+    table: String,
     columns: Vec<String>,
-    rows: Vec<SnapshotRow>,
+    pk_columns: Vec<String>,
+    snapshot_ts: u64,
+    table_version: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotColumnScan {
+    loaded_columns: Vec<String>,
+    pk_columns: Vec<String>,
+    column_values: HashMap<String, Vec<Lit>>,
+    row_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -7558,6 +7570,112 @@ impl Engine {
         save_json(&dir.join("manifest.json"), &manifest)
     }
 
+    fn snapshot_dir_for_id(&self, snapshot_id: &str) -> PathBuf {
+        self.snapshots_dir_path()
+            .join(snapshot_dir_name(snapshot_id))
+    }
+
+    fn load_snapshot_column_scan(
+        &self,
+        selection: &SnapshotSelection,
+        required: &HashSet<String>,
+        include_pk: bool,
+    ) -> anyhow::Result<SnapshotColumnScan> {
+        let dir = self.snapshot_dir_for_id(&selection.id);
+        let manifest: ColumnSnapshotManifestDisk = load_json(&dir.join("manifest.json"))
+            .ok_or_else(|| anyhow::anyhow!("missing snapshot manifest for {}", selection.id))?;
+        if manifest.format_version != SNAPSHOT_MANIFEST_FORMAT_VERSION {
+            anyhow::bail!(
+                "unsupported snapshot manifest version: {}",
+                manifest.format_version
+            );
+        }
+        if manifest.id != selection.id
+            || manifest.db != selection.db
+            || manifest.table != selection.table
+        {
+            anyhow::bail!("snapshot manifest mismatch for {}", selection.id);
+        }
+        if manifest.table_version != selection.table_version {
+            anyhow::bail!(
+                "snapshot manifest table version mismatch for {}",
+                selection.id
+            );
+        }
+        if manifest.snapshot_ts != selection.snapshot_ts {
+            anyhow::bail!("snapshot manifest timestamp mismatch for {}", selection.id);
+        }
+
+        let mut loaded_columns = Vec::new();
+        let mut column_values = HashMap::new();
+
+        for column in selection.pk_columns.iter() {
+            if !(include_pk || required.contains(column)) || column_values.contains_key(column) {
+                continue;
+            }
+            let values =
+                self.load_snapshot_segment_values(&dir, &manifest, selection, column, true)?;
+            loaded_columns.push(column.clone());
+            column_values.insert(column.clone(), values);
+        }
+
+        for column in selection.columns.iter() {
+            if !required.contains(column) || column_values.contains_key(column) {
+                continue;
+            }
+            let values =
+                self.load_snapshot_segment_values(&dir, &manifest, selection, column, false)?;
+            loaded_columns.push(column.clone());
+            column_values.insert(column.clone(), values);
+        }
+
+        let row_count = if let Some(values) = column_values.values().next() {
+            values.len()
+        } else {
+            manifest.row_count as usize
+        };
+        if row_count as u64 != manifest.row_count {
+            anyhow::bail!("snapshot manifest row count mismatch for {}", selection.id);
+        }
+        for values in column_values.values() {
+            if values.len() != row_count {
+                anyhow::bail!("snapshot column length mismatch for {}", selection.id);
+            }
+        }
+
+        Ok(SnapshotColumnScan {
+            loaded_columns,
+            pk_columns: selection.pk_columns.clone(),
+            column_values,
+            row_count,
+        })
+    }
+
+    fn load_snapshot_segment_values(
+        &self,
+        dir: &Path,
+        manifest: &ColumnSnapshotManifestDisk,
+        selection: &SnapshotSelection,
+        column: &str,
+        is_pk: bool,
+    ) -> anyhow::Result<Vec<Lit>> {
+        let segment = snapshot_manifest_segment(manifest, column, is_pk)?;
+        let decoded = read_snapshot_cseg(&dir.join(&segment.file))?;
+        if decoded.db != selection.db || decoded.table != selection.table {
+            anyhow::bail!("snapshot cseg table mismatch for {}", selection.id);
+        }
+        if decoded.column != column || decoded.is_pk != is_pk {
+            anyhow::bail!("snapshot cseg column mismatch for {}", selection.id);
+        }
+        if decoded.snapshot_ts != selection.snapshot_ts {
+            anyhow::bail!("snapshot cseg timestamp mismatch for {}", selection.id);
+        }
+        if decoded.values.len() as u64 != segment.row_count {
+            anyhow::bail!("snapshot cseg row count mismatch for {}", selection.id);
+        }
+        Ok(decoded.values)
+    }
+
     fn advisor_patterns_path(&self) -> PathBuf {
         self.data_dir.join("advisor_patterns.json")
     }
@@ -8338,13 +8456,13 @@ impl SnapshotManager {
         out
     }
 
-    fn snapshot_view_for_query(
+    fn snapshot_selection_for_query(
         &mut self,
         table: &TableKey,
         required: &HashSet<String>,
         table_version: u64,
         now: u64,
-    ) -> Option<SnapshotView> {
+    ) -> Option<SnapshotSelection> {
         let snapshots = self.snapshots.get_mut(table)?;
         let mut best_idx: Option<usize> = None;
         let mut best_cols = usize::MAX;
@@ -8367,9 +8485,14 @@ impl SnapshotManager {
         snap.stats.hits = snap.stats.hits.saturating_add(1);
         snap.stats.last_used_micros = now;
 
-        Some(SnapshotView {
+        Some(SnapshotSelection {
+            id: snap.id.clone(),
+            db: snap.db.clone(),
+            table: snap.table.clone(),
             columns: snap.columns.clone(),
-            rows: snap.rows.clone(),
+            pk_columns: snap.pk_columns.clone(),
+            snapshot_ts: snap.snapshot_ts,
+            table_version: snap.table_version,
         })
     }
 
@@ -8622,9 +8745,9 @@ impl ColumnSnapshot {
     }
 
     fn covers(&self, required: &HashSet<String>) -> bool {
-        required
-            .iter()
-            .all(|col| self.column_index.contains_key(col))
+        required.iter().all(|col| {
+            self.column_index.contains_key(col) || self.pk_columns.iter().any(|pk| pk == col)
+        })
     }
 }
 
@@ -9386,6 +9509,28 @@ fn execute_select_with_keys(
     Ok((columns, rows, keys))
 }
 
+fn snapshot_scan_for_query(
+    engine: &Engine,
+    info: &QuerySnapshotInfo,
+    schema: &TableSchema,
+    include_pk: bool,
+) -> Option<SnapshotColumnScan> {
+    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
+    let table_key = TableKey {
+        db: info.base.db.clone(),
+        table: info.base.table.clone(),
+    };
+    let now = now_micros();
+    let selection = if let Ok(mut manager) = engine.snapshots.lock() {
+        manager.snapshot_selection_for_query(&table_key, &required, schema.table_version, now)
+    } else {
+        None
+    }?;
+    engine
+        .load_snapshot_column_scan(&selection, &required, include_pk)
+        .ok()
+}
+
 fn try_execute_select_snapshot(
     engine: &Engine,
     query: &Query,
@@ -9406,26 +9551,15 @@ fn try_execute_select_snapshot(
         Err(_) => return Ok(None),
     };
 
-    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
-    let table_key = TableKey {
-        db: info.base.db.clone(),
-        table: info.base.table.clone(),
-    };
-    let now = now_micros();
-    let view = if let Ok(mut manager) = engine.snapshots.lock() {
-        manager.snapshot_view_for_query(&table_key, &required, schema.table_version, now)
-    } else {
-        None
-    };
-    let Some(view) = view else {
+    let Some(scan) = snapshot_scan_for_query(engine, info, schema, false) else {
         return Ok(None);
     };
 
     let order = &query.order_by;
     let mut rows = Vec::new();
     let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
-    for row in view.rows.iter() {
-        let ctx = snapshot_row_ctx(&info.alias, &view.columns, row);
+    for row_idx in 0..scan.row_count {
+        let ctx = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
         if let Some(pred) = r#where.as_ref() {
             if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
                 continue;
@@ -9463,7 +9597,7 @@ fn try_execute_select_snapshot(
     }
 
     let columns = projection_columns(projection);
-    Ok(Some((columns, rows, view.rows.len() as u64)))
+    Ok(Some((columns, rows, scan.row_count as u64)))
 }
 
 fn try_execute_select_with_keys_snapshot(
@@ -9486,25 +9620,14 @@ fn try_execute_select_with_keys_snapshot(
         Err(_) => return Ok(None),
     };
 
-    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
-    let table_key = TableKey {
-        db: info.base.db.clone(),
-        table: info.base.table.clone(),
-    };
-    let now = now_micros();
-    let view = if let Ok(mut manager) = engine.snapshots.lock() {
-        manager.snapshot_view_for_query(&table_key, &required, schema.table_version, now)
-    } else {
-        None
-    };
-    let Some(view) = view else {
+    let Some(scan) = snapshot_scan_for_query(engine, info, schema, true) else {
         return Ok(None);
     };
 
     let order = &query.order_by;
     let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new();
-    for row in view.rows.iter() {
-        let ctx = snapshot_row_ctx(&info.alias, &view.columns, row);
+    for row_idx in 0..scan.row_count {
+        let ctx = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
         if let Some(pred) = r#where.as_ref() {
             if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
                 continue;
@@ -9516,12 +9639,12 @@ fn try_execute_select_with_keys_snapshot(
             out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
         }
         let keys = if order.is_empty() {
-            Vec::new()
+            snapshot_scan_pk(&scan, row_idx)
         } else {
             eval_order_keys(order, &ctx, args)?
         };
 
-        items.push((keys, row.pk.clone(), out_row));
+        items.push((keys, snapshot_scan_pk(&scan, row_idx), out_row));
     }
 
     // ORDER BY
@@ -9549,7 +9672,7 @@ fn try_execute_select_with_keys_snapshot(
         rows.push(row);
     }
 
-    Ok(Some((columns, rows, keys, view.rows.len() as u64)))
+    Ok(Some((columns, rows, keys, scan.row_count as u64)))
 }
 
 fn projection_columns(projection: &[skeindb_skeinql::types::SelectItem]) -> Vec<ColumnMeta> {
@@ -9951,12 +10074,32 @@ fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
     }
 }
 
-fn snapshot_row_ctx(alias: &str, columns: &[String], row: &SnapshotRow) -> RowCtx {
+fn snapshot_scan_row_ctx(alias: &str, scan: &SnapshotColumnScan, row_idx: usize) -> RowCtx {
     let mut ctx = RowCtx::new();
-    for (col, val) in columns.iter().zip(row.values.iter()) {
+    for col in scan.loaded_columns.iter() {
+        let Some(values) = scan.column_values.get(col) else {
+            continue;
+        };
+        let Some(val) = values.get(row_idx) else {
+            continue;
+        };
         ctx.insert(format!("{}.{}", alias, col), val.clone());
     }
     ctx
+}
+
+fn snapshot_scan_pk(scan: &SnapshotColumnScan, row_idx: usize) -> Vec<Lit> {
+    let mut out = Vec::new();
+    for col in scan.pk_columns.iter() {
+        let value = scan
+            .column_values
+            .get(col)
+            .and_then(|values| values.get(row_idx))
+            .cloned()
+            .unwrap_or(Lit::Null);
+        out.push(value);
+    }
+    out
 }
 
 fn row_ctx_from_row(alias: &str, row: &RowObject) -> RowCtx {
@@ -19841,6 +19984,18 @@ fn snapshot_column_values(
     Ok(out)
 }
 
+fn snapshot_manifest_segment<'a>(
+    manifest: &'a ColumnSnapshotManifestDisk,
+    column: &str,
+    is_pk: bool,
+) -> anyhow::Result<&'a ColumnSnapshotSegmentDisk> {
+    manifest
+        .segments
+        .iter()
+        .find(|segment| segment.column == column && segment.is_pk == is_pk)
+        .ok_or_else(|| anyhow::anyhow!("snapshot missing segment for column: {column}"))
+}
+
 fn encode_null_bitmap(values: &[Lit]) -> Vec<u8> {
     let mut bitmap = vec![0u8; values.len().div_ceil(8)];
     for (idx, value) in values.iter().enumerate() {
@@ -19851,7 +20006,6 @@ fn encode_null_bitmap(values: &[Lit]) -> Vec<u8> {
     bitmap
 }
 
-#[cfg(test)]
 fn null_bitmap_is_null(bitmap: &[u8], idx: usize) -> bool {
     let byte = idx / 8;
     if byte >= bitmap.len() {
@@ -19921,7 +20075,6 @@ fn write_snapshot_cseg(
     })
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 struct DecodedSnapshotCseg {
     db: String,
@@ -19932,7 +20085,6 @@ struct DecodedSnapshotCseg {
     values: Vec<Lit>,
 }
 
-#[cfg(test)]
 fn take_bytes<'a>(input: &mut &'a [u8], len: usize) -> anyhow::Result<&'a [u8]> {
     if input.len() < len {
         anyhow::bail!("unexpected EOF");
@@ -19942,26 +20094,22 @@ fn take_bytes<'a>(input: &mut &'a [u8], len: usize) -> anyhow::Result<&'a [u8]> 
     Ok(head)
 }
 
-#[cfg(test)]
 fn read_u32_le(input: &mut &[u8]) -> anyhow::Result<u32> {
     let bytes = take_bytes(input, 4)?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap_or([0u8; 4])))
 }
 
-#[cfg(test)]
 fn read_u64_le(input: &mut &[u8]) -> anyhow::Result<u64> {
     let bytes = take_bytes(input, 8)?;
     Ok(u64::from_le_bytes(bytes.try_into().unwrap_or([0u8; 8])))
 }
 
-#[cfg(test)]
 fn read_varu_string(input: &mut &[u8]) -> anyhow::Result<String> {
     let len = decode_varu(input)? as usize;
     let bytes = take_bytes(input, len)?;
     String::from_utf8(bytes.to_vec()).map_err(|err| anyhow::anyhow!("invalid utf8: {err}"))
 }
 
-#[cfg(test)]
 fn read_snapshot_cseg(path: &Path) -> anyhow::Result<DecodedSnapshotCseg> {
     let bytes = fs::read(path)?;
     let mut input = bytes.as_slice();
@@ -23281,6 +23429,157 @@ mod tests {
             .stats
             .hits;
         assert!(hits > 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_query_reads_cseg_sidecars_for_pk_filters_and_keys() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_reader_query");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        if let Some(tdata) = engine.tables.get_mut(&key) {
+            if let Some(entry) = tdata
+                .rows
+                .iter_mut()
+                .find(|entry| matches!(entry.row.get("id"), Some(Lit::U64 { v }) if *v == 2))
+            {
+                entry.row.insert(
+                    "city".to_string(),
+                    Lit::Str {
+                        v: "LiveCorrupt".to_string(),
+                    },
+                );
+            }
+        }
+        if let Some(snapshot) = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get_mut(&key)
+            .and_then(|list| list.get_mut(0))
+        {
+            if let Some(value) = snapshot
+                .rows
+                .get_mut(1)
+                .and_then(|row| row.values.get_mut(0))
+            {
+                *value = Lit::Str {
+                    v: "MemoryCorrupt".to_string(),
+                };
+            }
+        }
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            )),
+        );
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Tokyo".to_string(),
+            }]
+        );
+
+        let (_cols, rows, keys) = execute_select_with_keys(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Tokyo".to_string(),
+            }]
+        );
+        assert_eq!(keys, vec![vec![Lit::U64 { v: 2 }]]);
+
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert!(hits >= 2);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

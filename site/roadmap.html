@@ -144,10 +144,10 @@
 
   <div class="phase">
     <div class="phase-head"><h3>Phase 10 — Hybrid row/column snapshots</h3><span class="pill pill-active">Active</span></div>
-    <p>T100 is in place: snapshot builds now materialize rows visible at the requested snapshot timestamp and emit manifest plus <code>.cseg</code> sidecars. Reader and optimizer integration remain open.</p>
+    <p>T100 and T101 are in place: snapshot builds materialize rows at the requested snapshot timestamp, emit manifest plus <code>.cseg</code> sidecars, and simple single-table SELECTs now read those sidecars through a column-scan cursor. Optimizer routing remains open.</p>
     <ul class="tasks">
       <li><span class="tid">T100</span><span class="status s-done">done</span>Snapshot builder + .cseg writer</li>
-      <li><span class="tid">T101</span><span class="status s-open">open</span>Column scan operator</li>
+      <li><span class="tid">T101</span><span class="status s-done">done</span>Column scan operator</li>
       <li><span class="tid">T102</span><span class="status s-open">open</span>Optimizer rule for column snapshots</li>
     </ul>
   </div>
