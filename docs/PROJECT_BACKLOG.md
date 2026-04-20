@@ -122,7 +122,7 @@ Phase 0 verification checklist:
 ## Phase 15 - Additional performance improvements
 - [x] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)
 - [x] T151: Late materialization (decode only projected columns)
-- [ ] T152: Batch (vectorized) scan/filter/project pipeline
+- [x] T152: Batch (vectorized) scan/filter/project pipeline
 - [ ] T153: MVCC Visible Version Index cache
 
 ## Phase 16 - Query coalescing (thundering herd protection)

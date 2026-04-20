@@ -64,10 +64,10 @@ Current prototype coverage:
 - `schema_set_column_interned(...)` toggles the flag and `describe_table(...)` reports it per column
 - single-table scan paths precompile ValueID-safe predicates over interned columns and compare ValueIDs for `eq`, `ne`, and `in`
 - single-table row and snapshot scan paths now materialize only query-referenced columns, and when the predicate stays on the ValueID lookup path they only build row context for projection and `ORDER BY` columns
+- eligible single-table full scans now run through a 1024-row batch pipeline that transposes visible rows into a columnar buffer, filters them, and then projects result rows
 - unsupported operators or non-interned columns fall back to the normal expression evaluator
 
 Still open:
-- PF04 vectorized batches
 - PF05 MVCC visible-version cache
 
 ---
@@ -120,7 +120,7 @@ This is safe if the cache is validated (begin/end ts check) before use.
 - PF01: Schema flag for interned columns (implemented via `schema_flags.json`)
 - PF02: Executor support for ValueID-safe ops (implemented for `eq`, `ne`, and `in` on single-table scan paths)
 - PF03: Late materialization (implemented for single-table row/snapshot scan contexts)
-- PF04: Batch execution framework (scan->filter->project)
+- PF04: Batch execution framework (implemented for eligible single-table full scans)
 - PF05: Visible Version Index cache
 
 ## 5) Autoparameterization + plan reuse (SQL clients)

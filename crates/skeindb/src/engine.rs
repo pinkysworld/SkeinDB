@@ -1032,6 +1032,15 @@ struct SnapshotColumnScan {
     row_count: usize,
 }
 
+const SELECT_BATCH_SIZE: usize = 1024;
+
+#[derive(Debug, Clone)]
+struct SelectColumnBatch {
+    loaded_columns: Vec<String>,
+    column_values: HashMap<String, Vec<Lit>>,
+    row_count: usize,
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct SnapshotOptimizerPlan {
@@ -9623,6 +9632,183 @@ where
     }
 }
 
+fn scan_row_entries_batch(
+    rows: &[RowEntry],
+    start_idx: usize,
+    columns: &[String],
+    as_of_ms: Option<u64>,
+) -> Option<(SelectColumnBatch, usize, u64)> {
+    let mut cursor = start_idx;
+    let mut column_values = columns
+        .iter()
+        .cloned()
+        .map(|column| (column, Vec::new()))
+        .collect::<HashMap<_, _>>();
+    let mut row_count = 0usize;
+    let mut rows_scanned = 0u64;
+
+    while cursor < rows.len() && row_count < SELECT_BATCH_SIZE {
+        let entry = &rows[cursor];
+        cursor += 1;
+        if !row_visible_at(entry, as_of_ms) {
+            continue;
+        }
+
+        rows_scanned = rows_scanned.saturating_add(1);
+        row_count += 1;
+        for column in columns.iter() {
+            let value = entry.row.get(column).cloned().unwrap_or(Lit::Null);
+            if let Some(values) = column_values.get_mut(column) {
+                values.push(value);
+            }
+        }
+    }
+
+    if row_count == 0 {
+        return None;
+    }
+
+    Some((
+        SelectColumnBatch {
+            loaded_columns: columns.to_vec(),
+            column_values,
+            row_count,
+        },
+        cursor,
+        rows_scanned,
+    ))
+}
+
+fn select_batch_value(batch: &SelectColumnBatch, row_idx: usize, column: &str) -> Option<Lit> {
+    batch
+        .column_values
+        .get(column)
+        .and_then(|values| values.get(row_idx))
+        .cloned()
+}
+
+fn select_batch_row_ctx_columns(
+    alias: &str,
+    batch: &SelectColumnBatch,
+    row_idx: usize,
+    columns: &[String],
+) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for column in columns.iter() {
+        let Some(value) = select_batch_value(batch, row_idx, column) else {
+            continue;
+        };
+        ctx.insert(format!("{}.{}", alias, column), value);
+    }
+    ctx
+}
+
+fn build_select_batch_row_ctx(
+    alias: &str,
+    batch: &SelectColumnBatch,
+    row_idx: usize,
+    columns: Option<&[String]>,
+) -> RowCtx {
+    match columns {
+        Some(columns) => select_batch_row_ctx_columns(alias, batch, row_idx, columns),
+        None => select_batch_row_ctx_columns(alias, batch, row_idx, &batch.loaded_columns),
+    }
+}
+
+fn filter_select_batch(
+    alias: &str,
+    batch: &SelectColumnBatch,
+    predicate: Option<&Expr>,
+    predicate_plan: Option<&InternedPredicatePlan>,
+    query_ctx_columns: &[String],
+    args: &[Lit],
+) -> anyhow::Result<Vec<usize>> {
+    let mut selected = Vec::new();
+    for row_idx in 0..batch.row_count {
+        let matches = if let Some(predicate) = predicate {
+            if let Some(matches) = predicate_plan.and_then(|plan| {
+                compiled_interned_predicate_matches_lookup(plan, &mut |column| {
+                    select_batch_value(batch, row_idx, column)
+                })
+            }) {
+                matches
+            } else {
+                let ctx =
+                    build_select_batch_row_ctx(alias, batch, row_idx, Some(query_ctx_columns));
+                eval_predicate(predicate, &RowObject::new(), Some(&ctx), args)?
+            }
+        } else {
+            true
+        };
+        if matches {
+            selected.push(row_idx);
+        }
+    }
+    Ok(selected)
+}
+
+fn project_select_batch(
+    alias: &str,
+    batch: &SelectColumnBatch,
+    selected_rows: &[usize],
+    projection: &[SelectItem],
+    materialized_columns: &[String],
+    args: &[Lit],
+) -> anyhow::Result<Vec<Vec<Lit>>> {
+    let mut rows = Vec::with_capacity(selected_rows.len());
+    for row_idx in selected_rows.iter().copied() {
+        let ctx = build_select_batch_row_ctx(alias, batch, row_idx, Some(materialized_columns));
+        let mut row = Vec::with_capacity(projection.len());
+        for item in projection.iter() {
+            row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_select_batches(
+    tdata: &TableData,
+    alias: &str,
+    projection: &[SelectItem],
+    predicate: Option<&Expr>,
+    predicate_plan: Option<&InternedPredicatePlan>,
+    batch_columns: &[String],
+    materialized_columns: &[String],
+    args: &[Lit],
+    as_of_ms: Option<u64>,
+) -> anyhow::Result<(Vec<Vec<Lit>>, u64)> {
+    let mut rows = Vec::new();
+    let mut cursor = 0usize;
+    let mut rows_scanned = 0u64;
+
+    while let Some((batch, next_cursor, batch_rows_scanned)) =
+        scan_row_entries_batch(&tdata.rows, cursor, batch_columns, as_of_ms)
+    {
+        cursor = next_cursor;
+        rows_scanned = rows_scanned.saturating_add(batch_rows_scanned);
+        let selected_rows = filter_select_batch(
+            alias,
+            &batch,
+            predicate,
+            predicate_plan,
+            batch_columns,
+            args,
+        )?;
+        rows.extend(project_select_batch(
+            alias,
+            &batch,
+            &selected_rows,
+            projection,
+            materialized_columns,
+            args,
+        )?);
+    }
+
+    Ok((rows, rows_scanned))
+}
+
 fn index_prefilter_candidates(
     engine: &Engine,
     base: &BaseTableRef,
@@ -9688,10 +9874,18 @@ fn try_execute_select_base_table(
     let predicate_plan = compile_interned_predicate_for_base(engine, base, predicate, args);
     let query_ctx_columns =
         collect_single_table_query_columns(&alias, projection, predicate, order);
+    let batch_columns = query_ctx_columns.clone().unwrap_or_else(|| {
+        schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    });
     let materialized_ctx_columns = if predicate_plan.is_some() {
         collect_single_table_projection_order_columns(&alias, projection, order)
+            .unwrap_or_else(|| batch_columns.clone())
     } else {
-        query_ctx_columns.clone()
+        batch_columns.clone()
     };
 
     let has_limit = query
@@ -9732,7 +9926,7 @@ fn try_execute_select_base_table(
                                     let built = build_row_ctx(
                                         &alias,
                                         &entry.row,
-                                        query_ctx_columns.as_deref(),
+                                        Some(batch_columns.as_slice()),
                                     );
                                     if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)?
                                     {
@@ -9746,7 +9940,7 @@ fn try_execute_select_base_table(
                                 build_row_ctx(
                                     &alias,
                                     &entry.row,
-                                    materialized_ctx_columns.as_deref(),
+                                    Some(materialized_ctx_columns.as_slice()),
                                 )
                             });
                             let mut out_row = Vec::new();
@@ -9790,6 +9984,21 @@ fn try_execute_select_base_table(
     }
 
     let candidate_rows = index_prefilter_candidates(engine, base, predicate, args);
+    if !distinct && query.limit.is_none() && order.is_empty() && candidate_rows.is_none() {
+        let (rows, rows_scanned) = execute_select_batches(
+            tdata,
+            &alias,
+            projection,
+            predicate,
+            predicate_plan.as_ref(),
+            &batch_columns,
+            &materialized_ctx_columns,
+            args,
+            as_of_ms,
+        )?;
+        return Ok(Some((columns, rows, rows_scanned)));
+    }
+
     let mut rows = Vec::new();
     let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
     let mut rows_scanned = 0u64;
@@ -9809,7 +10018,7 @@ fn try_execute_select_base_table(
                     return Ok(());
                 }
             } else {
-                let built = build_row_ctx(&alias, &entry.row, query_ctx_columns.as_deref());
+                let built = build_row_ctx(&alias, &entry.row, Some(batch_columns.as_slice()));
                 if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
                     return Ok(());
                 }
@@ -9818,7 +10027,11 @@ fn try_execute_select_base_table(
         }
 
         let ctx = ctx.unwrap_or_else(|| {
-            build_row_ctx(&alias, &entry.row, materialized_ctx_columns.as_deref())
+            build_row_ctx(
+                &alias,
+                &entry.row,
+                Some(materialized_ctx_columns.as_slice()),
+            )
         });
         let mut out_row = Vec::new();
         for item in projection.iter() {
@@ -34269,6 +34482,115 @@ mod tests {
         )?;
         assert_eq!(columns.len(), 1);
         assert_eq!(rows, vec![vec![Lit::U64 { v: 1 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn row_scan_batch_respects_fixed_batch_size() {
+        let rows = (0..(SELECT_BATCH_SIZE + 3))
+            .map(|idx| RowEntry {
+                row: row(&[("id", Lit::U64 { v: idx as u64 })]),
+                version: 1,
+                deleted: false,
+                commit_ts_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        let columns = vec!["id".to_string()];
+
+        let (batch, next_idx, rows_scanned) =
+            scan_row_entries_batch(&rows, 0, &columns, None).expect("first batch");
+        assert_eq!(batch.row_count, SELECT_BATCH_SIZE);
+        assert_eq!(rows_scanned, SELECT_BATCH_SIZE as u64);
+        assert_eq!(next_idx, SELECT_BATCH_SIZE);
+
+        let (tail, tail_next_idx, tail_rows_scanned) =
+            scan_row_entries_batch(&rows, next_idx, &columns, None).expect("tail batch");
+        assert_eq!(tail.row_count, 3);
+        assert_eq!(tail_rows_scanned, 3);
+        assert_eq!(tail_next_idx, rows.len());
+    }
+
+    #[test]
+    fn execute_select_batch_pipeline_spans_multiple_batches() -> anyhow::Result<()> {
+        let dir = temp_dir("select_batch_pipeline_multi_batch");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut rows = Vec::new();
+        for idx in 0..(SELECT_BATCH_SIZE + 2) {
+            rows.push(row(&[
+                ("id", Lit::U64 { v: idx as u64 + 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: if idx % 2 == 0 {
+                            "Alice".to_string()
+                        } else {
+                            "Bob".to_string()
+                        },
+                    },
+                ),
+            ]));
+        }
+        engine.data_insert(&table, rows, None)?;
+        engine.schema_set_column_interned(&table, "name", true)?;
+
+        let query = base_query(
+            &table.db,
+            &table.table,
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+
+        let (columns, rows) = execute_select(
+            &engine,
+            &query,
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+            None,
+        )?;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(rows.len(), (SELECT_BATCH_SIZE + 2).div_ceil(2));
+        assert_eq!(rows.first(), Some(&vec![Lit::U64 { v: 1 }]));
+        assert_eq!(rows.last(), Some(&vec![Lit::U64 { v: 1025 }]));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
