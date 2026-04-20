@@ -85,17 +85,26 @@ Channel B: object fetch
 - `objects.need` (primary -> replica): advertise a batch of ValueIDs referenced by recent WAL
 - `objects.missing` (replica -> primary): return the subset that is missing
 - `objects.fetch` (primary -> replica): stream VE entries (ValueID + bytes)
+- `objects.pull` (replica-side orchestration): batch locally-missing ValueIDs, call remote `objects.fetch`, verify each fetched object against its requested ValueID, and persist only validated entries
 
 An alternative is replica-initiated pull:
 - replica requests missing ValueIDs directly when apply fails due to missing objects
 
 Batching is recommended to amortize overhead.
 
+Current prototype coverage:
+
+- `objects.fetch` now returns a lossless VE1 payload (`entry_b64`) in addition to the legacy raw-bytes view, so non-trivial `ValueStore` entries such as deltas can be reconstructed faithfully
+- `objects.pull` batches remote fetches, skips locally present objects, and recursively pulls missing delta-base dependencies before import
+- verified entries are imported via the same `ValueStore` decoding path used for `.vseg` replay
+
 ### 4.3 Integrity
 
 For each fetched object:
-- compute ValueID from bytes
-- verify it matches the requested ValueID
+- decode the transferred VE1 entry
+- materialize full bytes (following delta bases when necessary)
+- compute ValueID from the materialized bytes
+- verify it matches the requested ValueID before import
 
 This provides end-to-end integrity.
 
@@ -190,6 +199,6 @@ replica sides see the local CAS cost model in real time.
 ## 8) Backlog
 
 - CR01: ValueID existence Bloom summaries
-- CR02: object fetch protocol + batching
+- CR02: object fetch protocol + batching (implemented via `objects.fetch` + `objects.pull`)
 - CR03: replication metrics (saved bytes, hit rate)
 - CR04: shard move uses object manifests + progress reporting

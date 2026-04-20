@@ -1142,6 +1142,29 @@ impl ValueStore {
         ValueSegmentReader::open(path)?.load_store(config)
     }
 
+    pub fn export_transfer_entry(&mut self, id: &ValueId) -> Result<Vec<u8>, ValueStoreError> {
+        let entry = self.get(id).cloned().ok_or(ValueStoreError::NotFound)?;
+        encode_vseg_entry(*id, &entry)
+    }
+
+    pub fn import_transfer_entries<I>(&mut self, entries: I) -> Result<usize, ValueStoreError>
+    where
+        I: IntoIterator<Item = ValueSegmentEntry>,
+    {
+        let mut inserted = 0usize;
+        for entry in entries {
+            if self.index.contains_key(&entry.id) {
+                continue;
+            }
+            self.insert_loaded_entry(entry.id, entry.entry)?;
+            inserted = inserted.saturating_add(1);
+        }
+        if inserted > 0 {
+            self.recompute_loaded_delta_metadata()?;
+        }
+        Ok(inserted)
+    }
+
     fn insert_loaded_entry(
         &mut self,
         id: ValueId,
@@ -1594,6 +1617,44 @@ impl ValueSegmentReader {
         store.recompute_loaded_delta_metadata()?;
         Ok(store)
     }
+}
+
+pub fn encode_transfer_entry(id: ValueId, entry: &ValueEntry) -> Result<Vec<u8>, ValueStoreError> {
+    encode_vseg_entry(id, entry)
+}
+
+pub fn decode_transfer_entry(payload: &[u8]) -> Result<ValueSegmentEntry, ValueStoreError> {
+    decode_vseg_entry(payload)
+}
+
+pub fn materialize_transfer_entry_with_resolver<F>(
+    id: &ValueId,
+    entry: &ValueEntry,
+    base_resolver: &mut F,
+) -> Result<Vec<u8>, ValueStoreError>
+where
+    F: FnMut(&ValueId) -> Result<Vec<u8>, ValueStoreError>,
+{
+    if entry.kind != ValueKind::Delta {
+        let bytes = entry.bytes.clone();
+        if value_id(&bytes) != *id {
+            return Err(ValueStoreError::InvalidSegmentEntry(
+                "transfer value id does not match raw bytes",
+            ));
+        }
+        return Ok(bytes);
+    }
+
+    let delta = entry.delta.as_ref().ok_or(ValueStoreError::InvalidDelta)?;
+    let base_bytes = base_resolver(&delta.base)?;
+    let value = apply_patch_bytes(&base_bytes, &entry.bytes)?;
+    if value.len() != delta.full_len {
+        return Err(ValueStoreError::DeltaLengthMismatch);
+    }
+    if value_id(&value) != *id {
+        return Err(ValueStoreError::InvalidDelta);
+    }
+    Ok(value)
 }
 
 fn validate_vseg_header(file: &mut File) -> Result<(), ValueStoreError> {

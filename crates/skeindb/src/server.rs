@@ -39,14 +39,14 @@ use skeindb_skeinql::{
         EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
         ForensicVerifyParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
         MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
-        MigrationRewritePreviewParams, ObliviousExplainParams, ObliviousPolicyGetParams,
-        ObliviousPolicySetParams, PlanCacheClearParams, PlanCacheStatusParams,
-        QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams,
-        SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
-        TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
-        VectorIndexStatusParams, VectorInsertParams, VectorSearchParams, ViewCreateParams,
-        ViewDropParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
-        WasmPlanCompileParams, WasmPlanRunParams,
+        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousExplainParams,
+        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
+        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
+        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
+        TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
+        VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
+        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -14919,6 +14919,10 @@ pub(crate) async fn handle_rpc(
                     let p: P = parse_params(params.clone())?;
                     objects_fetch(state, p.ids).await
                 }
+                "objects.pull" => {
+                    let p: ObjectsPullParams = parse_params(params.clone())?;
+                    objects_pull(state, p).await
+                }
                 // --------------------
                 // cluster.route_query (T143 – read-balancing)
                 // --------------------
@@ -17106,6 +17110,9 @@ fn cluster_shard_rebalance(
 // CAS object pull protocol (T142 – CR02)
 // ---------------------------------------------------------------------------
 
+const OBJECTS_PULL_DEFAULT_BATCH_SIZE: usize = 64;
+const OBJECTS_PULL_MAX_BATCH_SIZE: usize = 512;
+
 fn parse_value_id(hex: &str) -> Option<skeindb_core::valuestore::ValueId> {
     if hex.len() != 32 {
         return None;
@@ -17115,6 +17122,156 @@ fn parse_value_id(hex: &str) -> Option<skeindb_core::valuestore::ValueId> {
         id[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(id)
+}
+
+fn value_id_to_hex(id: &skeindb_core::valuestore::ValueId) -> String {
+    id.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn parse_value_kind_name(kind: &str) -> Option<skeindb_core::ValueKind> {
+    match kind {
+        "Cell" => Some(skeindb_core::ValueKind::Cell),
+        "Group" => Some(skeindb_core::ValueKind::Group),
+        "BlobChunk" => Some(skeindb_core::ValueKind::BlobChunk),
+        "BlobManifest" => Some(skeindb_core::ValueKind::BlobManifest),
+        "Delta" => Some(skeindb_core::ValueKind::Delta),
+        "Embedding" => Some(skeindb_core::ValueKind::Embedding),
+        _ => None,
+    }
+}
+
+fn normalize_objects_pull_batch_size(batch_size: Option<usize>) -> usize {
+    batch_size
+        .unwrap_or(OBJECTS_PULL_DEFAULT_BATCH_SIZE)
+        .clamp(1, OBJECTS_PULL_MAX_BATCH_SIZE)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferMaterializeError {
+    Deferred,
+    Invalid,
+}
+
+fn materialize_staged_transfer_entry(
+    id: skeindb_core::valuestore::ValueId,
+    entry: &skeindb_core::valuestore::ValueEntry,
+    staged: &HashMap<
+        skeindb_core::valuestore::ValueId,
+        skeindb_core::valuestore::ValueSegmentEntry,
+    >,
+    local_store: &mut skeindb_core::valuestore::ValueStore,
+    cache: &mut HashMap<skeindb_core::valuestore::ValueId, Vec<u8>>,
+    visiting: &mut HashSet<skeindb_core::valuestore::ValueId>,
+) -> Result<Vec<u8>, TransferMaterializeError> {
+    if let Some(hit) = cache.get(&id) {
+        return Ok(hit.clone());
+    }
+    if !visiting.insert(id) {
+        return Err(TransferMaterializeError::Invalid);
+    }
+
+    let result = skeindb_core::valuestore::materialize_transfer_entry_with_resolver(
+        &id,
+        entry,
+        &mut |base_id| {
+            if let Some(hit) = cache.get(base_id) {
+                return Ok(hit.clone());
+            }
+            if let Some(base_entry) = staged.get(base_id) {
+                match materialize_staged_transfer_entry(
+                    *base_id,
+                    &base_entry.entry,
+                    staged,
+                    local_store,
+                    cache,
+                    visiting,
+                ) {
+                    Ok(bytes) => Ok(bytes),
+                    Err(TransferMaterializeError::Deferred) => {
+                        Err(skeindb_core::valuestore::ValueStoreError::NotFound)
+                    }
+                    Err(TransferMaterializeError::Invalid) => {
+                        Err(skeindb_core::valuestore::ValueStoreError::InvalidDelta)
+                    }
+                }
+            } else {
+                local_store.materialize(base_id)
+            }
+        },
+    );
+
+    visiting.remove(&id);
+    match result {
+        Ok(bytes) => {
+            cache.insert(id, bytes.clone());
+            Ok(bytes)
+        }
+        Err(skeindb_core::valuestore::ValueStoreError::NotFound) => {
+            Err(TransferMaterializeError::Deferred)
+        }
+        Err(_) => Err(TransferMaterializeError::Invalid),
+    }
+}
+
+async fn fetch_remote_object_batch(
+    source_rpc_url: &str,
+    ids: &[String],
+) -> Result<Vec<Value>, RpcError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|err| RpcError::new("transport_error", err.to_string()))?;
+    let url = format!("{}/api/v1/rpc", source_rpc_url.trim_end_matches('/'));
+    let payload = serde_json::json!({
+        "skeinql": SKEINQL_VERSION,
+        "id": "objects.pull.remote",
+        "method": "objects.fetch",
+        "params": { "ids": ids },
+    });
+
+    let mut req = client
+        .post(&url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
+        .json(&payload);
+    if let Ok(token) = std::env::var("SKEINDB_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|err| RpcError::new("transport_error", format!("{} => {}", url, err)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(RpcError::new(
+            "transport_error",
+            format!("{} => {}", url, status),
+        ));
+    }
+
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|err| RpcError::new("invalid_response", err.to_string()))?;
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("remote objects.fetch failed");
+        return Err(RpcError::new("remote_error", msg));
+    }
+
+    body.get("result")
+        .and_then(|v| v.get("objects"))
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            RpcError::new(
+                "invalid_response",
+                "remote objects.fetch returned no objects array",
+            )
+        })
 }
 
 /// Build the T167 CAS replication object-pull stats JSON from current
@@ -17233,16 +17390,23 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
             Some(id) => id,
             None => continue,
         };
-        if let Some(entry) = vs.get(&id) {
+        if let Some(entry) = vs.get(&id).cloned() {
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&entry.bytes);
-            let computed = skeindb_core::value_id(&entry.bytes);
+            let entry_b64 = skeindb_core::valuestore::encode_transfer_entry(id, &entry)
+                .ok()
+                .map(|payload| base64::engine::general_purpose::STANDARD.encode(payload));
+            let computed = vs
+                .materialize(&id)
+                .map(|bytes| skeindb_core::value_id(&bytes))
+                .ok();
             obj_bytes = obj_bytes.saturating_add(entry.bytes.len() as u64);
             objects.push(serde_json::json!({
                 "id": id_str,
                 "bytes_b64": b64,
+                "entry_b64": entry_b64,
                 "kind": format!("{:?}", entry.kind),
-                "verified": computed == id,
+                "verified": computed == Some(id),
             }));
         }
     }
@@ -17259,6 +17423,243 @@ async fn objects_fetch(state: &AppState, ids: Vec<String>) -> Result<Value, RpcE
         r.last_updated_ms = now_unix_ms_u64();
     }
     Ok(serde_json::json!({ "ok": true, "objects": objects }))
+}
+
+/// `objects.pull`: fetch locally-missing ValueIDs from a remote node in
+/// bounded batches, verify them against their ValueID hashes, and persist only
+/// validated entries. Delta objects are transferred losslessly and can pull
+/// their base dependencies recursively.
+async fn objects_pull(state: &AppState, params: ObjectsPullParams) -> Result<Value, RpcError> {
+    use base64::Engine as _;
+
+    let source_rpc_url = params.source_rpc_url.trim().to_string();
+    if source_rpc_url.is_empty() {
+        return Err(RpcError::new(
+            "invalid_request",
+            "source_rpc_url is required",
+        ));
+    }
+
+    let requested = params.ids.len();
+    let batch_size = normalize_objects_pull_batch_size(params.batch_size);
+    let mut already_present = 0usize;
+    let mut invalid_ids = Vec::new();
+    let mut pending = VecDeque::new();
+    let mut queued = HashSet::new();
+    let mut seen_inputs = HashSet::new();
+
+    {
+        let eng = state.engine.read().await;
+        let vs = eng.value_store_lock();
+        for raw_id in params.ids {
+            let normalized = raw_id.trim().to_ascii_lowercase();
+            if normalized.is_empty() || !seen_inputs.insert(normalized.clone()) {
+                continue;
+            }
+            let Some(id) = parse_value_id(&normalized) else {
+                invalid_ids.push(raw_id);
+                continue;
+            };
+            if vs.contains(id) {
+                already_present = already_present.saturating_add(1);
+            } else if queued.insert(normalized.clone()) {
+                pending.push_back(normalized);
+            }
+        }
+    }
+
+    let mut batches = 0usize;
+    let mut fetched_objects = 0usize;
+    let mut stored = 0usize;
+    let mut remote_missing = Vec::new();
+    let mut verification_failed = Vec::new();
+    let mut staged: HashMap<
+        skeindb_core::valuestore::ValueId,
+        skeindb_core::valuestore::ValueSegmentEntry,
+    > = HashMap::new();
+
+    while !pending.is_empty() {
+        let mut batch = Vec::new();
+        while batch.len() < batch_size {
+            let Some(next) = pending.pop_front() else {
+                break;
+            };
+            batch.push(next);
+        }
+        if batch.is_empty() {
+            break;
+        }
+        batches = batches.saturating_add(1);
+
+        let requested_batch: HashSet<String> = batch.iter().cloned().collect();
+        let objects = fetch_remote_object_batch(&source_rpc_url, &batch).await?;
+        fetched_objects = fetched_objects.saturating_add(objects.len());
+
+        let mut returned_ids = HashSet::new();
+        for object in objects {
+            let object_id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if object_id.is_empty() || !requested_batch.contains(&object_id) {
+                continue;
+            }
+            returned_ids.insert(object_id.clone());
+
+            let Some(payload_b64) = object.get("entry_b64").and_then(Value::as_str) else {
+                if !verification_failed.contains(&object_id) {
+                    verification_failed.push(object_id.clone());
+                }
+                continue;
+            };
+            let payload = match base64::engine::general_purpose::STANDARD.decode(payload_b64) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    if !verification_failed.contains(&object_id) {
+                        verification_failed.push(object_id.clone());
+                    }
+                    continue;
+                }
+            };
+            let transfer = match skeindb_core::valuestore::decode_transfer_entry(&payload) {
+                Ok(entry) => entry,
+                Err(_) => {
+                    if !verification_failed.contains(&object_id) {
+                        verification_failed.push(object_id.clone());
+                    }
+                    continue;
+                }
+            };
+            let Some(expected_id) = parse_value_id(&object_id) else {
+                if !verification_failed.contains(&object_id) {
+                    verification_failed.push(object_id.clone());
+                }
+                continue;
+            };
+            if transfer.id != expected_id {
+                if !verification_failed.contains(&object_id) {
+                    verification_failed.push(object_id.clone());
+                }
+                continue;
+            }
+            let kind_matches = object
+                .get("kind")
+                .and_then(Value::as_str)
+                .and_then(parse_value_kind_name)
+                .map(|kind| kind == transfer.entry.kind)
+                .unwrap_or(true);
+            if !kind_matches {
+                if !verification_failed.contains(&object_id) {
+                    verification_failed.push(object_id.clone());
+                }
+                continue;
+            }
+            staged.insert(transfer.id, transfer);
+        }
+
+        for requested_id in batch {
+            queued.remove(&requested_id);
+            if !returned_ids.contains(&requested_id) && !remote_missing.contains(&requested_id) {
+                remote_missing.push(requested_id);
+            }
+        }
+
+        {
+            let eng = state.engine.read().await;
+            let vs = eng.value_store_lock();
+            let staged_ids: HashSet<_> = staged.keys().copied().collect();
+            let mut extra_ids = Vec::new();
+            for transfer in staged.values() {
+                if let Some(delta) = transfer.entry.delta.as_ref() {
+                    if !staged_ids.contains(&delta.base) && !vs.contains(delta.base) {
+                        let base_hex = value_id_to_hex(&delta.base);
+                        if queued.insert(base_hex.clone()) {
+                            extra_ids.push(base_hex);
+                        }
+                    }
+                }
+            }
+            drop(vs);
+            drop(eng);
+            for id in extra_ids {
+                pending.push_back(id);
+            }
+        }
+
+        let (ready_entries, failed_ids) = {
+            let eng = state.engine.read().await;
+            let mut vs = eng.value_store_lock();
+            let mut cache: HashMap<skeindb_core::valuestore::ValueId, Vec<u8>> = HashMap::new();
+            let mut ready = Vec::new();
+            let mut failed = Vec::new();
+
+            for (id, transfer) in staged.iter() {
+                let mut visiting = HashSet::new();
+                match materialize_staged_transfer_entry(
+                    *id,
+                    &transfer.entry,
+                    &staged,
+                    &mut vs,
+                    &mut cache,
+                    &mut visiting,
+                ) {
+                    Ok(_) => ready.push(transfer.clone()),
+                    Err(TransferMaterializeError::Deferred) => {}
+                    Err(TransferMaterializeError::Invalid) => failed.push(*id),
+                }
+            }
+            (ready, failed)
+        };
+
+        for failed_id in failed_ids {
+            let failed_hex = value_id_to_hex(&failed_id);
+            if !verification_failed.contains(&failed_hex) {
+                verification_failed.push(failed_hex.clone());
+            }
+            staged.remove(&failed_id);
+            queued.remove(&failed_hex);
+        }
+
+        if !ready_entries.is_empty() {
+            let ready_ids: Vec<_> = ready_entries.iter().map(|entry| entry.id).collect();
+            let eng = state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            stored = stored.saturating_add(
+                vs.import_transfer_entries(ready_entries)
+                    .map_err(|err| RpcError::new("internal", err.to_string()))?,
+            );
+            drop(vs);
+            drop(eng);
+            for ready_id in ready_ids {
+                staged.remove(&ready_id);
+            }
+        }
+    }
+
+    if !staged.is_empty() {
+        for lingering_id in staged.keys() {
+            let lingering_hex = value_id_to_hex(lingering_id);
+            if !verification_failed.contains(&lingering_hex) {
+                verification_failed.push(lingering_hex);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "source_rpc_url": source_rpc_url,
+        "requested": requested,
+        "batch_size": batch_size,
+        "batches": batches,
+        "already_present": already_present,
+        "fetched_objects": fetched_objects,
+        "stored": stored,
+        "invalid_ids": invalid_ids,
+        "remote_missing": remote_missing,
+        "verification_failed": verification_failed,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -25218,6 +25619,10 @@ fn system_capabilities(state: &AppState) -> Value {
         "cluster.shard.move",
         "cluster.shard.rebalance",
         "cluster.replication_stats",
+        "objects.need",
+        "objects.missing",
+        "objects.fetch",
+        "objects.pull",
         "schema.list_databases",
         "schema.create_database",
         "schema.drop_database",
@@ -26689,6 +27094,44 @@ mod tests {
         serde_json::from_slice(&bytes).expect("parse sql response")
     }
 
+    async fn spawn_rpc_test_server(
+        state: AppState,
+        seen_fetch_batches: Arc<Mutex<Vec<Vec<String>>>>,
+    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+        let app = Router::new().route(
+            "/api/v1/rpc",
+            post(move |headers: HeaderMap, Json(req): Json<RpcRequest>| {
+                let state = state.clone();
+                let seen_fetch_batches = seen_fetch_batches.clone();
+                async move {
+                    if req.method == "objects.fetch" {
+                        let ids = req
+                            .params
+                            .as_ref()
+                            .and_then(|v| v.get("ids"))
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        seen_fetch_batches.lock().unwrap().push(ids);
+                    }
+                    rpc_handler(State(state), headers, Json(req)).await
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((format!("http://{}", addr), handle))
+    }
+
     #[tokio::test]
     async fn sql_exec_http_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("sql_exec_http_roundtrip");
@@ -26696,7 +27139,7 @@ mod tests {
         let state = build_state(dir.clone(), engine);
 
         let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
-        assert!(resp.ok);
+        assert!(resp.ok, "{resp:?}");
 
         let resp = call_sql_exec_http(
             &state,
@@ -26705,7 +27148,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.ok);
+        assert!(resp.ok, "{resp:?}");
 
         let resp = call_sql_exec_http(
             &state,
@@ -26714,7 +27157,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.ok);
+        assert!(resp.ok, "{resp:?}");
 
         let resp = call_sql_exec_http(
             &state,
@@ -26723,7 +27166,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(resp.ok);
+        assert!(resp.ok, "{resp:?}");
         let rows = resp
             .result
             .as_ref()
@@ -34193,6 +34636,7 @@ mod tests {
         assert_eq!(objects[0]["id"].as_str().unwrap(), hello_hex);
         assert_eq!(objects[0]["verified"].as_bool().unwrap(), true);
         assert_eq!(objects[0]["kind"].as_str().unwrap(), "Cell");
+        assert!(objects[0]["entry_b64"].as_str().is_some());
 
         // Decode the base64 bytes and verify content.
         use base64::Engine as _;
@@ -34201,6 +34645,233 @@ mod tests {
             .decode(b64)
             .unwrap();
         assert_eq!(bytes, b"hello");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn objects_pull_batches_missing_ids_and_skips_local_hits() -> anyhow::Result<()> {
+        let local_dir = temp_dir("objects_pull_local");
+        let remote_dir = temp_dir("objects_pull_remote");
+        let local_state = build_state(local_dir.clone(), Engine::open(&local_dir)?);
+        let remote_state = build_state(remote_dir.clone(), Engine::open(&remote_dir)?);
+
+        let local_hit = {
+            let eng = local_state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            vs.put(skeindb_core::ValueKind::Cell, b"local-hit".to_vec())
+        };
+        let remote_ids = {
+            let eng = remote_state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            vec![
+                vs.put(skeindb_core::ValueKind::Cell, b"remote-a".to_vec()),
+                vs.put(skeindb_core::ValueKind::Cell, b"remote-b".to_vec()),
+                vs.put(skeindb_core::ValueKind::Cell, b"remote-c".to_vec()),
+            ]
+        };
+        let local_hit_hex = value_id_to_hex(&local_hit);
+        let remote_hex: Vec<String> = remote_ids.iter().map(value_id_to_hex).collect();
+
+        let seen_fetch_batches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let (remote_url, remote_handle) =
+            spawn_rpc_test_server(remote_state.clone(), seen_fetch_batches.clone()).await?;
+
+        let resp = call_rpc(
+            &local_state,
+            "objects.pull",
+            json!({
+                "source_rpc_url": remote_url,
+                "ids": [local_hit_hex, remote_hex[0], remote_hex[1], remote_hex[2]],
+                "batch_size": 2
+            }),
+        )
+        .await;
+
+        remote_handle.abort();
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["requested"].as_u64().unwrap(), 4);
+        assert_eq!(result["batch_size"].as_u64().unwrap(), 2);
+        assert_eq!(result["batches"].as_u64().unwrap(), 2);
+        assert_eq!(result["already_present"].as_u64().unwrap(), 1);
+        assert_eq!(result["fetched_objects"].as_u64().unwrap(), 3);
+        assert_eq!(result["stored"].as_u64().unwrap(), 3);
+        assert_eq!(result["invalid_ids"].as_array().unwrap().len(), 0);
+        assert_eq!(result["remote_missing"].as_array().unwrap().len(), 0);
+        assert_eq!(result["verification_failed"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            seen_fetch_batches.lock().unwrap().clone(),
+            vec![
+                vec![remote_hex[0].clone(), remote_hex[1].clone()],
+                vec![remote_hex[2].clone()],
+            ]
+        );
+
+        {
+            let eng = local_state.engine.read().await;
+            let vs = eng.value_store_lock();
+            for id in &remote_ids {
+                assert!(vs.contains(*id));
+            }
+        }
+
+        std::fs::remove_dir_all(&local_dir).ok();
+        std::fs::remove_dir_all(&remote_dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn objects_pull_fetches_missing_delta_base_dependency() -> anyhow::Result<()> {
+        let local_dir = temp_dir("objects_pull_delta_local");
+        let remote_dir = temp_dir("objects_pull_delta_remote");
+        let local_state = build_state(local_dir.clone(), Engine::open(&local_dir)?);
+        let remote_state = build_state(remote_dir.clone(), Engine::open(&remote_dir)?);
+
+        let (base_id, delta_id, delta_bytes) = {
+            let eng = remote_state.engine.write().await;
+            let mut vs = eng.value_store_lock();
+            vs.set_delta_policy(skeindb_core::valuestore::DeltaPolicy {
+                enabled: true,
+                min_bytes: 1,
+                max_chain: 8,
+                min_savings_ratio: 1.0,
+                snapshot_interval: 0,
+                max_skip: 0,
+            });
+            let base_bytes = b"hello from the remote base value".to_vec();
+            let delta_bytes = b"hello from the remote delta value".to_vec();
+            let base_id = vs.put(skeindb_core::ValueKind::Cell, base_bytes);
+            let delta_id = vs.put_with_delta(
+                skeindb_core::ValueKind::Cell,
+                delta_bytes.clone(),
+                Some(base_id),
+            );
+            assert_eq!(
+                vs.get(&delta_id).expect("delta entry exists").kind,
+                skeindb_core::ValueKind::Delta
+            );
+            (base_id, delta_id, delta_bytes)
+        };
+        let delta_hex = value_id_to_hex(&delta_id);
+        let base_hex = value_id_to_hex(&base_id);
+
+        let seen_fetch_batches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let (remote_url, remote_handle) =
+            spawn_rpc_test_server(remote_state.clone(), seen_fetch_batches.clone()).await?;
+
+        let resp = call_rpc(
+            &local_state,
+            "objects.pull",
+            json!({
+                "source_rpc_url": remote_url,
+                "ids": [delta_hex],
+                "batch_size": 1
+            }),
+        )
+        .await;
+
+        remote_handle.abort();
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["batches"].as_u64().unwrap(), 2);
+        assert_eq!(result["stored"].as_u64().unwrap(), 2);
+        assert_eq!(result["verification_failed"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            seen_fetch_batches.lock().unwrap().clone(),
+            vec![vec![value_id_to_hex(&delta_id)], vec![base_hex]]
+        );
+
+        {
+            let eng = local_state.engine.read().await;
+            let mut vs = eng.value_store_lock();
+            assert!(vs.contains(base_id));
+            assert!(vs.contains(delta_id));
+            assert_eq!(vs.materialize(&delta_id)?, delta_bytes);
+        }
+
+        std::fs::remove_dir_all(&local_dir).ok();
+        std::fs::remove_dir_all(&remote_dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn objects_pull_rejects_hash_mismatch() -> anyhow::Result<()> {
+        use base64::Engine as _;
+
+        let dir = temp_dir("objects_pull_hash_mismatch");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let bad_bytes = b"tampered".to_vec();
+        let good_id = skeindb_core::value_id(&bad_bytes);
+        let mut bad_id = good_id;
+        bad_id[0] ^= 0x55;
+        let bad_hex = value_id_to_hex(&bad_id);
+        let payload = skeindb_core::valuestore::encode_transfer_entry(
+            bad_id,
+            &skeindb_core::valuestore::ValueEntry {
+                kind: skeindb_core::ValueKind::Cell,
+                bytes: bad_bytes.clone(),
+                delta: None,
+            },
+        )?;
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
+        let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bad_bytes);
+
+        let app = Router::new().route(
+            "/api/v1/rpc",
+            post(
+                move |_headers: HeaderMap, Json(_req): Json<RpcRequest>| async move {
+                    Json(serde_json::json!({
+                        "skeinql": SKEINQL_VERSION,
+                        "ok": true,
+                        "result": {
+                            "ok": true,
+                            "objects": [{
+                                "id": bad_hex,
+                                "bytes_b64": bytes_b64,
+                                "entry_b64": payload_b64,
+                                "kind": "Cell",
+                                "verified": false
+                            }]
+                        }
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let remote = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let resp = call_rpc(
+            &state,
+            "objects.pull",
+            json!({
+                "source_rpc_url": format!("http://{}", addr),
+                "ids": [value_id_to_hex(&bad_id)],
+                "batch_size": 1
+            }),
+        )
+        .await;
+
+        remote.abort();
+        assert!(resp.ok);
+        let result = resp.result.unwrap();
+        assert_eq!(result["stored"].as_u64().unwrap(), 0);
+        let failures = result["verification_failed"].as_array().unwrap();
+        let expected_bad_hex = value_id_to_hex(&bad_id);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].as_str(), Some(expected_bad_hex.as_str()));
+
+        {
+            let eng = state.engine.read().await;
+            let vs = eng.value_store_lock();
+            assert!(!vs.contains(bad_id));
+        }
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

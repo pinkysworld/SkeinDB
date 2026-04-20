@@ -1975,6 +1975,37 @@ pub struct ClusterReplicationInfo {
 }
 
 // --------------------------------
+// objects.* (CAS-aware replication)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectsPullParams {
+    pub source_rpc_url: String,
+    pub ids: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectsPullResult {
+    pub ok: bool,
+    pub source_rpc_url: String,
+    pub requested: usize,
+    pub batch_size: usize,
+    pub batches: usize,
+    pub already_present: usize,
+    pub fetched_objects: usize,
+    pub stored: usize,
+    #[serde(default)]
+    pub invalid_ids: Vec<String>,
+    #[serde(default)]
+    pub remote_missing: Vec<String>,
+    #[serde(default)]
+    pub verification_failed: Vec<String>,
+}
+
+// --------------------------------
 // cdc.* (selected)
 // --------------------------------
 
