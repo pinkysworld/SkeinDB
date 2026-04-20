@@ -312,6 +312,7 @@ pub struct Engine {
     schema_versions: HashMap<TableKey, u64>,
     schema_changes: Vec<SchemaChangeEntry>,
     schema_changes_next_id: u64,
+    schema_flags: HashMap<TableKey, TableSchemaFlags>,
 
     /// API tokens for security (T122).
     api_tokens: HashMap<String, ApiToken>,
@@ -464,6 +465,26 @@ struct SchemaChangesDisk {
     changes: Vec<SchemaChangeEntry>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TableSchemaFlags {
+    interned_columns: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TableSchemaFlagsEntry {
+    db: String,
+    table: String,
+    #[serde(default)]
+    interned_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SchemaFlagsDisk {
+    format_version: u32,
+    #[serde(default)]
+    tables: Vec<TableSchemaFlagsEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdvisorPatternDisk {
     db: String,
@@ -504,6 +525,7 @@ struct ChangeLogDisk {
 
 const SCHEMA_VERSION_FORMAT_VERSION: u32 = 1;
 const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
+const SCHEMA_FLAGS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
 const CHANGE_LOG_FORMAT_VERSION: u32 = 1;
@@ -1272,6 +1294,7 @@ impl Engine {
             schema_versions: HashMap::new(),
             schema_changes: Vec::new(),
             schema_changes_next_id: 1,
+            schema_flags: HashMap::new(),
             api_tokens: HashMap::new(),
             api_token_next_id: 1,
             db_users: HashMap::new(),
@@ -1290,6 +1313,7 @@ impl Engine {
         engine.load_views_best_effort();
         engine.load_schema_versions_best_effort();
         engine.load_schema_changes_best_effort();
+        engine.load_schema_flags_best_effort();
         engine.load_advisor_best_effort();
         engine.restore_advisor_indexes();
 
@@ -1540,6 +1564,9 @@ impl Engine {
         let next_version = self.schema_version_for(&source_key).saturating_add(1);
         self.schema_versions.remove(&source_key);
         self.set_schema_version(&target_key, next_version);
+        if let Some(flags) = self.schema_flags.remove(&source_key) {
+            self.schema_flags.insert(target_key.clone(), flags);
+        }
 
         if let Some(policy) = self.oblivious_policies.remove(&source_key) {
             self.oblivious_policies.insert(target_key.clone(), policy);
@@ -1581,6 +1608,7 @@ impl Engine {
         remove_file_if_exists(&self.table_segment_path(&source.db, &source.table))?;
         remove_file_if_exists(&self.table_secondary_index_path(&source.db, &source.table))?;
         self.persist_schema_versions_best_effort();
+        self.persist_schema_flags_best_effort();
         self.persist_oblivious_best_effort();
         self.persist_merge_policies_best_effort();
         self.persist_snapshots_best_effort();
@@ -1591,6 +1619,10 @@ impl Engine {
 
     pub fn describe_table(&self, db: &str, table: &str) -> anyhow::Result<serde_json::Value> {
         let schema = self.get_schema(db, table)?;
+        let key = TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        };
         let columns: Vec<serde_json::Value> = schema
             .columns
             .iter()
@@ -1600,6 +1632,7 @@ impl Engine {
                     "type": c.r#type,
                     "nullable": c.nullable,
                     "auto_increment": c.auto_increment,
+                    "interned": self.column_is_interned(&key, &c.name),
                 })
             })
             .collect();
@@ -1611,6 +1644,41 @@ impl Engine {
             "indexes": mysql_compat_indexes_json(schema),
             "compat_mysql": schema.compat_mysql,
         }))
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn schema_set_column_interned(
+        &mut self,
+        table: &BaseTableRef,
+        column_name: &str,
+        interned: bool,
+    ) -> anyhow::Result<()> {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let canonical_name = {
+            let (schema, _) = self.get_table(table)?;
+            canonical_schema_column_name(schema, column_name)
+                .ok_or_else(|| anyhow::anyhow!("not_found: column not found: {column_name}"))?
+                .to_string()
+        };
+
+        let changed = self.set_column_interned_flag(&key, &canonical_name, interned);
+        if !changed {
+            return Ok(());
+        }
+
+        {
+            let (schema, _) = self.get_table_mut(table)?;
+            bump_table_version(schema);
+        }
+        let next_version = self.schema_version_for(&key).saturating_add(1);
+        self.set_schema_version(&key, next_version);
+        self.persist_catalog()?;
+        self.persist_schema_flags_best_effort();
+        self.persist_schema_versions_best_effort();
+        Ok(())
     }
 
     pub fn schema_propose_change(
@@ -1923,6 +1991,7 @@ impl Engine {
             anyhow::bail!("invalid_request: column name must not be empty");
         }
 
+        let mut renamed_flag = None;
         {
             let (schema, tdata) = self.get_table_mut(table)?;
             let Some(col_idx) = schema
@@ -1966,6 +2035,7 @@ impl Engine {
                 }
                 rename_mysql_compat_column_default(schema, &existing_name, &target_name);
                 rename_mysql_compat_index_columns(schema, &existing_name, &target_name);
+                renamed_flag = Some((existing_name.clone(), target_name.clone()));
             }
 
             for entry in tdata.rows.iter_mut() {
@@ -2034,6 +2104,17 @@ impl Engine {
             bump_table_version(schema);
         }
 
+        if let Some((old_name, new_name)) = renamed_flag.as_ref() {
+            self.rename_schema_flag_column(
+                &TableKey {
+                    db: table.db.clone(),
+                    table: table.table.clone(),
+                },
+                old_name,
+                new_name,
+            );
+        }
+
         let key = TableKey {
             db: table.db.clone(),
             table: table.table.clone(),
@@ -2042,6 +2123,7 @@ impl Engine {
         self.set_schema_version(&key, next_version);
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
+        self.persist_schema_flags_best_effort();
         self.persist_schema_versions_best_effort();
         Ok(())
     }
@@ -2079,7 +2161,7 @@ impl Engine {
             anyhow::bail!("invalid_request: column name must not be empty");
         }
 
-        {
+        let removed_flag_column = {
             let (schema, tdata) = self.get_table_mut(table)?;
             let Some(col_idx) = schema
                 .columns
@@ -2124,7 +2206,16 @@ impl Engine {
             }
 
             bump_table_version(schema);
-        }
+            existing_name
+        };
+
+        self.remove_schema_flag_column(
+            &TableKey {
+                db: table.db.clone(),
+                table: table.table.clone(),
+            },
+            &removed_flag_column,
+        );
 
         let key = TableKey {
             db: table.db.clone(),
@@ -2134,6 +2225,7 @@ impl Engine {
         self.set_schema_version(&key, next_version);
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
+        self.persist_schema_flags_best_effort();
         self.persist_schema_versions_best_effort();
         Ok(())
     }
@@ -2168,6 +2260,7 @@ impl Engine {
         self.set_schema_version(&key, next_version);
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
+        self.persist_schema_flags_best_effort();
         self.persist_schema_versions_best_effort();
         Ok(())
     }
@@ -2379,6 +2472,14 @@ impl Engine {
         let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let predicate_plan = {
+            let (schema, _) = self.get_table(table)?;
+            compile_interned_predicate_for_table(self, &key, schema, predicate, args)
+        };
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
@@ -2389,7 +2490,13 @@ impl Engine {
                     continue;
                 }
                 let current_row = tdata.rows[idx].row.clone();
-                if !eval_predicate(predicate, &current_row, None, args)? {
+                let matches = if let Some(plan) = predicate_plan.as_ref() {
+                    compiled_interned_predicate_matches_row(plan, &current_row)
+                        .unwrap_or(eval_predicate(predicate, &current_row, None, args)?)
+                } else {
+                    eval_predicate(predicate, &current_row, None, args)?
+                };
+                if !matches {
                     continue;
                 }
 
@@ -2488,6 +2595,14 @@ impl Engine {
         let mut affected = 0u64;
         let mut change_pks: Vec<Option<Vec<Lit>>> = Vec::new();
         let mut snapshot_pks: Vec<Vec<Lit>> = Vec::new();
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let predicate_plan = {
+            let (schema, _) = self.get_table(table)?;
+            compile_interned_predicate_for_table(self, &key, schema, predicate, args)
+        };
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
@@ -2498,7 +2613,13 @@ impl Engine {
                     continue;
                 }
                 let row_before_delete = tdata.rows[idx].row.clone();
-                if !eval_predicate(predicate, &row_before_delete, None, args)? {
+                let matches = if let Some(plan) = predicate_plan.as_ref() {
+                    compiled_interned_predicate_matches_row(plan, &row_before_delete)
+                        .unwrap_or(eval_predicate(predicate, &row_before_delete, None, args)?)
+                } else {
+                    eval_predicate(predicate, &row_before_delete, None, args)?
+                };
+                if !matches {
                     continue;
                 }
                 secondary_index_remove_row(tdata, idx, &row_before_delete)?;
@@ -4140,6 +4261,13 @@ impl Engine {
         // Fallback: brute-force scan with optional LSH bucketing.
         let query_bucket = embedding_lsh_bucket(query_vec);
         let mut matches = Vec::new();
+        let filter_plan = params.filter.as_ref().and_then(|filter| {
+            let key = TableKey {
+                db: params.table.db.clone(),
+                table: params.table.table.clone(),
+            };
+            compile_interned_predicate_for_table(self, &key, schema, filter, &[])
+        });
         for entry in tdata.rows.iter() {
             if entry.deleted {
                 continue;
@@ -4166,7 +4294,13 @@ impl Engine {
                 }
             }
             if let Some(filter) = params.filter.as_ref() {
-                if !eval_predicate(filter, &entry.row, None, &[])? {
+                let matches = if let Some(plan) = filter_plan.as_ref() {
+                    compiled_interned_predicate_matches_row(plan, &entry.row)
+                        .unwrap_or(eval_predicate(filter, &entry.row, None, &[])?)
+                } else {
+                    eval_predicate(filter, &entry.row, None, &[])?
+                };
+                if !matches {
                     continue;
                 }
             }
@@ -4905,6 +5039,13 @@ impl Engine {
             }
 
             let resolved = resolve_dp_aggregates(schema, &params.aggregates)?;
+            let predicate_plan = params.r#where.as_ref().and_then(|predicate| {
+                let key = TableKey {
+                    db: params.table.db.clone(),
+                    table: params.table.table.clone(),
+                };
+                compile_interned_predicate_for_table(self, &key, schema, predicate, &[])
+            });
 
             let mut groups: BTreeMap<String, DpGroupState> = BTreeMap::new();
             let mut rows_examined = 0u64;
@@ -4916,7 +5057,13 @@ impl Engine {
                 }
                 rows_examined += 1;
                 if let Some(pred) = params.r#where.as_ref() {
-                    if !eval_predicate(pred, &entry.row, None, &[])? {
+                    let matches = if let Some(plan) = predicate_plan.as_ref() {
+                        compiled_interned_predicate_matches_row(plan, &entry.row)
+                            .unwrap_or(eval_predicate(pred, &entry.row, None, &[])?)
+                    } else {
+                        eval_predicate(pred, &entry.row, None, &[])?
+                    };
+                    if !matches {
                         continue;
                     }
                 }
@@ -7074,6 +7221,7 @@ impl Engine {
         self.persist_catalog()?;
         self.persist_schema_versions_best_effort();
         self.persist_schema_changes_best_effort();
+        self.persist_schema_flags_best_effort();
         self.persist_oblivious_best_effort();
         self.persist_merge_policies_best_effort();
         self.persist_views_best_effort();
@@ -7100,6 +7248,7 @@ impl Engine {
 
         self.tables.remove(&key);
         self.schema_versions.remove(&key);
+        self.schema_flags.remove(&key);
         self.oblivious_policies.remove(&key);
         self.merge_policies.remove(&key);
         self.edge_coverage.remove(&key);
@@ -7357,6 +7506,7 @@ impl Engine {
         self.persist_snapshots_best_effort();
         self.persist_schema_versions_best_effort();
         self.persist_schema_changes_best_effort();
+        self.persist_schema_flags_best_effort();
         self.persist_views_best_effort();
         self.persist_merge_policies_best_effort();
         self.persist_merge_wasm_registry_best_effort();
@@ -8056,6 +8206,10 @@ impl Engine {
         self.data_dir.join("schema_changes.json")
     }
 
+    fn schema_flags_path(&self) -> PathBuf {
+        self.data_dir.join("schema_flags.json")
+    }
+
     fn load_schema_versions_best_effort(&mut self) {
         let mut versions = HashMap::new();
         if let Some(disk) = load_json::<SchemaVersionsDisk>(&self.schema_versions_path()) {
@@ -8134,6 +8288,136 @@ impl Engine {
                 changes: self.schema_changes.clone(),
             },
         );
+    }
+
+    fn load_schema_flags_best_effort(&mut self) {
+        let mut flags = HashMap::new();
+        if let Some(disk) = load_json::<SchemaFlagsDisk>(&self.schema_flags_path()) {
+            if disk.format_version == SCHEMA_FLAGS_FORMAT_VERSION {
+                for entry in disk.tables {
+                    let key = TableKey {
+                        db: entry.db,
+                        table: entry.table,
+                    };
+                    let interned_columns = entry
+                        .interned_columns
+                        .into_iter()
+                        .filter(|name| !name.trim().is_empty())
+                        .collect::<HashSet<_>>();
+                    if !interned_columns.is_empty() {
+                        flags.insert(key, TableSchemaFlags { interned_columns });
+                    }
+                }
+            }
+        }
+
+        let mut normalized = HashMap::new();
+        let mut touched = false;
+        for (key, table_flags) in flags.into_iter() {
+            let Some(schema) = self
+                .catalog
+                .databases
+                .get(&key.db)
+                .and_then(|database| database.tables.get(&key.table))
+            else {
+                touched = true;
+                continue;
+            };
+
+            let mut interned_columns = HashSet::new();
+            for column in table_flags.interned_columns.into_iter() {
+                let Some(canonical) = canonical_schema_column_name(schema, &column) else {
+                    touched = true;
+                    continue;
+                };
+                if !interned_columns.insert(canonical.to_string()) {
+                    touched = true;
+                }
+            }
+
+            if interned_columns.is_empty() {
+                touched = true;
+                continue;
+            }
+            normalized.insert(key, TableSchemaFlags { interned_columns });
+        }
+
+        self.schema_flags = normalized;
+        if touched {
+            self.persist_schema_flags_best_effort();
+        }
+    }
+
+    fn persist_schema_flags_best_effort(&self) {
+        let mut tables = self
+            .schema_flags
+            .iter()
+            .filter_map(|(key, flags)| {
+                if flags.interned_columns.is_empty() {
+                    return None;
+                }
+                let mut interned_columns =
+                    flags.interned_columns.iter().cloned().collect::<Vec<_>>();
+                interned_columns.sort();
+                Some(TableSchemaFlagsEntry {
+                    db: key.db.clone(),
+                    table: key.table.clone(),
+                    interned_columns,
+                })
+            })
+            .collect::<Vec<_>>();
+        tables
+            .sort_by(|a, b| (a.db.clone(), a.table.clone()).cmp(&(b.db.clone(), b.table.clone())));
+        let _ = save_json(
+            &self.schema_flags_path(),
+            &SchemaFlagsDisk {
+                format_version: SCHEMA_FLAGS_FORMAT_VERSION,
+                tables,
+            },
+        );
+    }
+
+    fn column_is_interned(&self, key: &TableKey, column: &str) -> bool {
+        self.schema_flags
+            .get(key)
+            .map(|flags| flags.interned_columns.contains(column))
+            .unwrap_or(false)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn set_column_interned_flag(&mut self, key: &TableKey, column: &str, interned: bool) -> bool {
+        if interned {
+            let flags = self.schema_flags.entry(key.clone()).or_default();
+            flags.interned_columns.insert(column.to_string())
+        } else if let Some(flags) = self.schema_flags.get_mut(key) {
+            let removed = flags.interned_columns.remove(column);
+            if flags.interned_columns.is_empty() {
+                self.schema_flags.remove(key);
+            }
+            removed
+        } else {
+            false
+        }
+    }
+
+    fn rename_schema_flag_column(&mut self, key: &TableKey, old_name: &str, new_name: &str) {
+        let Some(flags) = self.schema_flags.get_mut(key) else {
+            return;
+        };
+        if !flags.interned_columns.remove(old_name) {
+            return;
+        }
+        flags.interned_columns.insert(new_name.to_string());
+    }
+
+    fn remove_schema_flag_column(&mut self, key: &TableKey, column_name: &str) {
+        let Some(flags) = self.schema_flags.get_mut(key) else {
+            return;
+        };
+        flags.interned_columns.remove(column_name);
+        if flags.interned_columns.is_empty() {
+            self.schema_flags.remove(key);
+        }
     }
 
     fn emit_change(&mut self, db: &str, table: &str, op: &str, pk: Option<Vec<Lit>>) {
@@ -9002,6 +9286,343 @@ impl IndexAdvisor {
 // Query execution (subset)
 // -----------------------------
 
+#[derive(Debug, Clone)]
+enum InternedPredicatePlan {
+    Constant(Option<bool>),
+    Eq {
+        column: String,
+        value_id: ValueId,
+        negated: bool,
+    },
+    In {
+        column: String,
+        value_ids: HashSet<ValueId>,
+        saw_null: bool,
+    },
+    And(Vec<InternedPredicatePlan>),
+    Or(Vec<InternedPredicatePlan>),
+    Not(Box<InternedPredicatePlan>),
+}
+
+fn compile_interned_predicate_for_base(
+    engine: &Engine,
+    base: &BaseTableRef,
+    predicate: Option<&Expr>,
+    args: &[Lit],
+) -> Option<InternedPredicatePlan> {
+    let predicate = predicate?;
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if !engine.schema_flags.contains_key(&key) {
+        return None;
+    }
+    let (schema, _) = engine.get_table(base).ok()?;
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let mut accepted_aliases = vec![alias.as_str()];
+    if !base.table.eq_ignore_ascii_case(&alias) {
+        accepted_aliases.push(base.table.as_str());
+    }
+    compile_interned_predicate_expr(engine, predicate, schema, &key, &accepted_aliases, args)
+}
+
+fn compile_interned_predicate_for_table(
+    engine: &Engine,
+    key: &TableKey,
+    schema: &TableSchema,
+    predicate: &Expr,
+    args: &[Lit],
+) -> Option<InternedPredicatePlan> {
+    if !engine.schema_flags.contains_key(key) {
+        return None;
+    }
+    compile_interned_predicate_expr(engine, predicate, schema, key, &[], args)
+}
+
+fn compile_interned_predicate_expr(
+    engine: &Engine,
+    expr: &Expr,
+    schema: &TableSchema,
+    key: &TableKey,
+    accepted_aliases: &[&str],
+    args: &[Lit],
+) -> Option<InternedPredicatePlan> {
+    if let Some(value) = predicate_constant_truth(expr, args) {
+        return Some(InternedPredicatePlan::Constant(value));
+    }
+
+    let Expr::Op {
+        op,
+        a,
+        b,
+        args: vargs,
+        list,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+
+    match op.as_str() {
+        "and" => {
+            let items = if let Some(items) = vargs.as_ref() {
+                items.clone()
+            } else {
+                let mut items = Vec::new();
+                if let Some(left) = a.as_deref() {
+                    items.push(left.clone());
+                }
+                if let Some(right) = b.as_deref() {
+                    items.push(right.clone());
+                }
+                items
+            };
+            if items.is_empty() {
+                return None;
+            }
+            let plans = items
+                .iter()
+                .map(|item| {
+                    compile_interned_predicate_expr(
+                        engine,
+                        item,
+                        schema,
+                        key,
+                        accepted_aliases,
+                        args,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(InternedPredicatePlan::And(plans))
+        }
+        "or" => {
+            let items = if let Some(items) = vargs.as_ref() {
+                items.clone()
+            } else {
+                let mut items = Vec::new();
+                if let Some(left) = a.as_deref() {
+                    items.push(left.clone());
+                }
+                if let Some(right) = b.as_deref() {
+                    items.push(right.clone());
+                }
+                items
+            };
+            if items.is_empty() {
+                return None;
+            }
+            let plans = items
+                .iter()
+                .map(|item| {
+                    compile_interned_predicate_expr(
+                        engine,
+                        item,
+                        schema,
+                        key,
+                        accepted_aliases,
+                        args,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(InternedPredicatePlan::Or(plans))
+        }
+        "not" => Some(InternedPredicatePlan::Not(Box::new(
+            compile_interned_predicate_expr(
+                engine,
+                a.as_deref()?,
+                schema,
+                key,
+                accepted_aliases,
+                args,
+            )?,
+        ))),
+        "eq" | "ne" => {
+            let left_col = a.as_deref().and_then(|expr| {
+                resolve_interned_column_ref(engine, schema, key, accepted_aliases, expr)
+            });
+            let right_col = b.as_deref().and_then(|expr| {
+                resolve_interned_column_ref(engine, schema, key, accepted_aliases, expr)
+            });
+            let (column, value_expr) = match (left_col, right_col) {
+                (Some(column), None) => (column, b.as_deref()?),
+                (None, Some(column)) => (column, a.as_deref()?),
+                _ => return None,
+            };
+            let value = expr_const_value(value_expr, args)?;
+            if matches!(value, Lit::Null) {
+                return Some(InternedPredicatePlan::Constant(None));
+            }
+            let value_id = interned_value_id(&value)?;
+            Some(InternedPredicatePlan::Eq {
+                column,
+                value_id,
+                negated: op == "ne",
+            })
+        }
+        "in" => {
+            let column =
+                resolve_interned_column_ref(engine, schema, key, accepted_aliases, a.as_deref()?)?;
+            let items = list.as_ref()?;
+            let mut value_ids = HashSet::new();
+            let mut saw_null = false;
+            for item in items.iter() {
+                let value = expr_const_value(item, args)?;
+                if matches!(value, Lit::Null) {
+                    saw_null = true;
+                    continue;
+                }
+                value_ids.insert(interned_value_id(&value)?);
+            }
+            Some(InternedPredicatePlan::In {
+                column,
+                value_ids,
+                saw_null,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn resolve_interned_column_ref(
+    engine: &Engine,
+    schema: &TableSchema,
+    key: &TableKey,
+    accepted_aliases: &[&str],
+    expr: &Expr,
+) -> Option<String> {
+    let Expr::Col { col, table } = expr else {
+        return None;
+    };
+    if let Some(table_name) = table.as_ref() {
+        if accepted_aliases.is_empty()
+            || !accepted_aliases
+                .iter()
+                .any(|alias| table_name.eq_ignore_ascii_case(alias))
+        {
+            return None;
+        }
+    }
+    let canonical = canonical_schema_column_name(schema, col)?;
+    if !engine.column_is_interned(key, canonical) {
+        return None;
+    }
+    Some(canonical.to_string())
+}
+
+fn predicate_constant_truth(expr: &Expr, args: &[Lit]) -> Option<Option<bool>> {
+    match expr_const_value(expr, args)? {
+        Lit::Bool { v } => Some(Some(v)),
+        Lit::Null => Some(None),
+        _ => None,
+    }
+}
+
+fn compiled_interned_predicate_matches_row(
+    plan: &InternedPredicatePlan,
+    row: &RowObject,
+) -> Option<bool> {
+    compiled_interned_predicate_matches_lookup(plan, &mut |column| row.get(column).cloned())
+}
+
+fn compiled_interned_predicate_matches_lookup<F>(
+    plan: &InternedPredicatePlan,
+    lookup: &mut F,
+) -> Option<bool>
+where
+    F: FnMut(&str) -> Option<Lit>,
+{
+    eval_compiled_interned_predicate(plan, lookup)
+        .ok()
+        .map(|truth| truth.unwrap_or(false))
+}
+
+fn eval_compiled_interned_predicate<F>(
+    plan: &InternedPredicatePlan,
+    lookup: &mut F,
+) -> Result<Option<bool>, ()>
+where
+    F: FnMut(&str) -> Option<Lit>,
+{
+    match plan {
+        InternedPredicatePlan::Constant(value) => Ok(*value),
+        InternedPredicatePlan::Eq {
+            column,
+            value_id,
+            negated,
+        } => {
+            let value = lookup(column).ok_or(())?;
+            if matches!(value, Lit::Null) {
+                return Ok(None);
+            }
+            let row_id = interned_value_id(&value).ok_or(())?;
+            let matched = row_id == *value_id;
+            Ok(Some(if *negated { !matched } else { matched }))
+        }
+        InternedPredicatePlan::In {
+            column,
+            value_ids,
+            saw_null,
+        } => {
+            let value = lookup(column).ok_or(())?;
+            if matches!(value, Lit::Null) {
+                return Ok(None);
+            }
+            let row_id = interned_value_id(&value).ok_or(())?;
+            if value_ids.contains(&row_id) {
+                Ok(Some(true))
+            } else if *saw_null {
+                Ok(None)
+            } else {
+                Ok(Some(false))
+            }
+        }
+        InternedPredicatePlan::And(items) => {
+            let mut saw_null = false;
+            let mut needs_fallback = false;
+            for item in items.iter() {
+                match eval_compiled_interned_predicate(item, lookup) {
+                    Ok(Some(true)) => {}
+                    Ok(Some(false)) => return Ok(Some(false)),
+                    Ok(None) => saw_null = true,
+                    Err(()) => needs_fallback = true,
+                }
+            }
+            if needs_fallback {
+                Err(())
+            } else if saw_null {
+                Ok(None)
+            } else {
+                Ok(Some(true))
+            }
+        }
+        InternedPredicatePlan::Or(items) => {
+            let mut saw_null = false;
+            let mut needs_fallback = false;
+            for item in items.iter() {
+                match eval_compiled_interned_predicate(item, lookup) {
+                    Ok(Some(true)) => return Ok(Some(true)),
+                    Ok(Some(false)) => {}
+                    Ok(None) => saw_null = true,
+                    Err(()) => needs_fallback = true,
+                }
+            }
+            if needs_fallback {
+                Err(())
+            } else if saw_null {
+                Ok(None)
+            } else {
+                Ok(Some(false))
+            }
+        }
+        InternedPredicatePlan::Not(item) => match eval_compiled_interned_predicate(item, lookup) {
+            Ok(Some(value)) => Ok(Some(!value)),
+            Ok(None) => Ok(None),
+            Err(()) => Err(()),
+        },
+    }
+}
+
 fn index_prefilter_candidates(
     engine: &Engine,
     base: &BaseTableRef,
@@ -9039,6 +9660,194 @@ fn index_prefilter_candidates(
     }
 
     secondary_index_candidates(schema, tdata, &filters)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn try_execute_select_base_table(
+    engine: &Engine,
+    query: &Query,
+    base: &BaseTableRef,
+    distinct: bool,
+    projection: &[SelectItem],
+    predicate: Option<&Expr>,
+    args: &[Lit],
+    as_of_ms: Option<u64>,
+) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if engine.views.contains_key(&key) || engine.oblivious_policy_for(base).level != "off" {
+        return Ok(None);
+    }
+
+    let (schema, tdata) = engine.get_table(base)?;
+    let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
+    let columns = projection_columns(projection);
+    let order = &query.order_by;
+    let predicate_plan = compile_interned_predicate_for_base(engine, base, predicate, args);
+
+    let has_limit = query
+        .limit
+        .as_ref()
+        .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
+    if !distinct {
+        if let (Some((limit, offset)), Some(hint)) =
+            (has_limit, vector_order_prefilter_hint(order, args))
+        {
+            let required = limit.saturating_add(offset);
+            if required > 0 {
+                if let Some(candidates) =
+                    vector_prefilter_candidates(schema, tdata, &hint.column, &hint.query_vec)
+                {
+                    if candidates.len() as u64 >= required {
+                        let mut rows = Vec::new();
+                        let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+                        let mut rows_scanned = 0u64;
+                        for idx in candidates.iter() {
+                            let Some(entry) = tdata.rows.get(*idx) else {
+                                continue;
+                            };
+                            if !row_visible_at(entry, as_of_ms) {
+                                continue;
+                            }
+                            rows_scanned = rows_scanned.saturating_add(1);
+
+                            let mut ctx = None;
+                            if let Some(pred) = predicate {
+                                if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                                    compiled_interned_predicate_matches_row(plan, &entry.row)
+                                }) {
+                                    if !matches {
+                                        continue;
+                                    }
+                                } else {
+                                    let built = row_ctx_from_row(&alias, &entry.row);
+                                    if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)?
+                                    {
+                                        continue;
+                                    }
+                                    ctx = Some(built);
+                                }
+                            }
+
+                            let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
+                            let mut out_row = Vec::new();
+                            for item in projection.iter() {
+                                out_row.push(eval_expr(
+                                    &item.expr,
+                                    &BTreeMap::new(),
+                                    Some(&ctx),
+                                    args,
+                                )?);
+                            }
+                            if order.is_empty() {
+                                rows.push(out_row);
+                            } else {
+                                let keys = eval_order_keys(order, &ctx, args)?;
+                                items.push((keys, out_row));
+                            }
+                        }
+
+                        if !order.is_empty() {
+                            items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+                            rows = items.into_iter().map(|(_, row)| row).collect();
+                        }
+
+                        if let Some(limit) = &query.limit {
+                            let off = limit.offset.unwrap_or(0) as usize;
+                            let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+                            let end = (off + lim).min(rows.len());
+                            rows = if off >= rows.len() {
+                                Vec::new()
+                            } else {
+                                rows[off..end].to_vec()
+                            };
+                        }
+
+                        return Ok(Some((columns, rows, rows_scanned)));
+                    }
+                }
+            }
+        }
+    }
+
+    let candidate_rows = index_prefilter_candidates(engine, base, predicate, args);
+    let mut rows = Vec::new();
+    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
+    let mut rows_scanned = 0u64;
+    let mut push_entry = |entry: &RowEntry| -> anyhow::Result<()> {
+        if !row_visible_at(entry, as_of_ms) {
+            return Ok(());
+        }
+        rows_scanned = rows_scanned.saturating_add(1);
+
+        let mut ctx = None;
+        if let Some(pred) = predicate {
+            if let Some(matches) = predicate_plan
+                .as_ref()
+                .and_then(|plan| compiled_interned_predicate_matches_row(plan, &entry.row))
+            {
+                if !matches {
+                    return Ok(());
+                }
+            } else {
+                let built = row_ctx_from_row(&alias, &entry.row);
+                if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
+                    return Ok(());
+                }
+                ctx = Some(built);
+            }
+        }
+
+        let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
+        let mut out_row = Vec::new();
+        for item in projection.iter() {
+            out_row.push(eval_expr(&item.expr, &BTreeMap::new(), Some(&ctx), args)?);
+        }
+        if order.is_empty() {
+            rows.push(out_row);
+        } else {
+            let keys = eval_order_keys(order, &ctx, args)?;
+            items.push((keys, out_row));
+        }
+        Ok(())
+    };
+
+    if let Some(indices) = candidate_rows {
+        for idx in indices.iter() {
+            let Some(entry) = tdata.rows.get(*idx) else {
+                continue;
+            };
+            push_entry(entry)?;
+        }
+    } else {
+        for entry in tdata.rows.iter() {
+            push_entry(entry)?;
+        }
+    }
+
+    if !order.is_empty() {
+        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
+        rows = items.into_iter().map(|(_, row)| row).collect();
+    }
+
+    if distinct {
+        rows = dedup_select_rows(rows);
+    }
+
+    if let Some(limit) = &query.limit {
+        let off = limit.offset.unwrap_or(0) as usize;
+        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
+        let end = (off + lim).min(rows.len());
+        rows = if off >= rows.len() {
+            Vec::new()
+        } else {
+            rows[off..end].to_vec()
+        };
+    }
+
+    Ok(Some((columns, rows, rows_scanned)))
 }
 
 fn execute_select(
@@ -9085,104 +9894,23 @@ fn execute_select(
 
     if from.len() == 1 {
         if let TableRef::Base(base) = &from[0] {
-            let has_limit = query
-                .limit
-                .as_ref()
-                .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
-            if !distinct.unwrap_or(false) {
-                if let (Some((limit, offset)), Some(hint)) = (
-                    has_limit,
-                    vector_order_prefilter_hint(&query.order_by, args),
-                ) {
-                    let key = TableKey {
-                        db: base.db.clone(),
-                        table: base.table.clone(),
-                    };
-                    if !engine.views.contains_key(&key)
-                        && engine.oblivious_policy_for(base).level == "off"
-                    {
-                        let required = limit.saturating_add(offset);
-                        if required > 0 {
-                            let (schema, tdata) = engine.get_table(base)?;
-                            if let Some(candidates) = vector_prefilter_candidates(
-                                schema,
-                                tdata,
-                                &hint.column,
-                                &hint.query_vec,
-                            ) {
-                                if candidates.len() as u64 >= required {
-                                    let alias =
-                                        base.r#as.clone().unwrap_or_else(|| base.table.clone());
-                                    let columns = projection_columns(projection);
-                                    let order = &query.order_by;
-                                    let mut rows = Vec::new();
-                                    let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
-                                    let mut rows_scanned = 0u64;
-                                    for idx in candidates.iter() {
-                                        let Some(entry) = tdata.rows.get(*idx) else {
-                                            continue;
-                                        };
-                                        if !row_visible_at(entry, as_of_ms) {
-                                            continue;
-                                        }
-                                        rows_scanned = rows_scanned.saturating_add(1);
-                                        let ctx = row_ctx_from_row(&alias, &entry.row);
-                                        if let Some(pred) = r#where {
-                                            if !eval_predicate(
-                                                pred,
-                                                &BTreeMap::new(),
-                                                Some(&ctx),
-                                                args,
-                                            )? {
-                                                continue;
-                                            }
-                                        }
-                                        let mut out_row = Vec::new();
-                                        for item in projection.iter() {
-                                            out_row.push(eval_expr(
-                                                &item.expr,
-                                                &BTreeMap::new(),
-                                                Some(&ctx),
-                                                args,
-                                            )?);
-                                        }
-                                        if order.is_empty() {
-                                            rows.push(out_row);
-                                        } else {
-                                            let keys = eval_order_keys(order, &ctx, args)?;
-                                            items.push((keys, out_row));
-                                        }
-                                    }
-
-                                    if !order.is_empty() {
-                                        items.sort_by(|a, b| compare_order(order, &a.0, &b.0));
-                                        rows = items.into_iter().map(|(_, row)| row).collect();
-                                    }
-
-                                    if let Some(limit) = &query.limit {
-                                        let off = limit.offset.unwrap_or(0) as usize;
-                                        let lim = limit.limit.unwrap_or(rows.len() as u64) as usize;
-                                        let end = (off + lim).min(rows.len());
-                                        rows = if off >= rows.len() {
-                                            Vec::new()
-                                        } else {
-                                            rows[off..end].to_vec()
-                                        };
-                                    }
-
-                                    if let Some(info) = snapshot_info.as_ref() {
-                                        engine.observe_and_plan_snapshot(info, rows_scanned);
-                                    }
-                                    if !index_infos.is_empty() {
-                                        engine.observe_index_advisor(&index_infos, rows_scanned);
-                                    }
-
-                                    return Ok((columns, rows));
-                                }
-                            }
-                        }
-                    }
+            if let Some((columns, rows, rows_scanned)) = try_execute_select_base_table(
+                engine,
+                query,
+                base,
+                distinct.unwrap_or(false),
+                projection,
+                r#where.as_ref(),
+                args,
+                as_of_ms,
+            )? {
+                if let Some(info) = snapshot_info.as_ref() {
+                    engine.observe_and_plan_snapshot(info, rows_scanned);
                 }
+                if !index_infos.is_empty() {
+                    engine.observe_index_advisor(&index_infos, rows_scanned);
+                }
+                return Ok((columns, rows));
             }
         }
     }
@@ -9424,6 +10152,7 @@ fn execute_select_with_keys(
 
     // Columns (same as execute_select)
     let columns = projection_columns(projection);
+    let predicate_plan = compile_interned_predicate_for_base(engine, base, r#where.as_ref(), args);
 
     let order = &query.order_by;
     let candidates = query
@@ -9457,18 +10186,25 @@ fn execute_select_with_keys(
         }
         rows_scanned = rows_scanned.saturating_add(1);
 
-        let mut ctx = RowCtx::new();
-        for (k, v) in entry.row.iter() {
-            ctx.insert(format!("{}.{}", alias, k), v.clone());
-        }
-
-        // WHERE
+        let mut ctx = None;
         if let Some(pred) = r#where {
-            if !eval_predicate(pred, &BTreeMap::new(), Some(&ctx), args)? {
-                return Ok(());
+            if let Some(matches) = predicate_plan
+                .as_ref()
+                .and_then(|plan| compiled_interned_predicate_matches_row(plan, &entry.row))
+            {
+                if !matches {
+                    return Ok(());
+                }
+            } else {
+                let built = row_ctx_from_row(&alias, &entry.row);
+                if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
+                    return Ok(());
+                }
+                ctx = Some(built);
             }
         }
 
+        let ctx = ctx.unwrap_or_else(|| row_ctx_from_row(&alias, &entry.row));
         let pk = extract_pk(schema, &entry.row)?;
 
         // Projection
@@ -9676,17 +10412,33 @@ fn try_execute_select_snapshot(
     let Some(scan) = snapshot_scan_for_query(engine, query, args, info, as_of_ms, false) else {
         return Ok(None);
     };
+    let predicate_plan =
+        compile_interned_predicate_for_base(engine, &info.base, r#where.as_ref(), args);
 
     let order = &query.order_by;
     let mut rows = Vec::new();
     let mut items: Vec<(Vec<Lit>, Vec<Lit>)> = Vec::new();
     for row_idx in 0..scan.row_count {
-        let ctx = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+        let mut ctx = None;
         if let Some(pred) = r#where.as_ref() {
-            if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
-                continue;
+            if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                compiled_interned_predicate_matches_lookup(plan, &mut |column| {
+                    snapshot_scan_value(&scan, row_idx, column)
+                })
+            }) {
+                if !matches {
+                    continue;
+                }
+            } else {
+                let built = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+                if !eval_predicate(pred, &RowObject::new(), Some(&built), args)? {
+                    continue;
+                }
+                ctx = Some(built);
             }
         }
+
+        let ctx = ctx.unwrap_or_else(|| snapshot_scan_row_ctx(&info.alias, &scan, row_idx));
 
         let mut out_row = Vec::new();
         for item in projection.iter() {
@@ -9741,16 +10493,32 @@ fn try_execute_select_with_keys_snapshot(
     let Some(scan) = snapshot_scan_for_query(engine, query, args, info, as_of_ms, true) else {
         return Ok(None);
     };
+    let predicate_plan =
+        compile_interned_predicate_for_base(engine, &info.base, r#where.as_ref(), args);
 
     let order = &query.order_by;
     let mut items: Vec<(Vec<Lit>, Vec<Lit>, Vec<Lit>)> = Vec::new();
     for row_idx in 0..scan.row_count {
-        let ctx = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+        let mut ctx = None;
         if let Some(pred) = r#where.as_ref() {
-            if !eval_predicate(pred, &RowObject::new(), Some(&ctx), args)? {
-                continue;
+            if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                compiled_interned_predicate_matches_lookup(plan, &mut |column| {
+                    snapshot_scan_value(&scan, row_idx, column)
+                })
+            }) {
+                if !matches {
+                    continue;
+                }
+            } else {
+                let built = snapshot_scan_row_ctx(&info.alias, &scan, row_idx);
+                if !eval_predicate(pred, &RowObject::new(), Some(&built), args)? {
+                    continue;
+                }
+                ctx = Some(built);
             }
         }
+
+        let ctx = ctx.unwrap_or_else(|| snapshot_scan_row_ctx(&info.alias, &scan, row_idx));
 
         let mut out_row = Vec::new();
         for item in projection.iter() {
@@ -10206,15 +10974,17 @@ fn snapshot_scan_row_ctx(alias: &str, scan: &SnapshotColumnScan, row_idx: usize)
     ctx
 }
 
+fn snapshot_scan_value(scan: &SnapshotColumnScan, row_idx: usize, column: &str) -> Option<Lit> {
+    scan.column_values
+        .get(column)
+        .and_then(|values| values.get(row_idx))
+        .cloned()
+}
+
 fn snapshot_scan_pk(scan: &SnapshotColumnScan, row_idx: usize) -> Vec<Lit> {
     let mut out = Vec::new();
     for col in scan.pk_columns.iter() {
-        let value = scan
-            .column_values
-            .get(col)
-            .and_then(|values| values.get(row_idx))
-            .cloned()
-            .unwrap_or(Lit::Null);
+        let value = snapshot_scan_value(scan, row_idx, col).unwrap_or(Lit::Null);
         out.push(value);
     }
     out
@@ -16807,6 +17577,10 @@ fn valueid_of_lit(lit: &Lit) -> anyhow::Result<String> {
     Ok(hex16(&id))
 }
 
+fn interned_value_id(lit: &Lit) -> Option<ValueId> {
+    value_store_item(lit).map(|item| item.id)
+}
+
 fn row_to_object(cols: &[ColumnMeta], row: &[Lit]) -> anyhow::Result<serde_json::Value> {
     let mut obj = serde_json::Map::new();
     for (i, c) in cols.iter().enumerate() {
@@ -22959,6 +23733,14 @@ fn collect_tables_from_ref(tref: &TableRef, out: &mut Vec<(String, String)>) {
 fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn canonical_schema_column_name<'a>(schema: &'a TableSchema, column: &str) -> Option<&'a str> {
+    schema
+        .columns
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(column))
+        .map(|candidate| candidate.name.as_str())
 }
 
 fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
@@ -32738,6 +33520,324 @@ mod tests {
     }
 
     #[test]
+    fn schema_interned_flags_persist_rename_and_drop() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_interned_flags");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.schema_set_column_interned(&table, "name", true)?;
+        let describe = engine.describe_table(&table.db, &table.table)?;
+        let columns = describe["columns"].as_array().unwrap();
+        assert!(columns
+            .iter()
+            .find(|column| column["name"] == "name")
+            .and_then(|column| column["interned"].as_bool())
+            .unwrap_or(false));
+        assert!(!columns
+            .iter()
+            .find(|column| column["name"] == "city")
+            .and_then(|column| column["interned"].as_bool())
+            .unwrap_or(true));
+
+        engine.schema_rename_mysql_compat_column(&table, "name", "handle")?;
+        assert!(engine.column_is_interned(&key, "handle"));
+        assert!(!engine.column_is_interned(&key, "name"));
+
+        engine.checkpoint_for_shutdown()?;
+        let flags_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("schema_flags.json"))?)?;
+        assert_eq!(
+            flags_disk["format_version"].as_u64(),
+            Some(SCHEMA_FLAGS_FORMAT_VERSION as u64)
+        );
+        assert_eq!(
+            flags_disk["tables"][0]["interned_columns"][0].as_str(),
+            Some("handle")
+        );
+
+        let mut reopened = Engine::open(&dir)?;
+        let reopened_describe = reopened.describe_table(&table.db, &table.table)?;
+        let reopened_columns = reopened_describe["columns"].as_array().unwrap();
+        assert!(reopened_columns
+            .iter()
+            .find(|column| column["name"] == "handle")
+            .and_then(|column| column["interned"].as_bool())
+            .unwrap_or(false));
+
+        reopened.schema_drop_mysql_compat_column(&table, "handle")?;
+        assert!(!reopened.schema_flags.contains_key(&key));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn interned_predicate_plan_requires_flag_and_supports_eq_and_in() -> anyhow::Result<()> {
+        let dir = temp_dir("interned_predicate_plan");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let eq_param = eq_expr(
+            Expr::Col {
+                col: "name".to_string(),
+                table: None,
+            },
+            Expr::Param { param: 0 },
+        );
+        assert!(compile_interned_predicate_for_base(
+            &engine,
+            &table,
+            Some(&eq_param),
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+        )
+        .is_none());
+
+        engine.schema_set_column_interned(&table, "name", true)?;
+
+        let eq_plan = compile_interned_predicate_for_base(
+            &engine,
+            &table,
+            Some(&eq_param),
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+        )
+        .expect("eq predicate should compile for interned column");
+        let alice = row(&[(
+            "name",
+            Lit::Str {
+                v: "Alice".to_string(),
+            },
+        )]);
+        let bob = row(&[(
+            "name",
+            Lit::Str {
+                v: "Bob".to_string(),
+            },
+        )]);
+        assert_eq!(
+            compiled_interned_predicate_matches_row(&eq_plan, &alice),
+            Some(true)
+        );
+        assert_eq!(
+            compiled_interned_predicate_matches_row(&eq_plan, &bob),
+            Some(false)
+        );
+
+        let in_predicate = Expr::Op {
+            op: "in".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "name".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: Some(vec![
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Alice".to_string(),
+                    },
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Carol".to_string(),
+                    },
+                },
+                Expr::Lit { lit: Lit::Null },
+            ]),
+            lo: None,
+            hi: None,
+        };
+        let in_plan =
+            compile_interned_predicate_for_base(&engine, &table, Some(&in_predicate), &[])
+                .expect("in predicate should compile for interned column");
+        assert_eq!(
+            compiled_interned_predicate_matches_row(&in_plan, &alice),
+            Some(true)
+        );
+        assert_eq!(
+            compiled_interned_predicate_matches_row(&in_plan, &bob),
+            Some(false)
+        );
+
+        let like_predicate = Expr::Op {
+            op: "like".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "name".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::Str {
+                    v: "A%".to_string(),
+                },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        assert!(
+            compile_interned_predicate_for_base(&engine, &table, Some(&like_predicate), &[])
+                .is_none()
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn execute_select_works_after_reloading_interned_schema_flags() -> anyhow::Result<()> {
+        let dir = temp_dir("interned_select_reload");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Alice".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "name",
+                        Lit::Str {
+                            v: "Bob".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_set_column_interned(&table, "name", true)?;
+        engine.checkpoint_for_shutdown()?;
+
+        let reopened = Engine::open(&dir)?;
+        let query = base_query(
+            &table.db,
+            &table.table,
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "name".to_string(),
+                    table: None,
+                },
+                Expr::Param { param: 0 },
+            )),
+        );
+
+        let (columns, rows) = execute_select(
+            &reopened,
+            &query,
+            &[Lit::Str {
+                v: "Alice".to_string(),
+            }],
+            None,
+        )?;
+        assert_eq!(columns.len(), 1);
+        assert_eq!(rows, vec![vec![Lit::U64 { v: 1 }]]);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
     fn history_gc_retains_pre_t180_tombstones() -> anyhow::Result<()> {
         let dir = temp_dir("history_gc_pre_t180");
         let mut engine = Engine::open(&dir)?;

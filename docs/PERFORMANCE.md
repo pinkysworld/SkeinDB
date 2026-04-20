@@ -57,6 +57,19 @@ Benchmarks should report:
 - memory bandwidth (optional)
 - p95 latency improvements
 
+### 1.5 Prototype status
+
+Current prototype coverage:
+- interned-column schema metadata persists in `data/schema_flags.json`
+- `schema_set_column_interned(...)` toggles the flag and `describe_table(...)` reports it per column
+- single-table scan paths precompile ValueID-safe predicates over interned columns and compare ValueIDs for `eq`, `ne`, and `in`
+- unsupported operators or non-interned columns fall back to the normal expression evaluator
+
+Still open:
+- PF03 late materialization
+- PF04 vectorized batches
+- PF05 MVCC visible-version cache
+
 ---
 
 ## 2) Vectorized execution batches
@@ -104,8 +117,8 @@ This is safe if the cache is validated (begin/end ts check) before use.
 
 ## 4) Backlog
 
-- PF01: Schema flag for interned columns
-- PF02: Executor support for ValueID-safe ops (eq, in)
+- PF01: Schema flag for interned columns (implemented via `schema_flags.json`)
+- PF02: Executor support for ValueID-safe ops (implemented for `eq`, `ne`, and `in` on single-table scan paths)
 - PF03: Late materialization (decode only projected columns)
 - PF04: Batch execution framework (scan->filter->project)
 - PF05: Visible Version Index cache

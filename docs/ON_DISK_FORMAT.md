@@ -31,6 +31,7 @@ data/
   views.json                  (prototype materialized views, format v1)
   schema_versions.json        (prototype schema versions, format v1)
   schema_changes.json         (prototype schema change log, format v1)
+  schema_flags.json           (prototype schema flags, format v1)
   changes.json                (prototype retained CDC change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v2)
@@ -426,7 +427,32 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.4 wasm_catalog.json
+### 11.4 schema_flags.json
+
+Prototype schema metadata for opt-in execution hints that should survive reopen.
+
+Format:
+
+```json
+{
+  "format_version": 1,
+  "tables": [
+    {
+      "db": "app",
+      "table": "users",
+      "interned_columns": ["email", "city"]
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Added in v0.3 as an optional metadata file for Phase 15 T150.
+- Missing files mean no interned-column flags are active.
+- Unknown `format_version` values are ignored by the current loader.
+- Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.
+
+### 11.5 wasm_catalog.json
 
 Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
 embedded here; they live in the `ValueStore` and are referenced by `value_id`.
@@ -467,7 +493,7 @@ Compatibility notes:
   stored separately in `.vseg` data managed by `ValueStore`.
 - Unknown `format_version` values are rejected by the current core loader.
 
-### 11.5 tables/<db>/<table>.json (format v2)
+### 11.6 tables/<db>/<table>.json (format v2)
 
 Prototype row persistence for `tables/<db>/<table>.json` now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.
@@ -518,7 +544,7 @@ Rules:
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 
-### 11.6 tables/<db>/<table>.rseg (prototype segment container v1)
+### 11.7 tables/<db>/<table>.rseg (prototype segment container v1)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
 
@@ -543,7 +569,7 @@ Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
 - If both files are missing or unreadable, the table loads as empty.
 
-### 11.7 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
+### 11.8 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
 
 Optional persisted cache for the engine's reusable secondary-index state.
 

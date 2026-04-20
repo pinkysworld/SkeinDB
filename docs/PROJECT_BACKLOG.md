@@ -120,7 +120,7 @@ Phase 0 verification checklist:
 - [x] T145: Sharding metadata + router prototype (single-shard txns)
 
 ## Phase 15 - Additional performance improvements
-- [ ] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)
+- [x] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)
 - [ ] T151: Late materialization (decode only projected columns)
 - [ ] T152: Batch (vectorized) scan/filter/project pipeline
 - [ ] T153: MVCC Visible Version Index cache
