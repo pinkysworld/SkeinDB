@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "crc32c",
@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-ir"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2076,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "skeindb-skeinql"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

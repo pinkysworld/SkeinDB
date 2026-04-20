@@ -1948,6 +1948,10 @@ pub struct ClusterShardMoveResult {
     pub ok: bool,
     pub dry_run: bool,
     pub shard: ClusterShardInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ClusterShardManifestInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ClusterShardMoveProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1962,6 +1966,40 @@ pub struct ClusterShardMovePlan {
     pub shard_id: String,
     pub from_node_id: String,
     pub to_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ClusterShardManifestInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ClusterShardMoveProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardManifestInfo {
+    pub object_count: u64,
+    pub total_bytes: u64,
+    pub missing_object_count: u64,
+    pub missing_bytes: u64,
+    pub already_present_object_count: u64,
+    pub already_present_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterShardMoveProgress {
+    pub stage: String,
+    pub transfer_required: bool,
+    pub source_node_id: String,
+    pub destination_node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_rpc_url: Option<String>,
+    pub requested_object_count: u64,
+    pub pulled_object_count: u64,
+    pub stored_object_count: u64,
+    pub batches: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalid_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_missing: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_failed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

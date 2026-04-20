@@ -56,7 +56,9 @@ use skeindb_skeinql::{
     RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
 
-use crate::engine::{CdcPollResult, ChangeEvent, ColumnSchema, Engine, Subscriptions};
+use crate::engine::{
+    CdcPollResult, ChangeEvent, ColumnSchema, Engine, ObjectManifest, Subscriptions,
+};
 use crate::pg_wire;
 use crate::quic;
 
@@ -14877,9 +14879,13 @@ pub(crate) async fn handle_rpc(
                     let p: ClusterShardCreateParams = parse_params(params.clone())?;
                     cluster_shard_create(state, p)
                 }
+                "cluster.shard.manifest" => {
+                    let p: ClusterShardManifestParams = parse_params(params.clone())?;
+                    cluster_shard_manifest(state, p).await
+                }
                 "cluster.shard.move" => {
                     let p: ClusterShardMoveParams = parse_params(params.clone())?;
-                    cluster_shard_move(state, p)
+                    cluster_shard_move(state, p).await
                 }
                 "cluster.shard.rebalance" => {
                     let p = if params.is_some() {
@@ -14890,7 +14896,7 @@ pub(crate) async fn handle_rpc(
                             dry_run: None,
                         }
                     };
-                    cluster_shard_rebalance(state, p)
+                    cluster_shard_rebalance(state, p).await
                 }
                 // --------------------
                 // objects.* (CAS object pull – CR02)
@@ -16984,18 +16990,377 @@ fn cluster_shard_create(
     Ok(serde_json::json!({"ok": true, "shard": shard}))
 }
 
-fn cluster_shard_move(state: &AppState, params: ClusterShardMoveParams) -> Result<Value, RpcError> {
-    let now = now_unix_ms_u64();
-    let moved = {
-        let mut cluster = state.cluster.lock().unwrap();
-        if !cluster.nodes.iter().any(|n| n.node_id == params.to_node_id) {
-            return Err(RpcError::new("not_found", "destination node not found"));
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ClusterShardManifestParams {
+    db: String,
+    #[serde(default)]
+    table: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ShardObjectManifest {
+    ids: Vec<String>,
+    bytes_by_id: HashMap<String, u64>,
+    total_bytes: u64,
+}
+
+fn shard_object_manifest_from_engine(manifest: ObjectManifest) -> ShardObjectManifest {
+    let mut ids = Vec::with_capacity(manifest.entries.len());
+    let mut bytes_by_id = HashMap::with_capacity(manifest.entries.len());
+    for entry in manifest.entries {
+        let id = value_id_to_hex(&entry.id);
+        bytes_by_id.insert(id.clone(), entry.bytes);
+        ids.push(id);
+    }
+    ShardObjectManifest {
+        ids,
+        bytes_by_id,
+        total_bytes: manifest.total_bytes,
+    }
+}
+
+async fn cluster_shard_manifest(
+    state: &AppState,
+    params: ClusterShardManifestParams,
+) -> Result<Value, RpcError> {
+    let eng = state.engine.read().await;
+    let manifest = eng
+        .shard_object_manifest(&params.db, params.table.as_deref())
+        .map_err(|err| {
+            let message = err.to_string();
+            let code = if message.contains("not found") {
+                "not_found"
+            } else {
+                "internal"
+            };
+            RpcError::new(code, message)
+        })?;
+    drop(eng);
+
+    let manifest = shard_object_manifest_from_engine(manifest);
+    let objects = manifest
+        .ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "bytes": manifest.bytes_by_id.get(id).copied().unwrap_or(0),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "ok": true,
+        "object_count": manifest.ids.len(),
+        "total_bytes": manifest.total_bytes,
+        "objects": objects,
+    }))
+}
+
+async fn call_remote_rpc_result(
+    rpc_url: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|err| RpcError::new("transport_error", err.to_string()))?;
+    let url = format!("{}/api/v1/rpc", rpc_url.trim_end_matches('/'));
+    let payload = serde_json::json!({
+        "skeinql": SKEINQL_VERSION,
+        "id": format!("remote:{}", method),
+        "method": method,
+        "params": params,
+    });
+
+    let mut req = client
+        .post(&url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
+        .json(&payload);
+    if let Ok(token) = std::env::var("SKEINDB_TOKEN") {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|err| RpcError::new("transport_error", format!("{} => {}", url, err)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(RpcError::new(
+            "transport_error",
+            format!("{} => {}", url, status),
+        ));
+    }
+
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|err| RpcError::new("invalid_response", err.to_string()))?;
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = body
+            .get("error")
+            .and_then(|v| v.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("remote_error");
+        let message = body
+            .get("error")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("remote rpc failed");
+        return Err(RpcError::new(code, message));
+    }
+
+    body.get("result").cloned().ok_or_else(|| {
+        RpcError::new(
+            "invalid_response",
+            format!("remote {} returned no result", method),
+        )
+    })
+}
+
+fn parse_shard_manifest_rpc_result(result: &Value) -> Result<ShardObjectManifest, RpcError> {
+    let objects = result
+        .get("objects")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError::new("invalid_response", "manifest result missing objects"))?;
+    let mut ids = Vec::with_capacity(objects.len());
+    let mut bytes_by_id = HashMap::with_capacity(objects.len());
+    let mut total_bytes = 0u64;
+
+    for object in objects {
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if id.is_empty() {
+            return Err(RpcError::new(
+                "invalid_response",
+                "manifest object missing id",
+            ));
         }
+        let bytes = object.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+        if bytes_by_id.insert(id.clone(), bytes).is_none() {
+            ids.push(id);
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+    }
+    ids.sort();
+
+    Ok(ShardObjectManifest {
+        ids,
+        bytes_by_id,
+        total_bytes: result
+            .get("total_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(total_bytes),
+    })
+}
+
+fn parse_string_array_field(result: &Value, field: &str) -> Vec<String> {
+    result
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn sum_manifest_bytes(manifest: &ShardObjectManifest, ids: &[String]) -> u64 {
+    ids.iter()
+        .filter_map(|id| manifest.bytes_by_id.get(id))
+        .copied()
+        .sum()
+}
+
+fn summarize_manifest_transfer(
+    manifest: &ShardObjectManifest,
+    missing_ids: &[String],
+) -> (Vec<String>, u64, u64) {
+    let missing_set: HashSet<&str> = missing_ids.iter().map(String::as_str).collect();
+    let mut present_ids = Vec::new();
+    for id in manifest.ids.iter() {
+        if !missing_set.contains(id.as_str()) {
+            present_ids.push(id.clone());
+        }
+    }
+    let missing_bytes = sum_manifest_bytes(manifest, missing_ids);
+    let present_bytes = manifest.total_bytes.saturating_sub(missing_bytes);
+    (present_ids, missing_bytes, present_bytes)
+}
+
+fn shard_manifest_summary_json(
+    manifest: &ShardObjectManifest,
+    present_ids: &[String],
+    missing_ids: &[String],
+) -> Value {
+    let missing_bytes = sum_manifest_bytes(manifest, missing_ids);
+    serde_json::json!({
+        "object_count": manifest.ids.len(),
+        "total_bytes": manifest.total_bytes,
+        "missing_object_count": missing_ids.len(),
+        "missing_bytes": missing_bytes,
+        "already_present_object_count": present_ids.len(),
+        "already_present_bytes": manifest.total_bytes.saturating_sub(missing_bytes),
+    })
+}
+
+fn shard_move_progress_json(
+    stage: &str,
+    source_node_id: &str,
+    destination_node_id: &str,
+    source_rpc_url: Option<&str>,
+    missing_ids: &[String],
+    pull_result: Option<&Value>,
+) -> Value {
+    serde_json::json!({
+        "stage": stage,
+        "transfer_required": !missing_ids.is_empty(),
+        "source_node_id": source_node_id,
+        "destination_node_id": destination_node_id,
+        "source_rpc_url": source_rpc_url,
+        "requested_object_count": missing_ids.len(),
+        "pulled_object_count": pull_result
+            .and_then(|value| value.get("fetched_objects"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "stored_object_count": pull_result
+            .and_then(|value| value.get("stored"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "batches": pull_result
+            .and_then(|value| value.get("batches"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "invalid_ids": pull_result
+            .map(|value| parse_string_array_field(value, "invalid_ids"))
+            .unwrap_or_default(),
+        "remote_missing": pull_result
+            .map(|value| parse_string_array_field(value, "remote_missing"))
+            .unwrap_or_default(),
+        "verification_failed": pull_result
+            .map(|value| parse_string_array_field(value, "verification_failed"))
+            .unwrap_or_default(),
+    })
+}
+
+async fn resolve_shard_object_manifest(
+    state: &AppState,
+    source_node_id: &str,
+    source_rpc_url: Option<&str>,
+    db: &str,
+    table: Option<&str>,
+) -> Result<ShardObjectManifest, RpcError> {
+    let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+    if source_node_id == local_node_id {
+        let eng = state.engine.read().await;
+        let manifest = eng.shard_object_manifest(db, table).map_err(|err| {
+            let message = err.to_string();
+            let code = if message.contains("not found") {
+                "not_found"
+            } else {
+                "internal"
+            };
+            RpcError::new(code, message)
+        })?;
+        drop(eng);
+        return Ok(shard_object_manifest_from_engine(manifest));
+    }
+
+    let rpc_url = source_rpc_url
+        .ok_or_else(|| RpcError::new("not_found", "source node rpc url unavailable"))?;
+    let result = call_remote_rpc_result(
+        rpc_url,
+        "cluster.shard.manifest",
+        serde_json::json!({
+            "db": db,
+            "table": table,
+        }),
+    )
+    .await?;
+    parse_shard_manifest_rpc_result(&result)
+}
+
+async fn execute_destination_objects_pull(
+    state: &AppState,
+    destination_node_id: &str,
+    destination_rpc_url: Option<&str>,
+    source_rpc_url: &str,
+    missing_ids: &[String],
+) -> Result<Value, RpcError> {
+    let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+    if missing_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "batches": 0,
+            "fetched_objects": 0,
+            "stored": 0,
+            "invalid_ids": [],
+            "remote_missing": [],
+            "verification_failed": [],
+        }));
+    }
+
+    if destination_node_id == local_node_id {
+        return objects_pull(
+            state,
+            ObjectsPullParams {
+                source_rpc_url: source_rpc_url.to_string(),
+                ids: missing_ids.to_vec(),
+                batch_size: None,
+            },
+        )
+        .await;
+    }
+
+    let rpc_url = destination_rpc_url
+        .ok_or_else(|| RpcError::new("not_found", "destination node rpc url unavailable"))?;
+    call_remote_rpc_result(
+        rpc_url,
+        "objects.pull",
+        serde_json::json!({
+            "source_rpc_url": source_rpc_url,
+            "ids": missing_ids,
+        }),
+    )
+    .await
+}
+
+async fn cluster_shard_move(
+    state: &AppState,
+    params: ClusterShardMoveParams,
+) -> Result<Value, RpcError> {
+    let now = now_unix_ms_u64();
+    let dry_run = params.dry_run.unwrap_or(false);
+    let (preview, source_node_id, source_rpc_url, destination_rpc_url) = {
+        let cluster = state.cluster.lock().unwrap();
+        let destination_rpc_url = cluster
+            .nodes
+            .iter()
+            .find(|n| n.node_id == params.to_node_id)
+            .map(|n| n.rpc_url.clone())
+            .ok_or_else(|| RpcError::new("not_found", "destination node not found"))?;
         let shard = cluster
             .shards
-            .iter_mut()
+            .iter()
             .find(|s| s.shard_id == params.shard_id)
             .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
+
+        let source_node_id = shard.primary_node_id.clone();
+        let source_rpc_url = cluster
+            .nodes
+            .iter()
+            .find(|n| n.node_id == source_node_id)
+            .map(|n| n.rpc_url.clone());
+
         let mut preview = shard.clone();
         let old_primary = preview.primary_node_id.clone();
         preview.primary_node_id = params.to_node_id.clone();
@@ -17004,28 +17369,133 @@ fn cluster_shard_move(state: &AppState, params: ClusterShardMoveParams) -> Resul
             preview.replicas.push(old_primary);
         }
         preview.updated_at_ms = now;
-        if !params.dry_run.unwrap_or(false) {
+        (
+            preview,
+            source_node_id,
+            source_rpc_url,
+            Some(destination_rpc_url),
+        )
+    };
+
+    let manifest = resolve_shard_object_manifest(
+        state,
+        &source_node_id,
+        source_rpc_url.as_deref(),
+        &preview.db,
+        preview.table.as_deref(),
+    )
+    .await?;
+
+    let (present_ids, missing_ids) =
+        if source_node_id == params.to_node_id || manifest.ids.is_empty() {
+            (manifest.ids.clone(), Vec::new())
+        } else {
+            let local_node_id = { state.cluster.lock().unwrap().local_node_id.clone() };
+            let need_result = if params.to_node_id == local_node_id {
+                objects_need(state, manifest.ids.clone()).await?
+            } else {
+                let rpc_url = destination_rpc_url.as_deref().ok_or_else(|| {
+                    RpcError::new("not_found", "destination node rpc url unavailable")
+                })?;
+                call_remote_rpc_result(
+                    rpc_url,
+                    "objects.need",
+                    serde_json::json!({
+                        "ids": manifest.ids.clone(),
+                    }),
+                )
+                .await?
+            };
+            let missing_ids = parse_string_array_field(&need_result, "missing");
+            let (present_ids, _, _) = summarize_manifest_transfer(&manifest, &missing_ids);
+            (present_ids, missing_ids)
+        };
+
+    let manifest_summary = shard_manifest_summary_json(&manifest, &present_ids, &missing_ids);
+    let pull_result = if !dry_run && !missing_ids.is_empty() {
+        let source_rpc_url = source_rpc_url
+            .as_deref()
+            .ok_or_else(|| RpcError::new("not_found", "source node rpc url unavailable"))?;
+        Some(
+            execute_destination_objects_pull(
+                state,
+                &params.to_node_id,
+                destination_rpc_url.as_deref(),
+                source_rpc_url,
+                &missing_ids,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    if let Some(result) = pull_result.as_ref() {
+        let invalid_ids = parse_string_array_field(result, "invalid_ids");
+        let remote_missing = parse_string_array_field(result, "remote_missing");
+        let verification_failed = parse_string_array_field(result, "verification_failed");
+        let stored = result.get("stored").and_then(Value::as_u64).unwrap_or(0);
+        if !invalid_ids.is_empty()
+            || !remote_missing.is_empty()
+            || !verification_failed.is_empty()
+            || stored != missing_ids.len() as u64
+        {
+            return Err(RpcError::new(
+                "transfer_incomplete",
+                format!(
+                    "shard object transfer incomplete: stored {} of {} required objects",
+                    stored,
+                    missing_ids.len()
+                ),
+            ));
+        }
+    }
+
+    if !dry_run {
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            let shard = cluster
+                .shards
+                .iter_mut()
+                .find(|s| s.shard_id == params.shard_id)
+                .ok_or_else(|| RpcError::new("not_found", "shard not found"))?;
             *shard = preview.clone();
         }
-        preview
-    };
-    if !params.dry_run.unwrap_or(false) {
         persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
     }
+
+    let stage = if missing_ids.is_empty() {
+        "skipped"
+    } else if dry_run {
+        "planned"
+    } else {
+        "completed"
+    };
+    let progress = shard_move_progress_json(
+        stage,
+        &source_node_id,
+        &params.to_node_id,
+        source_rpc_url.as_deref(),
+        &missing_ids,
+        pull_result.as_ref(),
+    );
+
     Ok(serde_json::json!({
         "ok": true,
-        "dry_run": params.dry_run.unwrap_or(false),
-        "shard": moved
+        "dry_run": dry_run,
+        "shard": preview,
+        "manifest": manifest_summary,
+        "progress": progress,
     }))
 }
 
-fn cluster_shard_rebalance(
+async fn cluster_shard_rebalance(
     state: &AppState,
     params: ClusterShardRebalanceParams,
 ) -> Result<Value, RpcError> {
     let max_moves = params.max_moves.unwrap_or(8).max(1) as usize;
     let dry_run = params.dry_run.unwrap_or(false);
-    let mut plans = Vec::new();
+    let mut plans = Vec::<(String, String, String)>::new();
     {
         let cluster = state.cluster.lock().unwrap();
         let active_nodes: Vec<String> = cluster
@@ -17035,7 +17505,7 @@ fn cluster_shard_rebalance(
             .map(|n| n.node_id.clone())
             .collect();
         if active_nodes.len() < 2 || cluster.shards.len() < 2 {
-            return Ok(serde_json::json!({"ok": true, "dry_run": dry_run, "moves": plans}));
+            return Ok(serde_json::json!({"ok": true, "dry_run": dry_run, "moves": []}));
         }
 
         let mut loads: HashMap<String, usize> =
@@ -17057,11 +17527,7 @@ fn cluster_shard_rebalance(
                 .iter()
                 .find(|s| s.primary_node_id == max_node)
             {
-                plans.push(serde_json::json!({
-                    "shard_id": shard.shard_id,
-                    "from_node_id": max_node,
-                    "to_node_id": min_node,
-                }));
+                plans.push((shard.shard_id.clone(), max_node.clone(), min_node.clone()));
                 if let Some(v) = loads.get_mut(&max_node) {
                     *v = v.saturating_sub(1);
                 }
@@ -17074,35 +17540,30 @@ fn cluster_shard_rebalance(
         }
     }
 
-    if !dry_run && !plans.is_empty() {
-        let mut cluster = state.cluster.lock().unwrap();
-        for plan in plans.iter() {
-            let shard_id = plan
-                .get("shard_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let to_node = plan
-                .get("to_node_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if let Some(shard) = cluster.shards.iter_mut().find(|s| s.shard_id == shard_id) {
-                let old = shard.primary_node_id.clone();
-                shard.primary_node_id = to_node.to_string();
-                shard.replicas.retain(|n| n != to_node);
-                if !shard.replicas.contains(&old) {
-                    shard.replicas.push(old);
-                }
-                shard.updated_at_ms = now_unix_ms_u64();
-            }
-        }
-        drop(cluster);
-        persist_cluster_state(state).map_err(|e| RpcError::new("internal", e.to_string()))?;
+    let mut moves = Vec::with_capacity(plans.len());
+    for (shard_id, from_node_id, to_node_id) in plans.into_iter() {
+        let moved = cluster_shard_move(
+            state,
+            ClusterShardMoveParams {
+                shard_id: shard_id.clone(),
+                to_node_id: to_node_id.clone(),
+                dry_run: Some(dry_run),
+            },
+        )
+        .await?;
+        moves.push(serde_json::json!({
+            "shard_id": shard_id,
+            "from_node_id": from_node_id,
+            "to_node_id": to_node_id,
+            "manifest": moved.get("manifest").cloned(),
+            "progress": moved.get("progress").cloned(),
+        }));
     }
 
     Ok(serde_json::json!({
         "ok": true,
         "dry_run": dry_run,
-        "moves": plans,
+        "moves": moves,
     }))
 }
 
@@ -25525,6 +25986,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "stats.coalescing"
             | "security.token.list"
             | "admin.user.list"
+            | "cluster.shard.manifest"
             | "objects.need"
             | "objects.missing"
             | "objects.fetch"
@@ -27059,6 +27521,22 @@ mod tests {
             shutdown_tx,
             etag_notify: Arc::new(etag_tx),
         }
+    }
+
+    fn create_test_table(engine: &mut Engine, db: &str, table: &str) -> anyhow::Result<()> {
+        engine.create_table(
+            db,
+            table,
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )
     }
 
     async fn call_rpc(state: &AppState, method: &str, params: Value) -> RpcResponse {
@@ -34011,7 +34489,8 @@ mod tests {
     #[tokio::test]
     async fn cluster_control_plane_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("cluster_control");
-        let engine = Engine::open(&dir)?;
+        let mut engine = Engine::open(&dir)?;
+        create_test_table(&mut engine, "app", "users")?;
         let state = build_state(dir.clone(), engine);
 
         let resp = call_rpc(&state, "cluster.status", json!({})).await;
@@ -34094,6 +34573,22 @@ mod tests {
                 .and_then(|v| v.get("dry_run"))
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("manifest"))
+                .and_then(|v| v.get("object_count"))
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|v| v.get("progress"))
+                .and_then(|v| v.get("stage"))
+                .and_then(|v| v.as_str()),
+            Some("skipped")
         );
 
         let resp = call_rpc(
@@ -34300,7 +34795,8 @@ mod tests {
     #[tokio::test]
     async fn cluster_node_leave_reassigns_shard_primary() -> anyhow::Result<()> {
         let dir = temp_dir("cluster_leave_shard");
-        let engine = Engine::open(&dir)?;
+        let mut engine = Engine::open(&dir)?;
+        create_test_table(&mut engine, "app", "events")?;
         let state = build_state(dir.clone(), engine);
 
         let token = call_rpc(&state, "cluster.join_token.create", json!({}))
@@ -34380,6 +34876,212 @@ mod tests {
         assert_eq!(shard_primary, Some("node-test"));
 
         std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cluster_shard_move_transfers_manifest_objects_and_reports_progress(
+    ) -> anyhow::Result<()> {
+        let source_dir = temp_dir("cluster_move_manifest_source");
+        let dest_dir = temp_dir("cluster_move_manifest_dest");
+
+        let mut source_engine = Engine::open(&source_dir)?;
+        source_engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tag".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        source_engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shared-payload".to_string(),
+                        },
+                    ),
+                    (
+                        "tag",
+                        Lit::Str {
+                            v: "alpha".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shared-payload".to_string(),
+                        },
+                    ),
+                    (
+                        "tag",
+                        Lit::Str {
+                            v: "beta".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let source_state = build_state(source_dir.clone(), source_engine);
+        let dest_state = build_state(dest_dir.clone(), Engine::open(&dest_dir)?);
+
+        let manifest_ids = {
+            let eng = source_state.engine.read().await;
+            let manifest = eng.shard_object_manifest("app", Some("users"))?;
+            manifest
+                .entries
+                .iter()
+                .map(|entry| value_id_to_hex(&entry.id))
+                .collect::<Vec<_>>()
+        };
+
+        let source_fetches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let (source_url, source_handle) =
+            spawn_rpc_test_server(source_state.clone(), source_fetches.clone()).await?;
+        let dest_fetches = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let (dest_url, dest_handle) =
+            spawn_rpc_test_server(dest_state.clone(), dest_fetches.clone()).await?;
+
+        {
+            let mut cluster = source_state.cluster.lock().unwrap();
+            cluster.enabled = true;
+            if let Some(local) = cluster.nodes.iter_mut().find(|n| n.node_id == "node-test") {
+                local.rpc_url = source_url.clone();
+            }
+            cluster.nodes.push(ClusterNode {
+                node_id: "replica-a".to_string(),
+                rpc_url: dest_url.clone(),
+                role: "replica".to_string(),
+                status: "online".to_string(),
+                joined_at_ms: now_unix_ms_u64(),
+                last_seen_ms: now_unix_ms_u64(),
+            });
+        }
+
+        let created = call_rpc(
+            &source_state,
+            "cluster.shard.create",
+            json!({
+                "db": "app",
+                "table": "users",
+                "replicas": ["replica-a"]
+            }),
+        )
+        .await;
+        assert!(created.ok, "{created:?}");
+        let shard_id = created
+            .result
+            .as_ref()
+            .and_then(|v| v.get("shard"))
+            .and_then(|v| v.get("shard_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(!shard_id.is_empty());
+
+        let moved = call_rpc(
+            &source_state,
+            "cluster.shard.move",
+            json!({
+                "shard_id": shard_id,
+                "to_node_id": "replica-a",
+                "dry_run": false
+            }),
+        )
+        .await;
+
+        assert!(moved.ok, "{moved:?}");
+        let result = moved.result.expect("missing move result");
+        assert_eq!(
+            result
+                .get("shard")
+                .and_then(|v| v.get("primary_node_id"))
+                .and_then(|v| v.as_str()),
+            Some("replica-a")
+        );
+        assert_eq!(
+            result
+                .get("manifest")
+                .and_then(|v| v.get("object_count"))
+                .and_then(|v| v.as_u64()),
+            Some(manifest_ids.len() as u64)
+        );
+        assert_eq!(
+            result
+                .get("manifest")
+                .and_then(|v| v.get("missing_object_count"))
+                .and_then(|v| v.as_u64()),
+            Some(manifest_ids.len() as u64)
+        );
+        assert_eq!(
+            result
+                .get("progress")
+                .and_then(|v| v.get("stage"))
+                .and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert_eq!(
+            result
+                .get("progress")
+                .and_then(|v| v.get("stored_object_count"))
+                .and_then(|v| v.as_u64()),
+            Some(manifest_ids.len() as u64)
+        );
+
+        let fetched_from_source: HashSet<String> = source_fetches
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|batch| batch.iter().cloned())
+            .collect();
+        let expected_ids: HashSet<String> = manifest_ids.iter().cloned().collect();
+        assert_eq!(fetched_from_source, expected_ids);
+
+        {
+            let eng = dest_state.engine.read().await;
+            let vs = eng.value_store_lock();
+            for id_hex in manifest_ids.iter() {
+                let id = parse_value_id(id_hex).expect("valid manifest id");
+                assert!(vs.contains(id));
+            }
+        }
+
+        source_handle.abort();
+        dest_handle.abort();
+        std::fs::remove_dir_all(&source_dir).ok();
+        std::fs::remove_dir_all(&dest_dir).ok();
         Ok(())
     }
 

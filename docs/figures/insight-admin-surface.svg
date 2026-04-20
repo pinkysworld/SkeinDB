@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 840" role="img" aria-labelledby="title desc">
+  <title id="title">SkeinAdmin live surface</title>
+  <desc id="desc">A stylized screenshot of the SkeinAdmin dashboard with telemetry, cluster, and research cards.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="840" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b0f18"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141b2a"/>
+      <stop offset="1" stop-color="#0d1422"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c90ff"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="840" fill="url(#bg)"/>
+  <rect x="44" y="44" width="1192" height="752" rx="34" fill="#0d1320" stroke="#243146" stroke-width="2"/>
+  <rect x="44" y="44" width="220" height="752" rx="34" fill="#0b1120" stroke="#243146" stroke-width="2"/>
+  <text x="82" y="104" fill="#f8fafc" font-size="34" font-family="Inter, Arial, sans-serif" font-weight="800">SkeinAdmin</text>
+  <text x="82" y="136" fill="#8da0c8" font-size="17" font-family="JetBrains Mono, monospace">single-binary control plane</text>
+
+  <rect x="82" y="182" width="144" height="38" rx="12" fill="#1a2540"/>
+  <text x="104" y="208" fill="#93c5fd" font-size="17" font-family="Inter, Arial, sans-serif" font-weight="700">Dashboard</text>
+  <text x="82" y="268" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Cluster</text>
+  <text x="82" y="306" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Easy Viewer</text>
+  <text x="82" y="344" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">CDC</text>
+  <text x="82" y="382" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Security</text>
+  <text x="82" y="420" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Index Advisor</text>
+  <text x="82" y="458" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Forensics</text>
+  <text x="82" y="496" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Research</text>
+
+  <rect x="300" y="78" width="900" height="64" rx="20" fill="#11192b" stroke="#23314d"/>
+  <text x="334" y="118" fill="#f8fafc" font-size="28" font-family="Inter, Arial, sans-serif" font-weight="700">Live product surface</text>
+  <text x="952" y="118" fill="#7c90ff" font-size="18" font-family="JetBrains Mono, monospace">26 admin panels</text>
+
+  <rect x="300" y="178" width="282" height="162" rx="24" fill="url(#panel)" stroke="#2a3652"/>
+  <text x="332" y="220" fill="#9fb2d7" font-size="16" font-family="JetBrains Mono, monospace">runtime breadth</text>
+  <text x="332" y="274" fill="url(#violet)" font-size="58" font-family="Inter, Arial, sans-serif" font-weight="900">74</text>
+  <text x="332" y="308" fill="#f8fafc" font-size="26" font-family="Inter, Arial, sans-serif" font-weight="700">RPC methods</text>
+  <text x="332" y="332" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">15 families, typed SkeinQL and wire-facing control paths</text>
+
+  <rect x="609" y="178" width="282" height="162" rx="24" fill="url(#panel)" stroke="#2a3652"/>
+  <text x="641" y="220" fill="#9fb2d7" font-size="16" font-family="JetBrains Mono, monospace">research depth</text>
+  <text x="641" y="274" fill="url(#cyan)" font-size="58" font-family="Inter, Arial, sans-serif" font-weight="900">20</text>
+  <text x="641" y="308" fill="#f8fafc" font-size="26" font-family="Inter, Arial, sans-serif" font-weight="700">tracks</text>
+  <text x="641" y="332" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">14 hardened, 6 prototype surfaces carried in one executable</text>
+
+  <rect x="918" y="178" width="282" height="162" rx="24" fill="url(#panel)" stroke="#2a3652"/>
+  <text x="950" y="220" fill="#9fb2d7" font-size="16" font-family="JetBrains Mono, monospace">cluster telemetry</text>
+  <text x="950" y="274" fill="#34d399" font-size="58" font-family="Inter, Arial, sans-serif" font-weight="900">0.875</text>
+  <text x="950" y="308" fill="#f8fafc" font-size="26" font-family="Inter, Arial, sans-serif" font-weight="700">CAS hit-rate</text>
+  <text x="950" y="332" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">replication object counters surfaced in dashboard cards</text>
+
+  <rect x="300" y="378" width="900" height="364" rx="26" fill="#11192b" stroke="#243146"/>
+  <text x="334" y="420" fill="#f8fafc" font-size="28" font-family="Inter, Arial, sans-serif" font-weight="700">Telemetry canvas</text>
+  <text x="334" y="448" fill="#91a4c9" font-size="18" font-family="Inter, Arial, sans-serif">The admin bundles cluster, compatibility, compaction, security, and research controls into a single runtime.</text>
+
+  <rect x="334" y="484" width="256" height="226" rx="22" fill="#0d1424" stroke="#26304a"/>
+  <text x="362" y="522" fill="#8b9bff" font-size="16" font-family="JetBrains Mono, monospace">cluster.status</text>
+  <text x="362" y="566" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">primary: node-test</text>
+  <text x="362" y="598" fill="#dbe5ff" font-size="20" font-family="JetBrains Mono, monospace">nodes: 2</text>
+  <text x="362" y="628" fill="#dbe5ff" font-size="20" font-family="JetBrains Mono, monospace">shards: 1</text>
+  <text x="362" y="658" fill="#dbe5ff" font-size="20" font-family="JetBrains Mono, monospace">replication.failed_ops: 0</text>
+
+  <rect x="622" y="484" width="256" height="226" rx="22" fill="#0d1424" stroke="#26304a"/>
+  <text x="650" y="522" fill="#38bdf8" font-size="16" font-family="JetBrains Mono, monospace">stats.snapshot</text>
+  <path d="M652 644 C700 620, 724 560, 770 554 C808 548, 824 600, 850 592" stroke="#22d3ee" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <path d="M652 664 C690 652, 734 618, 770 622 C804 626, 828 674, 850 686" stroke="#7c90ff" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <text x="650" y="566" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">compaction + CDC + coalescing</text>
+  <text x="650" y="598" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Live cards pull straight from the binary runtime counters.</text>
+
+  <rect x="910" y="484" width="256" height="226" rx="22" fill="#0d1424" stroke="#26304a"/>
+  <text x="938" y="522" fill="#34d399" font-size="16" font-family="JetBrains Mono, monospace">advisor.index_synthesize</text>
+  <rect x="938" y="552" width="200" height="18" rx="9" fill="#1f2e1f"/>
+  <rect x="938" y="552" width="154" height="18" rx="9" fill="#22c55e"/>
+  <text x="938" y="610" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">ranked suggestions</text>
+  <text x="938" y="642" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">Observed-before and expected-after scan costs share the same UI.</text>
+  <text x="938" y="684" fill="#d1fae5" font-size="20" font-family="JetBrains Mono, monospace">status: building -&gt; completed</text>
+</svg>

@@ -1,7 +1,7 @@
 # CAS-aware Replication and Bandwidth Bounds
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Prototype
+Last updated: 2026-04-20
 
 Goal:
 Use SkeinDB's content-addressed ValueStore (ValueID) to reduce replication and rebalancing bandwidth.
@@ -97,6 +97,8 @@ Current prototype coverage:
 - `objects.fetch` now returns a lossless VE1 payload (`entry_b64`) in addition to the legacy raw-bytes view, so non-trivial `ValueStore` entries such as deltas can be reconstructed faithfully
 - `objects.pull` batches remote fetches, skips locally present objects, and recursively pulls missing delta-base dependencies before import
 - verified entries are imported via the same `ValueStore` decoding path used for `.vseg` replay
+- shard transfer preflight now includes `cluster.shard.manifest`, which enumerates the ValueIDs referenced by the live rows of a shard scope (database or table)
+- `cluster.shard.move` and `cluster.shard.rebalance` now use shard manifests plus `objects.need` / `objects.pull` to transfer only missing objects before placement changes, and return manifest/progress summaries with object counts, bytes, batches, and pull outcomes
 
 ### 4.3 Integrity
 
@@ -148,6 +150,13 @@ For Level-3 shard moves, the same mechanism applies:
 Optimization:
 - "object manifest" per shard: a compact set of ValueIDs referenced by live row versions
 - manifests allow prefetch and accurate progress reporting
+
+Current prototype coverage:
+
+- shard manifests are computed from the source node's live rows, either locally or through the internal `cluster.shard.manifest` RPC when the source primary is remote
+- the destination node answers `objects.need` against the manifest, so move planning can distinguish already-present objects from the transfer set
+- non-dry-run moves call `objects.pull` on the destination and only update shard placement after the required objects were stored successfully
+- `cluster.shard.move` and `cluster.shard.rebalance` return `manifest` and `progress` sections so callers can report total bytes, missing bytes, batches, fetched objects, stored objects, and verification failures
 
 ---
 
@@ -201,4 +210,4 @@ replica sides see the local CAS cost model in real time.
 - CR01: ValueID existence Bloom summaries
 - CR02: object fetch protocol + batching (implemented via `objects.fetch` + `objects.pull`)
 - CR03: replication metrics (saved bytes, hit rate)
-- CR04: shard move uses object manifests + progress reporting
+- CR04: shard move uses object manifests + progress reporting (implemented via `cluster.shard.manifest`, `cluster.shard.move`, and `cluster.shard.rebalance`)

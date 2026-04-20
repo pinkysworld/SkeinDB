@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 840" role="img" aria-labelledby="title desc">
+  <title id="title">Compatibility and transport surface</title>
+  <desc id="desc">A stylized screenshot showing MySQL and PostgreSQL compatibility depth alongside multi-transport access paths.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="840" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1020"/>
+      <stop offset="1" stop-color="#15172b"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14192c"/>
+      <stop offset="1" stop-color="#0f1425"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="840" fill="url(#bg)"/>
+  <circle cx="1020" cy="170" r="180" fill="#7c90ff" fill-opacity="0.12"/>
+  <rect x="48" y="48" width="1184" height="744" rx="32" fill="#0d1320" stroke="#243146" stroke-width="2"/>
+
+  <rect x="82" y="82" width="1116" height="60" rx="18" fill="#11192b" stroke="#23314d"/>
+  <text x="116" y="120" fill="#f8fafc" font-size="30" font-family="Inter, Arial, sans-serif" font-weight="800">Compatibility depth</text>
+  <text x="897" y="120" fill="#94a3ff" font-size="18" font-family="JetBrains Mono, monospace">MySQL + PostgreSQL + HTTP + QUIC</text>
+
+  <rect x="82" y="182" width="520" height="560" rx="26" fill="#11192b" stroke="#243146"/>
+  <text x="116" y="224" fill="#67e8f9" font-size="18" font-family="JetBrains Mono, monospace">terminal</text>
+  <text x="116" y="264" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">Corpus-backed protocol confidence</text>
+
+  <rect x="116" y="300" width="452" height="404" rx="20" fill="#0a1020" stroke="#23314d"/>
+  <text x="146" y="340" fill="#34d399" font-size="20" font-family="JetBrains Mono, monospace">$ skeindb serve --http 8080 --pg 5432</text>
+  <text x="146" y="388" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">mysql corpus statements : 678</text>
+  <text x="146" y="426" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">pg bootstrap probes    : handled</text>
+  <text x="146" y="464" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">system.capabilities    : 74 methods</text>
+  <text x="146" y="502" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">transport.capabilities : http=true</text>
+  <text x="146" y="540" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">                         quic=false</text>
+  <text x="146" y="598" fill="#93c5fd" font-size="22" font-family="JetBrains Mono, monospace">SHOW server_version</text>
+  <text x="146" y="632" fill="#f8fafc" font-size="22" font-family="JetBrains Mono, monospace">8.0.0-skeindb  |  PostgreSQL probes bridged</text>
+
+  <rect x="642" y="182" width="556" height="246" rx="26" fill="#11192b" stroke="#243146"/>
+  <text x="676" y="224" fill="#8b9bff" font-size="18" font-family="JetBrains Mono, monospace">client surfaces</text>
+  <rect x="676" y="260" width="160" height="124" rx="18" fill="#0f1830" stroke="#28436e"/>
+  <text x="706" y="306" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">MySQL</text>
+  <text x="706" y="340" fill="#dbe5ff" font-size="18" font-family="Inter, Arial, sans-serif">COM_QUERY</text>
+  <text x="706" y="366" fill="#dbe5ff" font-size="18" font-family="Inter, Arial, sans-serif">prepared metadata</text>
+
+  <rect x="854" y="260" width="160" height="124" rx="18" fill="#101d19" stroke="#24463b"/>
+  <text x="892" y="306" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">PG wire</text>
+  <text x="892" y="340" fill="#d1fae5" font-size="18" font-family="Inter, Arial, sans-serif">startup probes</text>
+  <text x="892" y="366" fill="#d1fae5" font-size="18" font-family="Inter, Arial, sans-serif">simple query path</text>
+
+  <rect x="1032" y="260" width="132" height="124" rx="18" fill="#141b2a" stroke="#2a3652"/>
+  <text x="1058" y="306" fill="#f8fafc" font-size="24" font-family="Inter, Arial, sans-serif" font-weight="700">HTTP</text>
+  <text x="1058" y="340" fill="#dbe5ff" font-size="18" font-family="Inter, Arial, sans-serif">RPC</text>
+  <text x="1058" y="366" fill="#dbe5ff" font-size="18" font-family="Inter, Arial, sans-serif">SSE</text>
+
+  <rect x="642" y="462" width="556" height="280" rx="26" fill="#11192b" stroke="#243146"/>
+  <text x="676" y="504" fill="#34d399" font-size="18" font-family="JetBrains Mono, monospace">why it matters</text>
+  <text x="676" y="548" fill="#f8fafc" font-size="30" font-family="Inter, Arial, sans-serif" font-weight="800">One runtime, multiple entry points</text>
+  <text x="676" y="590" fill="#95a4c7" font-size="20" font-family="Inter, Arial, sans-serif">The same engine answers wire protocol clients, SkeinQL RPC callers, and admin workflows.</text>
+
+  <rect x="676" y="628" width="492" height="74" rx="18" fill="#0d1424" stroke="#26304a"/>
+  <text x="708" y="674" fill="#dbe5ff" font-size="22" font-family="JetBrains Mono, monospace">compatible SQL layer + typed RPC surface + embedded admin</text>
+</svg>

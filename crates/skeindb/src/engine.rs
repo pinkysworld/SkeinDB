@@ -1212,6 +1212,18 @@ pub struct EngineStorageStats {
     pub interned_values: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectManifestEntry {
+    pub id: ValueId,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectManifest {
+    pub entries: Vec<ObjectManifestEntry>,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct Subscriptions {
     pub subs: HashMap<String, Subscription>,
@@ -1386,6 +1398,58 @@ impl Engine {
     /// Acquire a lock on the ValueStore for CAS object operations.
     pub fn value_store_lock(&self) -> std::sync::MutexGuard<'_, ValueStore> {
         self.value_store.lock().expect("value_store lock poisoned")
+    }
+
+    pub fn shard_object_manifest(
+        &self,
+        db: &str,
+        table: Option<&str>,
+    ) -> anyhow::Result<ObjectManifest> {
+        let mut objects = HashMap::<ValueId, u64>::new();
+
+        match table {
+            Some(table_name) => {
+                self.get_schema(db, table_name)?;
+                let key = TableKey {
+                    db: db.to_string(),
+                    table: table_name.to_string(),
+                };
+                let Some(tdata) = self.tables.get(&key) else {
+                    anyhow::bail!("table data not loaded: {db}.{table_name}");
+                };
+                collect_table_object_manifest(tdata, &mut objects);
+            }
+            None => {
+                let database = self
+                    .catalog
+                    .databases
+                    .get(db)
+                    .ok_or_else(|| anyhow::anyhow!("database not found: {db}"))?;
+                let mut table_names: Vec<String> = database.tables.keys().cloned().collect();
+                table_names.sort();
+                for table_name in table_names {
+                    let key = TableKey {
+                        db: db.to_string(),
+                        table: table_name,
+                    };
+                    let Some(tdata) = self.tables.get(&key) else {
+                        continue;
+                    };
+                    collect_table_object_manifest(tdata, &mut objects);
+                }
+            }
+        }
+
+        let mut entries = objects
+            .into_iter()
+            .map(|(id, bytes)| ObjectManifestEntry { id, bytes })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        let total_bytes = entries.iter().map(|entry| entry.bytes).sum();
+        Ok(ObjectManifest {
+            entries,
+            total_bytes,
+        })
     }
 
     pub fn create_database(&mut self, db: &str) -> anyhow::Result<()> {
@@ -18599,6 +18663,20 @@ fn collect_value_store_items(row: &RowObject, out: &mut Vec<ValueStoreItem>) {
     }
 }
 
+fn collect_table_object_manifest(tdata: &TableData, out: &mut HashMap<ValueId, u64>) {
+    for entry in tdata.rows.iter() {
+        if entry.deleted {
+            continue;
+        }
+        for lit in entry.row.values() {
+            let Some(item) = value_store_item(lit) else {
+                continue;
+            };
+            out.entry(item.id).or_insert(item.bytes.len() as u64);
+        }
+    }
+}
+
 fn record_value_store_lookups(store: &mut ValueStore, row: &RowObject) {
     for v in row.values() {
         if let Some(item) = value_store_item(v) {
@@ -24220,6 +24298,113 @@ mod tests {
         dir.push(unique);
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[test]
+    fn shard_object_manifest_deduplicates_interned_values() -> anyhow::Result<()> {
+        let dir = temp_dir("shard_object_manifest");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tag".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shared-payload".to_string(),
+                        },
+                    ),
+                    (
+                        "tag",
+                        Lit::Str {
+                            v: "alpha".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "shared-payload".to_string(),
+                        },
+                    ),
+                    (
+                        "tag",
+                        Lit::Str {
+                            v: "beta".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let manifest = engine.shard_object_manifest("app", Some("users"))?;
+        let expected_items = vec![
+            value_store_item(&Lit::Str {
+                v: "shared-payload".to_string(),
+            })
+            .expect("shared payload item"),
+            value_store_item(&Lit::Str {
+                v: "alpha".to_string(),
+            })
+            .expect("alpha item"),
+            value_store_item(&Lit::Str {
+                v: "beta".to_string(),
+            })
+            .expect("beta item"),
+        ];
+        let expected: HashMap<ValueId, u64> = expected_items
+            .into_iter()
+            .map(|item| (item.id, item.bytes.len() as u64))
+            .collect();
+
+        assert_eq!(manifest.entries.len(), expected.len());
+        assert_eq!(
+            manifest.total_bytes,
+            expected.values().copied().sum::<u64>()
+        );
+        for entry in manifest.entries.iter() {
+            assert_eq!(expected.get(&entry.id), Some(&entry.bytes));
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     fn eq_expr(left: Expr, right: Expr) -> Expr {

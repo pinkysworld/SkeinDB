@@ -121,6 +121,12 @@ Novel opportunity:
 - shard move can transfer only missing ValueIDs
 - reduces time and bandwidth for rebalance
 
+Current prototype coverage:
+- the source node enumerates a shard-scoped object manifest from live row versions
+- the destination node preflights the manifest with `objects.need`
+- non-dry-run `cluster.shard.move` / `cluster.shard.rebalance` calls pull only missing objects via `objects.pull` before changing primary placement
+- move and rebalance responses include manifest/progress summaries so operators can report object counts, bytes, and pull outcomes
+
 ---
 
 ## 5) Cluster management API (SkeinQL)

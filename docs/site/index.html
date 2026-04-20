@@ -245,6 +245,123 @@
       font-family: 'JetBrains Mono', monospace; font-size: .82rem;
     }
 
+    /* --- INSIGHTS --- */
+    .insights-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 1.25rem;
+    }
+    .insight-card {
+      background: linear-gradient(180deg, rgba(24,24,27,.96), rgba(15,23,42,.88));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+      position: relative;
+      transition: border-color .2s, transform .15s;
+    }
+    .insight-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .insight-featured {
+      grid-column: span 12;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+      gap: 1.5rem;
+      padding: 1.5rem;
+    }
+    .insight-half {
+      grid-column: span 6;
+      padding: 1.1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .insight-copy h3 {
+      font-size: 1.4rem;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      line-height: 1.2;
+      margin-bottom: .75rem;
+    }
+    .insight-copy.compact h3 { font-size: 1.08rem; }
+    .insight-copy p {
+      color: var(--text-secondary);
+      font-size: .92rem;
+      line-height: 1.75;
+    }
+    .insight-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: .9rem;
+      color: var(--accent-light);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .74rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .insight-eyebrow::before {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent-light), var(--cyan));
+      box-shadow: 0 0 18px rgba(99,102,241,.45);
+    }
+    .insight-frame {
+      background: linear-gradient(180deg, rgba(6,11,23,.92), rgba(12,17,31,.86));
+      border: 1px solid rgba(129,140,248,.18);
+      border-radius: 16px;
+      padding: .65rem;
+    }
+    .insight-frame img {
+      width: 100%;
+      display: block;
+      border-radius: 12px;
+      background: #070b14;
+    }
+    .insight-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .75rem;
+      margin-top: 1.2rem;
+    }
+    .insight-metric {
+      background: rgba(15,23,42,.7);
+      border: 1px solid rgba(129,140,248,.14);
+      border-radius: 12px;
+      padding: .85rem;
+    }
+    .insight-metric strong {
+      display: block;
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -.02em;
+    }
+    .insight-metric span {
+      display: block;
+      margin-top: .3rem;
+      color: var(--text-dim);
+      font-size: .75rem;
+      line-height: 1.5;
+    }
+    .insight-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .55rem;
+      margin-top: 1rem;
+    }
+    .insight-pills span {
+      display: inline-flex;
+      align-items: center;
+      padding: .4rem .72rem;
+      border-radius: 999px;
+      background: rgba(99,102,241,.09);
+      border: 1px solid rgba(129,140,248,.16);
+      color: var(--text-secondary);
+      font-size: .76rem;
+      font-weight: 600;
+    }
+
     /* --- RESEARCH TRACKS --- */
     .tracks-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
@@ -347,6 +464,9 @@
       .nav-links { display: none; }
       .nav-hamburger { display: block; }
       .features-grid { grid-template-columns: 1fr; }
+      .insight-featured, .insight-half { grid-column: span 12; }
+      .insight-featured { grid-template-columns: 1fr; }
+      .insight-metrics { grid-template-columns: 1fr; }
       .paper-card { flex-direction: column; }
       .footer-inner { flex-direction: column; gap: 1.5rem; }
       .hero { padding: 4rem 1.5rem 3rem; }
@@ -364,6 +484,7 @@
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
+      <a href="#insights">Insights</a>
       <a href="#research">Research</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="pricing.html">Pricing</a>
@@ -391,6 +512,7 @@
   </button>
   <a href="#features" onclick="document.getElementById('mobileMenu').classList.remove('open')">Features</a>
   <a href="#architecture" onclick="document.getElementById('mobileMenu').classList.remove('open')">Architecture</a>
+  <a href="#insights" onclick="document.getElementById('mobileMenu').classList.remove('open')">Insights</a>
   <a href="#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research</a>
   <a href="#quickstart" onclick="document.getElementById('mobileMenu').classList.remove('open')">Quick Start</a>
   <a href="#paper" onclick="document.getElementById('mobileMenu').classList.remove('open')">Paper</a>
@@ -527,6 +649,72 @@
     <div class="arch-fallback" style="display:none">
       <p>Architecture diagram available at <code>docs/figures/architecture.png</code></p>
     </div>
+  </div>
+</section>
+
+<!-- INSIGHTS -->
+<section id="insights">
+  <div class="section-header">
+    <h2>Operational Insights</h2>
+    <p>Three runtime surfaces that show what SkeinDB is actually doing: manifest-backed shard movement, the embedded admin canvas, and compatibility depth across client entry points.</p>
+  </div>
+  <div class="insights-grid">
+    <article class="insight-card insight-featured">
+      <div class="insight-copy">
+        <div class="insight-eyebrow">New in the cluster plane</div>
+        <h3>Shard moves now expose transfer math before ownership flips</h3>
+        <p>Rebalancing is no longer a blind metadata edit. SkeinDB now builds a shard-scoped object manifest from live rows, asks the destination which ValueIDs are missing, and only pulls the missing objects before changing primary placement.</p>
+        <div class="insight-metrics">
+          <div class="insight-metric">
+            <strong>Manifest</strong>
+            <span>Total objects and bytes are surfaced per move, not inferred after the fact.</span>
+          </div>
+          <div class="insight-metric">
+            <strong>Need-check</strong>
+            <span>The destination preflights ValueID coverage with <code>objects.need</code>.</span>
+          </div>
+          <div class="insight-metric">
+            <strong>Progress</strong>
+            <span>Batches, pulled objects, stored objects, and verification failures ride in the response.</span>
+          </div>
+        </div>
+      </div>
+      <div class="insight-frame">
+        <img src="../figures/insight-cas-shard-move.svg" alt="Manifest-backed shard move progress surface" loading="lazy">
+      </div>
+    </article>
+
+    <article class="insight-card insight-half">
+      <div class="insight-frame">
+        <img src="../figures/insight-admin-surface.svg" alt="SkeinAdmin live dashboard surface" loading="lazy">
+      </div>
+      <div class="insight-copy compact">
+        <div class="insight-eyebrow">Embedded admin</div>
+        <h3>Telemetry, security, CDC, cluster control, and research panels share one live control surface</h3>
+        <p>SkeinAdmin is wired directly to the runtime. The dashboard, Easy Viewer, index advisor, cluster tools, and forensics panels speak the same typed control plane as external clients.</p>
+        <div class="insight-pills">
+          <span>26 admin panels</span>
+          <span>74 RPC methods</span>
+          <span>20 research tracks</span>
+        </div>
+      </div>
+    </article>
+
+    <article class="insight-card insight-half">
+      <div class="insight-frame">
+        <img src="../figures/insight-compat-surface.svg" alt="MySQL and PostgreSQL compatibility surface" loading="lazy">
+      </div>
+      <div class="insight-copy compact">
+        <div class="insight-eyebrow">Compatibility depth</div>
+        <h3>One engine answers MySQL wire clients, PostgreSQL bootstrap probes, HTTP RPC, and the admin stack</h3>
+        <p>The same executable now carries a broad MySQL corpus, early PostgreSQL listener coverage, and the typed SkeinQL surface that powers both automation and the embedded UI.</p>
+        <div class="insight-pills">
+          <span>678 MySQL corpus statements</span>
+          <span>PG startup probes</span>
+          <span>HTTP + QUIC transport</span>
+        </div>
+      </div>
+    </article>
   </div>
 </section>
 
