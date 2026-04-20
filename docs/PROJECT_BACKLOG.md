@@ -123,7 +123,7 @@ Phase 0 verification checklist:
 - [x] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)
 - [x] T151: Late materialization (decode only projected columns)
 - [x] T152: Batch (vectorized) scan/filter/project pipeline
-- [ ] T153: MVCC Visible Version Index cache
+- [x] T153: MVCC Visible Version Index cache. Latest: `crates/skeindb-core/src/mvcc.rs` now exposes a bounded `VisibleVersionIndex` keyed by `row_id + snapshot_epoch_bucket`, validates cached entries against the current `RowDir` head pointer plus the cached version's exact visibility window before reuse, and falls back to normal chain walking on head changes or same-bucket timestamp drift. Unit tests cover cache hits, same-bucket revalidation, head-change invalidation, and bounded eviction; integration tests cover file-backed reuse over `RowSegmentSet` + `RowDir`.
 
 ## Phase 16 - Query coalescing (thundering herd protection)
 - [x] T160: Query fingerprint canonicalization (SkeinIR + SkeinQL) + auth scope keying

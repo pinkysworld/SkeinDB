@@ -19,7 +19,7 @@
 //! - [`resolve_row_id`] starts from `RowDir::get(row_id)` and therefore only
 //!   works when the caller still has a head pointer for that row.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use thiserror::Error;
@@ -152,6 +152,161 @@ impl MvccLookup {
     }
 }
 
+const DEFAULT_VISIBLE_VERSION_BUCKET_WIDTH: u64 = 1_000;
+const DEFAULT_VISIBLE_VERSION_INDEX_CAPACITY: usize = 4_096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SnapshotEpochBucket {
+    Latest,
+    AsOf(u64),
+}
+
+impl SnapshotEpochBucket {
+    fn from_snapshot(snapshot: Snapshot, bucket_width: u64) -> Self {
+        match snapshot.timestamp() {
+            Some(ts) => Self::AsOf(ts / bucket_width.max(1)),
+            None => Self::Latest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VisibleVersionCacheKey {
+    row_id: u64,
+    bucket: SnapshotEpochBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleVersionCacheEntry {
+    head: Option<FilePtr>,
+    lookup: MvccLookup,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisibleVersionIndexStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub stale: usize,
+    pub inserts: usize,
+    pub evictions: usize,
+}
+
+/// Bounded hint cache for snapshot-visible row versions keyed by row id and
+/// coarse snapshot bucket. Cached entries are reused only when the current
+/// RowDir head pointer still matches and the cached version remains visible for
+/// the exact snapshot timestamp.
+#[derive(Debug, Clone)]
+pub struct VisibleVersionIndex {
+    bucket_width: u64,
+    capacity: usize,
+    entries: HashMap<VisibleVersionCacheKey, VisibleVersionCacheEntry>,
+    order: VecDeque<VisibleVersionCacheKey>,
+    stats: VisibleVersionIndexStats,
+}
+
+impl Default for VisibleVersionIndex {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_VISIBLE_VERSION_BUCKET_WIDTH,
+            DEFAULT_VISIBLE_VERSION_INDEX_CAPACITY,
+        )
+    }
+}
+
+impl VisibleVersionIndex {
+    pub fn new(bucket_width: u64, capacity: usize) -> Self {
+        Self {
+            bucket_width: bucket_width.max(1),
+            capacity,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            stats: VisibleVersionIndexStats::default(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn stats(&self) -> VisibleVersionIndexStats {
+        self.stats
+    }
+
+    pub fn resolve_row_id<R: RowVersionResolver>(
+        &mut self,
+        row_dir: &RowDir,
+        resolver: &mut R,
+        row_id: u64,
+        snapshot: Snapshot,
+    ) -> Result<MvccLookup, MvccError> {
+        self.stats.misses += 1;
+        if self.capacity == 0 {
+            return crate::mvcc::resolve_row_id(row_dir, resolver, row_id, snapshot);
+        }
+
+        let key = VisibleVersionCacheKey {
+            row_id,
+            bucket: SnapshotEpochBucket::from_snapshot(snapshot, self.bucket_width),
+        };
+        let head = row_dir.get(row_id);
+
+        if let Some(entry) = self.entries.get(&key).cloned() {
+            if entry.head == head && cached_lookup_matches_snapshot(&entry.lookup, snapshot) {
+                self.stats.hits += 1;
+                self.stats.misses -= 1;
+                return Ok(entry.lookup);
+            }
+            self.stats.stale += 1;
+            self.remove_key(&key);
+        }
+
+        let lookup = crate::mvcc::resolve_row_id(row_dir, resolver, row_id, snapshot)?;
+        if !lookup.is_missing() {
+            self.insert(
+                key,
+                VisibleVersionCacheEntry {
+                    head,
+                    lookup: lookup.clone(),
+                },
+            );
+        }
+        Ok(lookup)
+    }
+
+    fn insert(&mut self, key: VisibleVersionCacheKey, entry: VisibleVersionCacheEntry) {
+        self.remove_key(&key);
+        while self.entries.len() >= self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&oldest).is_some() {
+                self.stats.evictions += 1;
+            }
+        }
+        self.order.push_back(key);
+        self.entries.insert(key, entry);
+        self.stats.inserts += 1;
+    }
+
+    fn remove_key(&mut self, key: &VisibleVersionCacheKey) {
+        self.entries.remove(key);
+        self.order.retain(|queued| queued != key);
+    }
+}
+
+fn cached_lookup_matches_snapshot(lookup: &MvccLookup, snapshot: Snapshot) -> bool {
+    match lookup {
+        MvccLookup::Visible(version) | MvccLookup::Deleted(version) => {
+            snapshot.is_row_visible(&version.row)
+        }
+        MvccLookup::Missing => false,
+    }
+}
+
 pub fn resolve_head<R: RowVersionResolver>(
     resolver: &mut R,
     head: FilePtr,
@@ -238,6 +393,7 @@ mod tests {
     #[derive(Default)]
     struct FakeResolver {
         rows: HashMap<FilePtr, RowVersion>,
+        loads: usize,
     }
 
     impl FakeResolver {
@@ -248,6 +404,7 @@ mod tests {
 
     impl RowVersionResolver for FakeResolver {
         fn load_row_version(&mut self, ptr: FilePtr) -> Result<RowVersion, MvccError> {
+            self.loads += 1;
             Ok(self.rows.get(&ptr).cloned().expect("missing fake row"))
         }
     }
@@ -369,5 +526,132 @@ mod tests {
                 actual: 7
             }
         ));
+    }
+
+    #[test]
+    fn visible_version_index_reuses_cached_version_for_same_bucket() {
+        let p1 = FilePtr::new(1, 64);
+        let mut resolver = FakeResolver::default();
+        resolver.insert(p1, row(3, 42, 100, 0, FilePtr::NONE, false));
+
+        let mut row_dir = RowDir::new();
+        row_dir.put(42, p1);
+
+        let mut index = VisibleVersionIndex::new(100, 8);
+        let first = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::as_of(150))
+            .unwrap();
+        let second = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::as_of(199))
+            .unwrap();
+
+        match first {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p1),
+            other => panic!("expected Visible, got {other:?}"),
+        }
+        match second {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p1),
+            other => panic!("expected Visible, got {other:?}"),
+        }
+        assert_eq!(resolver.loads, 1);
+        assert_eq!(index.stats().hits, 1);
+        assert_eq!(index.stats().misses, 1);
+        assert_eq!(index.stats().stale, 0);
+    }
+
+    #[test]
+    fn visible_version_index_revalidates_snapshot_within_bucket() {
+        let p1 = FilePtr::new(1, 64);
+        let p2 = FilePtr::new(1, 128);
+        let mut resolver = FakeResolver::default();
+        resolver.insert(p1, row(3, 42, 100, 150, FilePtr::NONE, false));
+        resolver.insert(p2, row(3, 42, 150, 0, p1, false));
+
+        let mut row_dir = RowDir::new();
+        row_dir.put(42, p2);
+
+        let mut index = VisibleVersionIndex::new(100, 8);
+        let newer = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::as_of(190))
+            .unwrap();
+        let older = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::as_of(110))
+            .unwrap();
+
+        match newer {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p2),
+            other => panic!("expected newer Visible version, got {other:?}"),
+        }
+        match older {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p1),
+            other => panic!("expected older Visible version, got {other:?}"),
+        }
+        assert_eq!(resolver.loads, 3);
+        assert_eq!(index.stats().hits, 0);
+        assert_eq!(index.stats().misses, 2);
+        assert_eq!(index.stats().stale, 1);
+    }
+
+    #[test]
+    fn visible_version_index_invalidates_when_rowdir_head_changes() {
+        let p1 = FilePtr::new(1, 64);
+        let p2 = FilePtr::new(1, 128);
+        let mut resolver = FakeResolver::default();
+        resolver.insert(p1, row(3, 42, 100, 0, FilePtr::NONE, false));
+        resolver.insert(p2, row(3, 42, 200, 0, p1, false));
+
+        let mut row_dir = RowDir::new();
+        row_dir.put(42, p1);
+
+        let mut index = VisibleVersionIndex::new(100, 8);
+        let before_update = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::latest())
+            .unwrap();
+        row_dir.put(42, p2);
+        let after_update = index
+            .resolve_row_id(&row_dir, &mut resolver, 42, Snapshot::latest())
+            .unwrap();
+
+        match before_update {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p1),
+            other => panic!("expected pre-update Visible version, got {other:?}"),
+        }
+        match after_update {
+            MvccLookup::Visible(version) => assert_eq!(version.ptr, p2),
+            other => panic!("expected post-update Visible version, got {other:?}"),
+        }
+        assert_eq!(resolver.loads, 2);
+        assert_eq!(index.stats().hits, 0);
+        assert_eq!(index.stats().misses, 2);
+        assert_eq!(index.stats().stale, 1);
+    }
+
+    #[test]
+    fn visible_version_index_evicts_oldest_entry_when_capacity_is_reached() {
+        let p1 = FilePtr::new(1, 64);
+        let p2 = FilePtr::new(1, 128);
+        let mut resolver = FakeResolver::default();
+        resolver.insert(p1, row(3, 1, 100, 0, FilePtr::NONE, false));
+        resolver.insert(p2, row(3, 2, 100, 0, FilePtr::NONE, false));
+
+        let mut row_dir = RowDir::new();
+        row_dir.put(1, p1);
+        row_dir.put(2, p2);
+
+        let mut index = VisibleVersionIndex::new(100, 1);
+        index
+            .resolve_row_id(&row_dir, &mut resolver, 1, Snapshot::as_of(150))
+            .unwrap();
+        index
+            .resolve_row_id(&row_dir, &mut resolver, 2, Snapshot::as_of(150))
+            .unwrap();
+        index
+            .resolve_row_id(&row_dir, &mut resolver, 1, Snapshot::as_of(150))
+            .unwrap();
+
+        assert_eq!(resolver.loads, 3);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.stats().hits, 0);
+        assert_eq!(index.stats().evictions, 2);
     }
 }

@@ -65,10 +65,8 @@ Current prototype coverage:
 - single-table scan paths precompile ValueID-safe predicates over interned columns and compare ValueIDs for `eq`, `ne`, and `in`
 - single-table row and snapshot scan paths now materialize only query-referenced columns, and when the predicate stays on the ValueID lookup path they only build row context for projection and `ORDER BY` columns
 - eligible single-table full scans now run through a 1024-row batch pipeline that transposes visible rows into a columnar buffer, filters them, and then projects result rows
+- `skeindb-core::mvcc::VisibleVersionIndex` now caches validated `row_id + snapshot_epoch_bucket` lookups and reuses the resolved visible version when the `RowDir` head pointer still matches and the cached version remains visible for the exact snapshot timestamp
 - unsupported operators or non-interned columns fall back to the normal expression evaluator
-
-Still open:
-- PF05 MVCC visible-version cache
 
 ---
 
@@ -105,6 +103,12 @@ Maintain a small per-row "visible hint" cache keyed by `(row_id, snapshot_epoch_
 
 - When a snapshot reads a row, store the resolved version pointer in the cache.
 - For future reads at similar snapshot epochs, jump directly to the likely visible version.
+
+Current prototype coverage:
+
+- bounded `VisibleVersionIndex` cache in `crates/skeindb-core/src/mvcc.rs`
+- cache validation against the current `RowDir` head pointer and the cached version's exact `[begin_ts, end_ts)` visibility window
+- automatic fallback to normal chain walking on head changes or same-bucket timestamp drift
 
 This is safe if the cache is validated (begin/end ts check) before use.
 

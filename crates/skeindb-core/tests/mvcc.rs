@@ -1,8 +1,36 @@
 use std::path::PathBuf;
 
-use skeindb_core::mvcc::{resolve_head, resolve_row_id, MvccLookup, RowSegmentSet, Snapshot};
+use skeindb_core::mvcc::{
+    resolve_head, resolve_row_id, MvccError, MvccLookup, RowSegmentSet, RowVersionResolver,
+    Snapshot, VisibleVersionIndex,
+};
 use skeindb_core::rowdir::RowDir;
 use skeindb_core::rowseg::{FilePtr, RowGroup, RowGroupRef, RowSegmentWriter, RowVersion};
+
+struct CountingSegments {
+    inner: RowSegmentSet,
+    loads: usize,
+}
+
+impl CountingSegments {
+    fn open_paths<I, P>(paths: I) -> Result<Self, MvccError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<std::path::Path>,
+    {
+        Ok(Self {
+            inner: RowSegmentSet::open_paths(paths)?,
+            loads: 0,
+        })
+    }
+}
+
+impl RowVersionResolver for CountingSegments {
+    fn load_row_version(&mut self, ptr: FilePtr) -> Result<RowVersion, MvccError> {
+        self.loads += 1;
+        self.inner.load_row_version(ptr)
+    }
+}
 
 struct Cleanup(Vec<PathBuf>);
 
@@ -173,4 +201,56 @@ fn mvcc_skips_staged_head_and_keeps_previous_committed_version_visible() {
         }
         other => panic!("expected committed fallback, got {other:?}"),
     }
+}
+
+#[test]
+fn mvcc_visible_version_index_reuses_file_backed_history_lookup() {
+    let path = temp_path("visible-index");
+    let _cleanup = Cleanup(vec![path.clone()]);
+
+    let mut writer = RowSegmentWriter::create(&path, 41, 1_700_000_000).unwrap();
+    let p1 = writer
+        .append(&row(7, 42, 100, 200, FilePtr::NONE, false, b"v1"))
+        .unwrap();
+    let p2 = writer
+        .append(&row(7, 42, 200, 300, p1, false, b"v2"))
+        .unwrap();
+    let p3 = writer
+        .append(&row(7, 42, 300, 0, p2, false, b"v3"))
+        .unwrap();
+    writer.sync().unwrap();
+    drop(writer);
+
+    let mut row_dir = RowDir::new();
+    row_dir.put(42, p3);
+
+    let mut segments = CountingSegments::open_paths([path.as_path()]).unwrap();
+    let mut index = VisibleVersionIndex::new(100, 8);
+
+    let first = index
+        .resolve_row_id(&row_dir, &mut segments, 42, Snapshot::as_of(250))
+        .unwrap();
+    let second = index
+        .resolve_row_id(&row_dir, &mut segments, 42, Snapshot::as_of(299))
+        .unwrap();
+
+    match first {
+        MvccLookup::Visible(version) => {
+            assert_eq!(version.ptr, p2);
+            assert_eq!(version.hops, 2);
+        }
+        other => panic!("expected Visible at 250, got {other:?}"),
+    }
+
+    match second {
+        MvccLookup::Visible(version) => {
+            assert_eq!(version.ptr, p2);
+            assert_eq!(version.hops, 2);
+        }
+        other => panic!("expected cached Visible at 299, got {other:?}"),
+    }
+
+    assert_eq!(segments.loads, 2);
+    assert_eq!(index.stats().hits, 1);
+    assert_eq!(index.stats().misses, 1);
 }
