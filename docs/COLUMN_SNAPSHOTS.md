@@ -101,6 +101,8 @@ Current prototype:
 - Simple single-table SELECT execution can now read required columns directly from `manifest.json` + `.cseg` sidecars.
 - Primary-key columns are always eligible because they are stored as dedicated segments even when they are not part of the projected snapshot column list.
 - Execution is still row-wise after load: predicates, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
+- The optimizer now routes into snapshot scans only for current-time reads when a covering snapshot is cheaper than a row scan and no better row-side prefilter path is available.
+- Historical `AS OF` reads and selective vector/index-prefilter paths stay on the row engine.
 
 Hybrid plan:
 - scan column snapshots for cold partitions
@@ -163,4 +165,5 @@ Prototype (scaffold status):
 - Cost model, pattern tracking, and online controller are implemented for single-table SELECTs.
 - Snapshots persist in `snapshots.json`, emit sidecar `.cseg` artifacts, and are loaded best-effort on startup when `table_version` still matches.
 - Snapshot reader + column scan execution are in place for simple single-table SELECTs.
-- Broader optimizer routing and hybrid merge planning remain follow-up work in T102.
+- A basic optimizer rule now routes covered current-time single-table SELECTs into snapshot scans when the snapshot cost model beats a row scan and no selective row-side path wins first.
+- Broader hybrid merge planning remains follow-up work beyond T102.

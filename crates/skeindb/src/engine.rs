@@ -1010,6 +1010,15 @@ struct SnapshotColumnScan {
     row_count: usize,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct SnapshotOptimizerPlan {
+    selection: SnapshotSelection,
+    estimated_rows: u64,
+    estimated_row_scan_cost: f64,
+    estimated_snapshot_scan_cost: f64,
+}
+
 #[derive(Debug, Clone)]
 struct QuerySnapshotInfo {
     base: BaseTableRef,
@@ -8456,14 +8465,13 @@ impl SnapshotManager {
         out
     }
 
-    fn snapshot_selection_for_query(
-        &mut self,
+    fn snapshot_candidate_for_query(
+        &self,
         table: &TableKey,
         required: &HashSet<String>,
         table_version: u64,
-        now: u64,
     ) -> Option<SnapshotSelection> {
-        let snapshots = self.snapshots.get_mut(table)?;
+        let snapshots = self.snapshots.get(table)?;
         let mut best_idx: Option<usize> = None;
         let mut best_cols = usize::MAX;
 
@@ -8481,9 +8489,7 @@ impl SnapshotManager {
         }
 
         let idx = best_idx?;
-        let snap = &mut snapshots[idx];
-        snap.stats.hits = snap.stats.hits.saturating_add(1);
-        snap.stats.last_used_micros = now;
+        let snap = &snapshots[idx];
 
         Some(SnapshotSelection {
             id: snap.id.clone(),
@@ -8494,6 +8500,31 @@ impl SnapshotManager {
             snapshot_ts: snap.snapshot_ts,
             table_version: snap.table_version,
         })
+    }
+
+    fn record_snapshot_hit(&mut self, table: &TableKey, snapshot_id: &str, now: u64) {
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return;
+        };
+        let Some(snap) = list.iter_mut().find(|snap| snap.id == snapshot_id) else {
+            return;
+        };
+        snap.stats.hits = snap.stats.hits.saturating_add(1);
+        snap.stats.last_used_micros = now;
+    }
+
+    fn estimate_query_scan_costs(
+        &self,
+        row_count: u64,
+        table_cols: usize,
+        snapshot_scan_cols: usize,
+    ) -> (f64, f64) {
+        let row_scan_cost =
+            self.cost_model.row_scan_cost_per_cell * (table_cols as f64) * (row_count as f64);
+        let snapshot_scan_cost = self.cost_model.snapshot_scan_cost_per_cell
+            * (snapshot_scan_cols as f64)
+            * (row_count as f64);
+        (row_scan_cost, snapshot_scan_cost)
     }
 
     fn record_query(
@@ -9042,7 +9073,7 @@ fn execute_select(
 
     if let Some(info) = snapshot_info.as_ref() {
         if let Some((columns, rows, rows_scanned)) =
-            try_execute_select_snapshot(engine, query, args, info)?
+            try_execute_select_snapshot(engine, query, args, info, as_of_ms)?
         {
             if !index_infos.is_empty() {
                 engine.observe_index_advisor(&index_infos, rows_scanned);
@@ -9381,7 +9412,7 @@ fn execute_select_with_keys(
 
     if let Some(info) = snapshot_info.as_ref() {
         if let Some((columns, rows, keys, rows_scanned)) =
-            try_execute_select_with_keys_snapshot(engine, query, args, info)?
+            try_execute_select_with_keys_snapshot(engine, query, args, info, as_of_ms)?
         {
             if !index_infos.is_empty() {
                 engine.observe_index_advisor(&index_infos, rows_scanned);
@@ -9509,10 +9540,106 @@ fn execute_select_with_keys(
     Ok((columns, rows, keys))
 }
 
+fn choose_snapshot_optimizer_plan(
+    engine: &Engine,
+    query: &Query,
+    args: &[Lit],
+    info: &QuerySnapshotInfo,
+    as_of_ms: Option<u64>,
+    include_pk: bool,
+) -> Option<SnapshotOptimizerPlan> {
+    if as_of_ms.is_some() || query.lock.is_some() {
+        return None;
+    }
+
+    let QueryBody::Select { select } = query.body.as_ref() else {
+        return None;
+    };
+    if select.distinct.unwrap_or(false) || select.group_by.is_some() || select.having.is_some() {
+        return None;
+    }
+
+    let from = select.from.as_ref()?;
+    if from.len() != 1 {
+        return None;
+    }
+    let TableRef::Base(base) = &from[0] else {
+        return None;
+    };
+
+    let key = TableKey {
+        db: base.db.clone(),
+        table: base.table.clone(),
+    };
+    if engine.views.contains_key(&key) || engine.oblivious_policy_for(base).level != "off" {
+        return None;
+    }
+
+    let (schema, tdata) = engine.get_table(base).ok()?;
+
+    let has_limit = query
+        .limit
+        .as_ref()
+        .and_then(|limit| limit.limit.map(|lim| (lim, limit.offset.unwrap_or(0))));
+    if let (Some((limit, offset)), Some(hint)) = (
+        has_limit,
+        vector_order_prefilter_hint(&query.order_by, args),
+    ) {
+        let required = limit.saturating_add(offset);
+        if required > 0 {
+            if let Some(candidates) =
+                vector_prefilter_candidates(schema, tdata, &hint.column, &hint.query_vec)
+            {
+                if candidates.len() as u64 >= required {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if index_prefilter_candidates(engine, base, select.r#where.as_ref(), args).is_some() {
+        return None;
+    }
+
+    let estimated_rows = tdata
+        .rows
+        .iter()
+        .filter(|entry| row_visible_at(entry, None))
+        .count() as u64;
+    let required: HashSet<String> = info.required_cols.iter().cloned().collect();
+    let extra_pk_cols = if include_pk {
+        schema
+            .primary_key
+            .iter()
+            .filter(|col| !required.contains(*col))
+            .count()
+    } else {
+        0
+    };
+    let snapshot_scan_cols = required.len() + extra_pk_cols;
+
+    let manager = engine.snapshots.lock().ok()?;
+    let selection = manager.snapshot_candidate_for_query(&key, &required, schema.table_version)?;
+    let (estimated_row_scan_cost, estimated_snapshot_scan_cost) =
+        manager.estimate_query_scan_costs(estimated_rows, schema.columns.len(), snapshot_scan_cols);
+    if estimated_snapshot_scan_cost >= estimated_row_scan_cost {
+        return None;
+    }
+
+    Some(SnapshotOptimizerPlan {
+        selection,
+        estimated_rows,
+        estimated_row_scan_cost,
+        estimated_snapshot_scan_cost,
+    })
+}
+
 fn snapshot_scan_for_query(
     engine: &Engine,
+    query: &Query,
+    args: &[Lit],
     info: &QuerySnapshotInfo,
-    schema: &TableSchema,
+    as_of_ms: Option<u64>,
     include_pk: bool,
 ) -> Option<SnapshotColumnScan> {
     let required: HashSet<String> = info.required_cols.iter().cloned().collect();
@@ -9520,15 +9647,14 @@ fn snapshot_scan_for_query(
         db: info.base.db.clone(),
         table: info.base.table.clone(),
     };
-    let now = now_micros();
-    let selection = if let Ok(mut manager) = engine.snapshots.lock() {
-        manager.snapshot_selection_for_query(&table_key, &required, schema.table_version, now)
-    } else {
-        None
-    }?;
-    engine
-        .load_snapshot_column_scan(&selection, &required, include_pk)
-        .ok()
+    let plan = choose_snapshot_optimizer_plan(engine, query, args, info, as_of_ms, include_pk)?;
+    let scan = engine
+        .load_snapshot_column_scan(&plan.selection, &required, include_pk)
+        .ok()?;
+    if let Ok(mut manager) = engine.snapshots.lock() {
+        manager.record_snapshot_hit(&table_key, &plan.selection.id, now_micros());
+    }
+    Some(scan)
 }
 
 fn try_execute_select_snapshot(
@@ -9536,6 +9662,7 @@ fn try_execute_select_snapshot(
     query: &Query,
     args: &[Lit],
     info: &QuerySnapshotInfo,
+    as_of_ms: Option<u64>,
 ) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
     let QueryBody::Select { select } = query.body.as_ref() else {
         return Ok(None);
@@ -9546,12 +9673,7 @@ fn try_execute_select_snapshot(
         ..
     } = select.as_ref();
 
-    let schema = match engine.get_schema(&info.base.db, &info.base.table) {
-        Ok(schema) => schema,
-        Err(_) => return Ok(None),
-    };
-
-    let Some(scan) = snapshot_scan_for_query(engine, info, schema, false) else {
+    let Some(scan) = snapshot_scan_for_query(engine, query, args, info, as_of_ms, false) else {
         return Ok(None);
     };
 
@@ -9605,6 +9727,7 @@ fn try_execute_select_with_keys_snapshot(
     query: &Query,
     args: &[Lit],
     info: &QuerySnapshotInfo,
+    as_of_ms: Option<u64>,
 ) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>, u64)>> {
     let QueryBody::Select { select } = query.body.as_ref() else {
         return Ok(None);
@@ -9615,12 +9738,7 @@ fn try_execute_select_with_keys_snapshot(
         ..
     } = select.as_ref();
 
-    let schema = match engine.get_schema(&info.base.db, &info.base.table) {
-        Ok(schema) => schema,
-        Err(_) => return Ok(None),
-    };
-
-    let Some(scan) = snapshot_scan_for_query(engine, info, schema, true) else {
+    let Some(scan) = snapshot_scan_for_query(engine, query, args, info, as_of_ms, true) else {
         return Ok(None);
     };
 
@@ -23429,6 +23547,356 @@ mod tests {
             .stats
             .hits;
         assert!(hits > 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_prefers_covered_projection() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_prefer");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+        }
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            )),
+        );
+
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        let plan = choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false)
+            .expect("missing snapshot optimizer plan");
+        assert_eq!(plan.selection.columns, vec!["city".to_string()]);
+        assert!(plan.estimated_rows >= 2);
+        assert!(plan.estimated_snapshot_scan_cost < plan.estimated_row_scan_cost);
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Tokyo".to_string(),
+            }]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_skips_as_of_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_as_of");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Tokyo".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        let as_of_ms = now_millis();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 2 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Paris".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.01;
+        }
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        assert!(
+            choose_snapshot_optimizer_plan(&engine, &query, &[], &info, Some(as_of_ms), false)
+                .is_none()
+        );
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], Some(as_of_ms))?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            vec![Lit::Str {
+                v: "Tokyo".to_string(),
+            }]
+        );
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert_eq!(hits, 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_optimizer_rule_skips_index_prefilter_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("snap_optimizer_index_prefilter");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.schema_add_mysql_compat_index(
+            &table,
+            "city_idx".to_string(),
+            vec!["city".to_string()],
+            false,
+        )?;
+        engine.build_column_snapshot(
+            "app",
+            "users",
+            Some(vec!["city".to_string()]),
+            now_micros(),
+        )?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.01;
+        }
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "city".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                },
+            )),
+        );
+        let info = query_snapshot_info(&query).expect("missing snapshot info");
+        assert!(choose_snapshot_optimizer_plan(&engine, &query, &[], &info, None, false).is_none());
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row[0]
+            == Lit::Str {
+                v: "Oslo".to_string()
+            }));
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let hits = engine
+            .snapshots
+            .lock()
+            .unwrap()
+            .snapshots
+            .get(&key)
+            .unwrap()[0]
+            .stats
+            .hits;
+        assert_eq!(hits, 0);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

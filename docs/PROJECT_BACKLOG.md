@@ -88,7 +88,7 @@ Phase 0 verification checklist:
 ## Phase 10 - Hybrid row/column snapshots
 - [x] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md). Latest: snapshot builds now honor `snapshot_ts`, persist `manifest.json` + `.cseg` sidecars under `data/snapshots/`, and keep those artifacts in sync during incremental refresh.
 - [x] T101: Snapshot reader + column scan operator. Latest: simple single-table SELECT execution now loads projected and PK columns from snapshot manifests and `.cseg` sidecars instead of cloning in-memory snapshot rows.
-- [ ] T102: Optimizer rule: use column snapshots for covered ranges
+- [x] T102: Optimizer rule: use column snapshots for covered ranges. Latest: an explicit optimizer rule now chooses snapshot scans only for covered current-time single-table SELECTs when the cost model beats a row scan and no better vector/index-prefilter path exists.
 
 ## Phase 11 - Compatibility telemetry and migration hints
 - [x] T110: Feature flag instrumentation in MySQL translator
