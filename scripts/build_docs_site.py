@@ -134,7 +134,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
       <a href="../contact.html">Contact</a>
-      <a href="index.html" class="active">Docs</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
     </div>
     <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -205,6 +206,10 @@ hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
 .nav-links{display:flex;gap:1.4rem;align-items:center;flex-wrap:wrap}
 .nav-links a{color:var(--text-secondary);font-size:.88rem;font-weight:500;transition:color .2s}
 .nav-links a:hover,.nav-links a.active{color:var(--text)}
+.nav-links a.nav-sponsor{color:#f472b6}
+.nav-links a.nav-sponsor:hover{color:#f9a8d4}
+.nav-links a.nav-docs-cta{color:var(--accent-light);font-weight:600;padding:4px 12px;border-radius:6px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2)}
+.nav-links a.nav-docs-cta:hover,.nav-links a.nav-docs-cta.active{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.4);color:var(--accent-light)}
 .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500}
 .nav-gh svg{width:16px;height:16px;fill:currentColor}
 
@@ -421,13 +426,15 @@ def rewrite_links(body: str, slug_map: dict[str, str]) -> str:
         # normalise path relative to docs/
         norm = path.replace("./", "").replace("docs/", "")
         if norm in slug_map:
-            return f'{match.group(1)}"{slug_map[norm]}.html{anchor}"'
+          return f'{match.group(1)}="{slug_map[norm]}.html{anchor}"'
         if norm.endswith(".md"):
             # unknown md link — leave broken but readable
             return match.group(0)
         # images and other assets — make sure they resolve from /docs/site/guide/
+        if norm.startswith("assets/"):
+          return f'{match.group(1)}="{norm}{anchor}"'
         if any(path.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")):
-            return f'{match.group(1)}"../../figures/{os.path.basename(path)}{anchor}"'
+          return f'{match.group(1)}="../../figures/{os.path.basename(path)}{anchor}"'
         return match.group(0)
     return re.sub(r'(href|src)=\"([^\"]+)\"', repl, body)
 

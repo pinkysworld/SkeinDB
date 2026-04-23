@@ -16216,6 +16216,47 @@ pub(crate) async fn handle_rpc(
                 }
 
                 // --------------------
+                // settings.encryption.* (T193)
+                // --------------------
+                "settings.encryption.status" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionStatusParams =
+                        match params.clone() {
+                            Some(v) if !v.is_null() => parse_params(Some(v))?,
+                            _ => Default::default(),
+                        };
+                    let eng = state.engine.read().await;
+                    Ok(eng.settings_encryption_status(p))
+                }
+                "settings.encryption.set_mode" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionSetModeParams =
+                        parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.settings_encryption_set_mode(p)
+                        .map_err(|e| RpcError::new("invalid_argument", e))
+                }
+                "settings.encryption.register_key" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams =
+                        parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.settings_encryption_register_key(p)
+                        .map_err(|e| RpcError::new("invalid_argument", e))
+                }
+                "settings.encryption.set_active_key" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionSetActiveKeyParams =
+                        parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.settings_encryption_set_active_key(p)
+                        .map_err(|e| RpcError::new("invalid_argument", e))
+                }
+                "settings.encryption.rotate_key" => {
+                    let p: skeindb_skeinql::methods::SettingsEncryptionRotateKeyParams =
+                        parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    eng.settings_encryption_rotate_key(p)
+                        .map_err(|e| RpcError::new("invalid_argument", e))
+                }
+
+                // --------------------
                 // edge.* (research)
                 // --------------------
                 "edge.bundle.request" => {
@@ -26050,6 +26091,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "maintenance.history.status"
             | "maintenance.replay.export"
             | "maintenance.replay.run"
+            | "settings.encryption.status"
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
@@ -26228,6 +26270,11 @@ fn system_capabilities(state: &AppState) -> Value {
         "maintenance.replay.export",
         "maintenance.replay.import",
         "maintenance.replay.run",
+        "settings.encryption.status",
+        "settings.encryption.set_mode",
+        "settings.encryption.register_key",
+        "settings.encryption.set_active_key",
+        "settings.encryption.rotate_key",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",

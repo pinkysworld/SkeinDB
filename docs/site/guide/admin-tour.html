@@ -21,7 +21,8 @@
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
       <a href="../contact.html">Contact</a>
-      <a href="index.html" class="active">Docs</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
     </div>
     <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -112,7 +113,7 @@
 <p><strong>SkeinAdmin</strong> is the built-in web admin — 26 panels covering schema, data, configuration, clustering, research features, and operations. It ships with the single binary: no separate install, no Node/Electron, no cloud service.</p>
 <p>Open it at <code>http://127.0.0.1:8080/admin</code> once <code>skeindb serve</code> is running.</p>
 <h2 id="layout">Layout<a class="headerlink" href="#layout" title="Permanent link">¶</a></h2>
-<p><img alt="SkeinAdmin — overview" src"../../figures/admin-overview.png" /></p>
+<p><img alt="SkeinAdmin — overview" src="assets/screenshots/admin-overview.png" /></p>
 <ul>
 <li><strong>Left sidebar</strong> — panel switcher, grouped into Data, Ops, Security, Research, and System.</li>
 <li><strong>Top bar</strong> — connection info, node status, running server version.</li>
@@ -121,25 +122,25 @@
 </ul>
 <h2 id="tour-of-the-key-panels">Tour of the key panels<a class="headerlink" href="#tour-of-the-key-panels" title="Permanent link">¶</a></h2>
 <h3 id="dashboard">Dashboard<a class="headerlink" href="#dashboard" title="Permanent link">¶</a></h3>
-<p><img alt="Dashboard" src"../../figures/admin-dashboard.png" /></p>
+<p><img alt="Dashboard" src="assets/screenshots/admin-dashboard.png" /></p>
 <p>At-a-glance: throughput, QPS, WAL lag, slow queries, connection counts. Small enough to watch on a laptop.</p>
 <h3 id="schema-browser">Schema browser<a class="headerlink" href="#schema-browser" title="Permanent link">¶</a></h3>
-<p><img alt="Schema browser" src"../../figures/admin-schema.png" /></p>
+<p><img alt="Schema browser" src="assets/screenshots/admin-schema.png" /></p>
 <p>Tree view of databases → tables → columns / indexes / views. Click a column to see type, nullability, default, and referring indexes.</p>
 <h3 id="data-editor-easy-viewer">Data editor (Easy Viewer)<a class="headerlink" href="#data-editor-easy-viewer" title="Permanent link">¶</a></h3>
-<p><img alt="Data editor" src"../../figures/admin-data-editor.png" /></p>
+<p><img alt="Data editor" src="assets/screenshots/admin-data-editor.png" /></p>
 <p>Inline database creation, live <code>CREATE TABLE</code> preview, cell editing with MVCC version history on the right panel. Useful for early development without dropping into SQL.</p>
 <h3 id="sql-console">SQL console<a class="headerlink" href="#sql-console" title="Permanent link">¶</a></h3>
-<p><img alt="SQL console" src"../../figures/admin-sql.png" /></p>
+<p><img alt="SQL console" src="assets/screenshots/admin-sql.png" /></p>
 <p>Dialect-aware: write MySQL, PostgreSQL (partial), or SkeinQL; results render in the same table. Query history, save/share snippets, explain plans.</p>
 <h3 id="index-advisor">Index advisor<a class="headerlink" href="#index-advisor" title="Permanent link">¶</a></h3>
-<p><img alt="Index advisor" src"../../figures/admin-index-advisor.png" /></p>
+<p><img alt="Index advisor" src="assets/screenshots/admin-index-advisor.png" /></p>
 <p>The <a href="index-advisor.html">Index advisor</a> page. Ranked recommendations from workload telemetry, with an "apply" button and an observed-before / expected-after panel.</p>
 <h3 id="cluster-dashboard">Cluster dashboard<a class="headerlink" href="#cluster-dashboard" title="Permanent link">¶</a></h3>
-<p><img alt="Cluster dashboard" src"../../figures/admin-cluster.png" /></p>
+<p><img alt="Cluster dashboard" src="assets/screenshots/admin-cluster.png" /></p>
 <p>Topology view: nodes, shards, replica lag, join tokens, manual promotion, rolling upgrade co-ordination. See <a href="clustering.html">Clustering</a>.</p>
 <h3 id="audit-wal-viewer">Audit WAL viewer<a class="headerlink" href="#audit-wal-viewer" title="Permanent link">¶</a></h3>
-<p><img alt="Audit WAL" src"../../figures/admin-audit.png" /></p>
+<p><img alt="Audit WAL" src="assets/screenshots/admin-audit.png" /></p>
 <p>Tamper-evident log viewer with forensic query language. Verify chain integrity from the UI. See <a href="audit-wal.html">Audit WAL</a>.</p>
 <h3 id="research-panels">Research panels<a class="headerlink" href="#research-panels" title="Permanent link">¶</a></h3>
 <p>Dedicated UIs for research tracks: ETag cache coherence, query coalescing, CDC, Wasm UDFs, oblivious execution, differential privacy budgets, merge policies, delta chains, column snapshots. Each panel surfaces the relevant metrics and toggles — the same data the SkeinQL API exposes, just visual.</p>

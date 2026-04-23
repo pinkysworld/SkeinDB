@@ -18,6 +18,10 @@ hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
 .nav-links{display:flex;gap:1.4rem;align-items:center;flex-wrap:wrap}
 .nav-links a{color:var(--text-secondary);font-size:.88rem;font-weight:500;transition:color .2s}
 .nav-links a:hover,.nav-links a.active{color:var(--text)}
+.nav-links a.nav-sponsor{color:#f472b6}
+.nav-links a.nav-sponsor:hover{color:#f9a8d4}
+.nav-links a.nav-docs-cta{color:var(--accent-light);font-weight:600;padding:4px 12px;border-radius:6px;background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.2)}
+.nav-links a.nav-docs-cta:hover,.nav-links a.nav-docs-cta.active{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.4);color:var(--accent-light)}
 .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500}
 .nav-gh svg{width:16px;height:16px;fill:currentColor}
 

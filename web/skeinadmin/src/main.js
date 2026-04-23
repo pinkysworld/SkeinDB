@@ -5445,6 +5445,38 @@ wire('btnSecCreateToken', securityCreateToken);
 wire('btnSecRefreshTokens', securityRefreshTokens);
 wire('btnSecTopQueries', securityTopQueries);
 
+// Encryption (T193)
+wire('btnEncStatus', () => call('settings.encryption.status', {}, 'encStatusOut'));
+wire('btnEncSetMode', () => {
+  const db = (document.getElementById('encModeDb')?.value || '').trim();
+  const mode = document.getElementById('encModeSelect')?.value || 'off';
+  if (!db) { document.getElementById('encModeOut').textContent = 'Database name required.'; return; }
+  return call('settings.encryption.set_mode', { db, mode }, 'encModeOut');
+});
+wire('btnEncRegisterKey', () => {
+  const db = (document.getElementById('encRegDb')?.value || '').trim();
+  const key_id = (document.getElementById('encRegKeyId')?.value || '').trim();
+  const master_key_b64 = (document.getElementById('encRegMaster')?.value || '').trim();
+  const make_active = (document.getElementById('encRegMakeActive')?.value || 'true') === 'true';
+  if (!db || !key_id || !master_key_b64) {
+    document.getElementById('encRegOut').textContent = 'db, key_id, and base64 master key are required.';
+    return;
+  }
+  return call('settings.encryption.register_key', { db, key_id, master_key_b64, make_active }, 'encRegOut');
+});
+wire('btnEncSetActive', () => {
+  const db = (document.getElementById('encActiveDb')?.value || '').trim();
+  const key_id = (document.getElementById('encActiveKeyId')?.value || '').trim();
+  if (!db || !key_id) { document.getElementById('encActiveOut').textContent = 'db and key_id required.'; return; }
+  return call('settings.encryption.set_active_key', { db, key_id }, 'encActiveOut');
+});
+wire('btnEncRotate', () => {
+  const db = (document.getElementById('encRotateDb')?.value || '').trim();
+  const new_key_id = (document.getElementById('encRotateKeyId')?.value || '').trim();
+  if (!db || !new_key_id) { document.getElementById('encRotateOut').textContent = 'db and new_key_id required.'; return; }
+  return call('settings.encryption.rotate_key', { db, new_key_id }, 'encRotateOut');
+});
+
 // Telemetry
 wire('btnTelemetryCompatSummary', () => call('telemetry.compat_summary', {}, 'telemetryOut'));
 wire('btnTelemetryFeatureFlags', () => call('telemetry.feature_flags', {}, 'telemetryOut'));

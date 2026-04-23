@@ -178,3 +178,50 @@ fn skeinadmin_easy_design_tab_exposes_wysiwyg_schema_editor() {
         assert!(js.contains(ma), "skeinadmin design js should contain {ma}");
     }
 }
+
+#[test]
+fn skeinadmin_encryption_panel_exposes_key_management_controls() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-panel=\"encryption\"",
+        "Database Encryption",
+        "btnEncStatus",
+        "btnEncSetMode",
+        "btnEncRegisterKey",
+        "btnEncSetActive",
+        "btnEncRotate",
+        "encStatusGrid",
+        "ENC_OFF",
+        "ENC_RANDOM",
+        "ENC_MLE_DB",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin encryption html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "settings.encryption.status",
+        "settings.encryption.set_mode",
+        "settings.encryption.register_key",
+        "settings.encryption.set_active_key",
+        "settings.encryption.rotate_key",
+        "wire('btnEncStatus'",
+        "wire('btnEncSetMode'",
+        "wire('btnEncRegisterKey'",
+        "wire('btnEncSetActive'",
+        "wire('btnEncRotate'",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin encryption js should contain {marker}"
+        );
+    }
+}

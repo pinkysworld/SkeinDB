@@ -177,3 +177,100 @@ Evaluation metrics:
 - dedup ratio with/without encryption
 - CPU overhead per write/read
 - attack surface discussion (qualitative)
+
+
+## 9. T191 — `EncryptedValueStore` wrapper
+
+The `skeindb_core::encrypted_valuestore::EncryptedValueStore<'a>` type layers
+encrypt-on-write / decrypt-on-read over an existing `ValueStore` **without
+changing the on-disk `.vseg` format**. This is possible because every
+`EncryptionEnvelope` is fully self-describing:
+
+| Field           | Width       | Notes                                                      |
+| --------------- | ----------- | ---------------------------------------------------------- |
+| version         | u8          | currently `1`                                              |
+| mode_code       | u8          | `0=Off`, `1=ENC_RANDOM`, `2=ENC_MLE_DB`                    |
+| scope_id        | length-prefixed UTF-8 | database id (and AAD anchor)                     |
+| key_id          | optional length-prefixed UTF-8 | active key id at write time             |
+| nonce           | optional 12 bytes | only present for AEAD modes                          |
+| derivation_salt | optional 32 bytes | only present for `ENC_MLE_DB` (plaintext digest)     |
+| ciphertext      | remainder   | AEAD ciphertext (or raw plaintext for `Off`)               |
+
+The wrapper stores the encoded envelope as an ordinary `ValueKind::Cell` blob
+and reads it back using the strict `EncryptionEnvelope::from_stored_bytes`
+parser (rejects trailing bytes and unknown version codes). `Off` values bypass
+the envelope entirely and are stored as raw bytes — there is no overhead when
+encryption is disabled.
+
+API surface:
+
+```rust
+let mut store = ValueStore::new(ValueStoreConfig::default());
+let mut keys  = DatabaseKeyManager::new();
+keys.register_database_key("app", "k1", master_key)?;
+keys.set_database_mode("app", EncryptionMode::EncMleDb)?;
+
+let mut wrap = EncryptedValueStore::new(&mut store, &keys);
+let rec = wrap.put_encrypted(&ctx, b"hello")?;          // EncryptedRecord { value_id, mode, scope_id, key_id }
+let plain = wrap.get_decrypted(&ctx, &rec.value_id)?;   // back to bytes
+let env = wrap.read_envelope(&rec.value_id)?;           // inspect (no decrypt)
+```
+
+## 10. T192 — Key rotation and re-encryption
+
+`DatabaseKeyManager::rotate_active_key(db, new_key_id)` swaps the active key
+for `db` and returns a `KeyRotationPlan`:
+
+```rust
+pub struct KeyRotationPlan {
+    pub db: String,
+    pub mode: EncryptionMode,
+    pub previous_key_id: Option<String>,
+    pub new_key_id: String,
+}
+```
+
+To rewrite individual envelopes under the new active key, call
+`reencrypt_envelope` (envelope-level) or `EncryptedValueStore::reencrypt_value`
+(ValueStore-level). Both update a `ReencryptionProgress` counter set so an
+operator can drive a long-running rotation pass in user code:
+
+```rust
+pub struct ReencryptionProgress {
+    pub db: String,
+    pub envelopes_inspected: u64,
+    pub envelopes_rewritten: u64,
+    pub envelopes_skipped_off: u64,
+    pub envelopes_skipped_current: u64,
+    pub previous_key_id: Option<String>,
+    pub new_key_id: Option<String>,
+}
+```
+
+Old envelopes are intentionally **left in place** so historical reads continue
+to work under prior keys until a separate GC pass collects them.
+
+## 11. T193 — `settings.encryption.*` RPC + SkeinAdmin panel
+
+The engine exposes the runtime key-management surface via JSON-RPC. Master key
+bytes are **never persisted to disk** by these methods — operators must
+re-register keys after restart.
+
+| Method                                   | Direction | Notes                                              |
+| ---------------------------------------- | --------- | -------------------------------------------------- |
+| `settings.encryption.status`             | read      | per-database mode, active key id, registered keys, recent audit ring |
+| `settings.encryption.set_mode`           | write     | switch a database to `off` / `enc_random` / `enc_mle_db` |
+| `settings.encryption.register_key`       | write     | accepts base64 (standard / URL-safe / no-pad), validates 32-byte length, optional `make_active` |
+| `settings.encryption.set_active_key`     | write     | promote an already-registered key                  |
+| `settings.encryption.rotate_key`         | write     | returns a `KeyRotationPlan`; envelope rewriting is opt-in via `EncryptedValueStore::reencrypt_value` |
+
+SkeinAdmin gains an `Encryption` panel (sidebar + top tab) with cards for
+Status, Set Mode, Register Key, Set Active Key, and Rotate Key. The panel uses
+the same JSON-RPC client as every other admin tab.
+
+Audit: every mutating call appends a redacted `EncryptionAuditEntry` (no key
+material, ever) to a 256-entry in-memory ring exposed via
+`settings.encryption.status` → `recent_audit`.
+
+Coverage: `skeinadmin_encryption_panel_exposes_key_management_controls` plus
+the unit tests listed in section 8.

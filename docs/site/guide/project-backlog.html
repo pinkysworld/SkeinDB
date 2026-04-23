@@ -21,7 +21,8 @@
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
       <a href="../contact.html">Contact</a>
-      <a href="index.html" class="active">Docs</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
     </div>
     <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -277,7 +278,7 @@ Each task should include tests.</p>
 </ul>
 <h2 id="phase-20-dedup-preserving-encryption">Phase 20 - Dedup-preserving encryption<a class="headerlink" href="#phase-20-dedup-preserving-encryption" title="Permanent link">¶</a></h2>
 <ul>
-<li>[x] T190: Key management + AEAD wrappers (ENC_RANDOM, ENC_MLE_DB) (docs/CONVERGENT_ENCRYPTION.md). Latest: <code>skeindb-core</code> now exposes a standalone encryption baseline via <code>encryption::DatabaseKeyManager</code>, database-scoped encryption profiles, active key selection, and <code>EncryptionEnvelope</code> wrappers for <code>ENC_RANDOM</code> and <code>ENC_MLE_DB</code>. <code>ENC_RANDOM</code> derives a mode-specific AES-256-GCM-SIV key from the database master secret and uses randomized nonces; <code>ENC_MLE_DB</code> derives a deterministic content key from the database master secret plus a SHA-256 plaintext digest and returns an envelope carrying the derivation salt for later persistence work in T191. Focused integration coverage lives in <code>crates/skeindb-core/tests/encryption.rs</code>.</li>
+<li>[x] T190: Key management + AEAD wrappers (ENC_RANDOM, ENC_MLE_DB) (docs/CONVERGENT_ENCRYPTION.md). Latest: <code>skeindb-core</code> now exposes a standalone encryption baseline via <code>encryption::DatabaseKeyManager</code>, database-scoped encryption profiles, active key selection, and <code>EncryptionEnvelope</code> wrappers for <code>ENC_RANDOM</code> and <code>ENC_MLE_DB</code>. <code>ENC_RANDOM</code> derives a mode-specific AES-256-GCM-SIV key from the database master secret and uses randomized nonces; <code>ENC_MLE_DB</code> derives a deterministic content key from the database master secret plus a SHA-256 plaintext digest and returns an envelope carrying the derivation salt for later persistence work in T191. 2026-04-23 hardening: <code>ENC_MLE_DB</code> no longer uses a fixed zero AEAD nonce — the nonce is now HKDF-derived from the same <code>(master_key, plaintext_digest)</code> scope via a distinct info label, so dedup convergence is preserved while the fixed-nonce review finding is closed. Focused integration coverage lives in <code>crates/skeindb-core/tests/encryption.rs</code>.</li>
 <li>[ ] T191: ValueStore encryption metadata + encrypt/decrypt paths</li>
 <li>[ ] T192: Key rotation + background re-encryption task + progress reporting</li>
 <li>[ ] T193: settings.encryption.* SkeinQL endpoints + SkeinAdmin UI + audit notes</li>

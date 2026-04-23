@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{encode_varu, ValueKind};
+use crate::{decode_varu, encode_varu, ValueKind};
 
 pub const ENCRYPTION_ENVELOPE_VERSION: u8 = 1;
 pub const ENCRYPTION_MASTER_KEY_LEN: usize = 32;
@@ -37,6 +37,18 @@ impl EncryptionMode {
             Self::Off => "ENC_OFF",
             Self::EncRandom => "ENC_RANDOM",
             Self::EncMleDb => "ENC_MLE_DB",
+        }
+    }
+
+    /// Parse a mode label. Accepts both upper- and lower-case forms used in
+    /// configuration files and RPC parameters (`off`, `enc_off`, `enc_random`,
+    /// `enc_mle_db`).
+    pub fn parse(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "off" | "enc_off" => Some(Self::Off),
+            "enc_random" | "random" => Some(Self::EncRandom),
+            "enc_mle_db" | "mle_db" | "mle" => Some(Self::EncMleDb),
+            _ => None,
         }
     }
 
@@ -165,6 +177,76 @@ impl EncryptionEnvelope {
     }
 }
 
+impl EncryptionEnvelope {
+    /// Parse an envelope produced by [`EncryptionEnvelope::stored_bytes`]. This is the
+    /// canonical T191 / T192 reader: it consumes the entire input and rejects trailing bytes
+    /// so a caller can safely treat any successful parse as a complete, self-describing
+    /// encryption envelope.
+    pub fn from_stored_bytes(bytes: &[u8]) -> Result<Self, EncryptionError> {
+        let mut cursor: &[u8] = bytes;
+        let version = read_byte(&mut cursor)?;
+        if version != ENCRYPTION_ENVELOPE_VERSION {
+            return Err(EncryptionError::InvalidEnvelope(format!(
+                "unsupported envelope version: {version}"
+            )));
+        }
+        let mode_code = read_byte(&mut cursor)?;
+        let mode = match mode_code {
+            0 => EncryptionMode::Off,
+            1 => EncryptionMode::EncRandom,
+            2 => EncryptionMode::EncMleDb,
+            other => {
+                return Err(EncryptionError::InvalidEnvelope(format!(
+                    "unknown encryption mode code: {other}"
+                )))
+            }
+        };
+        let scope_id = read_string(&mut cursor)?;
+        let key_id = match read_byte(&mut cursor)? {
+            0 => None,
+            1 => Some(read_string(&mut cursor)?),
+            other => {
+                return Err(EncryptionError::InvalidEnvelope(format!(
+                    "invalid key_id presence flag: {other}"
+                )))
+            }
+        };
+        let nonce = match read_byte(&mut cursor)? {
+            0 => None,
+            1 => Some(read_fixed::<ENCRYPTION_NONCE_LEN>(&mut cursor)?),
+            other => {
+                return Err(EncryptionError::InvalidEnvelope(format!(
+                    "invalid nonce presence flag: {other}"
+                )))
+            }
+        };
+        let derivation_salt = match read_byte(&mut cursor)? {
+            0 => None,
+            1 => Some(read_fixed::<ENCRYPTION_DERIVATION_SALT_LEN>(&mut cursor)?),
+            other => {
+                return Err(EncryptionError::InvalidEnvelope(format!(
+                    "invalid derivation_salt presence flag: {other}"
+                )))
+            }
+        };
+        let ciphertext = read_bytes(&mut cursor)?;
+        if !cursor.is_empty() {
+            return Err(EncryptionError::InvalidEnvelope(
+                "trailing bytes after envelope".to_string(),
+            ));
+        }
+        Ok(EncryptionEnvelope {
+            version,
+            mode,
+            scope_id,
+            key_id,
+            nonce,
+            derivation_salt,
+            ciphertext,
+        })
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DatabaseKeyManager {
     profiles: HashMap<String, DatabaseEncryptionProfile>,
@@ -246,6 +328,25 @@ impl DatabaseKeyManager {
 
     pub fn profile(&self, db_id: &str) -> Option<&DatabaseEncryptionProfile> {
         self.profiles.get(db_id.trim())
+    }
+
+    /// Sorted list of all database IDs that currently have an encryption profile registered.
+    pub fn database_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.profiles.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Sorted list of registered key IDs for a database (empty if the database is unknown).
+    pub fn registered_key_ids(&self, db_id: &str) -> Vec<String> {
+        let trimmed = db_id.trim();
+        let mut ids: Vec<String> = self
+            .keys
+            .keys()
+            .filter_map(|(d, k)| if d == trimmed { Some(k.clone()) } else { None })
+            .collect();
+        ids.sort();
+        ids
     }
 
     pub fn encrypt(
@@ -374,6 +475,130 @@ impl DatabaseKeyManager {
     }
 }
 
+/// Plan summary for a T192 key-rotation operation.
+///
+/// `previous_key_id` is the active key prior to the rotation (may be `None` if the database
+/// did not have an active key yet); `new_key_id` is the key that is now marked active. The
+/// caller is responsible for re-encrypting existing values via [`DatabaseKeyManager::reencrypt_envelope`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyRotationPlan {
+    pub db_id: String,
+    pub previous_key_id: Option<String>,
+    pub new_key_id: String,
+    pub mode: EncryptionMode,
+}
+
+/// Progress counters for a streaming re-encryption pass driven by [`DatabaseKeyManager::reencrypt_envelope`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReencryptionProgress {
+    pub db_id: String,
+    pub previous_key_id: Option<String>,
+    pub new_key_id: Option<String>,
+    pub envelopes_inspected: u64,
+    pub envelopes_rewritten: u64,
+    pub envelopes_skipped_off: u64,
+    pub envelopes_skipped_current: u64,
+}
+
+impl ReencryptionProgress {
+    pub fn new(db_id: impl Into<String>) -> Self {
+        Self {
+            db_id: db_id.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn note_inspected(&mut self) {
+        self.envelopes_inspected = self.envelopes_inspected.saturating_add(1);
+    }
+
+    pub fn note_rewritten(&mut self) {
+        self.envelopes_rewritten = self.envelopes_rewritten.saturating_add(1);
+    }
+
+    pub fn note_off(&mut self) {
+        self.envelopes_skipped_off = self.envelopes_skipped_off.saturating_add(1);
+    }
+
+    pub fn note_already_current(&mut self) {
+        self.envelopes_skipped_current = self.envelopes_skipped_current.saturating_add(1);
+    }
+}
+
+impl DatabaseKeyManager {
+    /// Rotate the active key for `db_id` to `new_key_id`. Both the new key and (implicitly)
+    /// any prior keys remain available for decrypting historical envelopes; only the
+    /// *active* key — the one used to encrypt new envelopes — changes.
+    pub fn rotate_active_key(
+        &mut self,
+        db_id: impl AsRef<str>,
+        new_key_id: impl AsRef<str>,
+    ) -> Result<KeyRotationPlan, EncryptionError> {
+        let db_id = normalize_required(db_id.as_ref(), "db_id")?.to_string();
+        let new_key_id = normalize_required(new_key_id.as_ref(), "key_id")?.to_string();
+        if !self.keys.contains_key(&(db_id.clone(), new_key_id.clone())) {
+            return Err(EncryptionError::MissingKey {
+                db_id,
+                key_id: new_key_id,
+            });
+        }
+        let profile = self
+            .profiles
+            .entry(db_id.clone())
+            .or_insert_with(|| DatabaseEncryptionProfile::new(db_id.clone()));
+        let previous = profile.active_key_id.clone();
+        profile.active_key_id = Some(new_key_id.clone());
+        Ok(KeyRotationPlan {
+            db_id,
+            previous_key_id: previous,
+            new_key_id,
+            mode: profile.mode,
+        })
+    }
+
+    /// Re-encrypt a single envelope so it uses the database's currently-active key. Returns
+    /// `Ok(None)` if the envelope is already up to date or has mode `ENC_OFF`. Updates the
+    /// supplied [`ReencryptionProgress`] counters either way.
+    pub fn reencrypt_envelope(
+        &self,
+        ctx: &EncryptionContext,
+        envelope: &EncryptionEnvelope,
+        progress: &mut ReencryptionProgress,
+    ) -> Result<Option<EncryptionEnvelope>, EncryptionError> {
+        progress.note_inspected();
+
+        if envelope.mode == EncryptionMode::Off {
+            progress.note_off();
+            return Ok(None);
+        }
+
+        let db_id = normalize_required(&ctx.db_id, "db_id")?.to_string();
+        let profile = self
+            .profiles
+            .get(&db_id)
+            .ok_or_else(|| EncryptionError::UnknownDatabase(db_id.clone()))?;
+        let active_key_id = profile
+            .active_key_id
+            .clone()
+            .ok_or_else(|| EncryptionError::MissingActiveKey(db_id.clone()))?;
+
+        progress.previous_key_id = envelope.key_id.clone();
+        progress.new_key_id = Some(active_key_id.clone());
+
+        if envelope.key_id.as_deref() == Some(active_key_id.as_str())
+            && envelope.mode == profile.mode
+        {
+            progress.note_already_current();
+            return Ok(None);
+        }
+
+        let plaintext = self.decrypt(ctx, envelope)?;
+        let new_envelope = self.encrypt(ctx, &plaintext)?;
+        progress.note_rewritten();
+        Ok(Some(new_envelope))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EncryptionError {
     #[error("invalid {field}: must not be empty")]
@@ -400,6 +625,8 @@ pub enum EncryptionError {
     Aead,
     #[error("system entropy unavailable: {0}")]
     Entropy(String),
+    #[error("invalid stored encryption envelope: {0}")]
+    InvalidEnvelope(String),
 }
 
 fn normalize_required<'a>(value: &'a str, field: &'static str) -> Result<&'a str, EncryptionError> {
@@ -413,6 +640,51 @@ fn normalize_required<'a>(value: &'a str, field: &'static str) -> Result<&'a str
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&encode_varu(bytes.len() as u64));
     out.extend_from_slice(bytes);
+}
+
+fn read_byte(cursor: &mut &[u8]) -> Result<u8, EncryptionError> {
+    let (&head, rest) = cursor.split_first().ok_or_else(|| {
+        EncryptionError::InvalidEnvelope("unexpected end of envelope".to_string())
+    })?;
+    *cursor = rest;
+    Ok(head)
+}
+
+fn read_bytes(cursor: &mut &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    let len = decode_varu(cursor)
+        .map_err(|err| EncryptionError::InvalidEnvelope(format!("invalid length prefix: {err}")))?
+        as usize;
+    if cursor.len() < len {
+        return Err(EncryptionError::InvalidEnvelope(format!(
+            "length-prefixed slice exceeds remaining bytes (need {len}, have {})",
+            cursor.len()
+        )));
+    }
+    let (head, rest) = cursor.split_at(len);
+    let out = head.to_vec();
+    *cursor = rest;
+    Ok(out)
+}
+
+fn read_string(cursor: &mut &[u8]) -> Result<String, EncryptionError> {
+    let bytes = read_bytes(cursor)?;
+    String::from_utf8(bytes).map_err(|err| {
+        EncryptionError::InvalidEnvelope(format!("invalid UTF-8 in envelope string: {err}"))
+    })
+}
+
+fn read_fixed<const N: usize>(cursor: &mut &[u8]) -> Result<[u8; N], EncryptionError> {
+    if cursor.len() < N {
+        return Err(EncryptionError::InvalidEnvelope(format!(
+            "expected {N} bytes, found {}",
+            cursor.len()
+        )));
+    }
+    let (head, rest) = cursor.split_at(N);
+    let mut out = [0u8; N];
+    out.copy_from_slice(head);
+    *cursor = rest;
+    Ok(out)
 }
 
 fn derive_key(

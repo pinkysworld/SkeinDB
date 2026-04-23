@@ -331,6 +331,28 @@ pub struct Engine {
 
     /// Database users (T044).
     db_users: HashMap<String, DbUser>,
+
+    /// In-memory database key manager (T190 / T191 / T192 / T193).
+    ///
+    /// Master key material is intentionally **not persisted** here — operators must
+    /// re-register keys after restart via `settings.encryption.register_key`. Mode and
+    /// active-key metadata is persisted under `data/encryption.json` (without the keys
+    /// themselves) so the engine knows what to expect after restart.
+    key_manager: skeindb_core::encryption::DatabaseKeyManager,
+    encryption_audit: Vec<EncryptionAuditEntry>,
+    encryption_audit_next_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionAuditEntry {
+    pub id: u64,
+    pub event_ms: u64,
+    pub action: String,
+    pub db: Option<String>,
+    pub key_id: Option<String>,
+    pub previous_key_id: Option<String>,
+    pub mode: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1332,6 +1354,9 @@ impl Engine {
             api_tokens: HashMap::new(),
             api_token_next_id: 1,
             db_users: HashMap::new(),
+            key_manager: skeindb_core::encryption::DatabaseKeyManager::new(),
+            encryption_audit: Vec::new(),
+            encryption_audit_next_id: 1,
         };
 
         engine.load_tables_best_effort();
@@ -9175,6 +9200,227 @@ impl Engine {
         }
         drop(advisor);
         self.persist_advisor_patterns_best_effort();
+    }
+
+    // --------------------------------------------------------------
+    // settings.encryption.* (T193) — in-memory key management surface.
+    //
+    // Master key bytes are NEVER persisted to disk by the engine to avoid
+    // accidentally checking key material into the data directory. Operators
+    // re-register keys after restart via `settings.encryption.register_key`.
+    // --------------------------------------------------------------
+
+    fn record_encryption_audit(
+        &mut self,
+        action: &str,
+        db: Option<&str>,
+        key_id: Option<&str>,
+        previous_key_id: Option<&str>,
+        mode: Option<&str>,
+        note: Option<&str>,
+    ) {
+        let event_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let entry = EncryptionAuditEntry {
+            id: self.encryption_audit_next_id,
+            event_ms,
+            action: action.to_string(),
+            db: db.map(|s| s.to_string()),
+            key_id: key_id.map(|s| s.to_string()),
+            previous_key_id: previous_key_id.map(|s| s.to_string()),
+            mode: mode.map(|s| s.to_string()),
+            note: note.map(|s| s.to_string()),
+        };
+        self.encryption_audit_next_id = self.encryption_audit_next_id.saturating_add(1);
+        self.encryption_audit.push(entry);
+        // Cap to a sensible recent-history window.
+        const MAX_AUDIT: usize = 256;
+        if self.encryption_audit.len() > MAX_AUDIT {
+            let excess = self.encryption_audit.len() - MAX_AUDIT;
+            self.encryption_audit.drain(0..excess);
+        }
+    }
+
+    pub fn settings_encryption_status(
+        &self,
+        params: skeindb_skeinql::methods::SettingsEncryptionStatusParams,
+    ) -> serde_json::Value {
+        use skeindb_skeinql::methods::{
+            SettingsEncryptionDatabaseStatus, SettingsEncryptionStatusResult,
+        };
+
+        let filter = params.db.as_deref().map(str::trim);
+        let mut rows: Vec<SettingsEncryptionDatabaseStatus> = self
+            .key_manager
+            .database_ids()
+            .into_iter()
+            .filter(|d| match filter {
+                Some(f) if !f.is_empty() => d == f,
+                _ => true,
+            })
+            .map(|db| {
+                let profile = self.key_manager.profile(&db);
+                let mode = profile
+                    .map(|p| p.mode.as_str().to_string())
+                    .unwrap_or_else(|| "ENC_OFF".to_string());
+                let active_key_id = profile.and_then(|p| p.active_key_id.clone());
+                let registered_key_ids = self.key_manager.registered_key_ids(&db);
+                SettingsEncryptionDatabaseStatus {
+                    db,
+                    mode,
+                    active_key_id,
+                    registered_key_ids,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.db.cmp(&b.db));
+
+        let recent_audit: Vec<serde_json::Value> = self
+            .encryption_audit
+            .iter()
+            .rev()
+            .take(32)
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .collect();
+
+        serde_json::to_value(SettingsEncryptionStatusResult {
+            databases: rows,
+            recent_audit,
+        })
+        .unwrap_or(serde_json::Value::Null)
+    }
+
+    pub fn settings_encryption_set_mode(
+        &mut self,
+        params: skeindb_skeinql::methods::SettingsEncryptionSetModeParams,
+    ) -> Result<serde_json::Value, String> {
+        use skeindb_core::encryption::EncryptionMode;
+        use skeindb_skeinql::methods::SettingsEncryptionSetModeResult;
+
+        let mode = EncryptionMode::parse(&params.mode)
+            .ok_or_else(|| format!("invalid encryption mode: {}", params.mode))?;
+        self.key_manager
+            .set_database_mode(&params.db, mode)
+            .map_err(|e| e.to_string())?;
+        self.record_encryption_audit(
+            "set_mode",
+            Some(&params.db),
+            None,
+            None,
+            Some(mode.as_str()),
+            None,
+        );
+        Ok(serde_json::to_value(SettingsEncryptionSetModeResult {
+            ok: true,
+            db: params.db,
+            mode: mode.as_str().to_string(),
+        })
+        .unwrap_or(serde_json::Value::Null))
+    }
+
+    pub fn settings_encryption_register_key(
+        &mut self,
+        params: skeindb_skeinql::methods::SettingsEncryptionRegisterKeyParams,
+    ) -> Result<serde_json::Value, String> {
+        use base64::{engine::general_purpose, Engine as _};
+        use skeindb_skeinql::methods::SettingsEncryptionRegisterKeyResult;
+
+        let raw = general_purpose::STANDARD
+            .decode(params.master_key_b64.as_bytes())
+            .or_else(|_| general_purpose::URL_SAFE.decode(params.master_key_b64.as_bytes()))
+            .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(params.master_key_b64.as_bytes()))
+            .map_err(|e| format!("master_key_b64 is not valid base64: {e}"))?;
+        if raw.len() != skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN {
+            return Err(format!(
+                "master_key_b64 must decode to {} bytes (got {})",
+                skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN,
+                raw.len()
+            ));
+        }
+        let mut key_bytes = [0u8; skeindb_core::encryption::ENCRYPTION_MASTER_KEY_LEN];
+        key_bytes.copy_from_slice(&raw);
+        self.key_manager
+            .register_database_key(&params.db, &params.key_id, key_bytes)
+            .map_err(|e| e.to_string())?;
+        if params.make_active {
+            self.key_manager
+                .set_active_database_key(&params.db, &params.key_id)
+                .map_err(|e| e.to_string())?;
+        }
+        let active = self
+            .key_manager
+            .profile(&params.db)
+            .and_then(|p| p.active_key_id.clone());
+        self.record_encryption_audit(
+            "register_key",
+            Some(&params.db),
+            Some(&params.key_id),
+            None,
+            None,
+            Some("master key bytes redacted"),
+        );
+        Ok(serde_json::to_value(SettingsEncryptionRegisterKeyResult {
+            ok: true,
+            db: params.db,
+            key_id: params.key_id,
+            active_key_id: active,
+        })
+        .unwrap_or(serde_json::Value::Null))
+    }
+
+    pub fn settings_encryption_set_active_key(
+        &mut self,
+        params: skeindb_skeinql::methods::SettingsEncryptionSetActiveKeyParams,
+    ) -> Result<serde_json::Value, String> {
+        use skeindb_skeinql::methods::SettingsEncryptionSetActiveKeyResult;
+
+        self.key_manager
+            .set_active_database_key(&params.db, &params.key_id)
+            .map_err(|e| e.to_string())?;
+        self.record_encryption_audit(
+            "set_active_key",
+            Some(&params.db),
+            Some(&params.key_id),
+            None,
+            None,
+            None,
+        );
+        Ok(serde_json::to_value(SettingsEncryptionSetActiveKeyResult {
+            ok: true,
+            db: params.db,
+            active_key_id: params.key_id,
+        })
+        .unwrap_or(serde_json::Value::Null))
+    }
+
+    pub fn settings_encryption_rotate_key(
+        &mut self,
+        params: skeindb_skeinql::methods::SettingsEncryptionRotateKeyParams,
+    ) -> Result<serde_json::Value, String> {
+        use skeindb_skeinql::methods::SettingsEncryptionRotateKeyResult;
+
+        let plan = self
+            .key_manager
+            .rotate_active_key(&params.db, &params.new_key_id)
+            .map_err(|e| e.to_string())?;
+        self.record_encryption_audit(
+            "rotate_key",
+            Some(&params.db),
+            Some(&params.new_key_id),
+            plan.previous_key_id.as_deref(),
+            Some(plan.mode.as_str()),
+            None,
+        );
+        Ok(serde_json::to_value(SettingsEncryptionRotateKeyResult {
+            ok: true,
+            db: params.db,
+            previous_key_id: plan.previous_key_id,
+            new_key_id: plan.new_key_id,
+            mode: plan.mode.as_str().to_string(),
+        })
+        .unwrap_or(serde_json::Value::Null))
     }
 }
 

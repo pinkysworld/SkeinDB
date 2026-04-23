@@ -353,6 +353,7 @@
           <button class="nav-item" data-panel="engine" data-scope="admin">Engine Config</button>
           <button class="nav-item" data-panel="users" data-scope="admin">Users &amp; Grants</button>
           <button class="nav-item" data-panel="security" data-scope="admin">Security</button>
+          <button class="nav-item" data-panel="encryption" data-scope="admin">Encryption</button>
           <button class="nav-item" data-panel="import" data-scope="admin">Import / Export</button>
           <button class="nav-item" data-panel="telemetry" data-scope="admin">Telemetry</button>
           <button class="nav-item" data-panel="cdc" data-scope="admin">CDC</button>
@@ -414,6 +415,7 @@
           <button class="tab-btn" data-panel="cdc" data-scope="admin">CDC</button>
           <button class="tab-btn" data-panel="replay" data-scope="admin">Replay</button>
           <button class="tab-btn" data-panel="security" data-scope="admin">Security</button>
+          <button class="tab-btn" data-panel="encryption" data-scope="admin">Encryption</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
         </nav>
@@ -1010,6 +1012,43 @@
               <div class="callout">View frequently executed queries grouped by their parameterized fingerprint. Useful for identifying candidates for autoparameterization or plan cache optimization.</div>
               <div class="actions"><button id="btnSecTopQueries" class="sm">Refresh</button></div>
               <div id="secTopQueryGrid" style="margin-top:12px"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ENCRYPTION (T193) --><section class="panel" data-panel="encryption">
+          <div class="panel-grid">
+            <div class="card wide"><h2>Database Encryption</h2>
+              <div class="callout">Inspect per-database encryption mode (<code>ENC_OFF</code>, <code>ENC_RANDOM</code>, <code>ENC_MLE_DB</code>) and active key. Master key bytes are <strong>never persisted to disk</strong> — operators must re-register keys after restart with <code>settings.encryption.register_key</code>.</div>
+              <div class="actions"><button id="btnEncStatus" class="primary sm">Refresh Status</button></div>
+              <div class="table-wrap" style="margin-top:8px;max-height:280px"><table id="encStatusGrid"></table></div>
+              <pre id="encStatusOut">Click Refresh Status to load per-database encryption state.</pre>
+            </div>
+            <div class="card"><h2>Set Mode</h2>
+              <div class="callout">Switch a database's encryption mode. Switching to <code>ENC_RANDOM</code> or <code>ENC_MLE_DB</code> requires that an active key be registered first.</div>
+              <div class="row"><div class="field"><label>Database</label><input id="encModeDb" placeholder="app" /></div><div class="field"><label>Mode</label><select id="encModeSelect"><option value="off">ENC_OFF</option><option value="enc_random">ENC_RANDOM</option><option value="enc_mle_db">ENC_MLE_DB</option></select></div></div>
+              <div class="actions"><button id="btnEncSetMode" class="primary sm">Apply Mode</button></div>
+              <pre id="encModeOut">Ready.</pre>
+            </div>
+            <div class="card"><h2>Register Key</h2>
+              <div class="callout">Register a 32-byte master key (base64-encoded) for a database. The key lives only in process memory. Re-register on every restart.</div>
+              <div class="row"><div class="field"><label>Database</label><input id="encRegDb" placeholder="app" /></div><div class="field"><label>Key ID</label><input id="encRegKeyId" placeholder="2026-04-key1" /></div></div>
+              <div class="field"><label>Master Key (base64, 32 bytes decoded)</label><input id="encRegMaster" placeholder="base64-encoded 32-byte key" /></div>
+              <div class="row"><div class="field"><label>Make Active</label><select id="encRegMakeActive"><option value="true">true</option><option value="false">false</option></select></div></div>
+              <div class="actions"><button id="btnEncRegisterKey" class="primary sm">Register Key</button></div>
+              <pre id="encRegOut">Ready.</pre>
+            </div>
+            <div class="card"><h2>Set Active Key</h2>
+              <div class="callout">Promote a previously registered key as the active key for new writes (does not re-encrypt historical envelopes).</div>
+              <div class="row"><div class="field"><label>Database</label><input id="encActiveDb" placeholder="app" /></div><div class="field"><label>Key ID</label><input id="encActiveKeyId" placeholder="2026-04-key1" /></div></div>
+              <div class="actions"><button id="btnEncSetActive" class="primary sm">Set Active</button></div>
+              <pre id="encActiveOut">Ready.</pre>
+            </div>
+            <div class="card"><h2>Rotate Key</h2>
+              <div class="callout">Rotate the active key for a database. Returns a <code>KeyRotationPlan</code> describing the previous and new key IDs and the current mode. Existing envelopes remain readable under historical keys; use the <code>EncryptedValueStore</code> reencryption API to rewrite them off-line.</div>
+              <div class="row"><div class="field"><label>Database</label><input id="encRotateDb" placeholder="app" /></div><div class="field"><label>New Key ID</label><input id="encRotateKeyId" placeholder="2026-05-key1" /></div></div>
+              <div class="actions"><button id="btnEncRotate" class="primary sm">Rotate Active Key</button></div>
+              <pre id="encRotateOut">Ready.</pre>
             </div>
           </div>
         </section>

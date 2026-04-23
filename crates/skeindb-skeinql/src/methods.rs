@@ -2352,3 +2352,89 @@ pub struct BackgroundStats {
     pub compaction: String,
     pub snapshots: String,
 }
+
+// --------------------------------
+// settings.encryption.* (T193)
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SettingsEncryptionStatusParams {
+    /// Optional database filter; when omitted, all known databases are returned.
+    pub db: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionDatabaseStatus {
+    pub db: String,
+    pub mode: String,
+    pub active_key_id: Option<String>,
+    pub registered_key_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionStatusResult {
+    pub databases: Vec<SettingsEncryptionDatabaseStatus>,
+    /// Recent audit entries (most recent first), capped to a small window.
+    pub recent_audit: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionSetModeParams {
+    pub db: String,
+    /// One of `off`, `enc_random`, `enc_mle_db`.
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionSetModeResult {
+    pub ok: bool,
+    pub db: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionRegisterKeyParams {
+    pub db: String,
+    pub key_id: String,
+    /// 32-byte master key, base64-encoded (URL-safe or standard).
+    pub master_key_b64: String,
+    /// When true, also marks this key as the active key for new writes.
+    #[serde(default)]
+    pub make_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionRegisterKeyResult {
+    pub ok: bool,
+    pub db: String,
+    pub key_id: String,
+    pub active_key_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionSetActiveKeyParams {
+    pub db: String,
+    pub key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionSetActiveKeyResult {
+    pub ok: bool,
+    pub db: String,
+    pub active_key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionRotateKeyParams {
+    pub db: String,
+    pub new_key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsEncryptionRotateKeyResult {
+    pub ok: bool,
+    pub db: String,
+    pub previous_key_id: Option<String>,
+    pub new_key_id: String,
+    pub mode: String,
+}
