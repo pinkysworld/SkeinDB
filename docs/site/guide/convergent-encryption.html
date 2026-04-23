@@ -16,7 +16,6 @@
     <div class="nav-links">
       <a href="../index.html#features">Features</a>
       <a href="../index.html#architecture">Architecture</a>
-      <a href="../index.html#research">Research</a>
       <a href="../roadmap.html">Roadmap</a>
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
@@ -31,6 +30,15 @@
   </div>
 </nav>
 
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
+
 <div class="docs-shell">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-search">
@@ -43,7 +51,12 @@
 <li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
 <li><a href="first-query.html">Your first query (SkeinQL)</a></li>
 <li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="cdc-with-sse.html">CDC with SSE</a></li>
+<li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
+<li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
 <li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
 </ul>
 <div class="group-title">📖 &nbsp;User Guide</div>
@@ -266,6 +279,150 @@ equal ciphertext and thus equal ValueIDs.</p>
 - dedup ratio with/without encryption
 - CPU overhead per write/read
 - attack surface discussion (qualitative)</p>
+<h2 id="9-t191-encryptedvaluestore-wrapper">9. T191 — <code>EncryptedValueStore</code> wrapper<a class="headerlink" href="#9-t191-encryptedvaluestore-wrapper" title="Permanent link">¶</a></h2>
+<p>The <code>skeindb_core::encrypted_valuestore::EncryptedValueStore&lt;'a&gt;</code> type layers
+encrypt-on-write / decrypt-on-read over an existing <code>ValueStore</code> <strong>without
+changing the on-disk <code>.vseg</code> format</strong>. This is possible because every
+<code>EncryptionEnvelope</code> is fully self-describing:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>version</td>
+<td>u8</td>
+<td>currently <code>1</code></td>
+</tr>
+<tr>
+<td>mode_code</td>
+<td>u8</td>
+<td><code>0=Off</code>, <code>1=ENC_RANDOM</code>, <code>2=ENC_MLE_DB</code></td>
+</tr>
+<tr>
+<td>scope_id</td>
+<td>length-prefixed UTF-8</td>
+<td>database id (and AAD anchor)</td>
+</tr>
+<tr>
+<td>key_id</td>
+<td>optional length-prefixed UTF-8</td>
+<td>active key id at write time</td>
+</tr>
+<tr>
+<td>nonce</td>
+<td>optional 12 bytes</td>
+<td>only present for AEAD modes</td>
+</tr>
+<tr>
+<td>derivation_salt</td>
+<td>optional 32 bytes</td>
+<td>only present for <code>ENC_MLE_DB</code> (plaintext digest)</td>
+</tr>
+<tr>
+<td>ciphertext</td>
+<td>remainder</td>
+<td>AEAD ciphertext (or raw plaintext for <code>Off</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>The wrapper stores the encoded envelope as an ordinary <code>ValueKind::Cell</code> blob
+and reads it back using the strict <code>EncryptionEnvelope::from_stored_bytes</code>
+parser (rejects trailing bytes and unknown version codes). <code>Off</code> values bypass
+the envelope entirely and are stored as raw bytes — there is no overhead when
+encryption is disabled.</p>
+<p>API surface:</p>
+<div class="codehilite"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ValueStore</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">ValueStoreConfig</span><span class="p">::</span><span class="n">default</span><span class="p">());</span>
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">keys</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="n">DatabaseKeyManager</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<span class="n">keys</span><span class="p">.</span><span class="n">register_database_key</span><span class="p">(</span><span class="s">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;k1&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">master_key</span><span class="p">)</span><span class="o">?</span><span class="p">;</span>
+<span class="n">keys</span><span class="p">.</span><span class="n">set_database_mode</span><span class="p">(</span><span class="s">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">EncryptionMode</span><span class="p">::</span><span class="n">EncMleDb</span><span class="p">)</span><span class="o">?</span><span class="p">;</span>
+
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">wrap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">EncryptedValueStore</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">keys</span><span class="p">);</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">rec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wrap</span><span class="p">.</span><span class="n">put_encrypted</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="s">b&quot;hello&quot;</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w">          </span><span class="c1">// EncryptedRecord { value_id, mode, scope_id, key_id }</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">plain</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wrap</span><span class="p">.</span><span class="n">get_decrypted</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ctx</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">rec</span><span class="p">.</span><span class="n">value_id</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w">   </span><span class="c1">// back to bytes</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">env</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wrap</span><span class="p">.</span><span class="n">read_envelope</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rec</span><span class="p">.</span><span class="n">value_id</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w">           </span><span class="c1">// inspect (no decrypt)</span>
+</code></pre></div>
+
+<h2 id="10-t192-key-rotation-and-re-encryption">10. T192 — Key rotation and re-encryption<a class="headerlink" href="#10-t192-key-rotation-and-re-encryption" title="Permanent link">¶</a></h2>
+<p><code>DatabaseKeyManager::rotate_active_key(db, new_key_id)</code> swaps the active key
+for <code>db</code> and returns a <code>KeyRotationPlan</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">KeyRotationPlan</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">db</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">mode</span><span class="p">:</span><span class="w"> </span><span class="nc">EncryptionMode</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">previous_key_id</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">new_key_id</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>To rewrite individual envelopes under the new active key, call
+<code>reencrypt_envelope</code> (envelope-level) or <code>EncryptedValueStore::reencrypt_value</code>
+(ValueStore-level). Both update a <code>ReencryptionProgress</code> counter set so an
+operator can drive a long-running rotation pass in user code:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ReencryptionProgress</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">db</span><span class="p">:</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">envelopes_inspected</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">envelopes_rewritten</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">envelopes_skipped_off</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">envelopes_skipped_current</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">previous_key_id</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">new_key_id</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="nb">String</span><span class="o">&gt;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Old envelopes are intentionally <strong>left in place</strong> so historical reads continue
+to work under prior keys until a separate GC pass collects them.</p>
+<h2 id="11-t193-settingsencryption-rpc-skeinadmin-panel">11. T193 — <code>settings.encryption.*</code> RPC + SkeinAdmin panel<a class="headerlink" href="#11-t193-settingsencryption-rpc-skeinadmin-panel" title="Permanent link">¶</a></h2>
+<p>The engine exposes the runtime key-management surface via JSON-RPC. Master key
+bytes are <strong>never persisted to disk</strong> by these methods — operators must
+re-register keys after restart.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Direction</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>settings.encryption.status</code></td>
+<td>read</td>
+<td>per-database mode, active key id, registered keys, recent audit ring</td>
+</tr>
+<tr>
+<td><code>settings.encryption.set_mode</code></td>
+<td>write</td>
+<td>switch a database to <code>off</code> / <code>enc_random</code> / <code>enc_mle_db</code></td>
+</tr>
+<tr>
+<td><code>settings.encryption.register_key</code></td>
+<td>write</td>
+<td>accepts base64 (standard / URL-safe / no-pad), validates 32-byte length, optional <code>make_active</code></td>
+</tr>
+<tr>
+<td><code>settings.encryption.set_active_key</code></td>
+<td>write</td>
+<td>promote an already-registered key</td>
+</tr>
+<tr>
+<td><code>settings.encryption.rotate_key</code></td>
+<td>write</td>
+<td>returns a <code>KeyRotationPlan</code>; envelope rewriting is opt-in via <code>EncryptedValueStore::reencrypt_value</code></td>
+</tr>
+</tbody>
+</table>
+<p>SkeinAdmin gains an <code>Encryption</code> panel (sidebar + top tab) with cards for
+Status, Set Mode, Register Key, Set Active Key, and Rotate Key. The panel uses
+the same JSON-RPC client as every other admin tab.</p>
+<p>Audit: every mutating call appends a redacted <code>EncryptionAuditEntry</code> (no key
+material, ever) to a 256-entry in-memory ring exposed via
+<code>settings.encryption.status</code> → <code>recent_audit</code>.</p>
+<p>Coverage: <code>skeinadmin_encryption_panel_exposes_key_management_controls</code> plus
+the unit tests listed in section 8.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CONVERGENT_ENCRYPTION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -308,6 +465,9 @@ equal ciphertext and thus equal ValueIDs.</p>
 </li>
 <li><a href="#7-limitations-and-safety-notes">7. Limitations and safety notes</a></li>
 <li><a href="#8-testing-and-evaluation">8. Testing and evaluation</a></li>
+<li><a href="#9-t191-encryptedvaluestore-wrapper">9. T191 — EncryptedValueStore wrapper</a></li>
+<li><a href="#10-t192-key-rotation-and-re-encryption">10. T192 — Key rotation and re-encryption</a></li>
+<li><a href="#11-t193-settingsencryption-rpc-skeinadmin-panel">11. T193 — settings.encryption.* RPC + SkeinAdmin panel</a></li>
 </ul>
 </div>
 

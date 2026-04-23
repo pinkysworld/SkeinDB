@@ -51,7 +51,12 @@ NAV: list[Section] = [
         DocPage("quickstart",             "tutorials/quickstart.md",           "Quickstart — 5 minutes",       "Tutorials"),
         DocPage("first-query",            "tutorials/first-query.md",          "Your first query (SkeinQL)",   "Tutorials"),
         DocPage("mysql-in-5-min",         "tutorials/mysql-in-5-min.md",       "MySQL in 5 minutes",           "Tutorials"),
+      DocPage("postgresql-in-5-min",    "tutorials/postgresql-in-5-min.md",  "PostgreSQL in 5 minutes",      "Tutorials"),
         DocPage("admin-tour",             "tutorials/admin-tour.md",           "Admin console tour",           "Tutorials"),
+      DocPage("monitoring-and-metrics", "tutorials/monitoring-and-metrics.md","Monitoring and metrics",       "Tutorials"),
+      DocPage("cdc-with-sse",           "tutorials/cdc-with-sse.md",         "CDC with SSE",                 "Tutorials"),
+      DocPage("encryption-and-key-rotation", "tutorials/encryption-and-key-rotation.md", "Encryption and key rotation", "Tutorials"),
+      DocPage("replay-bundles-and-integrity", "tutorials/replay-bundles-and-integrity.md", "Replay bundles and integrity", "Tutorials"),
         DocPage("setting-up-cluster",     "tutorials/setting-up-cluster.md",   "Setting up a 3-node cluster",  "Tutorials"),
     ]),
     Section("User Guide", "📖", [
@@ -129,7 +134,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="nav-links">
       <a href="../index.html#features">Features</a>
       <a href="../index.html#architecture">Architecture</a>
-      <a href="../index.html#research">Research</a>
       <a href="../roadmap.html">Roadmap</a>
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
@@ -143,6 +147,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     </a>
   </div>
 </nav>
+
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
 
 <div class="docs-shell">
   <aside class="sidebar" id="sidebar">
@@ -212,6 +225,13 @@ hr{border:none;border-top:1px solid var(--border);margin:2rem 0}
 .nav-links a.nav-docs-cta:hover,.nav-links a.nav-docs-cta.active{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.4);color:var(--accent-light)}
 .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500}
 .nav-gh svg{width:16px;height:16px;fill:currentColor}
+.research-rail{border-bottom:1px solid var(--border);background:rgba(9,9,11,.72)}
+.research-rail-inner{max-width:1600px;margin:0 auto;padding:.55rem 2rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+.research-rail-label{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim);margin-right:.25rem}
+.research-rail a{color:var(--text-secondary);font-size:.82rem;font-weight:500;padding:4px 10px;border-radius:999px;border:1px solid transparent;transition:color .2s,background .2s,border-color .2s}
+.research-rail a:hover,.research-rail a.active{color:var(--text);background:rgba(99,102,241,.08);border-color:rgba(99,102,241,.18)}
+
+@media(max-width:980px){.topnav{padding:0 1rem}.topnav-inner{height:auto;padding:.8rem 0;flex-wrap:wrap}.nav-links{width:100%;order:3;gap:1rem}.research-rail-inner{padding:.55rem 1rem}}
 
 /* ---- shell ---- */
 .docs-shell{display:grid;grid-template-columns:260px minmax(0,1fr) 220px;gap:2rem;max-width:1600px;margin:0 auto;padding:2rem 1.5rem 4rem}

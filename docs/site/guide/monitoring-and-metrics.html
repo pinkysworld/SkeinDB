@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Quickstart — 5 minutes — SkeinDB Docs</title>
-<meta name="description" content="Quickstart — 5 minutes — part of the SkeinDB documentation.">
+<title>Monitoring and metrics — SkeinDB Docs</title>
+<meta name="description" content="Monitoring and metrics — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -48,12 +48,12 @@
       <div class="group-title">🚀 &nbsp;Tutorials</div>
 <ul>
 <li><a href="index.html">Documentation home</a></li>
-<li><a href="quickstart.html" class="active">Quickstart — 5 minutes</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
 <li><a href="first-query.html">Your first query (SkeinQL)</a></li>
 <li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
 <li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
-<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="monitoring-and-metrics.html" class="active">Monitoring and metrics</a></li>
 <li><a href="cdc-with-sse.html">CDC with SSE</a></li>
 <li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
 <li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
@@ -119,94 +119,85 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Quickstart — 5 minutes</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Monitoring and metrics</span>
     </div>
     <article class="doc-article">
-      <h1 id="quickstart-5-minutes">Quickstart — 5 minutes<a class="headerlink" href="#quickstart-5-minutes" title="Permanent link">¶</a></h1>
-<p>Get a local SkeinDB running, run your first query, and open the admin console — in under five minutes.</p>
-<h2 id="1-install">1. Install<a class="headerlink" href="#1-install" title="Permanent link">¶</a></h2>
-<h3 id="macos-homebrew">macOS (Homebrew)<a class="headerlink" href="#macos-homebrew" title="Permanent link">¶</a></h3>
-<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>tap<span class="w"> </span>pinkysworld/skeindb<span class="w"> </span>https://github.com/pinkysworld/SkeinDB
-brew<span class="w"> </span>install<span class="w"> </span>--HEAD<span class="w"> </span>pinkysworld/skeindb/skeindb
+      <h1 id="monitoring-and-metrics">Monitoring and metrics<a class="headerlink" href="#monitoring-and-metrics" title="Permanent link">¶</a></h1>
+<p>This guide shows the fastest way to inspect a live SkeinDB node: health endpoint, Prometheus metrics, SkeinQL stats, and the built-in admin UI.</p>
+<p>Prerequisite: <a href="quickstart.html">Quickstart</a> completed.</p>
+<h2 id="1-start-the-server">1. Start the server<a class="headerlink" href="#1-start-the-server" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>cargo<span class="w"> </span>run<span class="w"> </span>--<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span><span class="w"> </span>--pg<span class="w"> </span><span class="m">5432</span>
 </code></pre></div>
 
-<h3 id="linux-from-source-anywhere-rust-runs">Linux / from source (anywhere Rust runs)<a class="headerlink" href="#linux-from-source-anywhere-rust-runs" title="Permanent link">¶</a></h3>
-<div class="codehilite"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/pinkysworld/SkeinDB.git
-<span class="nb">cd</span><span class="w"> </span>SkeinDB
-cargo<span class="w"> </span>build<span class="w"> </span>--release
-<span class="c1"># binary is at ./target/release/skeindb</span>
+<h2 id="2-check-basic-liveness">2. Check basic liveness<a class="headerlink" href="#2-check-basic-liveness" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/health
 </code></pre></div>
 
-<p>Prerequisite: Rust 1.75+ stable. See <a href="configuration.html">Configuration</a> for other options.</p>
-<h2 id="2-start-the-server">2. Start the server<a class="headerlink" href="#2-start-the-server" title="Permanent link">¶</a></h2>
-<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span>
+<p>Use this for load balancers and simple smoke checks.</p>
+<h2 id="3-inspect-prometheus-style-metrics">3. Inspect Prometheus-style metrics<a class="headerlink" href="#3-inspect-prometheus-style-metrics" title="Permanent link">¶</a></h2>
+<p>SkeinDB exposes a plain metrics endpoint at <code>GET /metrics</code>:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/metrics<span class="w"> </span><span class="p">|</span><span class="w"> </span>head<span class="w"> </span>-40
 </code></pre></div>
 
-<p>Three surfaces are now open:</p>
-<table>
-<thead>
-<tr>
-<th>Surface</th>
-<th>URL / Port</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>HTTP / SkeinQL</td>
-<td><code>http://127.0.0.1:8080</code></td>
-<td>Native typed RPC (JSON-RPC)</td>
-</tr>
-<tr>
-<td>MySQL wire</td>
-<td><code>127.0.0.1:3306</code></td>
-<td>Connect with any MySQL client</td>
-</tr>
-<tr>
-<td>Admin console</td>
-<td><code>http://127.0.0.1:8080/admin</code></td>
-<td>Web UI (SkeinAdmin)</td>
-</tr>
-</tbody>
-</table>
-<h2 id="3-run-your-first-query">3. Run your first query<a class="headerlink" href="#3-run-your-first-query" title="Permanent link">¶</a></h2>
-<p>Pick your favourite path:</p>
-<h3 id="a-native-skeinql-curl">A. Native SkeinQL (curl)<a class="headerlink" href="#a-native-skeinql-curl" title="Permanent link">¶</a></h3>
-<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/skeinql<span class="w"> </span><span class="se">\</span>
+<p>Minimal Prometheus scrape config:</p>
+<div class="codehilite"><pre><span></span><code><span class="nt">scrape_configs</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">job_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">skeindb</span>
+<span class="w">    </span><span class="nt">static_configs</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">targets</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;127.0.0.1:8080&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+
+<h2 id="4-pull-a-runtime-stats-snapshot-over-skeinql">4. Pull a runtime stats snapshot over SkeinQL<a class="headerlink" href="#4-pull-a-runtime-stats-snapshot-over-skeinql" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;ping&quot;,&quot;params&quot;:{}}&#39;</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;stats.snapshot&quot;,&quot;params&quot;:{}}&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.result | {uptime_s, qps, tps, sessions, process, storage, background}&#39;</span>
 </code></pre></div>
 
-<p>You should see <code>{"jsonrpc":"2.0","id":1,"result":{"pong":true,...}}</code>.</p>
-<p>Continue with <a href="first-query.html">Your first query</a> to create a table and insert rows.</p>
-<h3 id="b-mysql-client">B. MySQL client<a class="headerlink" href="#b-mysql-client" title="Permanent link">¶</a></h3>
-<div class="codehilite"><pre><span></span><code>mysql<span class="w"> </span>-h<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>-P<span class="w"> </span><span class="m">3306</span><span class="w"> </span>-u<span class="w"> </span>root<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;SELECT VERSION();&quot;</span>
-</code></pre></div>
-
-<p>Continue with <a href="mysql-in-5-min.html">MySQL in 5 minutes</a>.</p>
-<h3 id="c-admin-console">C. Admin console<a class="headerlink" href="#c-admin-console" title="Permanent link">¶</a></h3>
-<p>Open <code>http://127.0.0.1:8080/admin</code> in your browser. Continue with <a href="admin-tour.html">Admin console tour</a>.</p>
-<h2 id="4-what-next">4. What next?<a class="headerlink" href="#4-what-next" title="Permanent link">¶</a></h2>
+<p>At the current baseline, the snapshot includes:</p>
 <ul>
-<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
-<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li>uptime</li>
+<li>active and total sessions</li>
+<li>QPS and TPS</li>
+<li>process CPU and RSS</li>
+<li>storage metrics such as <code>wal_bytes</code> and <code>dedup_ratio</code></li>
+<li>background task status</li>
+</ul>
+<h2 id="5-watch-the-same-data-in-skeinadmin">5. Watch the same data in SkeinAdmin<a class="headerlink" href="#5-watch-the-same-data-in-skeinadmin" title="Permanent link">¶</a></h2>
+<p>Open:</p>
+<div class="codehilite"><pre><span></span><code>http://127.0.0.1:8080/admin
+</code></pre></div>
+
+<p>The most useful panels for day-to-day visibility are:</p>
+<ul>
+<li><strong>Overview</strong> for live health and headline server numbers</li>
+<li><strong>Telemetry</strong> for metrics-oriented summaries</li>
+<li><strong>Cluster</strong> when you are running replicas or shards</li>
+<li><strong>Time Travel &amp; Replay</strong> and <strong>Forensics</strong> for operational investigations</li>
+</ul>
+<h2 id="6-what-to-watch-first">6. What to watch first<a class="headerlink" href="#6-what-to-watch-first" title="Permanent link">¶</a></h2>
+<p>For a single node, start with these checks:</p>
+<ol>
+<li><code>wal_bytes</code> rising steadily without checkpoints or compaction progress.</li>
+<li><code>dedup_ratio</code> dropping sharply after a workload change.</li>
+<li>CPU or RSS growth that does not come back down after the workload quiets.</li>
+<li>Background tasks stuck in a non-idle state.</li>
+</ol>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="observability.html">Observability</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
 <li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
-<li><a href="configuration.html">Configuration reference</a></li>
 </ul>
-<blockquote>
-<p><strong>Stuck?</strong> Check the <a href="true-status-matrix.html">True Status Matrix</a> for what is currently hardened and what is still in-progress, or open an issue on <a href="https://github.com/pinkysworld/SkeinDB/issues">GitHub</a>.</p>
-</blockquote>
       <hr>
       <p class="edit-link">
-        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/quickstart.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/monitoring-and-metrics.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
         &nbsp;&middot;&nbsp;
-        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/quickstart.md" target="_blank" rel="noopener">View source</a>
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/monitoring-and-metrics.md" target="_blank" rel="noopener">View source</a>
       </p>
     </article>
     <div class="prev-next">
-<a class="prev" href="index.html"><span>← Previous</span>Documentation home</a>
-<a class="next" href="first-query.html"><span>Next →</span>Your first query (SkeinQL)</a>
+<a class="prev" href="admin-tour.html"><span>← Previous</span>Admin console tour</a>
+<a class="next" href="cdc-with-sse.html"><span>Next →</span>CDC with SSE</a>
 </div>
   </main>
 
@@ -214,19 +205,13 @@ cargo<span class="w"> </span>build<span class="w"> </span>--release
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#1-install">1. Install</a><ul>
-<li><a href="#macos-homebrew">macOS (Homebrew)</a></li>
-<li><a href="#linux-from-source-anywhere-rust-runs">Linux / from source (anywhere Rust runs)</a></li>
-</ul>
-</li>
-<li><a href="#2-start-the-server">2. Start the server</a></li>
-<li><a href="#3-run-your-first-query">3. Run your first query</a><ul>
-<li><a href="#a-native-skeinql-curl">A. Native SkeinQL (curl)</a></li>
-<li><a href="#b-mysql-client">B. MySQL client</a></li>
-<li><a href="#c-admin-console">C. Admin console</a></li>
-</ul>
-</li>
-<li><a href="#4-what-next">4. What next?</a></li>
+<li><a href="#1-start-the-server">1. Start the server</a></li>
+<li><a href="#2-check-basic-liveness">2. Check basic liveness</a></li>
+<li><a href="#3-inspect-prometheus-style-metrics">3. Inspect Prometheus-style metrics</a></li>
+<li><a href="#4-pull-a-runtime-stats-snapshot-over-skeinql">4. Pull a runtime stats snapshot over SkeinQL</a></li>
+<li><a href="#5-watch-the-same-data-in-skeinadmin">5. Watch the same data in SkeinAdmin</a></li>
+<li><a href="#6-what-to-watch-first">6. What to watch first</a></li>
+<li><a href="#next">Next</a></li>
 </ul>
 </div>
 

@@ -83,6 +83,26 @@
     }
     .nav-gh:hover { border-color: var(--accent); background: var(--bg-card-hover); }
     .nav-gh svg { width: 16px; height: 16px; fill: currentColor; }
+    .research-rail {
+      border-bottom: 1px solid var(--border);
+      background: rgba(9,9,11,.72);
+    }
+    .research-rail-inner {
+      max-width: 1200px; margin: 0 auto; padding: .55rem 2rem;
+      display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    }
+    .research-rail-label {
+      font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--text-dim); margin-right: .25rem;
+    }
+    .research-rail a {
+      color: var(--text-secondary); text-decoration: none; font-size: .82rem; font-weight: 500;
+      padding: 4px 10px; border-radius: 999px; border: 1px solid transparent;
+      transition: color .2s, background .2s, border-color .2s;
+    }
+    .research-rail a:hover {
+      color: var(--text); background: rgba(99,102,241,.08); border-color: rgba(99,102,241,.18);
+    }
 
     /* --- MOBILE MENU --- */
     .nav-hamburger {
@@ -462,6 +482,7 @@
     @media (max-width: 768px) {
       .nav-links { display: none; }
       .nav-hamburger { display: block; }
+      .research-rail-inner { padding: .55rem 1rem; }
       .features-grid { grid-template-columns: 1fr; }
       .insight-featured, .insight-half { grid-column: span 12; }
       .insight-featured { grid-template-columns: 1fr; }
@@ -484,7 +505,6 @@
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
       <a href="#insights">Insights</a>
-      <a href="#research">Research</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="pricing.html">Pricing</a>
       <a href="licensing.html">Licensing</a>
@@ -504,6 +524,15 @@
   </div>
 </nav>
 
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="#paper">Overview</a>
+    <a href="#research">Tracks</a>
+    <a href="../docs/site/guide/research-agenda.html">Agenda</a>
+  </div>
+</div>
+
 <!-- MOBILE MENU -->
 <div class="mobile-menu" id="mobileMenu">
   <button class="mobile-menu-close" onclick="document.getElementById('mobileMenu').classList.remove('open')" aria-label="Close menu">
@@ -512,9 +541,10 @@
   <a href="#features" onclick="document.getElementById('mobileMenu').classList.remove('open')">Features</a>
   <a href="#architecture" onclick="document.getElementById('mobileMenu').classList.remove('open')">Architecture</a>
   <a href="#insights" onclick="document.getElementById('mobileMenu').classList.remove('open')">Insights</a>
-  <a href="#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research</a>
+  <a href="#paper" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research Overview</a>
+  <a href="#research" onclick="document.getElementById('mobileMenu').classList.remove('open')">Research Tracks</a>
+  <a href="../docs/site/guide/research-agenda.html">Research Agenda</a>
   <a href="#quickstart" onclick="document.getElementById('mobileMenu').classList.remove('open')">Quick Start</a>
-  <a href="#paper" onclick="document.getElementById('mobileMenu').classList.remove('open')">Paper</a>
   <a href="roadmap.html">Roadmap</a>
   <a href="pricing.html">Pricing</a>
   <a href="licensing.html">Licensing</a>
@@ -856,6 +886,7 @@
       <a href="#features">Features</a>
       <a href="#quickstart">Quick Start</a>
       <a href="#architecture">Architecture</a>
+      <a href="#paper">Research Overview</a>
       <a href="#research">Research Tracks</a>
     </div>
     <div class="footer-col">

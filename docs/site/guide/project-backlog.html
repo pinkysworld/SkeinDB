@@ -16,7 +16,6 @@
     <div class="nav-links">
       <a href="../index.html#features">Features</a>
       <a href="../index.html#architecture">Architecture</a>
-      <a href="../index.html#research">Research</a>
       <a href="../roadmap.html">Roadmap</a>
       <a href="../pricing.html">Pricing</a>
       <a href="../licensing.html">Licensing</a>
@@ -31,6 +30,15 @@
   </div>
 </nav>
 
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
+
 <div class="docs-shell">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-search">
@@ -43,7 +51,12 @@
 <li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
 <li><a href="first-query.html">Your first query (SkeinQL)</a></li>
 <li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="cdc-with-sse.html">CDC with SSE</a></li>
+<li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
+<li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
 <li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
 </ul>
 <div class="group-title">📖 &nbsp;User Guide</div>
@@ -279,9 +292,9 @@ Each task should include tests.</p>
 <h2 id="phase-20-dedup-preserving-encryption">Phase 20 - Dedup-preserving encryption<a class="headerlink" href="#phase-20-dedup-preserving-encryption" title="Permanent link">¶</a></h2>
 <ul>
 <li>[x] T190: Key management + AEAD wrappers (ENC_RANDOM, ENC_MLE_DB) (docs/CONVERGENT_ENCRYPTION.md). Latest: <code>skeindb-core</code> now exposes a standalone encryption baseline via <code>encryption::DatabaseKeyManager</code>, database-scoped encryption profiles, active key selection, and <code>EncryptionEnvelope</code> wrappers for <code>ENC_RANDOM</code> and <code>ENC_MLE_DB</code>. <code>ENC_RANDOM</code> derives a mode-specific AES-256-GCM-SIV key from the database master secret and uses randomized nonces; <code>ENC_MLE_DB</code> derives a deterministic content key from the database master secret plus a SHA-256 plaintext digest and returns an envelope carrying the derivation salt for later persistence work in T191. 2026-04-23 hardening: <code>ENC_MLE_DB</code> no longer uses a fixed zero AEAD nonce — the nonce is now HKDF-derived from the same <code>(master_key, plaintext_digest)</code> scope via a distinct info label, so dedup convergence is preserved while the fixed-nonce review finding is closed. Focused integration coverage lives in <code>crates/skeindb-core/tests/encryption.rs</code>.</li>
-<li>[ ] T191: ValueStore encryption metadata + encrypt/decrypt paths</li>
-<li>[ ] T192: Key rotation + background re-encryption task + progress reporting</li>
-<li>[ ] T193: settings.encryption.* SkeinQL endpoints + SkeinAdmin UI + audit notes</li>
+<li>[x] T191: ValueStore encryption metadata + encrypt/decrypt paths. Latest: new <code>EncryptedValueStore</code> wrapper in <code>skeindb-core</code> (<code>crates/skeindb-core/src/encrypted_valuestore.rs</code>) layers <code>put_encrypted</code> / <code>get_decrypted</code> / <code>read_envelope</code> / <code>reencrypt_value</code> over an underlying <code>ValueStore</code> without changing the on-disk <code>.vseg</code> format — the <code>EncryptionEnvelope</code> is fully self-describing (mode code, scope id, optional key id, optional 12-byte nonce, optional 32-byte derivation salt, ciphertext) and is stored as an ordinary <code>ValueKind::Cell</code> blob. <code>EncryptionEnvelope::from_stored_bytes</code> is a strict parser that rejects trailing bytes and bad version codes. <code>Off</code> values bypass the envelope entirely and are stored as raw bytes. Coverage: <code>envelope_stored_bytes_roundtrip_via_from_stored_bytes</code>, <code>encrypted_value_store_roundtrip_under_three_modes</code> (ENC_OFF / ENC_RANDOM / ENC_MLE_DB).</li>
+<li>[x] T192: Key rotation + background re-encryption task + progress reporting. Latest: <code>DatabaseKeyManager::rotate_active_key(db, new_key_id)</code> returns a <code>KeyRotationPlan { db, mode, previous_key_id, new_key_id }</code>; <code>DatabaseKeyManager::reencrypt_envelope(ctx, env, &amp;mut ReencryptionProgress)</code> rewrites a single envelope under the new active key (or returns <code>Ok(None)</code> when no rewrite is required) and updates inspected/rewritten/skipped-off/skipped-current counters plus the <code>(previous_key_id, new_key_id)</code> rotation context. <code>EncryptedValueStore::reencrypt_value(ctx, value_id, &amp;mut progress)</code> writes the rewritten envelope back into the same <code>ValueStore</code> (old envelopes are left in place so historical reads continue to work under prior keys until a separate GC pass collects them). Coverage: <code>rotate_active_key_then_reencrypt_envelope_progress_counters</code>, <code>encrypted_value_store_reencrypt_value_writes_new_envelope</code>.</li>
+<li>[x] T193: settings.encryption.<em> SkeinQL endpoints + SkeinAdmin UI + audit notes. Latest: new RPC methods <code>settings.encryption.status</code>, <code>settings.encryption.set_mode</code>, <code>settings.encryption.register_key</code>, <code>settings.encryption.set_active_key</code>, <code>settings.encryption.rotate_key</code> are wired through <code>Engine</code> (<code>Engine.key_manager</code>, <code>Engine.encryption_audit</code>) and the JSON-RPC dispatcher (<code>crates/skeindb/src/server.rs</code>). Master key bytes are accepted as base64 (standard / URL-safe / URL-safe-no-pad), validated to decode to exactly 32 bytes, and </em><em>never persisted</em>* — operators re-register keys after restart. Mutating endpoints append a redacted <code>EncryptionAuditEntry</code> to a 256-event in-memory ring exposed by <code>settings.encryption.status</code> (<code>recent_audit</code>). SkeinAdmin gains a dedicated <code>Encryption</code> panel (sidebar + top tab) with cards for Status, Set Mode, Register Key, Set Active Key, and Rotate Key. Read-only allowlist + <code>mysql_known_method</code> registry are extended with the new method names. Coverage: <code>skeinadmin_encryption_panel_exposes_key_management_controls</code>.</li>
 </ul>
 <h2 id="phase-21-workload-guided-compaction-scheduler">Phase 21 - Workload-guided compaction scheduler<a class="headerlink" href="#phase-21-workload-guided-compaction-scheduler" title="Permanent link">¶</a></h2>
 <ul>

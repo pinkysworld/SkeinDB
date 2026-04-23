@@ -24,7 +24,12 @@
   .nav-links a.nav-docs-cta:hover{background:rgba(99,102,241,.15);border-color:rgba(99,102,241,.4);color:var(--accent-light)}
   .nav-gh{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);padding:6px 14px;border-radius:20px;color:var(--text);font-size:.82rem;font-weight:500;text-decoration:none}
   .nav-gh svg{width:16px;height:16px;fill:currentColor}
-  @media(max-width:900px){.nav-links{gap:1rem}}
+  .research-rail{border-bottom:1px solid var(--border);background:rgba(9,9,11,.72)}
+  .research-rail-inner{max-width:1200px;margin:0 auto;padding:.55rem 2rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+  .research-rail-label{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim);margin-right:.25rem}
+  .research-rail a{color:var(--text-secondary);text-decoration:none;font-size:.82rem;font-weight:500;padding:4px 10px;border-radius:999px;border:1px solid transparent;transition:color .2s,background .2s,border-color .2s}
+  .research-rail a:hover{color:var(--text);background:rgba(99,102,241,.08);border-color:rgba(99,102,241,.18)}
+  @media(max-width:980px){nav{padding:0 1rem}.nav-inner{height:auto;padding:.8rem 0;flex-wrap:wrap}.nav-links{width:100%;order:3;gap:1rem}.research-rail-inner{padding:.55rem 1rem}}
   main{max-width:1100px;margin:0 auto;padding:3rem 2rem 6rem}
   h1{font-size:clamp(1.8rem,4vw,2.6rem);font-weight:800;letter-spacing:-.03em;margin-bottom:.5rem}
   h2{font-size:1.4rem;font-weight:700;margin:2.5rem 0 1rem;letter-spacing:-.02em}
@@ -57,7 +62,6 @@
     <div class="nav-links">
       <a href="index.html#features">Features</a>
       <a href="index.html#architecture">Architecture</a>
-      <a href="index.html#research">Research</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="pricing.html">Pricing</a>
       <a href="licensing.html" class="active">Licensing</a>
@@ -71,6 +75,14 @@
     </a>
   </div>
 </nav>
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="index.html#paper">Overview</a>
+    <a href="index.html#research">Tracks</a>
+    <a href="../docs/site/guide/research-agenda.html">Agenda</a>
+  </div>
+</div>
 <main>
   <h1>Licensing &amp; sponsorship</h1>
   <p class="lead">SkeinDB is, and will remain, free and open-source software under the <strong>Apache License 2.0</strong>. This page explains what that means in practice, how the project sustains itself, and what paid tiers are available.</p>

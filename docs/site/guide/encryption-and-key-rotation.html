@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Encryption and key rotation — SkeinDB Docs</title>
+<meta name="description" content="Encryption and key rotation — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="cdc-with-sse.html">CDC with SSE</a></li>
+<li><a href="encryption-and-key-rotation.html" class="active">Encryption and key rotation</a></li>
+<li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Encryption and key rotation</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="encryption-and-key-rotation">Encryption and key rotation<a class="headerlink" href="#encryption-and-key-rotation" title="Permanent link">¶</a></h1>
+<p>This guide registers database master keys, enables an encryption mode, inspects status, and rotates the active key through SkeinQL.</p>
+<p>Prerequisite: <a href="first-query.html">Your first query (SkeinQL)</a> completed.</p>
+<h2 id="1-create-a-target-database">1. Create a target database<a class="headerlink" href="#1-create-a-target-database" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;schema.create_database&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="2-generate-and-register-the-first-key">2. Generate and register the first key<a class="headerlink" href="#2-generate-and-register-the-first-key" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="nv">KEY1</span><span class="o">=</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-base64<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:2,\&quot;method\&quot;:\&quot;settings.encryption.register_key\&quot;,\&quot;params\&quot;:{\&quot;db\&quot;:\&quot;app\&quot;,\&quot;key_id\&quot;:\&quot;k1\&quot;,\&quot;master_key_b64\&quot;:\&quot;</span><span class="nv">$KEY1</span><span class="s2">\&quot;,\&quot;make_active\&quot;:true}}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="3-enable-an-encryption-mode">3. Enable an encryption mode<a class="headerlink" href="#3-enable-an-encryption-mode" title="Permanent link">¶</a></h2>
+<p>Two modes are currently relevant:</p>
+<ul>
+<li><code>enc_random</code> for randomized encryption at rest</li>
+<li><code>enc_mle_db</code> for dedup-preserving convergent encryption within one database scope</li>
+</ul>
+<p>Enable randomized mode:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:3,&quot;method&quot;:&quot;settings.encryption.set_mode&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;,&quot;mode&quot;:&quot;enc_random&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>If you need dedup-preserving encryption instead, switch <code>mode</code> to <code>enc_mle_db</code>.</p>
+<h2 id="4-inspect-status">4. Inspect status<a class="headerlink" href="#4-inspect-status" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:4,&quot;method&quot;:&quot;settings.encryption.status&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>The response includes:</p>
+<ul>
+<li>current mode</li>
+<li>active key id</li>
+<li>registered key ids</li>
+<li>recent redacted audit entries</li>
+</ul>
+<h2 id="5-register-a-new-key-and-rotate">5. Register a new key and rotate<a class="headerlink" href="#5-register-a-new-key-and-rotate" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="nv">KEY2</span><span class="o">=</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-base64<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s2">&quot;{\&quot;skeinql\&quot;:\&quot;1.0\&quot;,\&quot;id\&quot;:5,\&quot;method\&quot;:\&quot;settings.encryption.register_key\&quot;,\&quot;params\&quot;:{\&quot;db\&quot;:\&quot;app\&quot;,\&quot;key_id\&quot;:\&quot;k2\&quot;,\&quot;master_key_b64\&quot;:\&quot;</span><span class="nv">$KEY2</span><span class="s2">\&quot;,\&quot;make_active\&quot;:false}}&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>jq
+
+curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:6,&quot;method&quot;:&quot;settings.encryption.rotate_key&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;,&quot;new_key_id&quot;:&quot;k2&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>Check status again:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:7,&quot;method&quot;:&quot;settings.encryption.status&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="6-switch-the-active-key-without-a-rotation-workflow">6. Switch the active key without a rotation workflow<a class="headerlink" href="#6-switch-the-active-key-without-a-rotation-workflow" title="Permanent link">¶</a></h2>
+<p>If you already registered a key and only want future writes to use it:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:8,&quot;method&quot;:&quot;settings.encryption.set_active_key&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;app&quot;,&quot;key_id&quot;:&quot;k2&quot;}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<h2 id="7-operational-notes">7. Operational notes<a class="headerlink" href="#7-operational-notes" title="Permanent link">¶</a></h2>
+<ul>
+<li>Master keys are accepted as base64 but are <strong>not persisted to disk</strong>. Re-register them after restart.</li>
+<li><code>enc_mle_db</code> preserves deduplication, but leaks equality within the same database scope. That is the trade-off for convergent encryption.</li>
+<li>The current runtime exposes rotation state and value-store re-encryption primitives, but a fully operator-driven background rewrite pass remains follow-up work.</li>
+<li>SkeinAdmin exposes the same flows through its dedicated <strong>Encryption</strong> panel.</li>
+</ul>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/encryption-and-key-rotation.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/encryption-and-key-rotation.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="cdc-with-sse.html"><span>← Previous</span>CDC with SSE</a>
+<a class="next" href="replay-bundles-and-integrity.html"><span>Next →</span>Replay bundles and integrity</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-create-a-target-database">1. Create a target database</a></li>
+<li><a href="#2-generate-and-register-the-first-key">2. Generate and register the first key</a></li>
+<li><a href="#3-enable-an-encryption-mode">3. Enable an encryption mode</a></li>
+<li><a href="#4-inspect-status">4. Inspect status</a></li>
+<li><a href="#5-register-a-new-key-and-rotate">5. Register a new key and rotate</a></li>
+<li><a href="#6-switch-the-active-key-without-a-rotation-workflow">6. Switch the active key without a rotation workflow</a></li>
+<li><a href="#7-operational-notes">7. Operational notes</a></li>
+<li><a href="#next">Next</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

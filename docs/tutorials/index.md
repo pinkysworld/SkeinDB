@@ -21,6 +21,21 @@ This site is organised into six sections:
 4. [Admin console tour](admin-tour.html) — a guided walkthrough of the 26-panel web admin.
 5. [Setting up a 3-node cluster](setting-up-cluster.html) — tokens, topology, promotion.
 
+## More guided walkthroughs
+
+<div class="home-grid">
+  <a class="home-card" href="postgresql-in-5-min.html"><div class="home-icon">🐘</div><h3>PostgreSQL in 5 minutes</h3><p>Bring up the PG listener, connect with <code>psql</code>, and try the current compatibility surface.</p></a>
+  <a class="home-card" href="monitoring-and-metrics.html"><div class="home-icon">📈</div><h3>Monitoring and metrics</h3><p>Use <code>/health</code>, <code>/metrics</code>, <code>stats.snapshot</code>, and SkeinAdmin to watch a live server.</p></a>
+  <a class="home-card" href="cdc-with-sse.html"><div class="home-icon">📡</div><h3>CDC with SSE</h3><p>Create a table subscription, stream changes over SSE, ack offsets, and reconnect safely.</p></a>
+  <a class="home-card" href="encryption-and-key-rotation.html"><div class="home-icon">🔐</div><h3>Encryption and key rotation</h3><p>Register keys, switch modes, inspect status, and rotate the active database key.</p></a>
+  <a class="home-card" href="replay-bundles-and-integrity.html"><div class="home-icon">🧾</div><h3>Replay bundles and integrity</h3><p>Export a deterministic replay bundle, import it into a workspace, and verify checksums.</p></a>
+</div>
+
+## Suggested paths
+
+1. **Application developer**: [Quickstart](quickstart.html) → [Your first query (SkeinQL)](first-query.html) → [MySQL in 5 minutes](mysql-in-5-min.html) or [PostgreSQL in 5 minutes](postgresql-in-5-min.html) → [CDC with SSE](cdc-with-sse.html).
+2. **Operator / admin**: [Admin console tour](admin-tour.html) → [Monitoring and metrics](monitoring-and-metrics.html) → [Setting up a 3-node cluster](setting-up-cluster.html) → [Encryption and key rotation](encryption-and-key-rotation.html) → [Replay bundles and integrity](replay-bundles-and-integrity.html).
+
 ## Reference
 
 - [SkeinQL reference](skeinql.html) — every RPC method, families, and payloads.
