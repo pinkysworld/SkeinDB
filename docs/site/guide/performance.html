@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Performance Improvements (Beyond Baseline) — SkeinDB Docs</title>
+<meta name="description" content="Performance Improvements (Beyond Baseline) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html" class="active">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Performance Improvements (Beyond Baseline)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="performance-improvements-beyond-baseline">Performance Improvements (Beyond Baseline)<a class="headerlink" href="#performance-improvements-beyond-baseline" title="Permanent link">¶</a></h1>
+<p>Status: Draft v0.1
+Last updated: 2026-01-17</p>
+<p>This document proposes additional performance features for SkeinDB that complement
+Cell-Interned MVCC, Delta values, ETag caching, Wasm UDFs, and Column Snapshots.</p>
+<p>The goal is to add at least one <strong>novel, measurable</strong> performance improvement that is also
+worth describing as a research contribution.</p>
+<hr />
+<h2 id="1-valueid-first-execution-vax">1) ValueID-first execution (VAX)<a class="headerlink" href="#1-valueid-first-execution-vax" title="Permanent link">¶</a></h2>
+<h3 id="11-core-idea">1.1 Core idea<a class="headerlink" href="#11-core-idea" title="Permanent link">¶</a></h3>
+<p>SkeinDB already uses a content-addressed ValueStore where identical values share the same
+ValueID. This makes ValueID behave like a <strong>universal dictionary encoding</strong>.</p>
+<p><strong>ValueID-first execution</strong> means:
+- predicates (equality, IN-list) and grouping/join keys can operate on ValueIDs instead of raw bytes
+- row materialization (turn ValueIDs into decoded values) is delayed until the end of the pipeline</p>
+<p>This can reduce CPU cost significantly for string-heavy workloads because comparisons become:
+- <code>memcmp(16)</code> on ValueIDs instead of <code>memcmp(n)</code> on long strings</p>
+<p>It can also reduce memory bandwidth and improve cache locality.</p>
+<h3 id="12-requirements">1.2 Requirements<a class="headerlink" href="#12-requirements" title="Permanent link">¶</a></h3>
+<ul>
+<li>Columns that are stored as ValueIDs must be marked as <code>interned</code> in schema metadata.</li>
+<li>The executor must be able to evaluate expressions on ValueIDs where semantics are preserved.</li>
+</ul>
+<p>Safe operators on ValueIDs:
+- <code>eq</code>, <code>ne</code>
+- <code>in</code> (when list is pre-interned)
+- hash keys for <code>GROUP BY</code> and hash join</p>
+<p>Unsafe operators (still require decoded bytes):
+- <code>like</code> (pattern match)
+- collation-aware comparisons (unless you intern collation-normalized forms)</p>
+<h3 id="13-planner-rule">1.3 Planner rule<a class="headerlink" href="#13-planner-rule" title="Permanent link">¶</a></h3>
+<p>If a predicate references only interned columns and uses ValueID-safe operators:
+- choose an execution path that keeps the column in ValueID form</p>
+<p>If a query needs decoded values only for output columns:
+- keep ValueIDs through filter/join/agg
+- decode only the projected output columns</p>
+<h3 id="14-measurable-outcomes">1.4 Measurable outcomes<a class="headerlink" href="#14-measurable-outcomes" title="Permanent link">¶</a></h3>
+<p>Benchmarks should report:
+- CPU time per query for string predicates
+- memory bandwidth (optional)
+- p95 latency improvements</p>
+<h3 id="15-prototype-status">1.5 Prototype status<a class="headerlink" href="#15-prototype-status" title="Permanent link">¶</a></h3>
+<p>Current prototype coverage:
+- interned-column schema metadata persists in <code>data/schema_flags.json</code>
+- <code>schema_set_column_interned(...)</code> toggles the flag and <code>describe_table(...)</code> reports it per column
+- single-table scan paths precompile ValueID-safe predicates over interned columns and compare ValueIDs for <code>eq</code>, <code>ne</code>, and <code>in</code>
+- single-table row and snapshot scan paths now materialize only query-referenced columns, and when the predicate stays on the ValueID lookup path they only build row context for projection and <code>ORDER BY</code> columns
+- eligible single-table full scans now run through a 1024-row batch pipeline that transposes visible rows into a columnar buffer, filters them, and then projects result rows
+- <code>skeindb-core::mvcc::VisibleVersionIndex</code> now caches validated <code>row_id + snapshot_epoch_bucket</code> lookups and reuses the resolved visible version when the <code>RowDir</code> head pointer still matches and the cached version remains visible for the exact snapshot timestamp
+- unsupported operators or non-interned columns fall back to the normal expression evaluator</p>
+<hr />
+<h2 id="2-vectorized-execution-batches">2) Vectorized execution batches<a class="headerlink" href="#2-vectorized-execution-batches" title="Permanent link">¶</a></h2>
+<h3 id="21-core-idea">2.1 Core idea<a class="headerlink" href="#21-core-idea" title="Permanent link">¶</a></h3>
+<p>Instead of processing rows one-by-one, the executor processes batches (e.g., 1024 rows) in a
+columnar-in-memory format (vectors). This reduces per-row overhead and can enable SIMD.</p>
+<p>This pairs well with ValueID-first execution:
+- ValueIDs can be processed in tight loops</p>
+<h3 id="22-minimal-v1-implementation">2.2 Minimal v1 implementation<a class="headerlink" href="#22-minimal-v1-implementation" title="Permanent link">¶</a></h3>
+<ul>
+<li>Scan operator outputs batches</li>
+<li>Filter operator evaluates batch predicates</li>
+<li>Project operator computes output batch</li>
+</ul>
+<p>Vectorized joins/aggregates can be added later.</p>
+<hr />
+<h2 id="3-mvcc-chain-acceleration-visible-version-index">3) MVCC chain acceleration (Visible Version Index)<a class="headerlink" href="#3-mvcc-chain-acceleration-visible-version-index" title="Permanent link">¶</a></h2>
+<h3 id="31-problem">3.1 Problem<a class="headerlink" href="#31-problem" title="Permanent link">¶</a></h3>
+<p>In MVCC, a row_id may have a long version chain.
+Finding the visible version can degrade to following pointers repeatedly.</p>
+<h3 id="32-proposal">3.2 Proposal<a class="headerlink" href="#32-proposal" title="Permanent link">¶</a></h3>
+<p>Maintain a small per-row "visible hint" cache keyed by <code>(row_id, snapshot_epoch_bucket)</code>.</p>
+<ul>
+<li>When a snapshot reads a row, store the resolved version pointer in the cache.</li>
+<li>For future reads at similar snapshot epochs, jump directly to the likely visible version.</li>
+</ul>
+<p>Current prototype coverage:</p>
+<ul>
+<li>bounded <code>VisibleVersionIndex</code> cache in <code>crates/skeindb-core/src/mvcc.rs</code></li>
+<li>cache validation against the current <code>RowDir</code> head pointer and the cached version's exact <code>[begin_ts, end_ts)</code> visibility window</li>
+<li>automatic fallback to normal chain walking on head changes or same-bucket timestamp drift</li>
+</ul>
+<p>This is safe if the cache is validated (begin/end ts check) before use.</p>
+<h3 id="33-measurable-outcomes">3.3 Measurable outcomes<a class="headerlink" href="#33-measurable-outcomes" title="Permanent link">¶</a></h3>
+<ul>
+<li>reduced pointer chasing on hot rows</li>
+<li>improved latency for read-heavy workloads with frequent updates</li>
+</ul>
+<hr />
+<h2 id="4-backlog">4) Backlog<a class="headerlink" href="#4-backlog" title="Permanent link">¶</a></h2>
+<ul>
+<li>PF01: Schema flag for interned columns (implemented via <code>schema_flags.json</code>)</li>
+<li>PF02: Executor support for ValueID-safe ops (implemented for <code>eq</code>, <code>ne</code>, and <code>in</code> on single-table scan paths)</li>
+<li>PF03: Late materialization (implemented for single-table row/snapshot scan contexts)</li>
+<li>PF04: Batch execution framework (implemented for eligible single-table full scans)</li>
+<li>PF05: Visible Version Index cache</li>
+</ul>
+<h2 id="5-autoparameterization-plan-reuse-sql-clients">5) Autoparameterization + plan reuse (SQL clients)<a class="headerlink" href="#5-autoparameterization-plan-reuse-sql-clients" title="Permanent link">¶</a></h2>
+<p>Many MySQL-compatible clients send repetitive ad-hoc SQL differing only by literals.
+If SkeinDB normalizes queries into a stable fingerprint and extracts parameters (docs/AUTOPARAMETERIZATION.md),
+the engine can reuse parse/plan work and improve throughput at high QPS.</p>
+<p>Measurable outcomes:
+- reduced CPU spent in parsing and translation
+- higher plan-cache hit rate
+- lower tail latency under bursty workloads</p>
+<h2 id="6-stall-aware-compaction-scheduling">6) Stall-aware compaction scheduling<a class="headerlink" href="#6-stall-aware-compaction-scheduling" title="Permanent link">¶</a></h2>
+<p>Compaction backlogs can induce write stalls and p99 spikes.
+The workload-guided scheduler (docs/COMPACTION_SCHEDULER.md) treats compaction as a budgeted background workload
+and prioritizes work to avoid stalls.</p>
+<p>Measurable outcomes:
+- fewer write stalls
+- lower p99 write latency
+- smoother throughput over time</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/PERFORMANCE.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PERFORMANCE.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="observability.html"><span>← Previous</span>Observability</a>
+<a class="next" href="audit-wal.html"><span>Next →</span>Audit WAL</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-valueid-first-execution-vax">1) ValueID-first execution (VAX)</a><ul>
+<li><a href="#11-core-idea">1.1 Core idea</a></li>
+<li><a href="#12-requirements">1.2 Requirements</a></li>
+<li><a href="#13-planner-rule">1.3 Planner rule</a></li>
+<li><a href="#14-measurable-outcomes">1.4 Measurable outcomes</a></li>
+<li><a href="#15-prototype-status">1.5 Prototype status</a></li>
+</ul>
+</li>
+<li><a href="#2-vectorized-execution-batches">2) Vectorized execution batches</a><ul>
+<li><a href="#21-core-idea">2.1 Core idea</a></li>
+<li><a href="#22-minimal-v1-implementation">2.2 Minimal v1 implementation</a></li>
+</ul>
+</li>
+<li><a href="#3-mvcc-chain-acceleration-visible-version-index">3) MVCC chain acceleration (Visible Version Index)</a><ul>
+<li><a href="#31-problem">3.1 Problem</a></li>
+<li><a href="#32-proposal">3.2 Proposal</a></li>
+<li><a href="#33-measurable-outcomes">3.3 Measurable outcomes</a></li>
+</ul>
+</li>
+<li><a href="#4-backlog">4) Backlog</a></li>
+<li><a href="#5-autoparameterization-plan-reuse-sql-clients">5) Autoparameterization + plan reuse (SQL clients)</a></li>
+<li><a href="#6-stall-aware-compaction-scheduling">6) Stall-aware compaction scheduling</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

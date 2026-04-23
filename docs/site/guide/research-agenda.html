@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinDB Research Agenda (Adapted) — SkeinDB Docs</title>
+<meta name="description" content="SkeinDB Research Agenda (Adapted) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html" class="active">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Research</span> <span>›</span> <span>SkeinDB Research Agenda (Adapted)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeindb-research-agenda-adapted">SkeinDB Research Agenda (Adapted)<a class="headerlink" href="#skeindb-research-agenda-adapted" title="Permanent link">¶</a></h1>
+<p>This file adapts the attached SkeinDB Research Agenda into the repository as implementable specs and backlog items.</p>
+<h2 id="executive-summary">Executive Summary<a class="headerlink" href="#executive-summary" title="Permanent link">¶</a></h2>
+<p>This document presents twenty detailed research proposals that extend the SkeinDB architecture. These proposals build on SkeinDB's core innovations: the ValueID-first storage model, SkeinQL native API, dependency tracking for cache coherency, hash-chained WAL, and WebAssembly extensibility. Each proposal includes problem statement, research hypotheses, methodology, evaluation plan, expected contributions, and connections to related work.
+The proposals span seven research areas: Storage and Query Optimization (learned indexes, adaptive hybrid execution, delta-chain topology), Security and Privacy (differential privacy, oblivious execution, forensic queries), Web-Native and Modern Applications (merge functions, incremental views, QUIC protocols), AI/ML Integration (vector embeddings, LLM-assisted parameterization, natural language interfaces), Consistency and Distribution (causal ETags, edge replication, schema evolution), Developer Experience and Tooling (index synthesis, intent inference, performance replay), and Systems Research (WebAssembly operators, energy-aware scheduling).
+Priority recommendations are based on novelty, feasibility, alignment with SkeinDB architecture, and potential impact. The highest-priority proposals are: Incremental View Maintenance via Dependency Graphs, Causal Consistency via ETag Chains, Differentially Private Aggregate Queries, and Vector Embeddings as First-Class ValueIDs.</p>
+<h2 id="proposals-20">Proposals (20)<a class="headerlink" href="#proposals-20" title="Permanent link">¶</a></h2>
+<ul>
+<li><strong>1. Learned Index Structures for ValueID Lookup</strong> → <code>docs/research_agenda/R01_learned-index-structures-for-valueid-lookup.md</code></li>
+<li><strong>2. Adaptive Row-Column Hybrid Execution</strong> → <code>docs/research_agenda/R02_adaptive-row-column-hybrid-execution.md</code></li>
+<li><strong>3. Delta-Chain Topology Optimization</strong> → <code>docs/research_agenda/R03_delta-chain-topology-optimization.md</code></li>
+<li><strong>4. Differentially Private Aggregate Queries via SkeinQL</strong> → <code>docs/research_agenda/R04_differentially-private-aggregate-queries-via-skeinql.md</code></li>
+<li><strong>5. Oblivious Query Execution for Multi-Tenant Deployments</strong> → <code>docs/research_agenda/R05_oblivious-query-execution-for-multi-tenant-deployments.md</code></li>
+<li><strong>6. Forensic Query Language for Hash-Chained WAL</strong> → <code>docs/research_agenda/R06_forensic-query-language-for-hash-chained-wal.md</code></li>
+<li><strong>7. Optimistic Concurrency with Client-Side Merge Functions</strong> → <code>docs/research_agenda/R07_optimistic-concurrency-with-client-side-merge-functions.md</code></li>
+<li><strong>8. Incremental View Maintenance via Dependency Graphs</strong> → <code>docs/research_agenda/R08_incremental-view-maintenance-via-dependency-graphs.md</code></li>
+<li><strong>9. HTTP/3 and QUIC-Native Database Protocol</strong> → <code>docs/research_agenda/R09_http-3-and-quic-native-database-protocol.md</code></li>
+<li><strong>10. Vector Embeddings as First-Class ValueIDs</strong> → <code>docs/research_agenda/R10_vector-embeddings-as-first-class-valueids.md</code></li>
+<li><strong>11. LLM-Assisted Query Autoparameterization</strong> → <code>docs/research_agenda/R11_llm-assisted-query-autoparameterization.md</code></li>
+<li><strong>12. Natural Language to SkeinQL with Verification</strong> → <code>docs/research_agenda/R12_natural-language-to-skeinql-with-verification.md</code></li>
+<li><strong>13. Causal Consistency via ETag Chains</strong> → <code>docs/research_agenda/R13_causal-consistency-via-etag-chains.md</code></li>
+<li><strong>14. Geo-Distributed Replay Bundles for Edge Caching</strong> → <code>docs/research_agenda/R14_geo-distributed-replay-bundles-for-edge-caching.md</code></li>
+<li><strong>15. Conflict-Free Schema Evolution</strong> → <code>docs/research_agenda/R15_conflict-free-schema-evolution.md</code></li>
+<li><strong>16. Automatic Index Synthesis from Dependency Analysis</strong> → <code>docs/research_agenda/R16_automatic-index-synthesis-from-dependency-analysis.md</code></li>
+<li><strong>17. Query Intent Inference for Compatibility Migration</strong> → <code>docs/research_agenda/R17_query-intent-inference-for-compatibility-migration.md</code></li>
+<li><strong>18. Reproducible Performance Regression Testing</strong> → <code>docs/research_agenda/R18_reproducible-performance-regression-testing.md</code></li>
+<li><strong>19. WebAssembly-Native Query Operators</strong> → <code>docs/research_agenda/R19_webassembly-native-query-operators.md</code></li>
+<li><strong>20. Energy-Aware Compaction Scheduling</strong> → <code>docs/research_agenda/R20_energy-aware-compaction-scheduling.md</code></li>
+</ul>
+<h2 id="implementation-status-snapshot-2026-02-21">Implementation status snapshot (2026-02-21)<a class="headerlink" href="#implementation-status-snapshot-2026-02-21" title="Permanent link">¶</a></h2>
+<p>All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Status</th>
+<th>Primary implementation surface</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R01</td>
+<td>Implemented (prototype)</td>
+<td>Learned index scaffolding + tests (<code>docs/LEARNED_INDEXES.md</code>, <code>crates/skeindb-core/tests/valuestore.rs</code>)</td>
+</tr>
+<tr>
+<td>R02</td>
+<td>Implemented (prototype)</td>
+<td>Hybrid row+column snapshot surfaces (<code>docs/COLUMN_SNAPSHOTS.md</code>, engine snapshot paths)</td>
+</tr>
+<tr>
+<td>R03</td>
+<td>Implemented (prototype)</td>
+<td>Delta-chained values + compaction (<code>docs/DELTA_VALUES.md</code>, <code>valuestore</code> delta tests)</td>
+</tr>
+<tr>
+<td>R04</td>
+<td>Implemented</td>
+<td>Differential privacy RPC family (<code>dp.*</code>) + budget tests</td>
+</tr>
+<tr>
+<td>R05</td>
+<td>Implemented (prototype)</td>
+<td>Oblivious execution policy/explain (<code>oblivious.*</code>) + server tests</td>
+</tr>
+<tr>
+<td>R06</td>
+<td>Implemented (prototype)</td>
+<td>Forensic WAL query/verify/export (<code>forensic.*</code>) + tamper checks</td>
+</tr>
+<tr>
+<td>R07</td>
+<td>Implemented (prototype)</td>
+<td>Merge policies + wasm merge registry (<code>merge.*</code>) + conflict tests</td>
+</tr>
+<tr>
+<td>R08</td>
+<td>Implemented (prototype)</td>
+<td>Incremental view APIs (<code>view.*</code>) + dependency refresh tests</td>
+</tr>
+<tr>
+<td>R09</td>
+<td>Implemented</td>
+<td>QUIC-native SkeinQL transport + <code>tests/quic_rpc.rs</code></td>
+</tr>
+<tr>
+<td>R10</td>
+<td>Implemented (prototype)</td>
+<td>Vector ingest/search/index status (<code>vector.*</code>) + ANN tests</td>
+</tr>
+<tr>
+<td>R11</td>
+<td>Implemented (prototype)</td>
+<td>Autoparameterization analysis/classification (<code>ai.autoparam.*</code>)</td>
+</tr>
+<tr>
+<td>R12</td>
+<td>Implemented (prototype)</td>
+<td>Natural language translate/explain/execute flow (<code>ai.nl.*</code>)</td>
+</tr>
+<tr>
+<td>R13</td>
+<td>Implemented (prototype)</td>
+<td>ETag validators + min-causality controls (<code>query.select</code> + <code>If-None-Match</code>)</td>
+</tr>
+<tr>
+<td>R14</td>
+<td>Implemented (prototype)</td>
+<td>Replay bundle/time-travel export surfaces (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
+</tr>
+<tr>
+<td>R15</td>
+<td>Implemented (prototype)</td>
+<td>Conflict-aware schema evolution (<code>schema.propose_change</code>, merge/apply APIs)</td>
+</tr>
+<tr>
+<td>R16</td>
+<td>Implemented (prototype)</td>
+<td>Index advisor synthesis/apply/history (<code>advisor.*</code>)</td>
+</tr>
+<tr>
+<td>R17</td>
+<td>Implemented (prototype)</td>
+<td>Compatibility intent inference + rewrite preview (<code>migration.*</code>)</td>
+</tr>
+<tr>
+<td>R18</td>
+<td>Implemented (prototype)</td>
+<td>Reproducible replay/report tooling (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
+</tr>
+<tr>
+<td>R19</td>
+<td>Implemented (prototype)</td>
+<td>Wasm-native plan compile/run + batch ABI (<code>wasm.plan.*</code>)</td>
+</tr>
+<tr>
+<td>R20</td>
+<td>Implemented (prototype)</td>
+<td>Energy-aware compaction policy scaffolds (<code>docs/COMPACTION_SCHEDULER.md</code>)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="priority-matrix-from-agenda">Priority Matrix (from agenda)<a class="headerlink" href="#priority-matrix-from-agenda" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Proposal</th>
+<th>Novelty</th>
+<th>Feasibility</th>
+<th>Alignment</th>
+<th>Impact</th>
+<th>Priority</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>Incremental View Maintenance</td>
+<td>High</td>
+<td>High</td>
+<td>Very High</td>
+<td>High</td>
+<td>P0</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Causal Consistency via ETags</td>
+<td>Very High</td>
+<td>Medium</td>
+<td>Very High</td>
+<td>High</td>
+<td>P0</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Differentially Private Queries</td>
+<td>High</td>
+<td>High</td>
+<td>High</td>
+<td>High</td>
+<td>P0</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Vector Embeddings as ValueIDs</td>
+<td>High</td>
+<td>Medium</td>
+<td>High</td>
+<td>Very High</td>
+<td>P0</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Delta-Chain Topology</td>
+<td>High</td>
+<td>High</td>
+<td>Very High</td>
+<td>Medium</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Forensic Query Language</td>
+<td>Very High</td>
+<td>Medium</td>
+<td>High</td>
+<td>Medium</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Client-Side Merge Functions</td>
+<td>Medium</td>
+<td>High</td>
+<td>Very High</td>
+<td>High</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>16</td>
+<td>Automatic Index Synthesis</td>
+<td>Medium</td>
+<td>High</td>
+<td>High</td>
+<td>High</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Learned Indexes for ValueID</td>
+<td>High</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>P2</td>
+</tr>
+<tr>
+<td>9</td>
+<td>HTTP/3 QUIC Protocol</td>
+<td>Very High</td>
+<td>Low</td>
+<td>High</td>
+<td>Medium</td>
+<td>P2</td>
+</tr>
+<tr>
+<td>14</td>
+<td>Geo-Distributed Replay Bundles</td>
+<td>High</td>
+<td>Medium</td>
+<td>High</td>
+<td>Medium</td>
+<td>P2</td>
+</tr>
+<tr>
+<td>19</td>
+<td>WebAssembly Query Operators</td>
+<td>High</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>P2</td>
+</tr>
+</tbody>
+</table>
+<h1 id="cross-cutting-themes">Cross-Cutting Themes<a class="headerlink" href="#cross-cutting-themes" title="Permanent link">¶</a></h1>
+<h2 id="dependency-tracking-as-infrastructure">Dependency Tracking as Infrastructure<a class="headerlink" href="#dependency-tracking-as-infrastructure" title="Permanent link">¶</a></h2>
+<p>SkeinDB's dependency tracking (originally for ETag-based cache validation) emerges as foundational infrastructure for multiple research directions. It enables: incremental view maintenance (#8), causal consistency (#13), CDC changefeeds (original paper), automatic index synthesis (#16), and query intent inference (#17). Investing in rich, efficient dependency tracking pays dividends across the research agenda.</p>
+<h2 id="webassembly-as-universal-sandbox">WebAssembly as Universal Sandbox<a class="headerlink" href="#webassembly-as-universal-sandbox" title="Permanent link">¶</a></h2>
+<p>WebAssembly appears in multiple proposals: merge functions (#7), query operators (#19), and the original paper's extensions. A robust Wasm runtime with well-designed capability model becomes a platform for extensibility across security boundaries, from untrusted user code to trusted system operators that can run anywhere.</p>
+<h2 id="the-replay-bundle-abstraction">The Replay Bundle Abstraction<a class="headerlink" href="#the-replay-bundle-abstraction" title="Permanent link">¶</a></h2>
+<p>Replay bundles (time-travel debugging in the original paper) generalize to multiple use cases: performance regression testing (#18), edge replication (#14), and forensic analysis (#6). Defining a rich replay bundle format with versioned schema, optional annotations, and cryptographic verification creates a powerful abstraction for data portability.</p>
+<h2 id="aiml-integration-points">AI/ML Integration Points<a class="headerlink" href="#aiml-integration-points" title="Permanent link">¶</a></h2>
+<p>Several proposals integrate machine learning: learned indexes (#1), LLM-assisted parameterization (#11), natural language interfaces (#12), and workload prediction for scheduling (#3, #20). Designing clean integration points for ML models (training data collection, inference APIs, feedback loops) enables future AI-native database features.</p>
+<h2 id="privacy-as-first-class-concern">Privacy as First-Class Concern<a class="headerlink" href="#privacy-as-first-class-concern" title="Permanent link">¶</a></h2>
+<p>Privacy appears explicitly (differential privacy #4, oblivious execution #5) and implicitly (replay bundle redaction, multi-tenant isolation). Building privacy primitives into the storage and query layers, rather than retrofitting them, enables stronger guarantees with lower overhead.</p>
+<h2 id="protocol-evolution">Protocol Evolution<a class="headerlink" href="#protocol-evolution" title="Permanent link">¶</a></h2>
+<p>SkeinDB already supports MySQL protocol and HTTP. Proposals suggest QUIC (#9), causal ETags (#13), and Wasm-based query shipping (#19). Designing for protocol evolution (versioning, negotiation, graceful degradation) enables the system to adapt to changing network and client landscapes.</p>
+<h1 id="conclusion-and-next-steps">Conclusion and Next Steps<a class="headerlink" href="#conclusion-and-next-steps" title="Permanent link">¶</a></h1>
+<p>This research agenda presents twenty distinct but interconnected directions for extending SkeinDB. The proposals leverage SkeinDB's unique architectural decisions: content-addressed storage via ValueIDs, native SkeinQL API separate from SQL compatibility, dependency tracking for cache coherency, hash-chained WAL for auditability, and WebAssembly for safe extensibility.
+Recommended starting points for research teams:
+- For systems researchers: Delta-Chain Topology (#3) and WebAssembly Query Operators (#19) offer clean formal problems with measurable outcomes.
+- For security researchers: Differential Privacy (#4) and Forensic Query Language (#6) address timely concerns with novel approaches.
+- For web/distributed systems researchers: Causal ETags (#13) and HTTP/3 Protocol (#9) reimagine database-web integration.
+- For ML researchers: Vector Embeddings (#10) and LLM-Assisted Parameterization (#11) explore AI-database synergies.
+- For database practitioners: Incremental View Maintenance (#8) and Automatic Index Synthesis (#16) deliver immediate practical value.
+Each proposal is designed to produce publishable research contributions while advancing SkeinDB's capabilities. The cross-cutting themes suggest that investments in core infrastructure (dependency tracking, Wasm runtime, replay bundles) will accelerate multiple research directions simultaneously.</p>
+<h2 id="repository-mapping">Repository mapping<a class="headerlink" href="#repository-mapping" title="Permanent link">¶</a></h2>
+<p>See <code>docs/RESEARCH_BACKLOG.md</code> for task IDs and how each proposal maps onto the existing Phase A–G implementation plan.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/RESEARCH_AGENDA.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RESEARCH_AGENDA.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="cas-replication.html"><span>← Previous</span>CAS replication</a>
+<a class="next" href="research-backlog.html"><span>Next →</span>Research backlog</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#executive-summary">Executive Summary</a></li>
+<li><a href="#proposals-20">Proposals (20)</a></li>
+<li><a href="#implementation-status-snapshot-2026-02-21">Implementation status snapshot (2026-02-21)</a></li>
+<li><a href="#priority-matrix-from-agenda">Priority Matrix (from agenda)</a></li>
+<li><a href="#dependency-tracking-as-infrastructure">Dependency Tracking as Infrastructure</a></li>
+<li><a href="#webassembly-as-universal-sandbox">WebAssembly as Universal Sandbox</a></li>
+<li><a href="#the-replay-bundle-abstraction">The Replay Bundle Abstraction</a></li>
+<li><a href="#aiml-integration-points">AI/ML Integration Points</a></li>
+<li><a href="#privacy-as-first-class-concern">Privacy as First-Class Concern</a></li>
+<li><a href="#protocol-evolution">Protocol Evolution</a></li>
+<li><a href="#repository-mapping">Repository mapping</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinDB On-Disk Format v0.3 (v0.2 compatible) — SkeinDB Docs</title>
+<meta name="description" content="SkeinDB On-Disk Format v0.3 (v0.2 compatible) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html" class="active">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>SkeinDB On-Disk Format v0.3 (v0.2 compatible)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeindb-on-disk-format-v03-v02-compatible">SkeinDB On-Disk Format v0.3 (v0.2 compatible)<a class="headerlink" href="#skeindb-on-disk-format-v03-v02-compatible" title="Permanent link">¶</a></h1>
+<p>Status: Draft v0.3 (v0.2 compatible)
+Last updated: 2026-03-31</p>
+<p>This document defines SkeinDB's on-disk storage layout and record formats.
+All formats MUST be versioned. Any breaking change requires a format version bump.</p>
+<p>Design goals:
+- Append-only segments
+- Crash safety with WAL + checkpoint
+- MVCC row versioning
+- Optional deduplicated ValueStore (content-addressed)
+- Simple compaction + GC suitable for single-binary deployments</p>
+<hr />
+<h2 id="1-directory-layout">1) Directory layout<a class="headerlink" href="#1-directory-layout" title="Permanent link">¶</a></h2>
+<p>data/
+  MANIFEST.log
+  MANIFEST.snapshot            (optional)
+  snapshots.json              (prototype snapshot metadata, format v1)
+  dp_budgets.json             (prototype DP budgets, format v1)
+  dp_audit.json               (prototype DP audit log, format v1)
+  oblivious_policies.json     (prototype oblivious policy store, format v1)
+  forensic_chain.json         (prototype forensic hash chain, format v3)
+  wasm_catalog.json           (prototype Wasm UDF catalog, format v1)
+  merge_policies.json         (prototype merge policies, format v1)
+  merge_wasm_registry.json    (prototype merge wasm registry, format v1)
+  views.json                  (prototype materialized views, format v1)
+  schema_versions.json        (prototype schema versions, format v1)
+  schema_changes.json         (prototype schema change log, format v1)
+  schema_flags.json           (prototype schema flags, format v1)
+  changes.json                (prototype retained CDC change log, format v1)
+  advisor_patterns.json       (prototype index advisor patterns, format v1)
+  advisor_history.json        (prototype index advisor history, format v2)
+  security_state.json         (security principals + API tokens, format v1)
+  tables/
+    <db>/<table>.json         (prototype row store, format v2)
+    <db>/<table>.rseg         (prototype row segment container, format v1)
+    <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
+  wal/
+    wal-000001.log
+  rows/
+    rows-000001.rseg
+  vals/
+    vals-000001.vseg
+  idx/
+    rowdir-L0-000001.run
+    valdir-L0-000002.run
+    pk_<table>-L0-000003.run
+  tmp/</p>
+<hr />
+<h2 id="2-common-encodings">2) Common encodings<a class="headerlink" href="#2-common-encodings" title="Permanent link">¶</a></h2>
+<h3 id="21-endianness">2.1 Endianness<a class="headerlink" href="#21-endianness" title="Permanent link">¶</a></h3>
+<ul>
+<li>Fixed-width integers in headers and record bodies are LITTLE-ENDIAN.</li>
+</ul>
+<h3 id="22-varu-uleb128">2.2 VarU (ULEB128)<a class="headerlink" href="#22-varu-uleb128" title="Permanent link">¶</a></h3>
+<ul>
+<li>Variable-length unsigned integer encoding for u64.</li>
+<li>7 bits payload per byte, MSB continuation.</li>
+</ul>
+<h3 id="23-bytes-and-string">2.3 Bytes and String<a class="headerlink" href="#23-bytes-and-string" title="Permanent link">¶</a></h3>
+<ul>
+<li>Bytes: VarU length + N bytes</li>
+<li>String: VarU length + UTF-8 bytes</li>
+</ul>
+<h3 id="24-checksums">2.4 Checksums<a class="headerlink" href="#24-checksums" title="Permanent link">¶</a></h3>
+<ul>
+<li>CRC32C over record payload bytes (not including len/crc).</li>
+</ul>
+<h3 id="25-valueid">2.5 ValueID<a class="headerlink" href="#25-valueid" title="Permanent link">¶</a></h3>
+<ul>
+<li>ValueID = BLAKE3-128(value_bytes) (16 bytes)</li>
+<li>On lookup, verify bytes equality to eliminate collision risk.</li>
+</ul>
+<hr />
+<h2 id="3-file-header-64-bytes">3) File header (64 bytes)<a class="headerlink" href="#3-file-header-64-bytes" title="Permanent link">¶</a></h2>
+<p>FileHeader (64 bytes)
+  magic[8]        = ASCII "SKNDB\0\1"
+  file_kind       = u8  (1=wal,2=rowseg,3=valseg,4=run,5=manifest)
+  endian          = u8  (1=little)
+  header_len      = u16 (64)
+  format_ver      = u32 (1)
+  file_id         = u32 (segment/run id)
+  created_unix_s  = u64
+  reserved[32]    = bytes (0)
+  header_crc32c   = u32 (CRC32C over bytes 0..59)</p>
+<hr />
+<h2 id="4-record-framing">4) Record framing<a class="headerlink" href="#4-record-framing" title="Permanent link">¶</a></h2>
+<p>RecordFrame:
+  len      u32 (LE)
+  crc32c   u32 (LE)
+  payload  [len] bytes</p>
+<h3 id="41-manifestlog-payload-records-format-v1">4.1 MANIFEST.log payload records (format v1)<a class="headerlink" href="#41-manifestlog-payload-records-format-v1" title="Permanent link">¶</a></h3>
+<p>Each MANIFEST record is wrapped in a <code>RecordFrame</code>. The payload body starts
+with a <code>rec_type</code> tag, then uses VarU fields.</p>
+<p>ManifestRecordV1 payloads:</p>
+<ul>
+<li><code>rec_type = 0x01</code> (<code>AddFile</code>)</li>
+<li><code>file_kind</code> u8 (<code>1=wal,2=rowseg,3=valseg,4=run</code>)</li>
+<li><code>file_id</code> VarU (u32 domain)</li>
+<li><code>level</code> VarU (u32 domain)</li>
+<li><code>rec_type = 0x02</code> (<code>RemoveFile</code>)</li>
+<li><code>file_kind</code> u8</li>
+<li><code>file_id</code> VarU (u32 domain)</li>
+<li><code>rec_type = 0x03</code> (<code>SetCurrentVersion</code>)</li>
+<li><code>version</code> VarU (u64)</li>
+<li><code>rec_type = 0x04</code> (<code>SetLastLsn</code>)</li>
+<li><code>lsn</code> VarU (u64)</li>
+<li><code>rec_type = 0x05</code> (<code>CleanShutdown</code>)</li>
+<li><code>unix_s</code> VarU (u64)</li>
+</ul>
+<p>Replayed semantics:</p>
+<ul>
+<li><code>AddFile</code> adds or updates a live file entry (<code>kind</code>,<code>file_id</code>) with its level.</li>
+<li><code>RemoveFile</code> deletes that entry from the live set.</li>
+<li><code>SetCurrentVersion</code>, <code>SetLastLsn</code>, and <code>CleanShutdown</code> update their
+  corresponding scalar state fields.</li>
+</ul>
+<hr />
+<h2 id="5-pointers">5) Pointers<a class="headerlink" href="#5-pointers" title="Permanent link">¶</a></h2>
+<p>FilePtr (12 bytes):
+  file_id  u32
+  offset   u64</p>
+<hr />
+<h2 id="6-row-segments-rseg">6) Row segments (.rseg)<a class="headerlink" href="#6-row-segments-rseg" title="Permanent link">¶</a></h2>
+<p>RV1 record payload:</p>
+<p>RV1
+  rec_type     u8   = 0x10
+  rec_ver      u8   = 1
+  flags        u16
+  table_id     u32
+  row_id       u64
+  begin_ts     u64      // commit_ts; 0 allowed only in WAL staging
+  end_ts       u64      // 0 means +INF
+  prev_ptr     FilePtr  // previous row version (or 0/0)
+  group_count  VarU</p>
+<p>repeated group_count:
+    group_id        VarU
+    group_ref_kind  u8   (0=inline_small, 1=value_id_ref)
+    if kind=0:
+      group_bytes   Bytes     // GroupObject bytes (GO1)
+    if kind=1:
+      group_vid[16]           // ValueID of a GROUP in value store</p>
+<p>Flags:
+- bit0 IS_DELETE</p>
+<p>Current <code>skeindb-core</code> implementation status for T014:</p>
+<ul>
+<li><code>.rseg</code> files are append-only and use <code>FileHeader(file_kind=RowSeg)</code> followed by <code>RecordFrame</code>-wrapped RV1 payloads.</li>
+<li><code>RowSegmentWriter::append</code> returns a <code>FilePtr { file_id, offset }</code> pointing at the start of the emitted <code>RecordFrame</code>, so callers can chain <code>prev_ptr</code> for MVCC version histories.</li>
+<li><code>RowGroupRef</code> is encoded as <code>group_ref_kind=0</code> (inline bytes) or <code>group_ref_kind=1</code> (16-byte ValueID).</li>
+<li><code>RowSegmentReader</code> supports sequential full scans (<code>read_all</code>) and random-access lookup by offset (<code>read_at</code>); decode strictly rejects unknown record types/versions, unknown group ref kinds, and trailing bytes.</li>
+</ul>
+<hr />
+<h2 id="7-value-segments-vseg">7) Value segments (.vseg)<a class="headerlink" href="#7-value-segments-vseg" title="Permanent link">¶</a></h2>
+<p>VE1 record payload:</p>
+<p>VE1
+  rec_type     u8  = 0x20
+  rec_ver      u8  = 1
+  val_kind     u8  (1=CELL, 2=GROUP, 3=BLOB_CHUNK, 4=BLOB_MANIFEST, 5=DELTA, 6=EMBEDDING)
+  codec        u8  (0=RAW, 1=ZSTD)
+  value_id[16]
+  raw_len      VarU
+  raw_bytes    Bytes-or-compressed</p>
+<p>GroupObject bytes GO1:
+- See v0.1 GO1 spec (GroupObject is the dedup unit for a group of columns)</p>
+<p>Current <code>skeindb-core</code> implementation status for T012:</p>
+<ul>
+<li><code>.vseg</code> files are append-only and use <code>FileHeader(file_kind=ValSeg)</code> followed by framed VE1 records.</li>
+<li><code>ValueSegmentWriter</code> / <code>ValueSegmentReader</code> currently support <code>codec=0</code> (RAW).</li>
+<li><code>codec=1</code> (ZSTD) is reserved in the format but not yet implemented by the core reader/writer.</li>
+<li>DELTA entries persist <code>DELTA1</code> inside <code>raw_bytes</code>; skip patches are runtime-only metadata and are rebuilt lazily rather than stored on disk.</li>
+</ul>
+<hr />
+<h2 id="8-sorted-runs-run">8) Sorted runs (.run)<a class="headerlink" href="#8-sorted-runs-run" title="Permanent link">¶</a></h2>
+<p>A .run is an immutable sorted key/value table (SSTable-like), used for:
+- rowdir: row_id -&gt; FilePtr
+- valdir: value_id -&gt; FilePtr
+- primary/secondary indexes</p>
+<p>DataBlock payload:
+  block_type  u8 = 0x40
+  block_ver   u8 = 1
+  entry_count VarU
+  repeated entry_count:
+    key Bytes
+    value Bytes</p>
+<p>IndexBlock payload:
+  block_type u8 = 0x41
+  block_ver  u8 = 1
+  block_count VarU
+  repeated:
+    first_key Bytes
+    block_offset u64</p>
+<p>Footer:
+  footer_magic[8] = "SKNRUN\0\1"
+  index_offset u64
+  file_crc32c u32 (optional)</p>
+<p>Current <code>skeindb-core</code> implementation status for T013:</p>
+<ul>
+<li><code>.run</code> files are immutable and use <code>FileHeader(file_kind=Run)</code> followed by one or more <code>DataBlock</code>s, a single <code>IndexBlock</code>, and a footer.</li>
+<li><code>RunWriter</code> requires strictly increasing keys and splits data blocks by a configurable target block size.</li>
+<li><code>RunReader</code> supports full scans and point lookups by binary-searching the loaded index block.</li>
+<li><code>SimpleLsm</code> provides a minimal memtable + level0 implementation: puts land in a <code>BTreeMap</code>, flushes create new <code>run-######.run</code> files, and reads consult level0 runs newest-first.</li>
+</ul>
+<h3 id="81-rowdir-runs-t015">8.1 RowDir runs (T015)<a class="headerlink" href="#81-rowdir-runs-t015" title="Permanent link">¶</a></h3>
+<p><code>RowDir</code> (<code>crates/skeindb-core/src/rowdir.rs</code>) reuses the <code>.run</code> format to
+persist the <code>row_id → FilePtr</code> head-pointer directory with no new on-disk
+format:</p>
+<ul>
+<li>Keys are 8-byte big-endian <code>row_id</code>, so ascending byte order matches
+  ascending numeric order.</li>
+<li>Values are <code>[tag:u8][payload]</code>:</li>
+<li><code>tag = 0</code> — live entry; payload is the 12-byte <code>FilePtr</code> (<code>file_id:u32 LE</code><ul>
+<li><code>offset:u64 LE</code>) pointing at the head of the row's version chain in
+a <code>.rseg</code> file.</li>
+</ul>
+</li>
+<li><code>tag = 1</code> — tombstone; no payload.</li>
+<li>On <code>load_from_run</code>, live entries upsert the in-memory map and tombstones
+  remove the entry entirely, so newer-generation tombstones shadow older-
+  generation live entries during merges.</li>
+</ul>
+<h3 id="82-mvcc-visibility-t016">8.2 MVCC visibility (T016)<a class="headerlink" href="#82-mvcc-visibility-t016" title="Permanent link">¶</a></h3>
+<p>Current <code>skeindb-core</code> visibility rules over <code>.rseg</code> chains:</p>
+<ul>
+<li>Readers walk <code>prev_ptr</code> from a known head <code>FilePtr</code> until they find the
+  first version visible at the chosen snapshot.</li>
+<li>A version is visible iff <code>begin_ts != 0 &amp;&amp; begin_ts &lt;= snapshot_ts &amp;&amp;
+  (end_ts == 0 || end_ts &gt; snapshot_ts)</code>.</li>
+<li><code>Snapshot::latest()</code> behaves like reading at <code>+INF</code>, so the current head
+  version wins when it is committed and not superseded.</li>
+<li><code>begin_ts == 0</code> means staged / not yet committed and is skipped, allowing a
+  previous committed version in the chain to remain visible.</li>
+<li>If the first visible version is a delete marker (<code>flags &amp; IS_DELETE != 0</code>),
+  the row is considered deleted at that snapshot.</li>
+</ul>
+<hr />
+<h2 id="9-wal-log">9) WAL (.log)<a class="headerlink" href="#9-wal-log" title="Permanent link">¶</a></h2>
+<p>WALHeader prefix for all WAL records:</p>
+<p>WALHeader
+  rec_type u8
+  rec_ver  u8
+  flags    u16
+  lsn      u64
+  txn_id   u64</p>
+<p>Commit rule:
+- A txn is committed iff a valid COMMIT_TXN record exists.
+- Recovery replays only committed txns in LSN order.</p>
+<p>Current v1 WAL body types:</p>
+<ul>
+<li><code>rec_type = 0x01</code> (<code>BEGIN_TXN</code>)</li>
+<li>no body payload</li>
+<li><code>rec_type = 0x02</code> (<code>MUTATION</code>)</li>
+<li><code>op_bytes</code> = Bytes (VarU length + opaque payload)</li>
+<li><code>rec_type = 0x03</code> (<code>COMMIT_TXN</code>)</li>
+<li>no body payload</li>
+<li><code>rec_type = 0x04</code> (<code>ABORT_TXN</code>)</li>
+<li>no body payload</li>
+</ul>
+<p>Recovery rules for the v1 body vocabulary:</p>
+<ul>
+<li>A txn is replayable only if a valid <code>COMMIT_TXN</code> was decoded for that <code>txn_id</code>.</li>
+<li><code>ABORT_TXN</code> discards any staged mutations for that <code>txn_id</code>.</li>
+<li>A torn or corrupt tail stops the scan at the last valid frame; recovery keeps
+  all earlier valid committed txns and discards the invalid tail bytes.</li>
+</ul>
+<hr />
+<h2 id="10-compaction-and-gc">10) Compaction and GC<a class="headerlink" href="#10-compaction-and-gc" title="Permanent link">¶</a></h2>
+<ul>
+<li>Compute safe_ts = oldest_active_snapshot_ts.</li>
+<li>Row compaction discards versions with end_ts &lt; safe_ts.</li>
+<li>Value GC is mark-and-sweep driven by live row versions.</li>
+</ul>
+<hr />
+<h2 id="11-prototype-metadata-json-format-v1">11) Prototype metadata JSON (format v1)<a class="headerlink" href="#11-prototype-metadata-json-format-v1" title="Permanent link">¶</a></h2>
+<p>These JSON files are optional and may be ignored by older binaries.
+Each file includes a <code>format_version</code> field; unknown versions should be ignored.</p>
+<h3 id="111-security_statejson">11.1 security_state.json<a class="headerlink" href="#111-security_statejson" title="Permanent link">¶</a></h3>
+<p>Persisted security principals for the HTTP/API bearer surface and protocol-level DB logins.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_api_token_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;api_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;token_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tok_0000000000000001&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;secret_sha256&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;4a44dc15364204a80fe80e9039455cc1...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;admin&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ci&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;created_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;expires_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;db_users&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;username&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;alice&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;read_write&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;created_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;grants&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;app&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;SELECT&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;INSERT&quot;</span><span class="p">]</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;password_sha1&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cbfdac6008f9cab4083784cbd1874f76618d2a97&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;password_sha256&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;fcf730b6d95236ecd3c9fc2d92d7b6b2...&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Added in v0.3 as an optional metadata file.
+- Raw API token secrets are <strong>not</strong> stored on disk; only <code>secret_sha256</code> is persisted.
+- Managed DB users persist digests (<code>password_sha1</code> for MySQL native-password verification and <code>password_sha256</code> for cleartext-password verification), never raw passwords.
+- If the file is missing or has an unknown <code>format_version</code>, the server starts with no managed API tokens or DB users.</p>
+<h3 id="112-forensic_chainjson">11.2 forensic_chain.json<a class="headerlink" href="#112-forensic_chainjson" title="Permanent link">¶</a></h3>
+<p>Prototype forensic chain persistence used by <code>maintenance.audit_status</code>,
+<code>maintenance.audit_verify</code>, and <code>skeindb audit-verify</code>.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;records&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ts_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;logs&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;insert&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">}],</span>
+<span class="w">      </span><span class="nt">&quot;change_seq&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;prev_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;genesis&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;8b9d...&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;checkpoint_anchors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;checkpoint_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ckpt_1730000001000&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;ts_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000001000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;chain_len&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;chain_head_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;8b9d...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;change_seq&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;last_verified_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000002000</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Format v3 persists <code>last_verified_ms</code> so successful verification survives reopen.
+- Older v1/v2 files load with <code>last_verified_ms = 0</code>.
+- The prototype chain remains a stand-in for the future WAL-backed verifier.</p>
+<h3 id="113-merge_wasm_registryjson">11.3 merge_wasm_registry.json<a class="headerlink" href="#113-merge_wasm_registryjson" title="Permanent link">¶</a></h3>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;modules&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;module_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge_sum&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;value_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;deadbeef...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;size_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1234</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;values_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;deterministic&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_fuel&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_memory_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">65536</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_output_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4096</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sum merge&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;wasm_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;AA==&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;created_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Added in v0.2 as an optional metadata file.
+- If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
+<h3 id="114-schema_flagsjson">11.4 schema_flags.json<a class="headerlink" href="#114-schema_flagsjson" title="Permanent link">¶</a></h3>
+<p>Prototype schema metadata for opt-in execution hints that should survive reopen.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;tables&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;interned_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;city&quot;</span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Added in v0.3 as an optional metadata file for Phase 15 T150.
+- Missing files mean no interned-column flags are active.
+- Unknown <code>format_version</code> values are ignored by the current loader.
+- Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.</p>
+<h3 id="115-wasm_catalogjson">11.5 wasm_catalog.json<a class="headerlink" href="#115-wasm_catalogjson" title="Permanent link">¶</a></h3>
+<p>Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
+embedded here; they live in the <code>ValueStore</code> and are referenced by <code>value_id</code>.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;modules&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;module_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;math_abs&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;math abs&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scalar&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.udf.v1&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;entrypoint&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein_scalar&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;value_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0123abcd0123abcd0123abcd0123abcd&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;size_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1234</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;allowed_hostcalls&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;log.debug&quot;</span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;allowed_tables&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;read&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;write&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="p">}</span>
+<span class="w">        </span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;deterministic&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_fuel&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_memory_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">65536</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;max_output_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4096</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;created_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Added in v0.3 as an optional metadata file for Phase 8 T080.
+- The catalog stores only typed metadata plus <code>value_id</code>; the Wasm bytes are
+  stored separately in <code>.vseg</code> data managed by <code>ValueStore</code>.
+- Unknown <code>format_version</code> values are rejected by the current core loader.</p>
+<h3 id="116-tablesjson-format-v2">11.6 tables/<db>/<table>.json (format v2)<a class="headerlink" href="#116-tablesjson-format-v2" title="Permanent link">¶</a></h3>
+<p>Prototype row persistence for <code>tables/&lt;db&gt;/&lt;table&gt;.json</code> now supports a
+ValueID-backed JSON format to reduce duplicated literal payloads in row files.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;payload&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;$skein_ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cell&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0123abcd...32hex&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;lit&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;hello&quot;</span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">2</span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;payload&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;$skein_ref&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cell&quot;</span><span class="p">,</span>
+<span class="w">            </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0123abcd...32hex&quot;</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Rules:
+- <code>"$skein_ref".id</code> is a 32-char hex ValueID.
+- Encoders should use <code>"$skein_ref"</code> adaptively: emit refs only when repeated values
+  produce net byte savings for that table snapshot.
+- The first occurrence of a ValueID in a table file should include <code>lit</code> seed data.
+- Later duplicates may omit <code>lit</code> and reference only <code>id</code>.
+- Unknown <code>format_version</code> values are treated as unsupported and should fall back to legacy readers.
+- v0.1/v0.2 legacy row arrays (<code>Vec&lt;RowEntry&gt;</code>) remain readable.</p>
+<h3 id="117-tablesrseg-prototype-segment-container-v1">11.7 tables/<db>/<table>.rseg (prototype segment container v1)<a class="headerlink" href="#117-tablesrseg-prototype-segment-container-v1" title="Permanent link">¶</a></h3>
+<p>SkeinDB can also persist table rows in a compact framed container with extension <code>.rseg</code>.</p>
+<p>Header:
+- <code>magic[8]</code>: <code>SKNSEGR1</code>
+- <code>segment_format_version</code> (<code>u32 LE</code>): currently <code>1</code>
+- <code>table_format_version</code> (<code>u32 LE</code>): currently <code>2</code> (same row payload schema as <code>.json</code>)
+- <code>row_count</code> (<code>u64 LE</code>)</p>
+<p>Body:
+- Repeated <code>row_count</code> times:
+  - <code>payload_len</code> (<code>u32 LE</code>)
+  - <code>payload</code> (<code>payload_len</code> bytes) as JSON-encoded <code>RowEntryDisk</code></p>
+<p>Behavior:
+- <code>--storage-mode json</code> (or <code>SKEINDB_STORAGE_MODE=json</code>): write/read <code>.json</code>; fallback read <code>.rseg</code>.
+- <code>--storage-mode segment</code> (or <code>SKEINDB_STORAGE_MODE=segment</code>): write/read <code>.rseg</code>; fallback read <code>.json</code>.
+- <code>--storage-mode hybrid</code> (or <code>SKEINDB_STORAGE_MODE=hybrid|dual</code>): write both formats; read prefers <code>.rseg</code>, then <code>.json</code>.
+- default mode (<code>serve</code> without <code>--storage-mode</code>): <code>segment</code>, so new deployments write/read <code>.rseg</code> and fall back to <code>.json</code>.</p>
+<p>Compatibility notes:
+- Unsupported segment header versions are ignored by fallback readers.
+- If both files are missing or unreadable, the table loads as empty.</p>
+<h3 id="118-tablessidxjson-prototype-secondary-index-cache-v1">11.8 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)<a class="headerlink" href="#118-tablessidxjson-prototype-secondary-index-cache-v1" title="Permanent link">¶</a></h3>
+<p>Optional persisted cache for the engine's reusable secondary-index state.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;row_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;indexes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;built_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;include&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">      </span><span class="nt">&quot;keys&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;[{\&quot;t\&quot;:\&quot;str\&quot;,\&quot;v\&quot;:\&quot;a@example.com\&quot;}]&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;[{\&quot;t\&quot;:\&quot;str\&quot;,\&quot;v\&quot;:\&quot;b@example.com\&quot;}]&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Rules:
+- <code>row_count</code> must match the currently loaded table row count or the cache is ignored.
+- <code>built_version</code> is the table-version snapshot the cache was built from; stale caches may be rebuilt in memory before use.
+- <code>columns</code> and <code>include</code> use the same ordering semantics as the prototype secondary-index advisor.
+- <code>keys</code> map the JSON-encoded composite key to row indexes inside the current table snapshot.
+- Missing files or unknown <code>format_version</code> values are ignored and fall back to rebuilding from row data.</p>
+<hr />
+<h1 id="appendix-a-v02v03-extensions">Appendix A) v0.2/v0.3 extensions<a class="headerlink" href="#appendix-a-v02v03-extensions" title="Permanent link">¶</a></h1>
+<p>This appendix specifies optional extensions that can be implemented without invalidating v0.1 data.
+The FileHeader format_ver remains 1; extensions use new record types and/or higher rec_ver values.</p>
+<h2 id="a1-delta-valueentries">A.1 Delta ValueEntries<a class="headerlink" href="#a1-delta-valueentries" title="Permanent link">¶</a></h2>
+<p>Value segments (.vseg) add a new value kind:
+- val_kind = 5 (DELTA)</p>
+<p>DELTA entries store a patch against a base ValueID. See docs/DELTA_VALUES.md.</p>
+<p>Suggested DELTA payload (VE1-compatible by treating raw_bytes as a DELTA1 container):</p>
+<p>DELTA1 (stored inside VE1 raw_bytes):
+- base_vid[16]
+- delta_codec u8
+- full_len VarU
+- patch_bytes Bytes</p>
+<p>Readers that do not understand DELTA should treat it as unsupported.</p>
+<h2 id="a2-hash-chained-wal-records">A.2 Hash-chained WAL records<a class="headerlink" href="#a2-hash-chained-wal-records" title="Permanent link">¶</a></h2>
+<p>WALHeader v1 (rec_ver=1) has:
+- rec_type u8
+- rec_ver u8
+- flags u16
+- lsn u64
+- txn_id u64</p>
+<p>WALHeader v2 (rec_ver=2) extends v1 by appending:
+- prev_hash[32]
+- rec_hash[32]</p>
+<p>Hash rules are defined in docs/AUDIT_WAL.md.</p>
+<p>This approach does not require changing the WAL FileHeader.</p>
+<h2 id="a3-column-snapshots">A.3 Column snapshots<a class="headerlink" href="#a3-column-snapshots" title="Permanent link">¶</a></h2>
+<p>Add a new directory:</p>
+<p>snapshots/</p>
+<p>Snapshot files are independent from WAL/rows/vals and can be deleted/rebuilt.</p>
+<p>Suggested snapshot file kind:
+- file_kind = 6 (snapshot)</p>
+<p>Prototype metadata:
+- <code>snapshots.json</code> stores column snapshot metadata + row values.
+- JSON includes <code>format_version</code> (current: 1) and a per-snapshot <code>table_version</code>.
+- On startup, snapshots are loaded only when <code>table_version</code> matches the catalog.</p>
+<p>Sidecar snapshot artifacts:
+- <code>snapshots/snap-&lt;snapshot_id&gt;/manifest.json</code> stores snapshot identity, projection, table version, row count, and per-segment metadata.
+- <code>snapshots/snap-&lt;snapshot_id&gt;/col-XXXX.cseg</code> stores one projected or primary-key column per file.
+- <code>.cseg</code> files use magic <code>SKNCSEG1</code>, <code>format_version = 1</code>, a column kind byte (<code>pk</code> vs value), <code>snapshot_ts</code>, row count, db/table/column names, a null bitmap, and row-ordered non-null <code>Lit</code> payloads.</p>
+<p>The runtime still treats <code>snapshots.json</code> as the startup cache; the sidecar snapshot directory is rebuilt best-effort on persist.</p>
+<p>See docs/COLUMN_SNAPSHOTS.md for cseg v1.</p>
+<h2 id="a4-index-advisor-telemetry-prototype">A.4 Index advisor telemetry (prototype)<a class="headerlink" href="#a4-index-advisor-telemetry-prototype" title="Permanent link">¶</a></h2>
+<ul>
+<li><code>advisor_patterns.json</code> stores aggregated query dependency patterns (format v1).</li>
+<li><code>advisor_history.json</code> stores apply/dismiss actions plus lifecycle state (<code>status</code>, <code>progress_pct</code>, <code>result_status</code>, <code>rollback_status</code>, <code>updated_at_ms</code>, <code>error</code>) (format v2; legacy format v1 entries are still accepted on load).</li>
+</ul>
+<h2 id="a5-cdc-retained-change-log-prototype">A.5 CDC retained change log (prototype)<a class="headerlink" href="#a5-cdc-retained-change-log-prototype" title="Permanent link">¶</a></h2>
+<ul>
+<li><code>changes.json</code> stores the retained change-log window used for CDC replay (format v1).</li>
+<li>Each record persists <code>seq</code>, <code>db</code>, <code>table</code>, <code>op</code>, optional <code>pk</code> / <code>query_id</code> / <code>etag</code>, plus <code>commit_ts_ms</code> and optional <code>lsn</code> metadata.</li>
+<li>Older unversioned array snapshots are still accepted on load and rewritten to the versioned envelope on the next persist.</li>
+</ul>
+<p>Files are optional and written only when <code>SKEINDB_ADVISOR_PERSIST=1</code>.</p>
+<h2 id="a6-embedding-valueentries">A.6 Embedding ValueEntries<a class="headerlink" href="#a6-embedding-valueentries" title="Permanent link">¶</a></h2>
+<p>Value segments (.vseg) add a new value kind:
+- val_kind = 6 (EMBEDDING)</p>
+<p>Embedding entries store vector values plus an optional model identifier.</p>
+<p>ValueID semantics (embedding-only):
+- ValueID[0..8] = LSH bucket (u64 LE)
+- ValueID[8..16] = first 8 bytes of BLAKE3-128 over EMB1 bytes</p>
+<p>Suggested EMB1 payload (VE1 raw_bytes):</p>
+<p>EMB1:
+- magic[4] = "EMB1"
+- dims u32 (LE)
+- model_len VarU
+- model_bytes Bytes (UTF-8, length = model_len; may be 0)
+- values f32[dims] (LE)</p>
+<p>Readers that do not understand EMBEDDING should treat it as unsupported.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/ON_DISK_FORMAT.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/ON_DISK_FORMAT.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="autoparameterization.html"><span>← Previous</span>Autoparameterization</a>
+<a class="next" href="delta-values.html"><span>Next →</span>Delta-chained values</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-directory-layout">1) Directory layout</a></li>
+<li><a href="#2-common-encodings">2) Common encodings</a><ul>
+<li><a href="#21-endianness">2.1 Endianness</a></li>
+<li><a href="#22-varu-uleb128">2.2 VarU (ULEB128)</a></li>
+<li><a href="#23-bytes-and-string">2.3 Bytes and String</a></li>
+<li><a href="#24-checksums">2.4 Checksums</a></li>
+<li><a href="#25-valueid">2.5 ValueID</a></li>
+</ul>
+</li>
+<li><a href="#3-file-header-64-bytes">3) File header (64 bytes)</a></li>
+<li><a href="#4-record-framing">4) Record framing</a><ul>
+<li><a href="#41-manifestlog-payload-records-format-v1">4.1 MANIFEST.log payload records (format v1)</a></li>
+</ul>
+</li>
+<li><a href="#5-pointers">5) Pointers</a></li>
+<li><a href="#6-row-segments-rseg">6) Row segments (.rseg)</a></li>
+<li><a href="#7-value-segments-vseg">7) Value segments (.vseg)</a></li>
+<li><a href="#8-sorted-runs-run">8) Sorted runs (.run)</a><ul>
+<li><a href="#81-rowdir-runs-t015">8.1 RowDir runs (T015)</a></li>
+<li><a href="#82-mvcc-visibility-t016">8.2 MVCC visibility (T016)</a></li>
+</ul>
+</li>
+<li><a href="#9-wal-log">9) WAL (.log)</a></li>
+<li><a href="#10-compaction-and-gc">10) Compaction and GC</a></li>
+<li><a href="#11-prototype-metadata-json-format-v1">11) Prototype metadata JSON (format v1)</a><ul>
+<li><a href="#111-security_statejson">11.1 security_state.json</a></li>
+<li><a href="#112-forensic_chainjson">11.2 forensic_chain.json</a></li>
+<li><a href="#113-merge_wasm_registryjson">11.3 merge_wasm_registry.json</a></li>
+<li><a href="#114-schema_flagsjson">11.4 schema_flags.json</a></li>
+<li><a href="#115-wasm_catalogjson">11.5 wasm_catalog.json</a></li>
+<li><a href="#116-tablesjson-format-v2">11.6 tables//.json (format v2)</a></li>
+<li><a href="#117-tablesrseg-prototype-segment-container-v1">11.7 tables//.rseg (prototype segment container v1)</a></li>
+<li><a href="#118-tablessidxjson-prototype-secondary-index-cache-v1">11.8 tables//.sidx.json (prototype secondary index cache v1)</a></li>
+</ul>
+</li>
+<li><a href="#a1-delta-valueentries">A.1 Delta ValueEntries</a></li>
+<li><a href="#a2-hash-chained-wal-records">A.2 Hash-chained WAL records</a></li>
+<li><a href="#a3-column-snapshots">A.3 Column snapshots</a></li>
+<li><a href="#a4-index-advisor-telemetry-prototype">A.4 Index advisor telemetry (prototype)</a></li>
+<li><a href="#a5-cdc-retained-change-log-prototype">A.5 CDC retained change log (prototype)</a></li>
+<li><a href="#a6-embedding-valueentries">A.6 Embedding ValueEntries</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

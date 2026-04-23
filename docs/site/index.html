@@ -6,7 +6,6 @@
   <title>SkeinDB — Single-Binary Database with Cell-Interned MVCC</title>
   <meta name="description" content="SkeinDB: A single-binary database with cell-interned MVCC, 20 research tracks, MySQL &amp; PostgreSQL compatibility, and web-native administration.">
   <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta property="og:title" content="SkeinDB — Single-Binary Database">
   <meta property="og:description" content="Cell-interned MVCC · 122 RPC methods · 20 research tracks (14 hardened) · MySQL &amp; PostgreSQL compatible · One binary">
   <meta property="og:type" content="website">
@@ -234,7 +233,7 @@
       background: var(--bg-card); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 2rem; overflow-x: auto;
     }
-    .arch-wrapper img {
+    .arch-wrapper img, .arch-wrapper object {
       width: 100%; max-width: 900px; display: block; margin: 0 auto;
     }
     .arch-fallback {
@@ -480,7 +479,7 @@
 <!-- NAV -->
 <nav>
   <div class="nav-inner">
-    <a class="nav-logo" href="index.html">SkeinDB</a>
+    <a class="nav-logo" href="#">SkeinDB</a>
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
@@ -491,7 +490,7 @@
       <a href="licensing.html">Licensing</a>
       <a href="contact.html">Contact</a>
       <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" style="color:#f472b6">❤ Sponsor</a>
-      <a href="docs.html" class="nav-docs-cta">Docs</a>
+      <a href="guide/index.html" class="nav-docs-cta">Docs</a>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
@@ -520,7 +519,7 @@
   <a href="pricing.html">Pricing</a>
   <a href="licensing.html">Licensing</a>
   <a href="contact.html">Contact</a>
-  <a href="docs.html">Documentation</a>
+  <a href="guide/index.html">Documentation</a>
   <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a>
 </div>
 
@@ -544,7 +543,7 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
       Get Started
     </a>
-    <a href="docs.html" class="btn btn-secondary">
+    <a href="guide/index.html" class="btn btn-secondary">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
       Read the Docs
     </a>
@@ -620,7 +619,7 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
-      <p>26 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation plus live create-table preview/validation and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.</p>
+      <p>26 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features, including a click-first Easy Viewer with inline database creation plus live create-table preview/validation, expert control panels, and a live Index Advisor page with ranked suggestions plus observed-before/expected-after scan reports.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
@@ -644,7 +643,7 @@
     <p>Five layers from client interface to persistence, unified by typed SkeinQL method dispatch.</p>
   </div>
   <div class="arch-wrapper">
-    <img src="../figures/architecture.png" alt="SkeinDB layered architecture" loading="lazy"
+    <img src="../docs/figures/architecture.png" alt="SkeinDB layered architecture" loading="lazy"
          onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
     <div class="arch-fallback" style="display:none">
       <p>Architecture diagram available at <code>docs/figures/architecture.png</code></p>
@@ -680,13 +679,13 @@
         </div>
       </div>
       <div class="insight-frame">
-        <img src="../figures/insight-cas-shard-move.svg" alt="Manifest-backed shard move progress surface" loading="lazy">
+        <img src="../docs/figures/insight-cas-shard-move.svg" alt="Manifest-backed shard move progress surface" loading="lazy">
       </div>
     </article>
 
     <article class="insight-card insight-half">
       <div class="insight-frame">
-        <img src="../figures/insight-admin-surface.svg" alt="SkeinAdmin live dashboard surface" loading="lazy">
+        <img src="../docs/figures/insight-admin-surface.svg" alt="SkeinAdmin live dashboard surface" loading="lazy">
       </div>
       <div class="insight-copy compact">
         <div class="insight-eyebrow">Embedded admin</div>
@@ -702,7 +701,7 @@
 
     <article class="insight-card insight-half">
       <div class="insight-frame">
-        <img src="../figures/insight-compat-surface.svg" alt="MySQL and PostgreSQL compatibility surface" loading="lazy">
+        <img src="../docs/figures/insight-compat-surface.svg" alt="MySQL and PostgreSQL compatibility surface" loading="lazy">
       </div>
       <div class="insight-copy compact">
         <div class="insight-eyebrow">Compatibility depth</div>
@@ -725,26 +724,26 @@
     <p>Each track has RPC methods, a dedicated admin panel, and automated test coverage. Click any track for details.</p>
   </div>
   <div class="tracks-grid">
-    <a class="track" href="research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
-    <a class="track" href="research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
-    <a class="track" href="research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
-    <a class="track" href="research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
-    <a class="track" href="research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
-    <a class="track" href="research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
-    <a class="track" href="research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
-    <a class="track" href="research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
-    <a class="track" href="research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
-    <a class="track" href="research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
-    <a class="track" href="research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
-    <a class="track" href="research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
-    <a class="track" href="research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
-    <a class="track" href="research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
-    <a class="track" href="research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
-    <a class="track" href="research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
-    <a class="track" href="research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
-    <a class="track" href="research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
-    <a class="track" href="research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
-    <a class="track" href="research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
+    <a class="track" href="../docs/site/research/r01.html"><span class="track-id">R01</span><span class="track-name">Learned Index Structures</span></a>
+    <a class="track" href="../docs/site/research/r02.html"><span class="track-id">R02</span><span class="track-name">Adaptive Row/Column Execution</span></a>
+    <a class="track" href="../docs/site/research/r03.html"><span class="track-id">R03</span><span class="track-name">Delta-Chain Topology</span></a>
+    <a class="track" href="../docs/site/research/r04.html"><span class="track-id">R04</span><span class="track-name">Differential Privacy</span></a>
+    <a class="track" href="../docs/site/research/r05.html"><span class="track-id">R05</span><span class="track-name">Oblivious Execution</span></a>
+    <a class="track" href="../docs/site/research/r06.html"><span class="track-id">R06</span><span class="track-name">Forensic Audit (WAL)</span></a>
+    <a class="track" href="../docs/site/research/r07.html"><span class="track-id">R07</span><span class="track-name">Merge Functions (CRDT)</span></a>
+    <a class="track" href="../docs/site/research/r08.html"><span class="track-id">R08</span><span class="track-name">Incremental View Maintenance</span></a>
+    <a class="track" href="../docs/site/research/r09.html"><span class="track-id">R09</span><span class="track-name">QUIC-Native Protocol</span></a>
+    <a class="track" href="../docs/site/research/r10.html"><span class="track-id">R10</span><span class="track-name">Vector Embeddings</span></a>
+    <a class="track" href="../docs/site/research/r11.html"><span class="track-id">R11</span><span class="track-name">Autoparameterization</span></a>
+    <a class="track" href="../docs/site/research/r12.html"><span class="track-id">R12</span><span class="track-name">NL → SkeinQL Translation</span></a>
+    <a class="track" href="../docs/site/research/r13.html"><span class="track-id">R13</span><span class="track-name">Causal ETag Consistency</span></a>
+    <a class="track" href="../docs/site/research/r14.html"><span class="track-id">R14</span><span class="track-name">Replay / Time-Travel</span></a>
+    <a class="track" href="../docs/site/research/r15.html"><span class="track-id">R15</span><span class="track-name">Conflict-Free Schema Evolution</span></a>
+    <a class="track" href="../docs/site/research/r16.html"><span class="track-id">R16</span><span class="track-name">Automatic Index Synthesis</span></a>
+    <a class="track" href="../docs/site/research/r17.html"><span class="track-id">R17</span><span class="track-name">Migration Intent Inference</span></a>
+    <a class="track" href="../docs/site/research/r18.html"><span class="track-id">R18</span><span class="track-name">Reproducible Performance Replay</span></a>
+    <a class="track" href="../docs/site/research/r19.html"><span class="track-id">R19</span><span class="track-name">Wasm Query Operators</span></a>
+    <a class="track" href="../docs/site/research/r20.html"><span class="track-id">R20</span><span class="track-name">Energy-Aware Compaction</span></a>
   </div>
 </section>
 
@@ -861,7 +860,7 @@
     </div>
     <div class="footer-col">
       <h4>Documentation</h4>
-      <a href="docs.html">All Docs</a>
+      <a href="guide/index.html">All Docs</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">MySQL Compat</a>

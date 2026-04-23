@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Configuration — SkeinDB Docs</title>
+<meta name="description" content="Configuration — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html" class="active">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Configuration</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">¶</a></h1>
+<p>SkeinDB is designed to run as a <strong>single executable</strong> with configuration primarily via CLI flags.</p>
+<p>The goal is a low-friction deployment model:
+- copy the binary
+- pick ports
+- pick a data directory
+- run</p>
+<blockquote>
+<p>The exact flags may evolve; this document describes the intended interface and the current scaffold behavior.</p>
+</blockquote>
+<hr />
+<h2 id="cli">CLI<a class="headerlink" href="#cli" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>skeindb serve [OPTIONS]
+
+OPTIONS:
+  --data &lt;path&gt;      Data directory (WAL, snapshots, metadata)
+  --storage-mode     Table row persistence mode: json | segment | hybrid (default segment)
+  --http &lt;port&gt;      HTTP port (SkeinQL + admin console)
+  --mysql &lt;port&gt;     MySQL protocol port (compatibility surface)
+  --pg &lt;port&gt;        PostgreSQL protocol port (partial v3 baseline, default 5432; 0 = disabled)
+  --bind &lt;ip&gt;        Bind address (default 127.0.0.1)
+</code></pre></div>
+
+<h3 id="examples">Examples<a class="headerlink" href="#examples" title="Permanent link">¶</a></h3>
+<p>Run on ports 8080/3306:</p>
+<div class="codehilite"><pre><span></span><code>./skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span>
+</code></pre></div>
+
+<p>Run with MySQL + PostgreSQL:</p>
+<div class="codehilite"><pre><span></span><code>./skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span><span class="w"> </span>--pg<span class="w"> </span><span class="m">5432</span>
+</code></pre></div>
+
+<p>Run with JSON-only row files:</p>
+<div class="codehilite"><pre><span></span><code>./skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span><span class="w"> </span>--storage-mode<span class="w"> </span>json
+</code></pre></div>
+
+<p>Run HTTP-only:</p>
+<div class="codehilite"><pre><span></span><code>./skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">0</span>
+</code></pre></div>
+
+<hr />
+<h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Permanent link">¶</a></h2>
+<p><code>SKEINDB_STORAGE_MODE</code> controls how per-table row files are persisted:
+- <code>json</code>: read/write <code>tables/&lt;db&gt;/&lt;table&gt;.json</code>
+- <code>segment</code>: read/write <code>tables/&lt;db&gt;/&lt;table&gt;.rseg</code>
+- <code>hybrid</code> / <code>dual</code>: write both files; read prefers <code>.rseg</code> then <code>.json</code>
+- default <code>serve</code> mode: <code>segment</code></p>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code><span class="nv">SKEINDB_STORAGE_MODE</span><span class="o">=</span>segment<span class="w"> </span>./skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span>
+</code></pre></div>
+
+<p>Notes:
+- CLI <code>--storage-mode</code> takes precedence for <code>serve</code>.
+- Environment variable is still used by non-serve workflows that open the engine directly.</p>
+<hr />
+<h2 id="http-services">HTTP services<a class="headerlink" href="#http-services" title="Permanent link">¶</a></h2>
+<p>When enabled, the HTTP listener serves:
+- <code>POST /api/v1/rpc</code> SkeinQL JSON-RPC
+- <code>GET /api/v1/q/:query_id</code> prepared query execution (ETag validators)
+- <code>GET /admin</code> (SkeinAdmin)
+- <code>GET /metrics</code> (Prometheus-style counters)</p>
+<h2 id="mysql-listener">MySQL listener<a class="headerlink" href="#mysql-listener" title="Permanent link">¶</a></h2>
+<p>When <code>--mysql</code> is non-zero, SkeinDB also starts a MySQL protocol listener.
+Current coverage:
+- connection handshake
+- <code>mysql_native_password</code> auth exchange
+- <code>COM_QUERY</code> SQL translation subset (<code>SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE</code>)
+- <code>COM_STMT_PREPARE</code> / <code>COM_STMT_EXECUTE</code> / <code>COM_STMT_CLOSE</code> (prepared statements)
+- 678 semicolon-terminated compatibility SQL statements in <code>tests/compat/corpus.sql</code></p>
+<p><code>COM_QUERY</code> and broader SQL compatibility are still tracked in the project backlog.</p>
+<hr />
+<h2 id="postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)<a class="headerlink" href="#postgresql-listener-partial-baseline" title="Permanent link">¶</a></h2>
+<p>When <code>--pg</code> is non-zero, SkeinDB starts a PostgreSQL v3 wire protocol listener.
+Current coverage:
+- StartupMessage + SSLRequest parsing
+- trust authentication when <code>SKEINDB_TOKEN</code> is unset
+- cleartext-password authentication when <code>SKEINDB_TOKEN</code> is set
+- SSL negotiation rejection (<code>'N'</code>)
+- startup <code>ParameterStatus</code> / <code>BackendKeyData</code> / <code>ReadyForQuery</code> sequence
+- simple query protocol delegated to the shared SQL engine
+- <code>BEGIN</code> / <code>COMMIT</code> / <code>ROLLBACK</code> compatibility stubs
+- extended-query protocol acknowledgements as stubs only</p>
+<p>Configuration in <code>skeindb-config.json</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;pg_port&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5432</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>See <code>docs/PG_COMPAT.md</code> for the current scope, tests, and remaining gaps.</p>
+<hr />
+<h2 id="data-directory-layout-prototype">Data directory layout (prototype)<a class="headerlink" href="#data-directory-layout-prototype" title="Permanent link">¶</a></h2>
+<p>The in-memory prototype persists a small amount of metadata.</p>
+<p>Planned layout (subject to change as the WAL/segment formats are implemented):</p>
+<div class="codehilite"><pre><span></span><code>&lt;data&gt;/
+  wal/
+  snapshots/
+  meta/
+</code></pre></div>
+
+<hr />
+<h2 id="running-behind-a-reverse-proxy">Running behind a reverse proxy<a class="headerlink" href="#running-behind-a-reverse-proxy" title="Permanent link">¶</a></h2>
+<p>SkeinDB is compatible with standard reverse proxies (Apache, Nginx, IIS) because the control plane is HTTP.</p>
+<p>Recommended settings:
+- keep HTTP/2 enabled where possible
+- use TLS termination at the proxy
+- enable gzip/brotli compression
+- set cache headers for prepared-query GET endpoints (<code>/api/v1/q/...</code>)</p>
+<hr />
+<h2 id="clustering-settings">Clustering settings<a class="headerlink" href="#clustering-settings" title="Permanent link">¶</a></h2>
+<p>Clustering is managed via SkeinQL (<code>cluster.*</code>) and is designed to be configured without external orchestration.</p>
+<p>See:
+- <code>docs/CLUSTERING.md</code></p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CONFIGURATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CONFIGURATION.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="query-coalescing.html"><span>← Previous</span>Query coalescing</a>
+<a class="next" href="skeinadmin.html"><span>Next →</span>SkeinAdmin (web console)</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#cli">CLI</a><ul>
+<li><a href="#examples">Examples</a></li>
+</ul>
+</li>
+<li><a href="#environment-variables">Environment variables</a></li>
+<li><a href="#http-services">HTTP services</a></li>
+<li><a href="#mysql-listener">MySQL listener</a></li>
+<li><a href="#postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)</a></li>
+<li><a href="#data-directory-layout-prototype">Data directory layout (prototype)</a></li>
+<li><a href="#running-behind-a-reverse-proxy">Running behind a reverse proxy</a></li>
+<li><a href="#clustering-settings">Clustering settings</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

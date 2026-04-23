@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAS-aware Replication and Bandwidth Bounds — SkeinDB Docs</title>
+<meta name="description" content="CAS-aware Replication and Bandwidth Bounds — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html" class="active">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>CAS-aware Replication and Bandwidth Bounds</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="cas-aware-replication-and-bandwidth-bounds">CAS-aware Replication and Bandwidth Bounds<a class="headerlink" href="#cas-aware-replication-and-bandwidth-bounds" title="Permanent link">¶</a></h1>
+<p>Status: Prototype
+Last updated: 2026-04-20</p>
+<p>Goal:
+Use SkeinDB's content-addressed ValueStore (ValueID) to reduce replication and rebalancing bandwidth.</p>
+<p>Key idea:
+- Replication streams row/version metadata that references ValueIDs.
+- The receiver transfers only the value objects it does not already have.</p>
+<p>This document complements docs/CLUSTERING.md and focuses on:
+1) the on-wire protocol for missing-object retrieval, and
+2) measurable bandwidth bounds/metrics that can be reported in research/evaluation.</p>
+<hr />
+<h2 id="1-assumptions">1) Assumptions<a class="headerlink" href="#1-assumptions" title="Permanent link">¶</a></h2>
+<ul>
+<li>Values and groups are immutable objects stored in the ValueStore.</li>
+<li>Objects are addressed by ValueID = hash(content).</li>
+<li>Row versions reference ValueIDs (directly or indirectly).</li>
+</ul>
+<p>Because objects are immutable and addressed by content, a receiver can safely:
+- deduplicate across tables/shards/nodes,
+- cache objects permanently until GC.</p>
+<hr />
+<h2 id="2-baseline-replication-wal-shipping">2) Baseline replication (WAL shipping)<a class="headerlink" href="#2-baseline-replication-wal-shipping" title="Permanent link">¶</a></h2>
+<p>Baseline Level-1 replication is WAL shipping:
+- primary emits WAL records in LSN order
+- replica applies committed txns</p>
+<p>In SkeinDB WAL records for row versions may reference ValueIDs.</p>
+<p>A naive replication design would inline full values in the stream.
+CAS-aware replication instead splits the stream:</p>
+<p>1) stream references (row versions, index updates, schema)
+2) fetch missing objects on demand</p>
+<hr />
+<h2 id="3-missing-object-detection">3) Missing object detection<a class="headerlink" href="#3-missing-object-detection" title="Permanent link">¶</a></h2>
+<p>Replica must answer: "do I already have ValueID X?"</p>
+<h3 id="31-direct-check">3.1 Direct check<a class="headerlink" href="#31-direct-check" title="Permanent link">¶</a></h3>
+<ul>
+<li>Lookup ValueID in valdir (ValueID -&gt; FilePtr)</li>
+<li>If present, the object exists</li>
+</ul>
+<p>This is correct but may be too slow if performed for every referenced ValueID in a hot stream.</p>
+<h3 id="32-bloom-summaries-recommended">3.2 Bloom summaries (recommended)<a class="headerlink" href="#32-bloom-summaries-recommended" title="Permanent link">¶</a></h3>
+<p>Maintain per-segment summaries:
+- for each valseg file, build a Bloom filter over ValueIDs contained in that segment
+- keep a union Bloom for all live segments</p>
+<p>On replicate/apply:
+- check Bloom first
+- if Bloom says "not present" -&gt; definitely missing
+- if Bloom says "maybe" -&gt; do valdir lookup to confirm</p>
+<p>This reduces random lookups when most values are missing or most are present.</p>
+<hr />
+<h2 id="4-missing-object-pull-protocol">4) Missing object pull protocol<a class="headerlink" href="#4-missing-object-pull-protocol" title="Permanent link">¶</a></h2>
+<h3 id="41-two-channel-replication">4.1 Two-channel replication<a class="headerlink" href="#41-two-channel-replication" title="Permanent link">¶</a></h3>
+<p>Channel A: WAL/metadata stream
+- carries row versions and references (ValueIDs)</p>
+<p>Channel B: object fetch
+- request/response to obtain object bytes by ValueID</p>
+<h3 id="42-object-fetch-rpcs-conceptual">4.2 Object fetch RPCs (conceptual)<a class="headerlink" href="#42-object-fetch-rpcs-conceptual" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>objects.need</code> (primary -&gt; replica): advertise a batch of ValueIDs referenced by recent WAL</li>
+<li><code>objects.missing</code> (replica -&gt; primary): return the subset that is missing</li>
+<li><code>objects.fetch</code> (primary -&gt; replica): stream VE entries (ValueID + bytes)</li>
+<li><code>objects.pull</code> (replica-side orchestration): batch locally-missing ValueIDs, call remote <code>objects.fetch</code>, verify each fetched object against its requested ValueID, and persist only validated entries</li>
+</ul>
+<p>An alternative is replica-initiated pull:
+- replica requests missing ValueIDs directly when apply fails due to missing objects</p>
+<p>Batching is recommended to amortize overhead.</p>
+<p>Current prototype coverage:</p>
+<ul>
+<li><code>objects.fetch</code> now returns a lossless VE1 payload (<code>entry_b64</code>) in addition to the legacy raw-bytes view, so non-trivial <code>ValueStore</code> entries such as deltas can be reconstructed faithfully</li>
+<li><code>objects.pull</code> batches remote fetches, skips locally present objects, and recursively pulls missing delta-base dependencies before import</li>
+<li>verified entries are imported via the same <code>ValueStore</code> decoding path used for <code>.vseg</code> replay</li>
+<li>shard transfer preflight now includes <code>cluster.shard.manifest</code>, which enumerates the ValueIDs referenced by the live rows of a shard scope (database or table)</li>
+<li><code>cluster.shard.move</code> and <code>cluster.shard.rebalance</code> now use shard manifests plus <code>objects.need</code> / <code>objects.pull</code> to transfer only missing objects before placement changes, and return manifest/progress summaries with object counts, bytes, batches, and pull outcomes</li>
+</ul>
+<h3 id="43-integrity">4.3 Integrity<a class="headerlink" href="#43-integrity" title="Permanent link">¶</a></h3>
+<p>For each fetched object:
+- decode the transferred VE1 entry
+- materialize full bytes (following delta bases when necessary)
+- compute ValueID from the materialized bytes
+- verify it matches the requested ValueID before import</p>
+<p>This provides end-to-end integrity.</p>
+<hr />
+<h2 id="5-bandwidth-bounds-evaluation-story">5) Bandwidth bounds (evaluation story)<a class="headerlink" href="#5-bandwidth-bounds-evaluation-story" title="Permanent link">¶</a></h2>
+<p>Let:
+- R = bytes of row/version metadata shipped (WAL records excluding inlined values)
+- U = total bytes of unique value objects referenced by those records
+- I = bytes of value objects already present on the receiver</p>
+<p>Then total bytes transmitted with CAS-aware replication is approximately:</p>
+<p>B_cas = R + (U - I) + overhead</p>
+<p>Naive inlining replication would transmit:</p>
+<p>B_naive = R + U + overhead</p>
+<p>Thus savings is:</p>
+<p>S = B_naive - B_cas = I</p>
+<p>Interpretation:
+- savings equals the bytes of referenced objects already present on the receiver.
+- CAS-assisted replication is maximally beneficial when:
+  - replicas share many objects due to deduplication,
+  - delta chains share common bases,
+  - shard rebalancing moves data that overlaps previously hosted data.</p>
+<hr />
+<h2 id="6-shard-move-rebalance-acceleration">6) Shard move / rebalance acceleration<a class="headerlink" href="#6-shard-move-rebalance-acceleration" title="Permanent link">¶</a></h2>
+<p>For Level-3 shard moves, the same mechanism applies:
+- sender enumerates row versions for the shard
+- sender sends referenced ValueIDs (or their Bloom summary)
+- receiver requests only missing objects</p>
+<p>Optimization:
+- "object manifest" per shard: a compact set of ValueIDs referenced by live row versions
+- manifests allow prefetch and accurate progress reporting</p>
+<p>Current prototype coverage:</p>
+<ul>
+<li>shard manifests are computed from the source node's live rows, either locally or through the internal <code>cluster.shard.manifest</code> RPC when the source primary is remote</li>
+<li>the destination node answers <code>objects.need</code> against the manifest, so move planning can distinguish already-present objects from the transfer set</li>
+<li>non-dry-run moves call <code>objects.pull</code> on the destination and only update shard placement after the required objects were stored successfully</li>
+<li><code>cluster.shard.move</code> and <code>cluster.shard.rebalance</code> return <code>manifest</code> and <code>progress</code> sections so callers can report total bytes, missing bytes, batches, fetched objects, stored objects, and verification failures</li>
+</ul>
+<hr />
+<h2 id="7-metrics">7) Metrics<a class="headerlink" href="#7-metrics" title="Permanent link">¶</a></h2>
+<p>Expose per link and per node:
+- repl_ref_bytes_total (bytes of reference/WAL stream)
+- repl_obj_bytes_total (bytes of value objects transferred)
+- repl_obj_saved_bytes_total (estimated bytes saved by CAS; equals I estimate)
+- repl_obj_hit_rate (fraction of referenced ValueIDs already present)
+- repl_missing_batch_size_avg
+- repl_apply_lag_lsn</p>
+<p>These metrics make the feature publishable: they quantify bandwidth savings.</p>
+<h3 id="71-clusterreplication_stats-rpc-t167">7.1) <code>cluster.replication_stats</code> RPC (T167)<a class="headerlink" href="#71-clusterreplication_stats-rpc-t167" title="Permanent link">¶</a></h3>
+<p>The runtime counters behind these metrics are exposed via the
+read-only RPC <code>cluster.replication_stats</code>, and embedded into
+<code>stats.snapshot</code> under <code>cluster.replication_objects</code>. Shape:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;need_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;need_ids_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">480</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;need_hits&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">420</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;need_misses&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;missing_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;missing_ids_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">120</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;missing_hits&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;missing_misses&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;fetch_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;fetch_ids_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;fetch_objects_served&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ref_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4096000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;obj_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">524288</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;saved_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4096000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;hit_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.875</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;saved_bytes_ratio&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.887</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_updated_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1758700000000</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><code>ref_bytes</code> = total bytes of objects the local replica already had when
+  asked about them via <code>objects.need</code> (= bytes avoided on the wire thanks
+  to CAS dedup).</li>
+<li><code>obj_bytes</code> = total bytes actually served via <code>objects.fetch</code>.</li>
+<li><code>hit_rate</code> = <code>need_hits / (need_hits + need_misses)</code>.</li>
+<li><code>saved_bytes_ratio</code> = <code>ref_bytes / (ref_bytes + obj_bytes)</code>.</li>
+</ul>
+<p>Counters are updated inside the <code>objects.need</code> / <code>objects.missing</code> /
+<code>objects.fetch</code> handlers regardless of caller role, so both primary and
+replica sides see the local CAS cost model in real time.</p>
+<hr />
+<h2 id="8-backlog">8) Backlog<a class="headerlink" href="#8-backlog" title="Permanent link">¶</a></h2>
+<ul>
+<li>CR01: ValueID existence Bloom summaries</li>
+<li>CR02: object fetch protocol + batching (implemented via <code>objects.fetch</code> + <code>objects.pull</code>)</li>
+<li>CR03: replication metrics (saved bytes, hit rate)</li>
+<li>CR04: shard move uses object manifests + progress reporting (implemented via <code>cluster.shard.manifest</code>, <code>cluster.shard.move</code>, and <code>cluster.shard.rebalance</code>)</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CAS_REPLICATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CAS_REPLICATION.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="transport-quic.html"><span>← Previous</span>QUIC transport</a>
+<a class="next" href="research-agenda.html"><span>Next →</span>Research agenda</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-assumptions">1) Assumptions</a></li>
+<li><a href="#2-baseline-replication-wal-shipping">2) Baseline replication (WAL shipping)</a></li>
+<li><a href="#3-missing-object-detection">3) Missing object detection</a><ul>
+<li><a href="#31-direct-check">3.1 Direct check</a></li>
+<li><a href="#32-bloom-summaries-recommended">3.2 Bloom summaries (recommended)</a></li>
+</ul>
+</li>
+<li><a href="#4-missing-object-pull-protocol">4) Missing object pull protocol</a><ul>
+<li><a href="#41-two-channel-replication">4.1 Two-channel replication</a></li>
+<li><a href="#42-object-fetch-rpcs-conceptual">4.2 Object fetch RPCs (conceptual)</a></li>
+<li><a href="#43-integrity">4.3 Integrity</a></li>
+</ul>
+</li>
+<li><a href="#5-bandwidth-bounds-evaluation-story">5) Bandwidth bounds (evaluation story)</a></li>
+<li><a href="#6-shard-move-rebalance-acceleration">6) Shard move / rebalance acceleration</a></li>
+<li><a href="#7-metrics">7) Metrics</a><ul>
+<li><a href="#71-clusterreplication_stats-rpc-t167">7.1) cluster.replication_stats RPC (T167)</a></li>
+</ul>
+</li>
+<li><a href="#8-backlog">8) Backlog</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

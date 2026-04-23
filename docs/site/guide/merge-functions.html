@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Merge Functions (Optimistic Concurrency) - Prototype — SkeinDB Docs</title>
+<meta name="description" content="Merge Functions (Optimistic Concurrency) - Prototype — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html" class="active">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>Merge Functions (Optimistic Concurrency) - Prototype</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="merge-functions-optimistic-concurrency-prototype">Merge Functions (Optimistic Concurrency) - Prototype<a class="headerlink" href="#merge-functions-optimistic-concurrency-prototype" title="Permanent link">¶</a></h1>
+<p>Status: Draft
+Last updated: 2026-01-19</p>
+<p>This document describes the prototype merge-function support for optimistic concurrency (R07).</p>
+<h2 id="1-overview">1) Overview<a class="headerlink" href="#1-overview" title="Permanent link">¶</a></h2>
+<p>Merge functions resolve write conflicts by combining a "current" row with an "incoming" row.
+SkeinDB exposes:</p>
+<ul>
+<li><code>merge.register</code> to store per-table merge policies</li>
+<li><code>merge.apply</code> to apply a merge (with optional ETag conflict detection)</li>
+<li><code>merge.simulate</code> to test merges without writes</li>
+</ul>
+<p>Merge policies are stored on disk in <code>merge_policies.json</code> (format v1).</p>
+<h2 id="2-policy-format">2) Policy format<a class="headerlink" href="#2-policy-format" title="Permanent link">¶</a></h2>
+<p>A policy has a default merge function and optional per-column overrides:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;default&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;last_write_wins&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;per_column&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">}}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Only <code>kind: "builtin"</code> is supported in this prototype.
+Wasm-based merge functions are not implemented yet.</p>
+<h2 id="3-built-in-merge-functions">3) Built-in merge functions<a class="headerlink" href="#3-built-in-merge-functions" title="Permanent link">¶</a></h2>
+<ul>
+<li><code>last_write_wins</code> / <code>replace</code>: use incoming value</li>
+<li><code>max</code>: numeric max</li>
+<li><code>min</code>: numeric min</li>
+<li><code>sum</code>: numeric sum (cross-type -&gt; f64)</li>
+<li><code>concat</code>: string concat or JSON array concat</li>
+<li><code>set_union</code>: JSON array union (unique values)</li>
+<li><code>object_merge</code>: JSON object merge (incoming overwrites)</li>
+<li><code>reject</code>: keep current value</li>
+</ul>
+<p>If a function cannot operate on the value types, SkeinDB falls back to the incoming value.</p>
+<h2 id="4-conflict-detection">4) Conflict detection<a class="headerlink" href="#4-conflict-detection" title="Permanent link">¶</a></h2>
+<p><code>merge.apply</code> accepts <code>expected_etag</code>:
+- If it matches the current row ETag, the merge is applied normally.
+- If it does not match, <code>conflict=true</code> is returned and <code>conflicts=["write_write"]</code>.
+  The merge still applies unless the policy is <code>reject</code> (default with no per-column overrides).</p>
+<p><code>merge.apply</code> also accepts <code>min_causality</code> (etag_chain_v1 token):
+- If the dependency versions are not satisfied, <code>conflict=true</code>, <code>applied=false</code>,
+  and <code>conflicts=["dependency"]</code> are returned.</p>
+<p>Constraint conflicts:
+- If the incoming row provides primary key values that do not match <code>pk</code>,
+  <code>conflict=true</code>, <code>applied=false</code>, and <code>conflicts=["constraint"]</code> are returned.
+- If the merged row would violate non-nullable columns, <code>conflict=true</code>,
+  <code>applied=false</code>, and <code>conflicts=["constraint"]</code> are returned.</p>
+<h2 id="5-limitations">5) Limitations<a class="headerlink" href="#5-limitations" title="Permanent link">¶</a></h2>
+<ul>
+<li>No Wasm execution yet (only built-ins).</li>
+<li>No cross-row merges or multi-row conflict resolution.</li>
+<li>Primary key values are immutable; mismatches are rejected.</li>
+</ul>
+<h2 id="6-wasm-merge-registry-prototype">6) Wasm merge registry (prototype)<a class="headerlink" href="#6-wasm-merge-registry-prototype" title="Permanent link">¶</a></h2>
+<p>Wasm merge functions are registered separately and referenced by module id.
+The registry enforces a <strong>values-only</strong> capability model (no table access).</p>
+<p>SkeinQL methods:
+- <code>merge.wasm.register</code> — register a Wasm module + capabilities
+- <code>merge.wasm.list</code> — list registered modules
+- <code>merge.wasm.drop</code> — remove a module</p>
+<p>Wasm execution is still disabled in this prototype; registration allows policies
+to reference module ids in preparation for sandboxed execution.
+Registry metadata is persisted in <code>merge_wasm_registry.json</code> (format v1).</p>
+<h2 id="7-offline-write-queues">7) Offline write queues<a class="headerlink" href="#7-offline-write-queues" title="Permanent link">¶</a></h2>
+<p>For offline-first clients, use the queue format in <code>docs/OFFLINE_WRITE_QUEUE.md</code>
+to batch <code>merge.apply</code> operations and replay them on reconnect.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/MERGE_FUNCTIONS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MERGE_FUNCTIONS.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="wasm-operators.html"><span>← Previous</span>Wasm query operators</a>
+<a class="next" href="cdc-changefeed.html"><span>Next →</span>CDC changefeed</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-overview">1) Overview</a></li>
+<li><a href="#2-policy-format">2) Policy format</a></li>
+<li><a href="#3-built-in-merge-functions">3) Built-in merge functions</a></li>
+<li><a href="#4-conflict-detection">4) Conflict detection</a></li>
+<li><a href="#5-limitations">5) Limitations</a></li>
+<li><a href="#6-wasm-merge-registry-prototype">6) Wasm merge registry (prototype)</a></li>
+<li><a href="#7-offline-write-queues">7) Offline write queues</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

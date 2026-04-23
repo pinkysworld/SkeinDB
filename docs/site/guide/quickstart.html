@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quickstart — 5 minutes — SkeinDB Docs</title>
+<meta name="description" content="Quickstart — 5 minutes — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html" class="active">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Quickstart — 5 minutes</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="quickstart-5-minutes">Quickstart — 5 minutes<a class="headerlink" href="#quickstart-5-minutes" title="Permanent link">¶</a></h1>
+<p>Get a local SkeinDB running, run your first query, and open the admin console — in under five minutes.</p>
+<h2 id="1-install">1. Install<a class="headerlink" href="#1-install" title="Permanent link">¶</a></h2>
+<h3 id="macos-homebrew">macOS (Homebrew)<a class="headerlink" href="#macos-homebrew" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>tap<span class="w"> </span>pinkysworld/skeindb<span class="w"> </span>https://github.com/pinkysworld/SkeinDB
+brew<span class="w"> </span>install<span class="w"> </span>--HEAD<span class="w"> </span>pinkysworld/skeindb/skeindb
+</code></pre></div>
+
+<h3 id="linux-from-source-anywhere-rust-runs">Linux / from source (anywhere Rust runs)<a class="headerlink" href="#linux-from-source-anywhere-rust-runs" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/pinkysworld/SkeinDB.git
+<span class="nb">cd</span><span class="w"> </span>SkeinDB
+cargo<span class="w"> </span>build<span class="w"> </span>--release
+<span class="c1"># binary is at ./target/release/skeindb</span>
+</code></pre></div>
+
+<p>Prerequisite: Rust 1.75+ stable. See <a href="configuration.html">Configuration</a> for other options.</p>
+<h2 id="2-start-the-server">2. Start the server<a class="headerlink" href="#2-start-the-server" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span>
+</code></pre></div>
+
+<p>Three surfaces are now open:</p>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>URL / Port</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HTTP / SkeinQL</td>
+<td><code>http://127.0.0.1:8080</code></td>
+<td>Native typed RPC (JSON-RPC)</td>
+</tr>
+<tr>
+<td>MySQL wire</td>
+<td><code>127.0.0.1:3306</code></td>
+<td>Connect with any MySQL client</td>
+</tr>
+<tr>
+<td>Admin console</td>
+<td><code>http://127.0.0.1:8080/admin</code></td>
+<td>Web UI (SkeinAdmin)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-run-your-first-query">3. Run your first query<a class="headerlink" href="#3-run-your-first-query" title="Permanent link">¶</a></h2>
+<p>Pick your favourite path:</p>
+<h3 id="a-native-skeinql-curl">A. Native SkeinQL (curl)<a class="headerlink" href="#a-native-skeinql-curl" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/skeinql<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;ping&quot;,&quot;params&quot;:{}}&#39;</span>
+</code></pre></div>
+
+<p>You should see <code>{"jsonrpc":"2.0","id":1,"result":{"pong":true,...}}</code>.</p>
+<p>Continue with <a href="first-query.html">Your first query</a> to create a table and insert rows.</p>
+<h3 id="b-mysql-client">B. MySQL client<a class="headerlink" href="#b-mysql-client" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>mysql<span class="w"> </span>-h<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>-P<span class="w"> </span><span class="m">3306</span><span class="w"> </span>-u<span class="w"> </span>root<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;SELECT VERSION();&quot;</span>
+</code></pre></div>
+
+<p>Continue with <a href="mysql-in-5-min.html">MySQL in 5 minutes</a>.</p>
+<h3 id="c-admin-console">C. Admin console<a class="headerlink" href="#c-admin-console" title="Permanent link">¶</a></h3>
+<p>Open <code>http://127.0.0.1:8080/admin</code> in your browser. Continue with <a href="admin-tour.html">Admin console tour</a>.</p>
+<h2 id="4-what-next">4. What next?<a class="headerlink" href="#4-what-next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+<li><a href="configuration.html">Configuration reference</a></li>
+</ul>
+<blockquote>
+<p><strong>Stuck?</strong> Check the <a href="true-status-matrix.html">True Status Matrix</a> for what is currently hardened and what is still in-progress, or open an issue on <a href="https://github.com/pinkysworld/SkeinDB/issues">GitHub</a>.</p>
+</blockquote>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/quickstart.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/quickstart.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="index.html"><span>← Previous</span>Documentation home</a>
+<a class="next" href="first-query.html"><span>Next →</span>Your first query (SkeinQL)</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-install">1. Install</a><ul>
+<li><a href="#macos-homebrew">macOS (Homebrew)</a></li>
+<li><a href="#linux-from-source-anywhere-rust-runs">Linux / from source (anywhere Rust runs)</a></li>
+</ul>
+</li>
+<li><a href="#2-start-the-server">2. Start the server</a></li>
+<li><a href="#3-run-your-first-query">3. Run your first query</a><ul>
+<li><a href="#a-native-skeinql-curl">A. Native SkeinQL (curl)</a></li>
+<li><a href="#b-mysql-client">B. MySQL client</a></li>
+<li><a href="#c-admin-console">C. Admin console</a></li>
+</ul>
+</li>
+<li><a href="#4-what-next">4. What next?</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

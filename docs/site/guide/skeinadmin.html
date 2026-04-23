@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinAdmin (Standalone Management Console) — SkeinDB Docs</title>
+<meta name="description" content="SkeinAdmin (Standalone Management Console) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html" class="active">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>SkeinAdmin (Standalone Management Console)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeinadmin-standalone-management-console">SkeinAdmin (Standalone Management Console)<a class="headerlink" href="#skeinadmin-standalone-management-console" title="Permanent link">¶</a></h1>
+<p>Status: Implemented embedded admin panel + active roadmap
+Last updated: 2026-03-31</p>
+<p>SkeinAdmin is a <strong>standalone</strong> management console for SkeinDB.
+It is intentionally separate from the SkeinDB server binary,
+so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
+<strong>multiple SkeinDB servers or clusters</strong> from one UI.</p>
+<p>SkeinDB now ships an embedded SkeinAdmin build at:
+- <code>/admin</code> for full control-plane administration
+- <code>/console</code> for SQL/workspace-first operation</p>
+<p>The same UI bundle powers both routes, with mode-aware navigation and controls.</p>
+<p>Recent UI updates:
+- <strong>Overview dashboard</strong> now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage &amp; deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC &amp; compaction (versions, delta chains, L0 files, stall rate), query &amp; cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
+- <strong>Engine Config panel</strong> for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with <code>settings.set</code>.
+- Connect/disconnect and profile workflows are shared across admin and console routes.
+- Admin topbar includes a guarded <strong>Shutdown</strong> action (<code>system.shutdown</code>) for graceful server stop.
+- <code>/admin</code> now includes a <strong>phpMyAdmin-inspired Easy Viewer</strong> with left sidebar database/table tree, sub-tabs (Browse/Structure/Insert/Search/New Table/Export/Operations), inline row editing, toast notifications, and confirmation dialogs.
+- Easy Viewer supports inline grid editing for spreadsheet-style row entry, copy, update, and batch delete.
+- Easy Viewer includes form-based insert, column-builder create-table, search with conditions, CSV/SQL export, and table/database operations (truncate, drop). Destructive flows now unwrap RPC errors before showing success, and generated SQL/export statements quote identifiers so non-simple names do not break the “easy” path.
+- The Security panel now uses the live token RPC payloads correctly, auto-populates the active Bearer token when you create one, and reflects the server’s persisted token inventory instead of stale in-memory UI assumptions.
+- User creation now requires a real password and provisions a stored DB login that MySQL and PostgreSQL wire clients can authenticate with.
+- <code>/console</code> remains workspace-first, while <code>/admin</code> keeps full control-plane navigation.</p>
+<hr />
+<h2 id="1-design-goals">1) Design goals<a class="headerlink" href="#1-design-goals" title="Permanent link">¶</a></h2>
+<ol>
+<li>
+<p><strong>Separate deployment</strong>
+   - SkeinAdmin is built as a web application that can be hosted anywhere.
+   - It connects to SkeinDB over HTTP(S) using SkeinQL and management endpoints.</p>
+</li>
+<li>
+<p><strong>Multi-target</strong>
+   - One SkeinAdmin instance can manage many servers and many clusters.
+   - The UI supports connection profiles.</p>
+</li>
+<li>
+<p><strong>No MySQL requirement</strong>
+   - SkeinAdmin should not rely on browser-to-MySQL connectivity.
+   - All operations use SkeinQL HTTP endpoints.</p>
+</li>
+<li>
+<p><strong>GUI-first administration workflows</strong>
+   - Execute SQL
+   - Browse schema
+   - Browse/edit tables
+   - Import/export (CSV, SQL dump)
+   - Manage users/privileges</p>
+</li>
+<li>
+<p><strong>Cluster-first administration</strong>
+   - Add/remove nodes
+   - Promote replica
+   - View replication lag and health
+   - Configure sharding / placement rules</p>
+</li>
+<li>
+<p><strong>Observability built-in</strong>
+   - Server load and performance dashboard
+   - Query statistics, slow queries, compaction status, dedup ratio</p>
+</li>
+</ol>
+<hr />
+<h2 id="2-deployment-models">2) Deployment models<a class="headerlink" href="#2-deployment-models" title="Permanent link">¶</a></h2>
+<h3 id="21-static-spa-recommended">2.1 Static SPA (recommended)<a class="headerlink" href="#21-static-spa-recommended" title="Permanent link">¶</a></h3>
+<ul>
+<li>SkeinAdmin is a static single-page application (SPA).</li>
+<li>It talks directly to the SkeinDB HTTP API.</li>
+</ul>
+<p>Requirements:
+- SkeinDB must enable CORS for allowed origins.
+- Authentication uses Bearer tokens (recommended). Persisted API tokens created in the Security panel now protect the HTTP RPC/API surface as soon as at least one active token exists.</p>
+<h3 id="22-reverse-proxy-hosted">2.2 Reverse-proxy hosted<a class="headerlink" href="#22-reverse-proxy-hosted" title="Permanent link">¶</a></h3>
+<ul>
+<li>Host the SPA behind IIS/Apache/Nginx.</li>
+<li>Optionally reverse-proxy <code>/api/</code> to a specific SkeinDB server.</li>
+</ul>
+<h3 id="23-air-gapped-admin-workstation">2.3 Air-gapped admin workstation<a class="headerlink" href="#23-air-gapped-admin-workstation" title="Permanent link">¶</a></h3>
+<ul>
+<li>SkeinAdmin can be served from local files (or a tiny local server) and connect to a
+  SkeinDB node reachable over LAN.</li>
+</ul>
+<h3 id="24-embedded-static-assets-single-binary-mode">2.4 Embedded static assets (single-binary mode)<a class="headerlink" href="#24-embedded-static-assets-single-binary-mode" title="Permanent link">¶</a></h3>
+<p>Even though SkeinAdmin is designed to be hostable as a standalone web app, SkeinDB SHOULD also be able to serve the built SkeinAdmin assets itself to preserve a one-binary deployment experience.</p>
+<p>Recommended behavior:
+- SkeinDB serves SkeinAdmin at: <code>/admin</code>
+- All API calls still go to <code>/api/v1/...</code> on the same origin
+- Port selection is controlled by SkeinDB's <code>--http</code> flag</p>
+<p>This mode is useful for:
+- developer environments
+- small on-prem deployments
+- edge devices</p>
+<hr />
+<h2 id="3-connection-profiles">3) Connection profiles<a class="headerlink" href="#3-connection-profiles" title="Permanent link">¶</a></h2>
+<p>A profile stores:
+- <code>name</code>
+- <code>base_url</code> (e.g. <code>https://db1.example.com:8080</code>)
+- auth method
+- optional: "cluster alias" for grouping nodes</p>
+<p>Security note:
+- Do not store raw tokens unencrypted in local storage.
+- Prefer short-lived tokens with refresh or manual paste.
+- API token secrets are only returned once at creation time; list responses no longer echo the raw secret.</p>
+<hr />
+<h2 id="4-ui-sections-navigation">4) UI sections (navigation)<a class="headerlink" href="#4-ui-sections-navigation" title="Permanent link">¶</a></h2>
+<h3 id="41-overview-dashboard">4.1 Overview (Dashboard)<a class="headerlink" href="#41-overview-dashboard" title="Permanent link">¶</a></h3>
+<ul>
+<li><strong>Server Info</strong>: version, SkeinQL version, transport mode, ping latency, method count, database count</li>
+<li><strong>Runtime</strong>: uptime (human-readable), CPU %, RSS memory, QPS/TPS, open transactions, connections</li>
+<li><strong>Storage &amp; Deduplication</strong>: dedup ratio, dedup enabled status, saved bytes, logical/unique bytes, interned/unique values, savings %, total rows, total tables, disk size, WAL size, visual bar chart showing unique vs saved breakdown</li>
+<li><strong>MVCC &amp; Compaction</strong>: MVCC versions, delta chains, compaction runs, compaction status, L0 files, stall rate</li>
+<li><strong>Query &amp; Cache</strong>: cache hit %, cache size, slow queries, avg latency, ETag hits, coalesced queries</li>
+<li><strong>Auto-refresh</strong>: manual refresh button + auto-refresh toggle (5s interval)</li>
+<li><strong>Profiles</strong>: save/load/delete connection profiles</li>
+<li><strong>Feature Center</strong>: quick-launch cards for all major panels</li>
+</ul>
+<h3 id="42-easy-viewer">4.2 Easy Viewer<a class="headerlink" href="#42-easy-viewer" title="Permanent link">¶</a></h3>
+<ul>
+<li><strong>Left sidebar</strong> with collapsible database/table tree, filter input, New DB button, and reload</li>
+<li><strong>Inline database creation</strong> from the sidebar with guided validation instead of browser prompts</li>
+<li><strong>Breadcrumb navigation</strong> showing Server › Database › Table context</li>
+<li><strong>Sub-tabs</strong> per table: Browse, Structure, Insert, Search, New Table, Export, Operations</li>
+<li><strong>Browse tab</strong>: paginated data grid with per-row Edit/Copy/Delete buttons, inline editing, check-all bulk delete, configurable rows-per-page</li>
+<li><strong>Structure tab</strong>: column listing with type, nullable, and primary-key info</li>
+<li><strong>Insert tab</strong>: form-based row insert with labeled fields per column and required-field validation before RPC submit</li>
+<li><strong>Search tab</strong>: condition-based search with column/operator/value fields</li>
+<li><strong>New Table tab</strong>: column builder with name, type, nullable, PK checkboxes plus live SQL preview and duplicate/identifier checks before create</li>
+<li><strong>Export tab</strong>: export table data as CSV or SQL, plus structure-only SQL export</li>
+<li><strong>Operations tab</strong>: truncate table, drop table, and drop database with confirmation dialogs</li>
+<li><strong>Toast notifications</strong> for success, error, and info feedback</li>
+<li>Responsive layout: sidebar collapses on narrow viewports</li>
+</ul>
+<h3 id="43-sql-workspace">4.3 SQL Workspace<a class="headerlink" href="#43-sql-workspace" title="Permanent link">¶</a></h3>
+<ul>
+<li>SQL editor with tabs</li>
+<li>History</li>
+<li>Saved queries</li>
+<li>Results grid</li>
+<li>EXPLAIN plan viewer</li>
+</ul>
+<h3 id="44-schema-browser">4.4 Schema Browser<a class="headerlink" href="#44-schema-browser" title="Permanent link">¶</a></h3>
+<ul>
+<li>Databases</li>
+<li>Tables</li>
+<li>Columns</li>
+<li>Indexes</li>
+<li>DDL view: "SHOW CREATE TABLE" equivalent</li>
+</ul>
+<h3 id="45-data-browser">4.5 Data Browser<a class="headerlink" href="#45-data-browser" title="Permanent link">¶</a></h3>
+<ul>
+<li>Table browse (paging/sort/filter)</li>
+<li>Row edit/create/delete</li>
+<li>CSV import/export</li>
+</ul>
+<h3 id="46-engine-config">4.6 Engine Config<a class="headerlink" href="#46-engine-config" title="Permanent link">¶</a></h3>
+<ul>
+<li><strong>Storage Engine</strong>: deduplication on/off, compression, encryption at rest, storage mode (<code>json</code> / <code>segment</code> / <code>hybrid</code>)</li>
+<li><strong>MVCC &amp; Versioning</strong>: MVCC toggle, delta-chained values, time travel, version retention days</li>
+<li><strong>Compaction</strong>: auto compaction, energy-aware scheduling (R20), max L0 files threshold</li>
+<li><strong>Cache &amp; Query</strong>: query cache, query coalescing, autoparameterization, cache size (MB)</li>
+<li><strong>Audit &amp; Security</strong>: tamper-evident WAL (R06), differential privacy (R04), oblivious execution (R05)</li>
+<li><strong>Replication &amp; CDC</strong>: replication toggle, CDC changefeeds, QUIC transport (R09)</li>
+<li>Load/save/reset controls with immediate feedback via <code>settings.set</code></li>
+</ul>
+<h3 id="46a-settings-manager">4.6a Settings Manager<a class="headerlink" href="#46a-settings-manager" title="Permanent link">¶</a></h3>
+<ul>
+<li>Live settings editor backed by <code>settings.get</code>, <code>settings.set</code>, and <code>settings.list</code></li>
+<li>Preset keys for common runtime knobs (cluster state, research config, storage mode, cache/coalescing/autoparam, CDC, QUIC)</li>
+<li>Capabilities / method explorer with jump-to-RPC shortcuts</li>
+<li>Quick pulls for transport status, feature flags, and workload feature telemetry</li>
+<li>Research config dashboard with toggle + JSON editor for all 20 research tracks</li>
+</ul>
+<h3 id="47-users-privileges">4.7 Users &amp; Privileges<a class="headerlink" href="#47-users-privileges" title="Permanent link">¶</a></h3>
+<ul>
+<li>Create user</li>
+<li>Reset credentials</li>
+<li>Grant/revoke privileges</li>
+<li>Show grants</li>
+</ul>
+<h3 id="48-maintenance">4.8 Maintenance<a class="headerlink" href="#48-maintenance" title="Permanent link">¶</a></h3>
+<ul>
+<li>Checkpoint</li>
+<li>Compact/vacuum</li>
+<li>Compaction policy (adaptive scheduler) + pause/resume</li>
+<li>Snapshot management (column snapshots)</li>
+<li>Audit verification (hash-chained WAL)</li>
+<li>Graceful shutdown trigger (admin action that checkpoints and marks cluster node offline)</li>
+</ul>
+<h3 id="481-time-travel-replay">4.8.1 Time travel &amp; replay<a class="headerlink" href="#481-time-travel-replay" title="Permanent link">¶</a></h3>
+<ul>
+<li>Point-in-time query runner built on <code>query.select as_of</code>, with ISO/epoch timestamp entry, seeded query JSON from the selected table, and inline result-grid rendering.</li>
+<li>History retention dashboard built on <code>maintenance.history.status</code>, showing per-table live/tombstone/purgeable counts plus the effective retention policy.</li>
+<li>History retention policy save + GC controls via <code>maintenance.history.set_policy</code> and <code>maintenance.history.gc</code>.</li>
+<li>Replay bundle export/download/import/integrity flows built on <code>maintenance.replay.export</code>, <code>maintenance.replay.import</code>, and <code>maintenance.replay.run</code>, including session-local replay workspace tracking and checksum summaries.</li>
+</ul>
+<h3 id="49-server-load-statistics">4.9 Server Load &amp; Statistics<a class="headerlink" href="#49-server-load-statistics" title="Permanent link">¶</a></h3>
+<p>(See docs/OBSERVABILITY.md)
+- CPU, memory, disk, network
+- QPS, active sessions
+- Latency p50/p95/p99
+- Cache hit rates (ETag 304 hit rate)
+- Compaction progress and backlog
+- Dedup ratio
+- Autoparameterization hit rate
+- CDC subscriptions and lag (if enabled)</p>
+<h3 id="410-cluster-management">4.10 Cluster Management<a class="headerlink" href="#410-cluster-management" title="Permanent link">¶</a></h3>
+<p>(See docs/CLUSTERING.md)
+- Node list (health, role, lag)
+- Add node / leave node / remove node
+- Promote replica
+- Shards and placement
+- Rebalance</p>
+<h3 id="411-security-and-encryption">4.11 Security and Encryption<a class="headerlink" href="#411-security-and-encryption" title="Permanent link">¶</a></h3>
+<ul>
+<li>API token create/list/revoke panel with modal confirmations, secret-once display, and real HTTP bearer enforcement</li>
+<li>Token roles: <code>admin</code>, <code>read_write</code>, and <code>read_only</code>; read-only tokens are blocked from mutating RPC methods</li>
+<li>DB-user management panel with password-backed user creation, partial per-database revoke, and MySQL/PG login compatibility</li>
+<li>Dedicated Security panel entry in the main navigation and top tab bar</li>
+<li>Encryption mode (ENC_OFF / ENC_RANDOM / ENC_MLE_DB)</li>
+<li>Key rotation and re-encryption progress</li>
+</ul>
+<h3 id="412-cdc-subscriptions">4.12 CDC Subscriptions<a class="headerlink" href="#412-cdc-subscriptions" title="Permanent link">¶</a></h3>
+<ul>
+<li>Create table subscriptions via <code>cdc.subscribe_table</code></li>
+<li>Poll / ACK / close session-local handles via <code>cdc.poll</code>, <code>cdc.ack</code>, and <code>cdc.close</code></li>
+<li>Inspect lag for the currently tracked browser-session subscriptions via <code>next_offset - acked_offset</code></li>
+<li>Prepared-query subscriptions remain planned work</li>
+</ul>
+<h3 id="413-index-advisor">4.13 Index Advisor<a class="headerlink" href="#413-index-advisor" title="Permanent link">¶</a></h3>
+<p>(See docs/INDEX_ADVISOR.md)
+- Ranked index suggestions from live advisor telemetry
+- Apply / dismiss actions wired to <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, and <code>advisor.history</code>
+- Embedded history log for prior advisor actions
+- Observed-before and expected-after scan report for each suggestion
+- Online build progress remains backlog work</p>
+<h3 id="413-views-incremental-maintenance">4.13 Views (Incremental Maintenance)<a class="headerlink" href="#413-views-incremental-maintenance" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/research_agenda/R08_*</code>)
+- Create/drop views
+- Show view freshness/lag
+- Trigger refresh (incremental or full)
+- Show dependency graph edges (what base tables feed the view)</p>
+<h3 id="414-forensics-verifiable-wal-queries">4.14 Forensics (Verifiable WAL Queries)<a class="headerlink" href="#414-forensics-verifiable-wal-queries" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/AUDIT_WAL.md</code> and <code>docs/research_agenda/R06_*</code>)
+- Inspect chain length, checkpoint anchors, and last verified time via <code>maintenance.audit_status</code>
+- Run full-chain verification via <code>maintenance.audit_verify</code> and surface the persisted <code>last_verified_ms</code>
+- Run forensic queries over the hash-chained WAL
+- Verify proof slices (completeness/inclusion)
+- Export signed forensic reports</p>
+<h3 id="415-migration-assistant-mysql-skeinql">4.15 Migration Assistant (MySQL → SkeinQL)<a class="headerlink" href="#415-migration-assistant-mysql-skeinql" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/TELEMETRY_AND_MIGRATION.md</code> and <code>docs/research_agenda/R17_*</code>)
+- Compatibility report (unsupported features)
+- Intent inference: detect patterns like pagination, polling, soft deletes
+- Rewrite previews: before/after SkeinQL migration hints
+- Exportable rewrite reports (JSON/Markdown/HTML) + copy-to-clipboard</p>
+<h3 id="416-nl-query-experimental">4.16 NL Query (Experimental)<a class="headerlink" href="#416-nl-query-experimental" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/research_agenda/R12_*</code>)
+- Natural language prompt workspace
+- <code>ai.nl.translate</code> preview + query JSON editor
+- <code>ai.nl.explain</code> summary + preview rows + approval token
+- <code>ai.nl.execute</code> gated execution using approval token
+- Suggested SkeinQL-native rewrites (cursor API, CDC subscribe, etc.)</p>
+<h3 id="417-embeddings">4.17 Embeddings<a class="headerlink" href="#417-embeddings" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/research_agenda/R10_*</code>)
+- Ingest embedding vectors
+- Build / monitor ANN index health
+- Playground for hybrid queries (filters + ANN order-by)</p>
+<h3 id="416-natural-language-queries">4.16 Natural Language Queries<a class="headerlink" href="#416-natural-language-queries" title="Permanent link">¶</a></h3>
+<p>(See <code>docs/research_agenda/R12_*</code>)
+- NL-to-SkeinQL translation (read-only by default)
+- Explanation + dry-run preview
+- Explicit confirmation gate for write queries</p>
+<hr />
+<h2 id="5-api-usage">5) API usage<a class="headerlink" href="#5-api-usage" title="Permanent link">¶</a></h2>
+<p>SkeinAdmin uses SkeinQL methods only.</p>
+<p>Minimum required methods:
+- system.version
+- system.capabilities
+- system.shutdown (optional but recommended for controlled operations)
+- schema.list_databases / list_tables / describe_table
+- query.select
+- sql.exec (optional, for power users)
+- stats.snapshot
+- stats.top_queries
+- cluster.status (if cluster enabled)</p>
+<hr />
+<h2 id="6-security">6) Security<a class="headerlink" href="#6-security" title="Permanent link">¶</a></h2>
+<p>Recommended baseline:
+- HTTPS only
+- Bearer token auth
+- RBAC in SkeinDB (admin vs read-only vs operator)
+- CSRF protection is handled by token + same-site policy (if cookies are used)</p>
+<p>SkeinAdmin should support:
+- read-only mode profiles
+- audit log (who executed which admin actions)</p>
+<hr />
+<h2 id="7-backlog-skeinadmin">7) Backlog (SkeinAdmin)<a class="headerlink" href="#7-backlog-skeinadmin" title="Permanent link">¶</a></h2>
+<ul>
+<li>SA01: Create SkeinAdmin SPA scaffold (web/skeinadmin)</li>
+<li>SA02: Connection profile UI + token handling</li>
+<li>SA03: SQL Workspace (execute via sql.exec)</li>
+<li>SA04: Schema Browser (schema.*)</li>
+<li>SA05: Data Browser (query.select + data.*)</li>
+<li>SA06: Users UI (admin.*)</li>
+<li>SA07: Stats dashboard (stats.*)</li>
+<li>SA08: Cluster dashboard (cluster.*)</li>
+<li>SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog</li>
+<li>SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*) — implemented with the dedicated <code>Time Travel &amp; Replay</code> panel, including <code>maintenance.history.*</code> retention controls and replay integrity summaries.</li>
+<li>SA11: Encryption + key rotation UI (settings.encryption + status/progress)</li>
+<li>SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work</li>
+<li>SA13: Compaction scheduler policy UI (maintenance.compaction.*)</li>
+<li>SA14: Autoparameterization and plan-cache widgets</li>
+<li>SA15: Forensics page (<code>maintenance.audit_*</code>, <code>forensic.*</code>) + proof verification UI</li>
+<li>SA16: Views page (view.*) + dependency visualization</li>
+<li>SA17: Migration Assistant (telemetry + intent inference) + exportable report</li>
+<li>SA18: Embeddings playground (vector.*) + index status</li>
+<li>SA19: NL Query page (ai.nl.*) with verification gate</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/SKEINADMIN.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINADMIN.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="configuration.html"><span>← Previous</span>Configuration</a>
+<a class="next" href="clustering.html"><span>Next →</span>Clustering</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-design-goals">1) Design goals</a></li>
+<li><a href="#2-deployment-models">2) Deployment models</a><ul>
+<li><a href="#21-static-spa-recommended">2.1 Static SPA (recommended)</a></li>
+<li><a href="#22-reverse-proxy-hosted">2.2 Reverse-proxy hosted</a></li>
+<li><a href="#23-air-gapped-admin-workstation">2.3 Air-gapped admin workstation</a></li>
+<li><a href="#24-embedded-static-assets-single-binary-mode">2.4 Embedded static assets (single-binary mode)</a></li>
+</ul>
+</li>
+<li><a href="#3-connection-profiles">3) Connection profiles</a></li>
+<li><a href="#4-ui-sections-navigation">4) UI sections (navigation)</a><ul>
+<li><a href="#41-overview-dashboard">4.1 Overview (Dashboard)</a></li>
+<li><a href="#42-easy-viewer">4.2 Easy Viewer</a></li>
+<li><a href="#43-sql-workspace">4.3 SQL Workspace</a></li>
+<li><a href="#44-schema-browser">4.4 Schema Browser</a></li>
+<li><a href="#45-data-browser">4.5 Data Browser</a></li>
+<li><a href="#46-engine-config">4.6 Engine Config</a></li>
+<li><a href="#46a-settings-manager">4.6a Settings Manager</a></li>
+<li><a href="#47-users-privileges">4.7 Users &amp; Privileges</a></li>
+<li><a href="#48-maintenance">4.8 Maintenance</a></li>
+<li><a href="#481-time-travel-replay">4.8.1 Time travel &amp; replay</a></li>
+<li><a href="#49-server-load-statistics">4.9 Server Load &amp; Statistics</a></li>
+<li><a href="#410-cluster-management">4.10 Cluster Management</a></li>
+<li><a href="#411-security-and-encryption">4.11 Security and Encryption</a></li>
+<li><a href="#412-cdc-subscriptions">4.12 CDC Subscriptions</a></li>
+<li><a href="#413-index-advisor">4.13 Index Advisor</a></li>
+<li><a href="#413-views-incremental-maintenance">4.13 Views (Incremental Maintenance)</a></li>
+<li><a href="#414-forensics-verifiable-wal-queries">4.14 Forensics (Verifiable WAL Queries)</a></li>
+<li><a href="#415-migration-assistant-mysql-skeinql">4.15 Migration Assistant (MySQL → SkeinQL)</a></li>
+<li><a href="#416-nl-query-experimental">4.16 NL Query (Experimental)</a></li>
+<li><a href="#417-embeddings">4.17 Embeddings</a></li>
+<li><a href="#416-natural-language-queries">4.16 Natural Language Queries</a></li>
+</ul>
+</li>
+<li><a href="#5-api-usage">5) API usage</a></li>
+<li><a href="#6-security">6) Security</a></li>
+<li><a href="#7-backlog-skeinadmin">7) Backlog (SkeinAdmin)</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

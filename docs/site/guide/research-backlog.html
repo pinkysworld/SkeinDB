@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Research Backlog (Adapted from January 2026 agenda) — SkeinDB Docs</title>
+<meta name="description" content="Research Backlog (Adapted from January 2026 agenda) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html" class="active">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Research</span> <span>›</span> <span>Research Backlog (Adapted from January 2026 agenda)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="research-backlog-adapted-from-january-2026-agenda">Research Backlog (Adapted from January 2026 agenda)<a class="headerlink" href="#research-backlog-adapted-from-january-2026-agenda" title="Permanent link">¶</a></h1>
+<p>This backlog turns the <strong>20 research proposals</strong> in <code>docs/RESEARCH_AGENDA.md</code> into <strong>Codex-friendly, PR-sized tasks</strong>, mapped onto the existing Phase A–G build plan and the current <code>docs/PROJECT_BACKLOG.md</code> task numbering.</p>
+<p>Notes:
+- These items are <strong>research-oriented</strong>: the goal is to make each direction implementable and measurable.
+- Tasks are designed to be <strong>optional</strong> and do not block core MySQL compatibility.</p>
+<h2 id="reality-sync-2026-03-30">Reality sync (2026-03-30)<a class="headerlink" href="#reality-sync-2026-03-30" title="Permanent link">¶</a></h2>
+<p>Runtime status and checklist status intentionally differ:
+- Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
+- <strong>14 tracks are now hardened</strong> with real algorithms and dedicated tests:
+  - <strong>R02</strong> — Adaptive row/column storage (snapshot + readback integration test)
+  - <strong>R03</strong> — Delta topology analysis (hot-chain detection, topology reports)
+  - <strong>R04</strong> — Differential privacy (Laplace noise, RDP composition, budget tracking)
+  - <strong>R05</strong> — Oblivious execution (policy registration + padding verification test)
+  - <strong>R06</strong> — Forensic Merkle proofs (SHA-256 hash chains, inclusion verification)
+  - <strong>R07</strong> — Client-side merge functions (conflict resolution + merge.list test)
+  - <strong>R08</strong> — Incremental view maintenance (dependency graphs, cascading invalidation)
+  - <strong>R09</strong> — QUIC-native protocol (multi-stream RPCs + rebind verification test)
+  - <strong>R10</strong> — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
+  - <strong>R11</strong> — LLM-assisted autoparameterization (classify + analyze integration test)
+  - <strong>R13</strong> — Causal vector-clock ETags (V2 clocks, dependency tracking, stale detection)
+  - <strong>R14</strong> — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
+  - <strong>R15</strong> — Conflict-free schema evolution (propose/merge/apply integration test)
+  - <strong>R16</strong> — Auto index synthesis (workload-driven advisor.recommend integration test)
+- Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
+- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.</p>
+<p>Source of truth matrix:
+- <code>docs/TRUE_STATUS_MATRIX.md</code></p>
+<h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">ID</th>
+<th>Proposal</th>
+<th>Priority (agenda)</th>
+<th>Primary repo specs / files</th>
+<th>Backlog tasks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1</td>
+<td>Learned Index Structures for ValueID Lookup</td>
+<td>P2</td>
+<td><code>docs/research_agenda/R01_*</code></td>
+<td><strong>Phase 24</strong> (T230–T235)</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td>Adaptive Row-Column Hybrid Execution</td>
+<td>—</td>
+<td><code>docs/COLUMN_SNAPSHOTS.md</code> + <code>docs/research_agenda/R02_*</code></td>
+<td>Extend <strong>Phase 10</strong> (T103–T106)</td>
+</tr>
+<tr>
+<td style="text-align: right;">3</td>
+<td>Delta-Chain Topology Optimization</td>
+<td>P1</td>
+<td><code>docs/DELTA_VALUES.md</code> + <code>docs/research_agenda/R03_*</code></td>
+<td>Extend <strong>Phase 7</strong> (T073–T076)</td>
+</tr>
+<tr>
+<td style="text-align: right;">4</td>
+<td>Differentially Private Aggregate Queries</td>
+<td>P0</td>
+<td><code>docs/research_agenda/R04_*</code></td>
+<td><strong>Phase 25</strong> (T240–T246)</td>
+</tr>
+<tr>
+<td style="text-align: right;">5</td>
+<td>Oblivious Query Execution</td>
+<td>—</td>
+<td><code>docs/research_agenda/R05_*</code></td>
+<td><strong>Phase 26</strong> (T250–T256)</td>
+</tr>
+<tr>
+<td style="text-align: right;">6</td>
+<td>Forensic Query Language for Hash-Chained WAL</td>
+<td>P1</td>
+<td><code>docs/AUDIT_WAL.md</code> + <code>docs/research_agenda/R06_*</code></td>
+<td><strong>Phase 27</strong> (T260–T266)</td>
+</tr>
+<tr>
+<td style="text-align: right;">7</td>
+<td>Optimistic Concurrency with Client-Side Merge Functions</td>
+<td>P1</td>
+<td><code>docs/WASM_UDFS.md</code> + <code>docs/ETAG_VALIDATORS.md</code> + <code>docs/research_agenda/R07_*</code></td>
+<td><strong>Phase 28</strong> (T270–T276)</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td>Incremental View Maintenance via Dependency Graphs</td>
+<td>P0</td>
+<td><code>docs/ETAG_VALIDATORS.md</code> + <code>docs/CDC_CHANGEFEED.md</code> + <code>docs/research_agenda/R08_*</code></td>
+<td><strong>Phase 29</strong> (T280–T287)</td>
+</tr>
+<tr>
+<td style="text-align: right;">9</td>
+<td>HTTP/3 and QUIC-Native DB Protocol</td>
+<td>P2</td>
+<td><code>docs/research_agenda/R09_*</code></td>
+<td><strong>Phase 30</strong> (T290–T295)</td>
+</tr>
+<tr>
+<td style="text-align: right;">10</td>
+<td>Vector Embeddings as First-Class ValueIDs</td>
+<td>P0</td>
+<td><code>docs/research_agenda/R10_*</code></td>
+<td><strong>Phase 31</strong> (T300–T307)</td>
+</tr>
+<tr>
+<td style="text-align: right;">11</td>
+<td>LLM-Assisted Query Autoparameterization</td>
+<td>—</td>
+<td><code>docs/AUTOPARAMETERIZATION.md</code> + <code>docs/research_agenda/R11_*</code></td>
+<td>Extend <strong>Phase 22</strong> (T215–T218)</td>
+</tr>
+<tr>
+<td style="text-align: right;">12</td>
+<td>Natural Language to SkeinQL with Verification</td>
+<td>—</td>
+<td><code>docs/research_agenda/R12_*</code></td>
+<td><strong>Phase 32</strong> (T310–T316)</td>
+</tr>
+<tr>
+<td style="text-align: right;">13</td>
+<td>Causal Consistency via ETag Chains</td>
+<td>P0</td>
+<td><code>docs/ETAG_VALIDATORS.md</code> + <code>docs/research_agenda/R13_*</code></td>
+<td>Extend <strong>Phase 6</strong> (T064–T067)</td>
+</tr>
+<tr>
+<td style="text-align: right;">14</td>
+<td>Geo-Distributed Replay Bundles for Edge Caching</td>
+<td>P2</td>
+<td><code>docs/TIME_TRAVEL_REPLAY.md</code> + <code>docs/research_agenda/R14_*</code></td>
+<td>Extend <strong>Phase 19</strong> (T185–T188)</td>
+</tr>
+<tr>
+<td style="text-align: right;">15</td>
+<td>Conflict-Free Schema Evolution</td>
+<td>—</td>
+<td><code>docs/research_agenda/R15_*</code></td>
+<td><strong>Phase 33</strong> (T320–T326)</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td>Automatic Index Synthesis from Dependency Analysis</td>
+<td>P1</td>
+<td><code>docs/INDEX_ADVISOR.md</code> + <code>docs/research_agenda/R16_*</code></td>
+<td>Extend <strong>Phase 18</strong> (T175–T179)</td>
+</tr>
+<tr>
+<td style="text-align: right;">17</td>
+<td>Query Intent Inference for Compatibility Migration</td>
+<td>—</td>
+<td><code>docs/TELEMETRY_AND_MIGRATION.md</code> + <code>docs/research_agenda/R17_*</code></td>
+<td>Extend <strong>Phase 11</strong> (T114–T118)</td>
+</tr>
+<tr>
+<td style="text-align: right;">18</td>
+<td>Reproducible Performance Regression Testing</td>
+<td>—</td>
+<td><code>docs/TIME_TRAVEL_REPLAY.md</code> + <code>docs/research_agenda/R18_*</code></td>
+<td>Extend <strong>Phase 19</strong> (T189)</td>
+</tr>
+<tr>
+<td style="text-align: right;">19</td>
+<td>WebAssembly-Native Query Operators</td>
+<td>P2</td>
+<td><code>docs/WASM_UDFS.md</code> + <code>docs/research_agenda/R19_*</code></td>
+<td>Extend <strong>Phase 8</strong> (T084–T087)</td>
+</tr>
+<tr>
+<td style="text-align: right;">20</td>
+<td>Energy-Aware Compaction Scheduling</td>
+<td>—</td>
+<td><code>docs/COMPACTION_SCHEDULER.md</code> + <code>docs/research_agenda/R20_*</code></td>
+<td>Extend <strong>Phase 21</strong> (T204–T207)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="task-definitions-new-additions">Task definitions (new additions)<a class="headerlink" href="#task-definitions-new-additions" title="Permanent link">¶</a></h2>
+<h3 id="phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)<a class="headerlink" href="#phase-24-learned-indexes-for-valueid-lookup-r01" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T230: Instrument ValueID lookup distribution + export histograms</li>
+<li>[ ] T231: Prototype learned model index (offline build) with fallback structure</li>
+<li>[ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)</li>
+<li>[ ] T233: Compaction-time model refresh policy + correctness tests</li>
+<li>[ ] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead</li>
+<li>[ ] T235: Distribution shift tests + graceful degradation</li>
+</ul>
+<h3 id="phase-25-differential-privacy-aggregates-r04">Phase 25 — Differential privacy aggregates (R04)<a class="headerlink" href="#phase-25-differential-privacy-aggregates-r04" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T240: Add SkeinQL aggregate nodes (COUNT/SUM/AVG) with explicit DP parameters (experimental)</li>
+<li>[ ] T241: Sensitivity analysis for single-table aggregates (bounded domains)</li>
+<li>[ ] T242: Privacy budget manager (per user/role) + persistence</li>
+<li>[ ] T243: Noise mechanisms (Laplace / Gaussian policy) + deterministic tests (seeded RNG)</li>
+<li>[ ] T244: Privacy-aware caching rules (ETag includes privacy metadata)</li>
+<li>[ ] T245: Audit log entries for DP queries (budget consumption)</li>
+<li>[ ] T246: Evaluation harness: accuracy vs epsilon, overhead vs baseline</li>
+</ul>
+<h3 id="phase-26-oblivious-query-execution-r05">Phase 26 — Oblivious query execution (R05)<a class="headerlink" href="#phase-26-oblivious-query-execution-r05" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T250: Threat model doc + “obliviousness levels” policy schema</li>
+<li>[ ] T251: ValueStore lookup padding + dummy reads (table/column policy)</li>
+<li>[ ] T252: Oblivious scan primitive (fixed-size batches, padding)</li>
+<li>[ ] T253: Oblivious sort/join primitive (limited scope, research mode)</li>
+<li>[ ] T254: Leakage evaluation harness (trace-based, mutual information metrics)</li>
+<li>[ ] T255: Performance overhead report generator</li>
+<li>[ ] T256: Admin UI settings for per-table obliviousness levels</li>
+</ul>
+<h3 id="phase-27-forensic-query-language-r06">Phase 27 — Forensic query language (R06)<a class="headerlink" href="#phase-27-forensic-query-language-r06" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T260: Define SkeinForensic query grammar (minimal) + JSON form over SkeinQL</li>
+<li>[ ] T261: Build verifiable WAL index (time/table/user) consistent with hash chain</li>
+<li>[ ] T262: Proof format for inclusion + boundary proofs; verifier tool</li>
+<li>[ ] T263: <code>forensic.query</code> SkeinQL endpoint + exportable report bundles</li>
+<li>[ ] T264: Incremental verification via checkpoint anchors</li>
+<li>[ ] T265: Case-study harness: simulated incident timelines + proofs</li>
+<li>[ ] T266: SkeinAdmin “Forensics” page (query + verify + export)</li>
+</ul>
+<h3 id="phase-28-merge-functions-for-optimistic-concurrency-r07">Phase 28 — Merge functions for optimistic concurrency (R07)<a class="headerlink" href="#phase-28-merge-functions-for-optimistic-concurrency-r07" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T270: Conflict model (write-write, constraint, dependency) + detection hooks</li>
+<li>[ ] T271: Merge function registry (Wasm) + capability model (“values-only” access)</li>
+<li>[ ] T272: SkeinQL <code>merge.register</code> / <code>merge.apply</code> + SQL compat hook (If-Match)</li>
+<li>[ ] T273: Offline write queue format (client SDK spec) + merge result handling</li>
+<li>[ ] T274: Safety tests: cancellation + deterministic merges</li>
+<li>[ ] T275: Bench: conflict rate + resolution success on example workloads</li>
+<li>[ ] T276: SkeinAdmin “Merge rules” page</li>
+</ul>
+<h3 id="phase-29-incremental-view-maintenance-r08">Phase 29 — Incremental view maintenance (R08)<a class="headerlink" href="#phase-29-incremental-view-maintenance-r08" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T280: <code>view.create</code> SkeinQL method with persisted definition (SkeinIR)</li>
+<li>[ ] T281: Dependency graph extension: view → base table deps at column granularity</li>
+<li>[ ] T282: Delta derivation for a restricted operator set (filter, project, group-by)</li>
+<li>[ ] T283: Incremental refresh pipeline (apply deltas from CDC stream)</li>
+<li>[ ] T284: Cost-based switch: incremental vs full recompute</li>
+<li>[ ] T285: Correctness oracle: compare incremental vs recompute on random workloads</li>
+<li>[ ] T286: Bench: view maintenance overhead + query speedups</li>
+<li>[ ] T287: SkeinAdmin “Views” page (status, refresh, explain deps)</li>
+</ul>
+<h3 id="phase-30-http3-quic-native-protocol-r09">Phase 30 — HTTP/3 / QUIC-native protocol (R09)<a class="headerlink" href="#phase-30-http3-quic-native-protocol-r09" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping</li>
+<li>[ ] T291: Implement server prototype with a QUIC library (feature-flag)</li>
+<li>[ ] T292: Prepared query handles over QUIC streams (read-only first)</li>
+<li>[ ] T293: 0-RTT safety rules (no writes in 0-RTT by default)</li>
+<li>[ ] T294: Bench: p99 latency under concurrency vs HTTP/2 and MySQL/TCP</li>
+<li>[ ] T295: Connection migration test harness (simulated IP change)</li>
+</ul>
+<h3 id="phase-31-vector-embeddings-as-first-class-valueids-r10">Phase 31 — Vector embeddings as first-class ValueIDs (R10)<a class="headerlink" href="#phase-31-vector-embeddings-as-first-class-valueids-r10" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T300: Add <code>ValueKind::Embedding</code> and typed literal support in SkeinQL</li>
+<li>[ ] T301: LSH bucket + content hash ValueID scheme (exact + approximate id)</li>
+<li>[ ] T302: ANN search operator (bucket filter + distance refine) (baseline)</li>
+<li>[ ] T303: Hybrid query: filter predicates + ANN order-by</li>
+<li>[ ] T304: Dependency tracking for embedding-derived queries (invalidate on source change)</li>
+<li>[ ] T305: Bench harness: recall/latency vs baseline index</li>
+<li>[ ] T306: Example app: small RAG retrieval pipeline</li>
+<li>[ ] T307: SkeinAdmin “Embeddings” page (index status + query playground)</li>
+</ul>
+<h3 id="phase-32-natural-language-to-skeinql-with-verification-r12">Phase 32 — Natural language to SkeinQL with verification (R12)<a class="headerlink" href="#phase-32-natural-language-to-skeinql-with-verification-r12" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T310: NL→SkeinQL prompt+schema packaging format (offline first)</li>
+<li>[ ] T311: Query explanation generator from dependency sets + planner info</li>
+<li>[ ] T312: Verification UI flow: explanation + sample rows + approval gate</li>
+<li>[ ] T313: Safety policy: forbid writes unless explicit confirmation token</li>
+<li>[ ] T314: Evaluation harness: adapted text-to-SQL benchmarks (execution match)</li>
+<li>[ ] T315: Iterative refinement protocol (user feedback loop)</li>
+<li>[ ] T316: SkeinAdmin “NL Query” page (experimental)</li>
+</ul>
+<h3 id="phase-33-conflict-free-schema-evolution-r15">Phase 33 — Conflict-free schema evolution (R15)<a class="headerlink" href="#phase-33-conflict-free-schema-evolution-r15" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T320: Schema version tagging in MVCC row versions</li>
+<li>[ ] T321: Concurrent schema changes protocol (add column/index) + conflict detection</li>
+<li>[ ] T322: Query execution across schema heterogeneity (safe conversions)</li>
+<li>[ ] T323: Schema merge algorithm + roll-forward/rollback rules</li>
+<li>[ ] T324: Migration assistant: show divergence + propose resolution</li>
+<li>[ ] T325: Rolling-deploy simulation harness</li>
+<li>[ ] T326: SkeinAdmin “Schema evolution” page</li>
+</ul>
+<h2 id="extensions-to-existing-phases-inline-patches">Extensions to existing phases (inline patches)<a class="headerlink" href="#extensions-to-existing-phases-inline-patches" title="Permanent link">¶</a></h2>
+<p>The following additions extend existing phases in <code>docs/PROJECT_BACKLOG.md</code>.</p>
+<h3 id="extend-phase-6-causal-etag-chains-r13">Extend Phase 6 — Causal ETag chains (R13)<a class="headerlink" href="#extend-phase-6-causal-etag-chains-r13" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T064: Define causal ETag format (compressed dependencies / vector-clock hybrid)</li>
+<li>[ ] T065: <code>min_causality</code> request field + response causality propagation rules</li>
+<li>[ ] T066: Replication propagates causality metadata (no total order required)</li>
+<li>[ ] T067: Cache interaction tests (If-None-Match with causal validators)</li>
+</ul>
+<h3 id="extend-phase-7-delta-topology-optimization-r03">Extend Phase 7 — Delta topology optimization (R03)<a class="headerlink" href="#extend-phase-7-delta-topology-optimization-r03" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T073: Implement periodic full snapshots for deltas (K-depth policy)</li>
+<li>[ ] T074: Skip-pointer (skip-list) delta chain encoding</li>
+<li>[ ] T075: Compaction-time topology restructuring policy</li>
+<li>[ ] T076: Bench: reconstruction latency vs write amplification</li>
+</ul>
+<h3 id="extend-phase-8-wasm-query-operators-r19">Extend Phase 8 — Wasm query operators (R19)<a class="headerlink" href="#extend-phase-8-wasm-query-operators-r19" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T084: Wasm operator ABI (columnar batches) + data interchange format</li>
+<li>[ ] T085: Compile a restricted plan subset to Wasm (filter/project)</li>
+<li>[ ] T086: Wasm SIMD exploration + perf tests</li>
+<li>[ ] T087: Edge runtime packaging (ship plan artifact)</li>
+</ul>
+<h3 id="extend-phase-10-adaptive-rowcolumn-execution-r02">Extend Phase 10 — Adaptive row/column execution (R02)<a class="headerlink" href="#extend-phase-10-adaptive-rowcolumn-execution-r02" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T103: Column snapshot cost model (build vs benefit)</li>
+<li>[ ] T104: Query pattern detector for hot projections</li>
+<li>[ ] T105: Dependency-driven incremental refresh/invalidation for snapshots</li>
+<li>[ ] T106: Adaptive controller (online materialization decisions)</li>
+</ul>
+<h3 id="extend-phase-11-intent-inference-for-migration-r17">Extend Phase 11 — Intent inference for migration (R17)<a class="headerlink" href="#extend-phase-11-intent-inference-for-migration-r17" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T114: Pattern library for common MySQL idioms (pagination, polling, soft deletes)</li>
+<li>[ ] T115: Sequence-level intent detection (multi-query patterns)</li>
+<li>[ ] T116: Intent → SkeinQL mapping (cursor API, CDC subscribe, etc.)</li>
+<li>[ ] T117: SkeinAdmin “Migration assistant” page</li>
+<li>[ ] T118: Offline report exporter (JSON + markdown)</li>
+</ul>
+<h3 id="extend-phase-18-index-synthesis-from-dependency-analysis-r16">Extend Phase 18 — Index synthesis from dependency analysis (R16)<a class="headerlink" href="#extend-phase-18-index-synthesis-from-dependency-analysis-r16" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T175: Dependency capture: predicate columns + range shapes + order-by needs</li>
+<li>[ ] T176: Candidate generator for covering + composite indexes (from deps)</li>
+<li>[ ] T177: Cost/benefit model includes write overhead + compaction overhead</li>
+<li>[ ] T178: Index retirement (unused) + safety rules</li>
+<li>[ ] T179: Evaluation harness: adaptation after workload shifts</li>
+</ul>
+<h3 id="extend-phase-19-edge-replay-bundles-performance-replay-r14-r18">Extend Phase 19 — Edge replay bundles + performance replay (R14, R18)<a class="headerlink" href="#extend-phase-19-edge-replay-bundles-performance-replay-r14-r18" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T185: Replay bundle redaction policies (privacy-safe export)</li>
+<li>[ ] T186: Geo-distributed “bundle windows” + routing rules (bounded staleness)</li>
+<li>[ ] T187: Performance bundle extensions (LSM state, cache warm hints, timing annotations)</li>
+<li>[ ] T188: Deterministic performance replay runner + variance report</li>
+<li>[ ] T189: Regression CI harness: compare latency distributions across commits</li>
+</ul>
+<h3 id="extend-phase-21-energy-aware-compaction-r20">Extend Phase 21 — Energy-aware compaction (R20)<a class="headerlink" href="#extend-phase-21-energy-aware-compaction-r20" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T204: Energy model instrumentation (CPU + IO estimate; optional external signals)</li>
+<li>[ ] T205: Constrained scheduler (energy minimization subject to latency/space bounds)</li>
+<li>[ ] T206: External signal integration (battery/plugged, time-of-use pricing hooks)</li>
+<li>[ ] T207: Evaluation harness: energy vs p99 latency tradeoffs</li>
+</ul>
+<h3 id="extend-phase-22-llm-assisted-semantic-autoparameterization-r11">Extend Phase 22 — LLM-assisted semantic autoparameterization (R11)<a class="headerlink" href="#extend-phase-22-llm-assisted-semantic-autoparameterization-r11" title="Permanent link">¶</a></h3>
+<ul>
+<li>[ ] T215: Label schema for “semantic constants” vs parameterizable literals</li>
+<li>[ ] T216: Pluggable classifier interface (offline model first)</li>
+<li>[ ] T217: Feedback loop: cache misses trigger reclassification</li>
+<li>[ ] T218: Metrics: plan-cache hit rate vs classifier overhead</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/RESEARCH_BACKLOG.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RESEARCH_BACKLOG.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="research-agenda.html"><span>← Previous</span>Research agenda</a>
+<a class="next" href="true-status-matrix.html"><span>Next →</span>True status matrix</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#reality-sync-2026-03-30">Reality sync (2026-03-30)</a></li>
+<li><a href="#mapping-table-proposal-repo">Mapping table (proposal → repo)</a></li>
+<li><a href="#task-definitions-new-additions">Task definitions (new additions)</a><ul>
+<li><a href="#phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)</a></li>
+<li><a href="#phase-25-differential-privacy-aggregates-r04">Phase 25 — Differential privacy aggregates (R04)</a></li>
+<li><a href="#phase-26-oblivious-query-execution-r05">Phase 26 — Oblivious query execution (R05)</a></li>
+<li><a href="#phase-27-forensic-query-language-r06">Phase 27 — Forensic query language (R06)</a></li>
+<li><a href="#phase-28-merge-functions-for-optimistic-concurrency-r07">Phase 28 — Merge functions for optimistic concurrency (R07)</a></li>
+<li><a href="#phase-29-incremental-view-maintenance-r08">Phase 29 — Incremental view maintenance (R08)</a></li>
+<li><a href="#phase-30-http3-quic-native-protocol-r09">Phase 30 — HTTP/3 / QUIC-native protocol (R09)</a></li>
+<li><a href="#phase-31-vector-embeddings-as-first-class-valueids-r10">Phase 31 — Vector embeddings as first-class ValueIDs (R10)</a></li>
+<li><a href="#phase-32-natural-language-to-skeinql-with-verification-r12">Phase 32 — Natural language to SkeinQL with verification (R12)</a></li>
+<li><a href="#phase-33-conflict-free-schema-evolution-r15">Phase 33 — Conflict-free schema evolution (R15)</a></li>
+</ul>
+</li>
+<li><a href="#extensions-to-existing-phases-inline-patches">Extensions to existing phases (inline patches)</a><ul>
+<li><a href="#extend-phase-6-causal-etag-chains-r13">Extend Phase 6 — Causal ETag chains (R13)</a></li>
+<li><a href="#extend-phase-7-delta-topology-optimization-r03">Extend Phase 7 — Delta topology optimization (R03)</a></li>
+<li><a href="#extend-phase-8-wasm-query-operators-r19">Extend Phase 8 — Wasm query operators (R19)</a></li>
+<li><a href="#extend-phase-10-adaptive-rowcolumn-execution-r02">Extend Phase 10 — Adaptive row/column execution (R02)</a></li>
+<li><a href="#extend-phase-11-intent-inference-for-migration-r17">Extend Phase 11 — Intent inference for migration (R17)</a></li>
+<li><a href="#extend-phase-18-index-synthesis-from-dependency-analysis-r16">Extend Phase 18 — Index synthesis from dependency analysis (R16)</a></li>
+<li><a href="#extend-phase-19-edge-replay-bundles-performance-replay-r14-r18">Extend Phase 19 — Edge replay bundles + performance replay (R14, R18)</a></li>
+<li><a href="#extend-phase-21-energy-aware-compaction-r20">Extend Phase 21 — Energy-aware compaction (R20)</a></li>
+<li><a href="#extend-phase-22-llm-assisted-semantic-autoparameterization-r11">Extend Phase 22 — LLM-assisted semantic autoparameterization (R11)</a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

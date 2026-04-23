@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Getting Started — SkeinDB Docs</title>
+<meta name="description" content="Getting Started — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html" class="active">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>User Guide</span> <span>›</span> <span>Getting Started</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="getting-started">Getting Started<a class="headerlink" href="#getting-started" title="Permanent link">¶</a></h1>
+<p>This repository contains a <strong>single-binary</strong> SkeinDB prototype.</p>
+<p>The focus of the scaffold is:
+- a portable executable (<code>skeindb</code>) that runs on Linux/macOS/Windows
+- an embedded HTTP API (SkeinQL JSON-RPC) + embedded admin UI (SkeinAdmin)
+- a MySQL compatibility surface (protocol + subset of SQL) intended as an adoption layer
+- research primitives (ETags, query patches, hash-chained WAL, ...)</p>
+<blockquote>
+<p>Note
+The current executor is a small in-memory/JSON-backed prototype intended to make SkeinQL immediately usable.
+The full ValueID/MVCC/LSM storage engine described in the paper is a planned build-out.</p>
+</blockquote>
+<hr />
+<h2 id="1-install">1) Install<a class="headerlink" href="#1-install" title="Permanent link">¶</a></h2>
+<h3 id="11-homebrew">1.1 Homebrew<a class="headerlink" href="#11-homebrew" title="Permanent link">¶</a></h3>
+<p>Use the repo as a tap:</p>
+<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>tap<span class="w"> </span>pinkysworld/skeindb<span class="w"> </span>https://github.com/pinkysworld/SkeinDB
+brew<span class="w"> </span>install<span class="w"> </span>--HEAD<span class="w"> </span>pinkysworld/skeindb/skeindb
+</code></pre></div>
+
+<p>The formula is <code>HEAD</code>-driven until the first tagged release lands. After the tag-driven release workflow updates <code>Formula/skeindb.rb</code>, the stable install path is:</p>
+<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>install<span class="w"> </span>pinkysworld/skeindb/skeindb
+</code></pre></div>
+
+<h3 id="12-apt-get">1.2 apt-get<a class="headerlink" href="#12-apt-get" title="Permanent link">¶</a></h3>
+<p>Once the signed apt branch has been published from a tagged release:</p>
+<div class="codehilite"><pre><span></span><code>sudo<span class="w"> </span>curl<span class="w"> </span>-fsSL<span class="w"> </span>https://raw.githubusercontent.com/pinkysworld/SkeinDB/apt/pubkey.gpg<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-o<span class="w"> </span>/usr/share/keyrings/skeindb-archive-keyring.gpg
+<span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;deb [signed-by=/usr/share/keyrings/skeindb-archive-keyring.gpg] https://raw.githubusercontent.com/pinkysworld/SkeinDB/apt stable main&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span>/etc/apt/sources.list.d/skeindb.list<span class="w"> </span>&gt;/dev/null
+sudo<span class="w"> </span>apt-get<span class="w"> </span>update
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>skeindb
+</code></pre></div>
+
+<p>The repository and signing metadata are generated by <code>.github/workflows/release-packages.yml</code>.</p>
+<h2 id="2-build">2) Build<a class="headerlink" href="#2-build" title="Permanent link">¶</a></h2>
+<p>Prerequisites:
+- Rust toolchain (stable)</p>
+<p>From the repo root:</p>
+<div class="codehilite"><pre><span></span><code>cargo<span class="w"> </span>build<span class="w"> </span>--release
+</code></pre></div>
+
+<p>The binary will be available at:</p>
+<div class="codehilite"><pre><span></span><code>./target/release/skeindb
+</code></pre></div>
+
+<hr />
+<h2 id="3-run-the-single-binary">3) Run the single binary<a class="headerlink" href="#3-run-the-single-binary" title="Permanent link">¶</a></h2>
+<p>Run with an HTTP port and MySQL port of your choice:</p>
+<div class="codehilite"><pre><span></span><code>./target/release/skeindb<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span>./data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--mysql<span class="w"> </span><span class="m">3306</span>
+</code></pre></div>
+
+<p>You can now access:
+- SkeinAdmin: <code>http://127.0.0.1:8080/admin</code>
+- SkeinQL JSON-RPC: <code>http://127.0.0.1:8080/api/v1/rpc</code>
+- Prepared-query GET endpoint: <code>http://127.0.0.1:8080/api/v1/q/&lt;query_id&gt;</code>
+- MySQL listener on <code>127.0.0.1:3306</code> (handshake/auth + <code>COM_QUERY</code> SQL subset translation; broader MySQL compatibility is still expanding)</p>
+<hr />
+<h2 id="4-first-skeinql-commands">4) First SkeinQL commands<a class="headerlink" href="#4-first-skeinql-commands" title="Permanent link">¶</a></h2>
+<h3 id="31-health-check">3.1 Health check<a class="headerlink" href="#31-health-check" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;system.ping&quot;,&quot;params&quot;:{}}&#39;</span>
+</code></pre></div>
+
+<h3 id="32-create-a-schema">3.2 Create a schema<a class="headerlink" href="#32-create-a-schema" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;jsonrpc&quot;:&quot;2.0&quot;,</span>
+<span class="s1">    &quot;id&quot;:2,</span>
+<span class="s1">    &quot;method&quot;:&quot;schema.create&quot;,</span>
+<span class="s1">    &quot;params&quot;:{</span>
+<span class="s1">      &quot;name&quot;:&quot;demo&quot;,</span>
+<span class="s1">      &quot;tables&quot;:[</span>
+<span class="s1">        {&quot;name&quot;:&quot;users&quot;,&quot;primary_key&quot;:[&quot;id&quot;],&quot;columns&quot;:[</span>
+<span class="s1">          {&quot;name&quot;:&quot;id&quot;,&quot;type&quot;:&quot;i64&quot;},</span>
+<span class="s1">          {&quot;name&quot;:&quot;name&quot;,&quot;type&quot;:&quot;string&quot;},</span>
+<span class="s1">          {&quot;name&quot;:&quot;updated_at&quot;,&quot;type&quot;:&quot;i64&quot;}</span>
+<span class="s1">        ]}</span>
+<span class="s1">      ]</span>
+<span class="s1">    }</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="33-insert-data">3.3 Insert data<a class="headerlink" href="#33-insert-data" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;jsonrpc&quot;:&quot;2.0&quot;,</span>
+<span class="s1">    &quot;id&quot;:3,</span>
+<span class="s1">    &quot;method&quot;:&quot;data.insert&quot;,</span>
+<span class="s1">    &quot;params&quot;:{</span>
+<span class="s1">      &quot;schema&quot;:&quot;demo&quot;,</span>
+<span class="s1">      &quot;table&quot;:&quot;users&quot;,</span>
+<span class="s1">      &quot;rows&quot;:[</span>
+<span class="s1">        {&quot;id&quot;:1,&quot;name&quot;:&quot;Ada&quot;,&quot;updated_at&quot;:1},</span>
+<span class="s1">        {&quot;id&quot;:2,&quot;name&quot;:&quot;Linus&quot;,&quot;updated_at&quot;:1}</span>
+<span class="s1">      ]</span>
+<span class="s1">    }</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="34-query-select">3.4 Query select<a class="headerlink" href="#34-query-select" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;jsonrpc&quot;:&quot;2.0&quot;,</span>
+<span class="s1">    &quot;id&quot;:4,</span>
+<span class="s1">    &quot;method&quot;:&quot;query.select&quot;,</span>
+<span class="s1">    &quot;params&quot;:{</span>
+<span class="s1">      &quot;query&quot;:{</span>
+<span class="s1">        &quot;schema&quot;:&quot;demo&quot;,</span>
+<span class="s1">        &quot;table&quot;:&quot;users&quot;,</span>
+<span class="s1">        &quot;select&quot;:[{&quot;col&quot;:&quot;id&quot;},{&quot;col&quot;:&quot;name&quot;}],</span>
+<span class="s1">        &quot;order_by&quot;:[{&quot;col&quot;:&quot;id&quot;,&quot;dir&quot;:&quot;asc&quot;}]</span>
+<span class="s1">      },</span>
+<span class="s1">      &quot;result_format&quot;:&quot;objects_json&quot;</span>
+<span class="s1">    }</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h3 id="35-sql-compatibility-endpoint-information_schema">3.5 SQL compatibility endpoint + information_schema<a class="headerlink" href="#35-sql-compatibility-endpoint-information_schema" title="Permanent link">¶</a></h3>
+<p>The SQL compatibility helper endpoint is available at <code>POST /api/v1/sql/exec</code>.
+It now supports virtual metadata queries over:
+- <code>information_schema.tables</code>
+- <code>information_schema.columns</code></p>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/sql/exec<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;sql&quot;:&quot;SELECT table_schema, table_name FROM information_schema.tables ORDER BY table_schema, table_name LIMIT 10&quot;}&#39;</span>
+</code></pre></div>
+
+<h3 id="36-transaction-handles-skeinql">3.6 Transaction handles (SkeinQL)<a class="headerlink" href="#36-transaction-handles-skeinql" title="Permanent link">¶</a></h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:8,&quot;method&quot;:&quot;tx.begin&quot;,&quot;params&quot;:{&quot;read_only&quot;:true}}&#39;</span>
+</code></pre></div>
+
+<p>Commit:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:9,&quot;method&quot;:&quot;tx.commit&quot;,&quot;params&quot;:{&quot;tx_id&quot;:&quot;tx_0000000000000001&quot;}}&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="5-storage-dedup-stats">5) Storage + dedup stats<a class="headerlink" href="#5-storage-dedup-stats" title="Permanent link">¶</a></h2>
+<p><code>stats.snapshot</code> now reports live dedup effectiveness from persisted table data:
+- <code>storage.dedup_ratio</code>: logical bytes / unique bytes (higher means better dedup)
+- <code>storage.logical_bytes</code>: total bytes before dedup
+- <code>storage.unique_bytes</code>: unique bytes after content-addressed dedup
+- <code>storage.duplicate_bytes</code>: bytes saved by dedup
+- <code>storage.interned_values</code>: unique values currently interned
+- Table row encoding uses adaptive ValueID refs: repeated values are emitted as
+  <code>"$skein_ref"</code> only when that lowers bytes on disk for the current table snapshot.</p>
+<p>Optional persistence mode (default is <code>segment</code>):
+- <code>--storage-mode json</code>: write/read <code>tables/&lt;db&gt;/&lt;table&gt;.json</code>
+- <code>--storage-mode segment</code>: write/read <code>tables/&lt;db&gt;/&lt;table&gt;.rseg</code>
+- <code>--storage-mode hybrid</code>: write both formats; read prefers <code>.rseg</code></p>
+<p>Compatibility:
+- <code>SKEINDB_STORAGE_MODE=dual</code> remains accepted as an alias for <code>hybrid</code>.</p>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:5,&quot;method&quot;:&quot;stats.snapshot&quot;,&quot;params&quot;:{}}&#39;</span>
+</code></pre></div>
+
+<p>Top query fingerprints (by total time/count/latency):</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:6,&quot;method&quot;:&quot;stats.top_queries&quot;,&quot;params&quot;:{&quot;limit&quot;:10,&quot;sort_by&quot;:&quot;total_ms&quot;}}&#39;</span>
+</code></pre></div>
+
+<p>Recent slow queries:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;content-type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:7,&quot;method&quot;:&quot;stats.slow_queries&quot;,&quot;params&quot;:{&quot;min_ms&quot;:200,&quot;limit&quot;:20}}&#39;</span>
+</code></pre></div>
+
+<hr />
+<h2 id="6-querypatch-delta-updates">6) QueryPatch (delta updates)<a class="headerlink" href="#6-querypatch-delta-updates" title="Permanent link">¶</a></h2>
+<p>See <code>docs/QUERY_PATCH.md</code> for a complete spec.</p>
+<p>At a high level:
+1) run <code>query.select</code> and keep the returned <code>etag</code>
+2) periodically call <code>query.patch(base_etag=...)</code>
+3) apply the returned delta to your cached list</p>
+<hr />
+<h2 id="7-mysql-compatibility">7) MySQL compatibility<a class="headerlink" href="#7-mysql-compatibility" title="Permanent link">¶</a></h2>
+<p>The MySQL surface is intended as an <em>adoption layer</em> so existing software can connect using standard MySQL drivers.</p>
+<p>Current status is documented in:
+- <code>docs/MYSQL_COMPAT.md</code></p>
+<hr />
+<h2 id="8-where-to-go-next">8) Where to go next<a class="headerlink" href="#8-where-to-go-next" title="Permanent link">¶</a></h2>
+<ul>
+<li>Operator knobs: <code>docs/CONFIGURATION.md</code></li>
+<li>Specs and research notes: <code>docs/README.md</code></li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/GETTING_STARTED.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="setting-up-cluster.html"><span>← Previous</span>Setting up a 3-node cluster</a>
+<a class="next" href="skeinql.html"><span>Next →</span>SkeinQL reference</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-install">1) Install</a><ul>
+<li><a href="#11-homebrew">1.1 Homebrew</a></li>
+<li><a href="#12-apt-get">1.2 apt-get</a></li>
+</ul>
+</li>
+<li><a href="#2-build">2) Build</a></li>
+<li><a href="#3-run-the-single-binary">3) Run the single binary</a></li>
+<li><a href="#4-first-skeinql-commands">4) First SkeinQL commands</a><ul>
+<li><a href="#31-health-check">3.1 Health check</a></li>
+<li><a href="#32-create-a-schema">3.2 Create a schema</a></li>
+<li><a href="#33-insert-data">3.3 Insert data</a></li>
+<li><a href="#34-query-select">3.4 Query select</a></li>
+<li><a href="#35-sql-compatibility-endpoint-information_schema">3.5 SQL compatibility endpoint + information_schema</a></li>
+<li><a href="#36-transaction-handles-skeinql">3.6 Transaction handles (SkeinQL)</a></li>
+</ul>
+</li>
+<li><a href="#5-storage-dedup-stats">5) Storage + dedup stats</a></li>
+<li><a href="#6-querypatch-delta-updates">6) QueryPatch (delta updates)</a></li>
+<li><a href="#7-mysql-compatibility">7) MySQL compatibility</a></li>
+<li><a href="#8-where-to-go-next">8) Where to go next</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

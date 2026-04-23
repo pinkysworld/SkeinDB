@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Change Data Capture (CDC) and dependency-driven changefeeds — SkeinDB Docs</title>
+<meta name="description" content="Change Data Capture (CDC) and dependency-driven changefeeds — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html" class="active">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>Change Data Capture (CDC) and dependency-driven changefeeds</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="change-data-capture-cdc-and-dependency-driven-changefeeds">Change Data Capture (CDC) and dependency-driven changefeeds<a class="headerlink" href="#change-data-capture-cdc-and-dependency-driven-changefeeds" title="Permanent link">¶</a></h1>
+<p>Status: Partial implementation
+Last updated: 2026-04-16</p>
+<p>Current runtime baseline:
+- <code>cdc.subscribe_table</code> creates table subscriptions over the RPC API.
+- <code>cdc.subscribe_query</code> creates dependency-driven subscriptions for prepared queries and emits invalidation events with the current query ETag.
+- <code>cdc.poll</code> reads from the retained persisted change log and returns <code>earliest_offset</code> / <code>latest_offset</code> plus <code>resnapshot_required</code> metadata when a consumer falls behind the retained horizon.
+- <code>GET /api/v1/cdc/sse/{sub_id}</code> streams the same subscription events over SSE, with replay from the retained change log, bounded batch delivery, reconnect via <code>Last-Event-ID</code> or <code>from_offset</code>, and a terminal <code>resnapshot</code> control event when the reconnect cursor falls behind retention.
+- <code>cdc.ack</code> advances an in-memory consumer cursor per subscription.
+- <code>cdc.close</code> removes the subscription handle.
+- SkeinAdmin now includes a dedicated CDC page for <code>cdc.subscribe_table</code> / <code>cdc.poll</code> / <code>cdc.ack</code> / <code>cdc.close</code>, with session-local lag visualization derived from <code>next_offset - acked_offset</code>.
+- WebSocket delivery and durable consumer cursors are still open backlog items.</p>
+<p>SkeinDB's MySQL compatibility mode is valuable for adoption, but modern web and data pipelines often need a "push" interface for changes.
+This document specifies a CDC subsystem that provides:</p>
+<ol>
+<li>table-level change streams (insert/update/delete)</li>
+<li>query-level changefeeds driven by prepared-query dependency sets (pairs naturally with ETags)</li>
+</ol>
+<p>The novelty for SkeinDB is that query-level CDC can be derived from the same dependency metadata used for cache coherency.</p>
+<h2 id="1-goals">1. Goals<a class="headerlink" href="#1-goals" title="Permanent link">¶</a></h2>
+<ul>
+<li>Provide low-latency incremental change propagation.</li>
+<li>Support both pull and push consumption patterns.</li>
+<li>Be safe for a single-binary deployment (no external Kafka requirement).</li>
+<li>Integrate with clustering later.</li>
+</ul>
+<p>Non-goals (v1):
+- Full MySQL replication protocol compatibility.</p>
+<h2 id="2-event-model">2. Event model<a class="headerlink" href="#2-event-model" title="Permanent link">¶</a></h2>
+<p>Each CDC event includes:
+- <code>offset</code>: monotonically increasing sequence (per stream)
+- <code>commit_ts_ms</code> and (optional) <code>lsn</code>
+- <code>db</code>, <code>table</code>
+- <code>op</code>: insert | update | delete
+- <code>pk</code>: primary key values
+- <code>before</code> and <code>after</code> images (optional, configurable)</p>
+<p>Current runtime scope:
+- row-level table events persist <code>commit_ts_ms</code> and <code>lsn = seq</code>
+- query invalidation events reuse the triggering table event metadata and override <code>op = "invalidate"</code></p>
+<h2 id="3-streams">3. Streams<a class="headerlink" href="#3-streams" title="Permanent link">¶</a></h2>
+<h3 id="31-table-streams">3.1 Table streams<a class="headerlink" href="#31-table-streams" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>cdc.subscribe_table</code> creates a stream for a given table.</li>
+<li>Current runtime scope: full-table subscriptions only.</li>
+<li>Optional filters (pk range, shard, columns) remain planned.</li>
+</ul>
+<h3 id="32-query-streams-dependency-driven">3.2 Query streams (dependency-driven)<a class="headerlink" href="#32-query-streams-dependency-driven" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>cdc.subscribe_query</code> subscribes to changes that might affect a prepared query.</li>
+<li>The server computes a dependency set for the query (tables, key ranges, or index ranges).</li>
+<li>Whenever a commit intersects the dependency set, the server emits a "query invalidated" event:</li>
+<li>query_id</li>
+<li>new_etag</li>
+<li>changed_keys summary (optional)</li>
+</ul>
+<p>Current runtime scope:
+- dependency sets are conservative and table-based, reusing the same prepared-query dependency metadata used for query ETags
+- invalidation events are delivered through <code>cdc.poll</code> with <code>op = "invalidate"</code>, the triggering <code>db</code> / <code>table</code>, and optional <code>query_id</code> / <code>etag</code> fields
+- subscriptions are bound to a prepared <code>query_id</code> plus its positional args</p>
+<p>This gives applications a direct way to update caches and UIs.</p>
+<h2 id="4-delivery-mechanisms">4. Delivery mechanisms<a class="headerlink" href="#4-delivery-mechanisms" title="Permanent link">¶</a></h2>
+<p>Current runtime support:
+- Long poll: <code>cdc.poll</code> (RPC)
+- SSE: <code>GET /api/v1/cdc/sse/{sub_id}</code>
+  - emits the same JSON event payloads as <code>cdc.poll</code>
+  - replays from <code>?from_offset=&lt;seq&gt;</code> or <code>Last-Event-ID: &lt;seq&gt;</code>
+  - drains the retained change log in bounded batches so slow consumers can reconnect without losing events inside the retained horizon
+  - emits <code>event: resnapshot</code> with recovery metadata when the reconnect cursor falls behind retention</p>
+<p>Planned follow-ons:
+- WebSocket with backpressure</p>
+<h2 id="5-exactly-once-vs-at-least-once">5. Exactly-once vs at-least-once<a class="headerlink" href="#5-exactly-once-vs-at-least-once" title="Permanent link">¶</a></h2>
+<ul>
+<li>Default delivery is at-least-once.</li>
+<li>Consumers ACK offsets via <code>cdc.ack</code>.</li>
+<li>Current runtime tracks acked offsets in memory per subscription and suppresses redelivery for older offsets.</li>
+<li>SSE reconnects are driven by event <code>id = seq</code>; clients can resume by supplying <code>Last-Event-ID</code> or <code>from_offset</code>.</li>
+<li>When a consumer falls behind the retained horizon, <code>cdc.poll</code> returns <code>resnapshot_required = true</code> and SSE emits a <code>resnapshot</code> control event instead of replaying a partial stream.</li>
+<li>Durable cursors and richer backpressure policies remain follow-on work.</li>
+</ul>
+<h2 id="6-retention">6. Retention<a class="headerlink" href="#6-retention" title="Permanent link">¶</a></h2>
+<p>Planned target design:
+- retention is tied to WAL retention
+- if WAL is truncated before a consumer catches up, the subscription must resnapshot</p>
+<p>Current runtime note:
+- the persisted retained change log is the current WAL-equivalent replay surface for subscriptions
+- retention is bounded by a configurable event horizon (<code>SKEINDB_CDC_RETENTION_EVENTS</code>, default <code>4096</code>)
+- when <code>from_offset</code> (or <code>Last-Event-ID</code>) is older than <code>earliest_offset - 1</code>, the server requires the consumer to resnapshot before resuming</p>
+<h2 id="7-skeinql-surface">7. SkeinQL surface<a class="headerlink" href="#7-skeinql-surface" title="Permanent link">¶</a></h2>
+<p>Methods:
+- <code>cdc.subscribe_table</code>
+- <code>cdc.subscribe_query</code>
+- <code>cdc.poll</code>
+- <code>cdc.ack</code>
+- <code>cdc.close</code></p>
+<p>HTTP transport:
+- <code>GET /api/v1/cdc/sse/{sub_id}</code></p>
+<h2 id="8-observability">8. Observability<a class="headerlink" href="#8-observability" title="Permanent link">¶</a></h2>
+<p>Expose:
+- active_subscriptions
+- lag (max_offset - consumer_offset)
+- dropped_events_total</p>
+<h2 id="9-testing">9. Testing<a class="headerlink" href="#9-testing" title="Permanent link">¶</a></h2>
+<ul>
+<li>ordering preserved per stream</li>
+<li>offsets monotonic</li>
+<li>acknowledged offsets suppress redelivery for older polls</li>
+<li>SSE resumes from <code>Last-Event-ID</code> / <code>from_offset</code></li>
+<li>retained-horizon loss returns <code>resnapshot_required</code> for <code>cdc.poll</code></li>
+<li>retained-horizon loss emits <code>event: resnapshot</code> for SSE reconnects</li>
+<li>closed subscriptions return <code>not_found</code></li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CDC_CHANGEFEED.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CDC_CHANGEFEED.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="merge-functions.html"><span>← Previous</span>Merge functions (CRDT)</a>
+<a class="next" href="etag-validators.html"><span>Next →</span>ETag validators</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-goals">1. Goals</a></li>
+<li><a href="#2-event-model">2. Event model</a></li>
+<li><a href="#3-streams">3. Streams</a><ul>
+<li><a href="#31-table-streams">3.1 Table streams</a></li>
+<li><a href="#32-query-streams-dependency-driven">3.2 Query streams (dependency-driven)</a></li>
+</ul>
+</li>
+<li><a href="#4-delivery-mechanisms">4. Delivery mechanisms</a></li>
+<li><a href="#5-exactly-once-vs-at-least-once">5. Exactly-once vs at-least-once</a></li>
+<li><a href="#6-retention">6. Retention</a></li>
+<li><a href="#7-skeinql-surface">7. SkeinQL surface</a></li>
+<li><a href="#8-observability">8. Observability</a></li>
+<li><a href="#9-testing">9. Testing</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

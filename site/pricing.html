@@ -146,11 +146,14 @@
     <a class="nav-logo" href="index.html">SkeinDB</a>
     <div class="nav-links">
       <a href="index.html#features">Features</a>
+      <a href="index.html#architecture">Architecture</a>
       <a href="index.html#research">Research</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="pricing.html" class="active">Pricing</a>
       <a href="licensing.html">Licensing</a>
-      <a href="../docs/site/docs.html" class="nav-docs-cta">Docs</a>
+      <a href="contact.html">Contact</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" style="color:#f472b6">❤ Sponsor</a>
+      <a href="../docs/site/guide/index.html" class="nav-docs-cta">Docs</a>
     </div>
     <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
       <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -190,13 +193,13 @@
 
     <div class="tier">
       <h3>Starter</h3>
-      <div class="price">€299<small>/month</small></div>
-      <p style="font-size:.85rem;color:var(--text-secondary)">Your first production deployment. One project, one responsive maintainer on email.</p>
+      <div class="price">€399<small>/month</small></div>
+      <p style="font-size:.85rem;color:var(--text-secondary)">Your first production cluster. One project, one responsive maintainer on email.</p>
       <ul>
         <li>Everything in Community</li>
         <li>Email support (business hours CET)</li>
         <li>Next-business-day response</li>
-        <li>Up to <strong>1 production deployment</strong></li>
+        <li>Up to <strong>1 production cluster</strong></li>
         <li>Config &amp; upgrade review, twice a year</li>
         <li>Listed as a Starter customer on request</li>
       </ul>
@@ -205,13 +208,13 @@
 
     <div class="tier featured">
       <h3>Business</h3>
-      <div class="price">€1,200<small>/month</small></div>
+      <div class="price">€1,800<small>/month</small></div>
       <p style="font-size:.85rem;color:var(--text-secondary)">Growing teams who need predictable turn-around and a direct line to engineering.</p>
       <ul>
         <li>Everything in Starter</li>
         <li>Email <strong>+ shared Slack/Teams</strong></li>
         <li><strong>Same-business-day</strong> response</li>
-        <li>Up to <strong>5 production deployments</strong></li>
+        <li>Up to <strong>3 production clusters</strong></li>
         <li>Quarterly roadmap &amp; upgrade call</li>
         <li>Priority bug triage on the public tree</li>
         <li>Migration &amp; schema review (2 / year)</li>
@@ -221,13 +224,13 @@
 
     <div class="tier">
       <h3>Enterprise</h3>
-      <div class="price">€3,900<small>/month</small></div>
+      <div class="price">€4,900<small>/month base</small></div>
       <p style="font-size:.85rem;color:var(--text-secondary)">Regulated teams and critical workloads. Named engineer, faster clock, architecture partner.</p>
       <ul>
         <li>Everything in Business</li>
         <li>Email + chat + <strong>scheduled video</strong></li>
         <li><strong>4-business-hour</strong> first response</li>
-        <li><strong>Unlimited production deployments</strong></li>
+        <li>Up to <strong>5 production clusters</strong> included, then <strong>+€400 / extra cluster</strong></li>
         <li>Named engineer as primary contact</li>
         <li>Monthly architecture &amp; capacity review</li>
         <li>Roadmap input on prioritisation</li>
@@ -257,6 +260,9 @@
   <p class="small">
     Prices are indicative monthly ranges for scoping. Final scope, taxes, billing cadence, annual discounts, and any 24×7 terms are agreed case-by-case in the commercial engagement.
   </p>
+  <p class="small" style="margin-top:.5rem">
+    <strong>A cluster</strong> = one SkeinDB deployment of any topology (single-node, primary&nbsp;+&nbsp;replicas, or sharded) serving one logical workload. Dev and staging environments for the same workload are included with the production cluster.
+  </p>
 </section>
 
 <!-- COMPARISON -->
@@ -279,7 +285,7 @@
       <tr><td>Apache-2.0 binary &amp; source</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
       <tr><td>First response SLA</td><td class="no">None</td><td>Next business day</td><td>Same business day</td><td>4 business hours</td></tr>
       <tr><td>Support channels</td><td>GitHub</td><td>Email</td><td>Email + chat</td><td>Email + chat + video</td></tr>
-      <tr><td>Covered production deployments</td><td>—</td><td>1</td><td>5</td><td>Unlimited</td></tr>
+      <tr><td>Covered production clusters</td><td>—</td><td>1</td><td>3</td><td>5 included, +€400 / extra</td></tr>
       <tr><td>Named engineering contact</td><td class="no">—</td><td class="no">—</td><td>Rotating</td><td class="yes">Named</td></tr>
       <tr><td>Architecture / capacity review</td><td class="no">—</td><td>2 / year</td><td>Quarterly</td><td>Monthly</td></tr>
       <tr><td>Roadmap input</td><td>Public issues</td><td>Public issues</td><td>Quarterly call</td><td>Prioritised</td></tr>
@@ -318,7 +324,7 @@
     </div>
     <div class="addon">
       <h3>24×7 pager rotation</h3>
-      <div class="addon-price">from €2,500 / month</div>
+      <div class="addon-price">from €3,500 / month</div>
       <p>On-call rotation with 1-hour acknowledgement target. Only available as an add-on to the Enterprise or Custom plans with a documented runbook in place.</p>
     </div>
     <div class="addon">
@@ -409,7 +415,7 @@
     </div>
     <div class="footer-col">
       <h4>Documentation</h4>
-      <a href="../docs/site/docs.html">All Docs</a>
+      <a href="../docs/site/guide/index.html">All Docs</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank" rel="noopener">Getting Started</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank" rel="noopener">SkeinQL Reference</a>
     </div>

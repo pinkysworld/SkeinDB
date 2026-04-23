@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observability and Server Statistics — SkeinDB Docs</title>
+<meta name="description" content="Observability and Server Statistics — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html" class="active">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Observability and Server Statistics</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="observability-and-server-statistics">Observability and Server Statistics<a class="headerlink" href="#observability-and-server-statistics" title="Permanent link">¶</a></h1>
+<p>Status: Draft v0.1
+Last updated: 2026-01-17</p>
+<p>This document defines the observability surface of SkeinDB:
+- server load and resource stats
+- query and storage statistics
+- background task visibility (compaction, snapshots, replication)
+- metrics export</p>
+<p>The goal is to make SkeinDB operable at higher loads <strong>without</strong> external tooling,
+while still integrating cleanly with standard monitoring stacks.</p>
+<hr />
+<h2 id="1-principles">1) Principles<a class="headerlink" href="#1-principles" title="Permanent link">¶</a></h2>
+<ol>
+<li>
+<p><strong>Low overhead by default</strong>
+   - counters should be cheap (atomic increments)
+   - sampling is used for expensive stats (latency histograms)</p>
+</li>
+<li>
+<p><strong>Two audiences</strong>
+   - humans (SkeinAdmin dashboards)
+   - machines (metrics endpoints / exporters)</p>
+</li>
+<li>
+<p><strong>Useful out of the box</strong>
+   - no Prometheus required to see basic health
+   - but Prometheus-compatible metrics should be available</p>
+</li>
+</ol>
+<hr />
+<h2 id="2-stats-data-model">2) Stats data model<a class="headerlink" href="#2-stats-data-model" title="Permanent link">¶</a></h2>
+<h3 id="21-instantaneous-system-snapshot">2.1 Instantaneous system snapshot<a class="headerlink" href="#21-instantaneous-system-snapshot" title="Permanent link">¶</a></h3>
+<p>A <code>stats.snapshot</code> should include:
+- process uptime
+- CPU usage (process and/or system)
+- memory RSS, heap
+- open file descriptors / handles
+- disk usage for data directory
+- network bytes in/out</p>
+<h3 id="22-database-workload-snapshot">2.2 Database workload snapshot<a class="headerlink" href="#22-database-workload-snapshot" title="Permanent link">¶</a></h3>
+<ul>
+<li>active sessions</li>
+<li>active queries</li>
+<li>QPS (queries/sec) recent window</li>
+<li>TPS (transactions/sec)</li>
+<li>commit rate</li>
+<li>p50/p95/p99 latency (if enabled)</li>
+<li>cache hit rates (row cache, value cache)</li>
+<li>coalescing hit rate (if enabled)</li>
+<li>in-flight query groups</li>
+<li>autoparameterization hit rate (if enabled)</li>
+<li>plan cache entries (if enabled)</li>
+<li>index advisor: suggestions_pending (if enabled)</li>
+</ul>
+<h3 id="23-storage-engine-snapshot">2.3 Storage engine snapshot<a class="headerlink" href="#23-storage-engine-snapshot" title="Permanent link">¶</a></h3>
+<ul>
+<li>WAL size and append rate</li>
+<li>checkpoint age</li>
+<li>compaction state (running? stage?)</li>
+<li>compaction throughput</li>
+<li>compaction queue length + stall/backpressure events</li>
+<li>LSM levels sizes</li>
+<li>ValueStore:</li>
+<li>unique values</li>
+<li>logical bytes vs physical bytes</li>
+<li>dedup ratio</li>
+<li>encryption mode and encrypted objects count (if enabled)</li>
+<li>delta chain depth stats (if DELTA enabled)</li>
+</ul>
+<p>History/replay (if enabled):
+- oldest retained commit_ts
+- retained history bytes
+- replay exports/imports + verify failures</p>
+<p>CDC (if enabled):
+- active subscriptions
+- max lag (producer_offset - consumer_offset)</p>
+<h3 id="24-cluster-snapshot-if-enabled">2.4 Cluster snapshot (if enabled)<a class="headerlink" href="#24-cluster-snapshot-if-enabled" title="Permanent link">¶</a></h3>
+<ul>
+<li>node role (primary/replica/router)</li>
+<li>replication lag (LSN difference)</li>
+<li>missing object fetch stats (CAS replication)</li>
+<li>CAS object hit rate and bytes_saved</li>
+<li>shard placement summary</li>
+</ul>
+<hr />
+<h2 id="3-export-surfaces">3) Export surfaces<a class="headerlink" href="#3-export-surfaces" title="Permanent link">¶</a></h2>
+<h3 id="31-skeinql-methods">3.1 SkeinQL methods<a class="headerlink" href="#31-skeinql-methods" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>stats.snapshot</code> -&gt; JSON summary for dashboards</li>
+<li><code>stats.top_queries</code> -&gt; top by total time / p95 / rows</li>
+<li><code>stats.slow_queries</code> -&gt; recent slow query log</li>
+<li><code>stats.storage</code> -&gt; compaction + disk + dedup</li>
+<li><code>stats.cluster</code> -&gt; node + shard view</li>
+</ul>
+<h3 id="32-http-metrics-endpoint-prometheus-style">3.2 HTTP metrics endpoint (Prometheus-style)<a class="headerlink" href="#32-http-metrics-endpoint-prometheus-style" title="Permanent link">¶</a></h3>
+<p>Optional endpoint:
+- GET <code>/metrics</code></p>
+<p>Design notes:
+- keep metric names stable
+- include labels:
+  - db, table, node_id, shard_id, role</p>
+<hr />
+<h2 id="4-query-statistics">4) Query statistics<a class="headerlink" href="#4-query-statistics" title="Permanent link">¶</a></h2>
+<h3 id="41-query-fingerprinting">4.1 Query fingerprinting<a class="headerlink" href="#41-query-fingerprinting" title="Permanent link">¶</a></h3>
+<ul>
+<li>normalize query text (or SkeinIR form)</li>
+<li>compute <code>query_fingerprint</code> (hash)</li>
+<li>track:</li>
+<li>count</li>
+<li>total_time</li>
+<li>rows_returned</li>
+<li>bytes_returned</li>
+</ul>
+<h3 id="42-sampling">4.2 Sampling<a class="headerlink" href="#42-sampling" title="Permanent link">¶</a></h3>
+<p>To keep overhead low:
+- always count
+- sample timing at a configurable rate (e.g., 1/100)</p>
+<hr />
+<h2 id="5-ui-requirements-skeinadmin">5) UI requirements (SkeinAdmin)<a class="headerlink" href="#5-ui-requirements-skeinadmin" title="Permanent link">¶</a></h2>
+<p>The "Server Load &amp; Stats" section should include:</p>
+<p>1) <strong>Overview</strong>
+- CPU, RAM, disk, network
+- QPS/TPS
+- active sessions</p>
+<p>2) <strong>Latency</strong>
+- p50/p95/p99 over last N minutes
+- slow query list</p>
+<p>3) <strong>Storage</strong>
+- WAL growth
+- compaction progress
+- dedup ratio
+- snapshot sizes</p>
+<p>4) <strong>Cluster</strong> (if enabled)
+- node list with health
+- replication lag
+- shard placement</p>
+<hr />
+<h2 id="6-backlog">6) Backlog<a class="headerlink" href="#6-backlog" title="Permanent link">¶</a></h2>
+<ul>
+<li>ST01: Implement basic counters + <code>stats.snapshot</code></li>
+<li>ST02: Implement query fingerprint store + <code>stats.top_queries</code></li>
+<li>ST03: Implement slow query log + UI</li>
+<li>ST04: Implement <code>/metrics</code></li>
+<li>ST05: Expose storage stats (compaction, dedup, delta)</li>
+<li>ST06: Expose cluster stats (lag, shard placement)</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/OBSERVABILITY.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/OBSERVABILITY.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="clustering.html"><span>← Previous</span>Clustering</a>
+<a class="next" href="performance.html"><span>Next →</span>Performance</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-principles">1) Principles</a></li>
+<li><a href="#2-stats-data-model">2) Stats data model</a><ul>
+<li><a href="#21-instantaneous-system-snapshot">2.1 Instantaneous system snapshot</a></li>
+<li><a href="#22-database-workload-snapshot">2.2 Database workload snapshot</a></li>
+<li><a href="#23-storage-engine-snapshot">2.3 Storage engine snapshot</a></li>
+<li><a href="#24-cluster-snapshot-if-enabled">2.4 Cluster snapshot (if enabled)</a></li>
+</ul>
+</li>
+<li><a href="#3-export-surfaces">3) Export surfaces</a><ul>
+<li><a href="#31-skeinql-methods">3.1 SkeinQL methods</a></li>
+<li><a href="#32-http-metrics-endpoint-prometheus-style">3.2 HTTP metrics endpoint (Prometheus-style)</a></li>
+</ul>
+</li>
+<li><a href="#4-query-statistics">4) Query statistics</a><ul>
+<li><a href="#41-query-fingerprinting">4.1 Query fingerprinting</a></li>
+<li><a href="#42-sampling">4.2 Sampling</a></li>
+</ul>
+</li>
+<li><a href="#5-ui-requirements-skeinadmin">5) UI requirements (SkeinAdmin)</a></li>
+<li><a href="#6-backlog">6) Backlog</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wasm Query Operators — SkeinDB Docs</title>
+<meta name="description" content="Wasm Query Operators — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html" class="active">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>Wasm Query Operators</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="wasm-query-operators">Wasm Query Operators<a class="headerlink" href="#wasm-query-operators" title="Permanent link">¶</a></h1>
+<p>Status: Draft
+Last updated: 2026-01-31</p>
+<p>Goal:
+Define a stable ABI for columnar batches and a portable plan artifact so SkeinDB can compile query operators to WebAssembly.</p>
+<p>This document defines the v1 ABI and the initial plan subset used by <code>wasm.plan.*</code>.</p>
+<hr />
+<h2 id="1-scope-v1">1) Scope (v1)<a class="headerlink" href="#1-scope-v1" title="Permanent link">¶</a></h2>
+<p>Supported operator subset:
+- scan (single base table)
+- filter (WHERE predicate)
+- project (SELECT expressions)</p>
+<p>Unsupported in v1:
+- joins, aggregates, group_by/having
+- order_by, limit, distinct
+- subqueries, case/cast expressions</p>
+<hr />
+<h2 id="2-columnar-batch-abi-skeinwasmbatchv1">2) Columnar batch ABI (skein.wasm.batch.v1)<a class="headerlink" href="#2-columnar-batch-abi-skeinwasmbatchv1" title="Permanent link">¶</a></h2>
+<h3 id="21-layout-overview">2.1 Layout overview<a class="headerlink" href="#21-layout-overview" title="Permanent link">¶</a></h3>
+<p>Batches are encoded as a single byte buffer in little-endian order.
+All offsets are relative to the start of the buffer.</p>
+<div class="codehilite"><pre><span></span><code>struct BatchHeaderV1 {
+  u32 magic;         // &#39;S&#39;,&#39;K&#39;,&#39;B&#39;,&#39;1&#39;
+  u16 version;       // 1
+  u16 flags;         // reserved
+  u32 row_count;
+  u32 column_count;
+  u32 columns_offset; // start of ColumnMeta array
+}
+
+struct ColumnMetaV1 {
+  u32 type_tag;      // see 2.2
+  u32 data_offset;   // start of column data
+  u32 data_len;      // bytes
+  u32 nulls_offset;  // 0 if no null bitmap
+  u32 nulls_len;     // bytes
+  u32 aux_offset;    // for varlen (offsets) or 0
+  u32 aux_len;
+}
+</code></pre></div>
+
+<h3 id="22-type-tags">2.2 Type tags<a class="headerlink" href="#22-type-tags" title="Permanent link">¶</a></h3>
+<p>Type tags align with SkeinQL literal kinds:
+- 1: bool (1 byte per row)
+- 2: i64 (8 bytes)
+- 3: u64 (8 bytes)
+- 4: f64 (8 bytes)
+- 5: str (varlen, UTF-8)
+- 6: bytes (varlen)</p>
+<h3 id="23-null-bitmap">2.3 Null bitmap<a class="headerlink" href="#23-null-bitmap" title="Permanent link">¶</a></h3>
+<p>If <code>nulls_offset</code> is non-zero, it points to a bitmap with 1 bit per row.
+Bit=1 indicates a non-null value, bit=0 indicates NULL.
+If omitted, all values are non-null.</p>
+<h3 id="24-varlen-encoding">2.4 Varlen encoding<a class="headerlink" href="#24-varlen-encoding" title="Permanent link">¶</a></h3>
+<p>For <code>str</code> and <code>bytes</code> columns:
+- <code>aux_offset</code> points to a u32 offsets array of length <code>row_count + 1</code>.
+- <code>data_offset</code> points to the concatenated payload bytes.
+- The i-th value spans <code>data[offs[i]..offs[i+1]]</code>.</p>
+<hr />
+<h2 id="3-operator-abi-v1">3) Operator ABI (v1)<a class="headerlink" href="#3-operator-abi-v1" title="Permanent link">¶</a></h2>
+<p>Operators are pure batch-to-batch transforms. The module exports:</p>
+<div class="codehilite"><pre><span></span><code>// Returns (ptr &lt;&lt; 32) | len, like skein UDFs.
+export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
+</code></pre></div>
+
+<p>Rules:
+- The host writes the input batch into module memory at (ptr,len).
+- The function returns a packed (ptr,len) for the output batch.
+- Returning len=0 indicates end-of-stream.</p>
+<p>Memory management follows the UDF ABI in <code>docs/WASM_UDFS.md</code>.</p>
+<hr />
+<h2 id="4-plan-artifact-format-skeinwasmplanv1">4) Plan artifact format (skein.wasm.plan.v1)<a class="headerlink" href="#4-plan-artifact-format-skeinwasmplanv1" title="Permanent link">¶</a></h2>
+<p>The portable plan artifact is JSON, base64-encoded for transport:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;plan&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;ops&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">}},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;predicate&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;gt&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;score&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;param&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">}}},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;projection&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;expr&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;id&quot;</span><span class="p">}},</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;expr&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;score&quot;</span><span class="p">}}]}</span>
+<span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Rules:
+- <code>scan</code> must be first and exactly once.
+- <code>project</code> must be last and exactly once.
+- <code>filter</code> is optional and must appear between scan and project.</p>
+<hr />
+<h2 id="5-skeinql-methods">5) SkeinQL methods<a class="headerlink" href="#5-skeinql-methods" title="Permanent link">¶</a></h2>
+<h3 id="wasmplancompile">wasm.plan.compile<a class="headerlink" href="#wasmplancompile" title="Permanent link">¶</a></h3>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;select&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;projection&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;expr&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="p">}}],</span><span class="w"> </span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">}]}}},</span>
+<span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="wasmplanrun">wasm.plan.run<a class="headerlink" href="#wasmplanrun" title="Permanent link">¶</a></h3>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;result_format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;objects_json&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;want_etag&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;wire&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skeinpack_v1&quot;</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result: the same envelope as <code>query.select</code> (<code>QueryExecResult</code>).</p>
+<p>When <code>result_format: "wasm_batch_v1"</code> is used, <code>data</code> contains a columnar batch:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;id&quot;</span><span class="p">,</span><span class="nt">&quot;type&quot;</span><span class="p">:{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">}}</span><span class="w"> </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;batch_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="6-prototype-notes">6) Prototype notes<a class="headerlink" href="#6-prototype-notes" title="Permanent link">¶</a></h2>
+<p>Current implementation:
+- The plan artifact is interpreted by the host (no Wasm codegen yet).
+- Only the filter/project subset is accepted.
+- <code>abi</code> and <code>target</code> are validated but otherwise ignored in v1.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/WASM_OPERATORS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/WASM_OPERATORS.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="wasm-udfs.html"><span>← Previous</span>Wasm UDFs</a>
+<a class="next" href="merge-functions.html"><span>Next →</span>Merge functions (CRDT)</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-scope-v1">1) Scope (v1)</a></li>
+<li><a href="#2-columnar-batch-abi-skeinwasmbatchv1">2) Columnar batch ABI (skein.wasm.batch.v1)</a><ul>
+<li><a href="#21-layout-overview">2.1 Layout overview</a></li>
+<li><a href="#22-type-tags">2.2 Type tags</a></li>
+<li><a href="#23-null-bitmap">2.3 Null bitmap</a></li>
+<li><a href="#24-varlen-encoding">2.4 Varlen encoding</a></li>
+</ul>
+</li>
+<li><a href="#3-operator-abi-v1">3) Operator ABI (v1)</a></li>
+<li><a href="#4-plan-artifact-format-skeinwasmplanv1">4) Plan artifact format (skein.wasm.plan.v1)</a></li>
+<li><a href="#5-skeinql-methods">5) SkeinQL methods</a><ul>
+<li><a href="#wasmplancompile">wasm.plan.compile</a></li>
+<li><a href="#wasmplanrun">wasm.plan.run</a></li>
+</ul>
+</li>
+<li><a href="#6-prototype-notes">6) Prototype notes</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

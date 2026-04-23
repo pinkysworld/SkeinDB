@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-tuning Index Advisor (Telemetry-driven) — SkeinDB Docs</title>
+<meta name="description" content="Self-tuning Index Advisor (Telemetry-driven) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html" class="active">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Self-tuning Index Advisor (Telemetry-driven)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="self-tuning-index-advisor-telemetry-driven">Self-tuning Index Advisor (Telemetry-driven)<a class="headerlink" href="#self-tuning-index-advisor-telemetry-driven" title="Permanent link">¶</a></h1>
+<p>Status: Partial implementation
+Last updated: 2026-04-16</p>
+<p>Current runtime baseline:
+- Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
+- <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, and <code>advisor.history</code> are live.
+- Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
+- <code>advisor.apply_index</code> now queues background in-memory secondary-index builds, returns <code>queued</code> or <code>exists</code>, and <code>advisor.history</code> records lifecycle state (<code>queued</code>, <code>building</code>, <code>completed</code>, <code>failed</code>, <code>cancelled</code>) with progress percentages plus optional result/rollback metadata.
+- SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
+- Measured before/after latency deltas remain open work.</p>
+<p>Goal:
+Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.</p>
+<p>Key idea:
+- The MySQL translator and SkeinQL engine already see every query.
+- We can record lightweight telemetry (fingerprints, predicate columns, sort columns).
+- From that telemetry, we can generate candidate index suggestions, estimate benefit, and present them in SkeinAdmin.</p>
+<p>This feature is designed to be research-friendly:
+- it is measurable (latency/CPU before and after)
+- it can be evaluated on real trace-like corpora
+- it supports safe deployment (suggestions are human-approved by default)</p>
+<hr />
+<h2 id="1-inputs-collected-telemetry">1) Inputs (collected telemetry)<a class="headerlink" href="#1-inputs-collected-telemetry" title="Permanent link">¶</a></h2>
+<p>The telemetry layer should record the following per query fingerprint:
+- count
+- total_time_ms, p95_time_ms (approximate)
+- logical reads (optional)
+- table(s) referenced
+- for each table:
+  - equality predicates: columns in (col = lit/param)
+  - range predicates: columns in (col &lt;, &lt;=, &gt;, &gt;=, BETWEEN)
+  - join keys: columns used in equi-joins
+  - order_by keys
+  - group_by keys</p>
+<p>Important:
+- Do not store literal values unless explicitly enabled (privacy).
+- Store only column IDs or normalized names.</p>
+<hr />
+<h2 id="2-candidate-generation-heuristics-v1">2) Candidate generation heuristics (v1)<a class="headerlink" href="#2-candidate-generation-heuristics-v1" title="Permanent link">¶</a></h2>
+<p>The advisor produces candidate indexes per table.</p>
+<h3 id="21-equality-first-composite-indexes">2.1 Equality-first composite indexes<a class="headerlink" href="#21-equality-first-composite-indexes" title="Permanent link">¶</a></h3>
+<p>If many queries filter by equality on columns (a,b) and then order by c:
+Suggest INDEX(a,b,c).</p>
+<p>Heuristic:
+- For each frequent query pattern, create a candidate key list:
+  - all equality columns (sorted by selectivity if stats known)
+  - then one range column (at most one)
+  - then ORDER BY columns (if compatible)</p>
+<h3 id="22-covering-indexes">2.2 Covering indexes<a class="headerlink" href="#22-covering-indexes" title="Permanent link">¶</a></h3>
+<p>If queries repeatedly select the same small set of columns:
+- Suggest including them (covering) if the engine supports INCLUDE columns.
+- If not, keep as a normal index and rely on row lookup.</p>
+<h3 id="23-avoiding-pathological-suggestions">2.3 Avoiding pathological suggestions<a class="headerlink" href="#23-avoiding-pathological-suggestions" title="Permanent link">¶</a></h3>
+<p>Reject candidates that:
+- exceed max columns (e.g., &gt; 4)
+- start with low-cardinality columns unless they are always paired with selective columns
+- duplicate an existing index prefix</p>
+<hr />
+<h2 id="3-benefit-estimation">3) Benefit estimation<a class="headerlink" href="#3-benefit-estimation" title="Permanent link">¶</a></h2>
+<p>SkeinDB can estimate benefit using increasing levels of sophistication.</p>
+<h3 id="31-level-0-no-stats">3.1 Level 0 (no stats)<a class="headerlink" href="#31-level-0-no-stats" title="Permanent link">¶</a></h3>
+<ul>
+<li>Use rule-based benefit categories:</li>
+<li>"HIGH" if it changes SEQ_SCAN to INDEX_RANGE on a frequent query</li>
+<li>"MED" if it improves sorting elimination</li>
+<li>"LOW" otherwise</li>
+</ul>
+<h3 id="32-level-1-basic-stats">3.2 Level 1 (basic stats)<a class="headerlink" href="#32-level-1-basic-stats" title="Permanent link">¶</a></h3>
+<p>Maintain per-column:
+- approximate distinct count
+- null fraction
+- min/max (for numeric)</p>
+<p>Then estimate selectivity of equality predicates.</p>
+<h3 id="33-level-2-histograms">3.3 Level 2 (histograms)<a class="headerlink" href="#33-level-2-histograms" title="Permanent link">¶</a></h3>
+<p>Build simple equi-depth histograms for hot columns.</p>
+<hr />
+<h2 id="4-safety-and-workflow">4) Safety and workflow<a class="headerlink" href="#4-safety-and-workflow" title="Permanent link">¶</a></h2>
+<p>Default posture:
+- Advisor only suggests; it does not auto-apply.</p>
+<p>Workflow:
+1) SkeinAdmin shows suggestions with:
+   - candidate key columns (+ INCLUDE columns when available)
+   - observed scan pressure from recent workload telemetry
+   - an expected-after access-path summary
+2) Admin clicks "Apply"
+3) Engine records a queued advisor action and completes the build in the background
+4) History records queued/building/completed-or-failed state for later review
+5) Failed builds record rollback state before the suggestion can surface again</p>
+<p>Note:
+- The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
+- Progress reporting is lifecycle-level (<code>queued</code> -&gt; <code>building</code> -&gt; terminal state), not per-row physical build accounting.</p>
+<p>An optional "auto-apply" mode can exist for development environments.</p>
+<hr />
+<h2 id="5-skeinql-api">5) SkeinQL API<a class="headerlink" href="#5-skeinql-api" title="Permanent link">¶</a></h2>
+<p>Recommended methods:</p>
+<ul>
+<li>
+<p><code>advisor.index_synthesize</code> (experimental, R16)
+  Params:
+  <code>json
+  { "table": {"db":"mydb","table":"users"}, "limit": 20, "min_queries": 3, "min_rows": 32 }</code></p>
+</li>
+<li>
+<p><code>advisor.apply_index</code> (queues an in-memory secondary-index build in the prototype)</p>
+</li>
+<li>indexes rebuild lazily on first use after table changes</li>
+<li><code>advisor.dismiss</code> (suppresses the suggestion and drops any advisor-built index)</li>
+<li>
+<p><code>advisor.history</code></p>
+</li>
+<li>
+<p><code>advisor.index_suggestions</code>
+  Params:
+  <code>json
+  { "db": "mydb", "table": "users", "limit": 20 }</code></p>
+</li>
+<li>
+<p><code>advisor.apply_index</code>
+  Params:
+  <code>json
+  { "table": {"db": "mydb", "table": "users"}, "columns": ["city","created_at"], "include": ["name"] }</code></p>
+</li>
+<li>
+<p><code>advisor.dismiss</code></p>
+</li>
+<li><code>advisor.history</code></li>
+</ul>
+<hr />
+<p>Telemetry persistence (prototype):
+- Set <code>SKEINDB_ADVISOR_PERSIST=1</code> to persist advisor patterns/history on disk.
+- Files: <code>advisor_patterns.json</code> + <code>advisor_history.json</code>.
+- Applied advisor indexes are restored from the history log on startup when their latest apply action reached a terminal success state.</p>
+<h2 id="6-metrics">6) Metrics<a class="headerlink" href="#6-metrics" title="Permanent link">¶</a></h2>
+<p>Expose:
+- advisor_suggestions_total
+- advisor_applied_total
+- advisor_rejected_total
+- advisor_estimated_saved_ms_total</p>
+<p>Note: <code>advisor_estimated_saved_ms_total</code> is a placeholder in the prototype.</p>
+<hr />
+<h2 id="7-backlog">7) Backlog<a class="headerlink" href="#7-backlog" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] IA01: Telemetry query fingerprint + column feature extraction</li>
+<li>[x] IA02: Candidate generation + duplication checks</li>
+<li>[x] IA03: Benefit estimation level 0</li>
+<li>[x] IA04: SkeinQL endpoints + SkeinAdmin UI page</li>
+<li>[ ] IA05: Measured before/after reporting for advisor-applied indexes</li>
+</ul>
+<hr />
+<h2 id="research-extension-automatic-index-synthesis-from-dependency-analysis">Research extension: Automatic index synthesis from dependency analysis<a class="headerlink" href="#research-extension-automatic-index-synthesis-from-dependency-analysis" title="Permanent link">¶</a></h2>
+<p>The baseline index advisor uses query fingerprints and rule-based heuristics.
+The research agenda proposes a stronger signal: <strong>runtime dependency tracking</strong> (which key ranges, columns, and ordering requirements were actually used).
+See: <code>docs/research_agenda/R16_automatic-index-synthesis-from-dependency-analysis.md</code>.</p>
+<p>Adaptation sketch:
+- Extend dependency recording to include predicate columns, range shapes, and sort/group requirements.
+- Generate candidate indexes (including covering indexes) from aggregated dependencies.
+- Retire indexes that no longer deliver measurable benefit, with safety checks.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/INDEX_ADVISOR.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INDEX_ADVISOR.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="compaction-scheduler.html"><span>← Previous</span>Compaction scheduler</a>
+<a class="next" href="telemetry-and-migration.html"><span>Next →</span>Telemetry &amp; migration</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-inputs-collected-telemetry">1) Inputs (collected telemetry)</a></li>
+<li><a href="#2-candidate-generation-heuristics-v1">2) Candidate generation heuristics (v1)</a><ul>
+<li><a href="#21-equality-first-composite-indexes">2.1 Equality-first composite indexes</a></li>
+<li><a href="#22-covering-indexes">2.2 Covering indexes</a></li>
+<li><a href="#23-avoiding-pathological-suggestions">2.3 Avoiding pathological suggestions</a></li>
+</ul>
+</li>
+<li><a href="#3-benefit-estimation">3) Benefit estimation</a><ul>
+<li><a href="#31-level-0-no-stats">3.1 Level 0 (no stats)</a></li>
+<li><a href="#32-level-1-basic-stats">3.2 Level 1 (basic stats)</a></li>
+<li><a href="#33-level-2-histograms">3.3 Level 2 (histograms)</a></li>
+</ul>
+</li>
+<li><a href="#4-safety-and-workflow">4) Safety and workflow</a></li>
+<li><a href="#5-skeinql-api">5) SkeinQL API</a></li>
+<li><a href="#6-metrics">6) Metrics</a></li>
+<li><a href="#7-backlog">7) Backlog</a></li>
+<li><a href="#research-extension-automatic-index-synthesis-from-dependency-analysis">Research extension: Automatic index synthesis from dependency analysis</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

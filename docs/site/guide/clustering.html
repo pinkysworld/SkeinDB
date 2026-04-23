@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clustering and Scale-Out (SkeinCluster) — SkeinDB Docs</title>
+<meta name="description" content="Clustering and Scale-Out (SkeinCluster) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html" class="active">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Clustering and Scale-Out (SkeinCluster)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="clustering-and-scale-out-skeincluster">Clustering and Scale-Out (SkeinCluster)<a class="headerlink" href="#clustering-and-scale-out-skeincluster" title="Permanent link">¶</a></h1>
+<p>Status: Prototype v0.2 (control-plane + replication transport + shard placement)
+Last updated: 2026-02-25</p>
+<p>This document defines SkeinDB's approach to clustering.</p>
+<p>SkeinDB starts as a single-node system, but can be expanded into a cluster for:
+- higher read throughput (replicas)
+- higher availability (failover)
+- higher write throughput (sharding)</p>
+<p>The design is intentionally incremental:
+- <strong>Level 1: Primary + read replicas</strong> (simple, practical)
+- <strong>Level 2: Sharded tables</strong> (scale writes)
+- <strong>Level 3: Elastic rebalancing</strong> (move shards between nodes)</p>
+<p>A key differentiator for SkeinDB clustering is that its storage is content-addressed (ValueID):
+replication can transmit <em>references</em> to objects and only send missing objects on-demand.</p>
+<hr />
+<h2 id="1-components">1) Components<a class="headerlink" href="#1-components" title="Permanent link">¶</a></h2>
+<h3 id="11-node-roles">1.1 Node roles<a class="headerlink" href="#11-node-roles" title="Permanent link">¶</a></h3>
+<ul>
+<li><strong>Primary</strong>: accepts writes for its shard(s), produces WAL</li>
+<li><strong>Replica</strong>: replays WAL, serves read-only queries</li>
+<li><strong>Router (optional)</strong>: accepts client connections and routes queries to correct primary/replica</li>
+</ul>
+<p>A single executable may run in any role via CLI flags.</p>
+<h3 id="12-cluster-identity">1.2 Cluster identity<a class="headerlink" href="#12-cluster-identity" title="Permanent link">¶</a></h3>
+<p>Each node has a stable <code>node_id</code>.
+A cluster has a stable <code>cluster_id</code>.</p>
+<p>Nodes join clusters using a short-lived join token.</p>
+<hr />
+<h2 id="2-level-1-primary-replicas">2) Level 1: Primary + Replicas<a class="headerlink" href="#2-level-1-primary-replicas" title="Permanent link">¶</a></h2>
+<h3 id="21-replication-stream-wal-shipping">2.1 Replication stream (WAL shipping)<a class="headerlink" href="#21-replication-stream-wal-shipping" title="Permanent link">¶</a></h3>
+<p>Baseline replication is WAL shipping:
+- primary streams WAL records to replicas
+- replica applies committed transactions in order</p>
+<p>Replica maintains:
+- last applied LSN
+- lag metrics</p>
+<h3 id="22-cas-assisted-replication-novel-improvement">2.2 CAS-assisted replication (novel improvement)<a class="headerlink" href="#22-cas-assisted-replication-novel-improvement" title="Permanent link">¶</a></h3>
+<p>Because SkeinDB stores large values as immutable objects addressed by ValueID,
+the replication stream can be optimized:</p>
+<ul>
+<li>WAL can transmit row versions referencing ValueIDs</li>
+<li>replica checks if it already has the referenced objects</li>
+<li>only missing objects are requested and transferred</li>
+</ul>
+<p>See docs/CAS_REPLICATION.md for the missing-object protocol and publishable bandwidth metrics.</p>
+<p>This avoids redundant transfer when:
+- multiple replicas exist
+- values are deduplicated
+- delta chains share a common base</p>
+<h3 id="23-read-scaling">2.3 Read scaling<a class="headerlink" href="#23-read-scaling" title="Permanent link">¶</a></h3>
+<p>Replica can serve:
+- SkeinQL queries (HTTP)
+- optionally MySQL connections in read-only mode</p>
+<p>Router can distribute reads using:
+- round-robin
+- least-lag
+- latency-aware selection</p>
+<p>Writes always go to the primary in Level 1.</p>
+<h3 id="24-failover">2.4 Failover<a class="headerlink" href="#24-failover" title="Permanent link">¶</a></h3>
+<p>Minimal failover options:
+- manual promotion of a replica
+- optional automatic promotion if quorum is available (future)</p>
+<hr />
+<h2 id="3-level-2-sharding">3) Level 2: Sharding<a class="headerlink" href="#3-level-2-sharding" title="Permanent link">¶</a></h2>
+<p>Sharding is opt-in and explicit.</p>
+<h3 id="31-shard-keys">3.1 Shard keys<a class="headerlink" href="#31-shard-keys" title="Permanent link">¶</a></h3>
+<p>A sharded table defines:
+- shard key (usually the primary key or a chosen column)
+- shard function:
+  - hash-based: consistent hashing
+  - range-based: key ranges</p>
+<h3 id="32-routing-rules">3.2 Routing rules<a class="headerlink" href="#32-routing-rules" title="Permanent link">¶</a></h3>
+<ul>
+<li>single-shard queries route to one primary</li>
+<li>multi-shard queries are limited in v1 (or executed as scatter-gather)</li>
+</ul>
+<h3 id="33-transaction-scope">3.3 Transaction scope<a class="headerlink" href="#33-transaction-scope" title="Permanent link">¶</a></h3>
+<p>In Level 2 (v1), transactions are single-shard for simplicity.
+Cross-shard transactions are a future extension.</p>
+<hr />
+<h2 id="4-level-3-elastic-rebalancing">4) Level 3: Elastic rebalancing<a class="headerlink" href="#4-level-3-elastic-rebalancing" title="Permanent link">¶</a></h2>
+<p>Rebalancing moves shards between nodes.</p>
+<p>Novel opportunity:
+- content-addressed ValueStore allows "object set" transfer
+- shard move can transfer only missing ValueIDs
+- reduces time and bandwidth for rebalance</p>
+<p>Current prototype coverage:
+- the source node enumerates a shard-scoped object manifest from live row versions
+- the destination node preflights the manifest with <code>objects.need</code>
+- non-dry-run <code>cluster.shard.move</code> / <code>cluster.shard.rebalance</code> calls pull only missing objects via <code>objects.pull</code> before changing primary placement
+- move and rebalance responses include manifest/progress summaries so operators can report object counts, bytes, and pull outcomes</p>
+<hr />
+<h2 id="5-cluster-management-api-skeinql">5) Cluster management API (SkeinQL)<a class="headerlink" href="#5-cluster-management-api-skeinql" title="Permanent link">¶</a></h2>
+<p>Proposed methods:</p>
+<ul>
+<li><code>cluster.status</code></li>
+<li><code>cluster.nodes</code></li>
+<li><code>cluster.join_token.create</code></li>
+<li><code>cluster.node.join</code></li>
+<li><code>cluster.node.remove</code></li>
+<li><code>cluster.node.leave</code></li>
+<li><code>cluster.replica.promote</code></li>
+</ul>
+<p>For sharding:
+- <code>cluster.shard.create</code>
+- <code>cluster.shard.move</code>
+- <code>cluster.shard.rebalance</code></p>
+<p>Implemented in this build:
+- <code>cluster.status</code>
+- <code>cluster.nodes</code>
+- <code>cluster.join_token.create</code>
+- <code>cluster.node.join</code>
+- <code>cluster.node.remove</code>
+- <code>cluster.node.leave</code>
+- <code>cluster.replica.promote</code>
+- <code>cluster.shard.create</code>
+- <code>cluster.shard.move</code>
+- <code>cluster.shard.rebalance</code></p>
+<p>Replication transport implemented:
+- primary node enforces write ownership per shard/global primary
+- successful write RPCs are fanned out to replica nodes over HTTP RPC
+- replica applies replicated writes using <code>x-skeindb-replication: 1</code>
+- replication counters are exposed in <code>cluster.status</code> and <code>stats.snapshot.cluster</code>
+- graceful shutdown (<code>Ctrl+C</code>, <code>SIGTERM</code>, or <code>system.shutdown</code>) marks the local node offline and sends best-effort <code>cluster.node.leave</code> notifications to online peers</p>
+<hr />
+<h2 id="6-ui-requirements-skeinadmin">6) UI requirements (SkeinAdmin)<a class="headerlink" href="#6-ui-requirements-skeinadmin" title="Permanent link">¶</a></h2>
+<p>Cluster settings section should include:
+- topology graph
+- node list with role/health
+- replication lag
+- promote replica
+- add/remove node
+- shard placement view</p>
+<hr />
+<h2 id="7-backlog">7) Backlog<a class="headerlink" href="#7-backlog" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] CL01: node_id + cluster_id plumbing</li>
+<li>[ ] CL02: WAL streaming protocol + replica applier (full LSN stream)</li>
+<li>[ ] CL03: CAS object fetch protocol (ValueID pull)</li>
+<li>[x] CL04: replica read-only serving + lag metrics (RPC + stats snapshot exposure)</li>
+<li>[x] CL05: join token + node join/leave</li>
+<li>[x] CL06: UI cluster page (SkeinAdmin)</li>
+<li>[x] CL07: sharding metadata + router prototype (write ownership + shard primary checks)</li>
+<li>[x] CL08: shard move and rebalance (v1)</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/CLUSTERING.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/CLUSTERING.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="skeinadmin.html"><span>← Previous</span>SkeinAdmin (web console)</a>
+<a class="next" href="observability.html"><span>Next →</span>Observability</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-components">1) Components</a><ul>
+<li><a href="#11-node-roles">1.1 Node roles</a></li>
+<li><a href="#12-cluster-identity">1.2 Cluster identity</a></li>
+</ul>
+</li>
+<li><a href="#2-level-1-primary-replicas">2) Level 1: Primary + Replicas</a><ul>
+<li><a href="#21-replication-stream-wal-shipping">2.1 Replication stream (WAL shipping)</a></li>
+<li><a href="#22-cas-assisted-replication-novel-improvement">2.2 CAS-assisted replication (novel improvement)</a></li>
+<li><a href="#23-read-scaling">2.3 Read scaling</a></li>
+<li><a href="#24-failover">2.4 Failover</a></li>
+</ul>
+</li>
+<li><a href="#3-level-2-sharding">3) Level 2: Sharding</a><ul>
+<li><a href="#31-shard-keys">3.1 Shard keys</a></li>
+<li><a href="#32-routing-rules">3.2 Routing rules</a></li>
+<li><a href="#33-transaction-scope">3.3 Transaction scope</a></li>
+</ul>
+</li>
+<li><a href="#4-level-3-elastic-rebalancing">4) Level 3: Elastic rebalancing</a></li>
+<li><a href="#5-cluster-management-api-skeinql">5) Cluster management API (SkeinQL)</a></li>
+<li><a href="#6-ui-requirements-skeinadmin">6) UI requirements (SkeinAdmin)</a></li>
+<li><a href="#7-backlog">7) Backlog</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

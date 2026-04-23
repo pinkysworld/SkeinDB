@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL Compatibility — SkeinDB Docs</title>
+<meta name="description" content="MySQL Compatibility — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html" class="active">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>User Guide</span> <span>›</span> <span>MySQL Compatibility</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="mysql-compatibility">MySQL Compatibility<a class="headerlink" href="#mysql-compatibility" title="Permanent link">¶</a></h1>
+<p>SkeinDB is designed to be <em>adoptable</em> by existing applications that already speak MySQL.</p>
+<p>The <strong>compatibility layer</strong> is intentionally treated as an <em>adoption surface</em>:
+- it makes it possible to point existing apps/tools at SkeinDB with minimal change
+- while SkeinDB retains a separate, research-friendly control plane (SkeinQL)</p>
+<p>This document explains the intended scope and the current scaffold status.</p>
+<hr />
+<h2 id="what-mysql-compatibility-means-here">What “MySQL compatibility” means here<a class="headerlink" href="#what-mysql-compatibility-means-here" title="Permanent link">¶</a></h2>
+<p>There are two related layers:</p>
+<h3 id="1-mysql-protocol-compatibility">1) MySQL protocol compatibility<a class="headerlink" href="#1-mysql-protocol-compatibility" title="Permanent link">¶</a></h3>
+<p>Support the MySQL client/server wire protocol so standard clients and drivers can connect.</p>
+<p>Examples:
+- command-line clients (<code>mysql</code>)
+- application drivers (JDBC, ODBC, Node mysql2, PHP mysqli, ...)
+- tooling (migration tools, admin GUIs)</p>
+<h3 id="2-sql-dialect-compatibility">2) SQL dialect compatibility<a class="headerlink" href="#2-sql-dialect-compatibility" title="Permanent link">¶</a></h3>
+<p>Support a subset of MySQL SQL syntax and semantics.</p>
+<p>Even with protocol support, SQL dialect mismatches can break apps.</p>
+<hr />
+<h2 id="current-status-in-this-repository">Current status in this repository<a class="headerlink" href="#current-status-in-this-repository" title="Permanent link">¶</a></h2>
+<ul>
+<li>The CLI <code>--mysql</code> listener now supports a <strong>minimal MySQL wire handshake</strong> with <code>mysql_native_password</code> auth exchange.</li>
+<li>The listener supports a <code>COM_QUERY</code> translation subset through <code>sql.exec</code> for:</li>
+<li><code>SELECT</code> (literal-only, single-table, and simple <code>INNER JOIN</code> / <code>LEFT JOIN</code> / <code>RIGHT JOIN</code> / <code>CROSS JOIN</code> / <code>NATURAL JOIN</code> / <code>FULL OUTER JOIN</code> queries, including basic left-associative multi-join chains, top-level comma-separated <code>FROM</code> lists, baseline <code>JOIN ... USING (...)</code> rewrites for simple base-table joins with explicit/qualified projections, derived tables / FROM subqueries (<code>SELECT * FROM (SELECT ...) AS alias</code>), common table expressions (<code>WITH name AS (SELECT ...) SELECT * FROM name</code>), projection aliases with or without <code>AS</code>, and wildcard projections such as <code>SELECT *</code> / <code>table.*</code> / <code>db.table.*</code> over those supported join shapes)</li>
+<li><code>SHOW</code> (<code>DATABASES</code>, <code>TABLES</code>, <code>COLUMNS</code>)</li>
+<li><code>USE</code></li>
+<li><code>CREATE DATABASE</code>, <code>CREATE TABLE</code>, <code>CREATE [UNIQUE] INDEX</code>, <code>DROP INDEX</code>, <code>DROP TABLE</code></li>
+<li><code>ALTER TABLE ... ADD COLUMN</code> (including compatibility handling for <code>AFTER</code> / <code>FIRST</code> position clauses), <code>ALTER TABLE ... MODIFY [COLUMN]</code>, <code>ALTER TABLE ... CHANGE [COLUMN]</code>, <code>ALTER TABLE ... RENAME COLUMN</code>, <code>ALTER TABLE ... RENAME [KEY|INDEX] ... TO ...</code>, <code>ALTER TABLE ... RENAME [TO|AS] [db.]new_table</code>, <code>ALTER TABLE ... DROP COLUMN</code>, <code>ALTER TABLE ... ADD [UNIQUE] KEY</code>, and <code>ALTER TABLE ... DROP [KEY|INDEX]</code></li>
+<li><code>INSERT</code>, <code>INSERT IGNORE</code>, <code>REPLACE</code>, <code>UPDATE</code>, <code>DELETE</code></li>
+<li><code>INSERT ... SELECT</code></li>
+<li><code>INSERT ... ON DUPLICATE KEY UPDATE</code> (declared key-aware compatibility routing)</li>
+<li>Multi-table <code>DELETE</code>: <code>DELETE t1 FROM t1 JOIN t2 ON ... WHERE ...</code></li>
+<li>Multi-table <code>UPDATE</code>: <code>UPDATE t1 JOIN t2 ON ... SET t1.col = ... WHERE ...</code> (executes via SELECT + affected-row counting)</li>
+<li><code>TRUNCATE TABLE</code> (rewrite to <code>DELETE FROM</code>)</li>
+<li><code>DROP DATABASE</code> / <code>DROP SCHEMA</code> (with <code>IF EXISTS</code>)</li>
+<li><code>RENAME TABLE ... TO ...</code> (rewrite to <code>ALTER TABLE RENAME</code>)</li>
+<li><code>CREATE VIEW</code> / <code>DROP VIEW</code> (no-op stubs)</li>
+<li><code>UNION</code> / <code>UNION ALL</code></li>
+<li><code>SQL_CALC_FOUND_ROWS</code> and <code>FOUND_ROWS()</code></li>
+<li>The MySQL wire layer also now includes a <strong>basic prepared-statement baseline</strong>:</li>
+<li><code>COM_STMT_PREPARE</code>, <code>COM_STMT_EXECUTE</code>, and <code>COM_STMT_CLOSE</code></li>
+<li><code>COM_STMT_SEND_LONG_DATA</code>, <code>COM_STMT_RESET</code>, and baseline <code>COM_STMT_FETCH</code></li>
+<li><code>?</code> placeholders are rebound into the same SQL-translation path as <code>COM_QUERY</code></li>
+<li>simple prepared <code>SELECT</code>s now advertise prepare-time result column counts and MySQL-style column definitions (including single-table <code>SELECT *</code>, simple join projections across the supported <code>INNER</code> / <code>LEFT</code> / <code>RIGHT</code> / <code>CROSS</code> join subset and top-level comma-separated <code>FROM</code> lists, baseline <code>JOIN ... USING (...)</code> explicit-projection queries over simple base-table joins, projection aliases with or without <code>AS</code>, supported scalar-expression projections such as arithmetic expressions, broader scalar/date-time functions including <code>FIND_IN_SET</code> / <code>ISNULL</code>, <code>DATE_FORMAT</code> / <code>FROM_UNIXTIME</code>, <code>DATEDIFF</code> / <code>TIMESTAMPDIFF</code>, <code>WEEKDAY</code> / <code>DAYOFWEEK</code> / <code>DAYOFYEAR</code>, <code>MONTHNAME</code> / <code>DAYNAME</code>, <code>QUARTER</code>, <code>LAST_DAY</code>, <code>EXTRACT(&lt;unit&gt; FROM ...)</code>, and baseline interval arithmetic through <code>DATE_ADD</code> / <code>DATE_SUB</code> / <code>TIMESTAMPADD</code>, supported subquery-compat <code>SELECT</code>s whose <code>WHERE</code> clauses are rewritten through the compatibility layer, including the current <code>IN</code> / <code>EXISTS</code> / simple scalar-compare subset, plus <code>CASE</code> / <code>CAST</code>, and simple aggregate / grouped-aggregate compatibility queries)</li>
+<li>prepare-time COM_STMT metadata now also stays aligned for supported scalar subqueries in <code>SELECT</code> lists, including correlated projection subqueries and embedded arithmetic such as <code>salary - (SELECT AVG(...))</code></li>
+<li>prepared wildcard projections over the supported join subset now execute through the same wildcard-expansion path used by <code>COM_QUERY</code>, so prepare-time wildcard metadata and execute-time rows stay aligned for <code>SELECT *</code> / <code>table.*</code> / <code>db.table.*</code> join shapes</li>
+<li>prepared <code>SELECT</code> responses are returned over the binary row protocol</li>
+<li>read-only server-side cursor execution now works for prepared result sets</li>
+<li>deeper prepare-time metadata parity (more complex joins/subqueries, richer exact types, stricter cursor/driver semantics) remains follow-on work</li>
+<li>The MySQL wire layer also now includes wire protocol support for <code>COM_INIT_DB</code> (0x02) and <code>COM_STATISTICS</code> (0x09).</li>
+<li>The MySQL wire layer also ships <strong>compatibility shims</strong> for the checked-in corpus in <code>tests/compat/corpus.sql</code>, including:</li>
+<li><code>BETWEEN</code> / <code>NOT BETWEEN</code> in <code>WHERE</code> clauses</li>
+<li><code>REGEXP</code> / <code>RLIKE</code> / <code>NOT REGEXP</code> pattern-matching operator</li>
+<li><code>&lt;=&gt;</code> (NULL-safe equality operator)</li>
+<li><code>SELECT ... FOR UPDATE</code> / <code>FOR SHARE</code> / <code>LOCK IN SHARE MODE</code> (locking hints stripped for compatibility)</li>
+<li><code>SELECT VERSION()</code> and <code>SELECT DATABASE()</code></li>
+<li>WordPress-style/bootstrap session queries such as <code>SET NAMES</code>, <code>SET CHARACTER SET</code>, <code>SET SESSION sql_mode</code>, <code>SET SQL_AUTO_IS_NULL</code>, <code>SET SESSION sql_notes</code>, <code>SET time_zone</code>, transaction-isolation/read-only <code>SET</code> forms, and <code>SELECT @@sql_mode</code> / <code>@@transaction_isolation</code> / <code>@@sql_auto_is_null</code></li>
+<li>literal session-variable selects with MySQL-style <code>LIMIT</code> forms (<code>LIMIT n</code>, <code>LIMIT offset,n</code>, <code>LIMIT n OFFSET offset</code>) for bootstrap probes such as <code>SELECT @@version_comment</code></li>
+<li><code>SHOW FULL TABLES</code>, <code>SHOW TABLE STATUS</code>, <code>SHOW [FULL] COLUMNS</code>, <code>SHOW INDEX</code>, <code>SHOW CREATE TABLE</code></li>
+<li><code>SHOW CREATE DATABASE</code></li>
+<li><code>SHOW WARNINGS</code> / <code>SHOW ERRORS</code> (empty result compat)</li>
+<li><code>SHOW PROCESSLIST</code> / <code>SHOW FULL PROCESSLIST</code> (single-row stub)</li>
+<li><code>SHOW TRIGGERS</code> / <code>SHOW EVENTS</code> / <code>SHOW PROCEDURE STATUS</code> / <code>SHOW FUNCTION STATUS</code> (empty result stubs)</li>
+<li><code>SHOW PLUGINS</code> (single-row SkeinDB stub)</li>
+<li><code>SHOW PROFILES</code> (empty result stub)</li>
+<li><code>SHOW ENGINES</code> / <code>SHOW STORAGE ENGINES</code> (SkeinDB engine row)</li>
+<li><code>DESCRIBE</code> / <code>SHOW KEYS</code></li>
+<li>aggregate result emulation for <code>COUNT(*)</code>, <code>COUNT(col)</code>, <code>COUNT(DISTINCT col)</code>, <code>SUM(col)</code>, <code>MIN(col)</code>, <code>MAX(col)</code>, <code>AVG(col)</code>, <code>GROUP_CONCAT()</code>, <code>BIT_AND()</code>, <code>BIT_OR()</code>, and <code>BIT_XOR()</code> on both single-result aggregate queries, single-column <code>GROUP BY</code> queries (including compatibility-level single-result <code>HAVING</code> without <code>GROUP BY</code>, grouped <code>HAVING</code> for simple alias/aggregate-expression top-level <code>AND</code> predicates, and compatibility-level <code>ORDER BY</code> / <code>LIMIT</code> / <code>OFFSET</code> handling), <strong>multi-column <code>GROUP BY</code></strong> queries with multiple group columns and multiple aggregate expressions, plus multi-count aggregate queries such as WordPress Users-screen role counts built from <code>COUNT(NULLIF(&lt;predicate&gt;, false))</code></li>
+<li><strong>window functions</strong>: <code>ROW_NUMBER()</code>, <code>RANK()</code>, and <code>DENSE_RANK()</code> with <code>OVER(PARTITION BY ... ORDER BY ... [DESC])</code> clauses in <code>SELECT</code> projections</li>
+<li><strong>user variables</strong>: <code>SET @varname = value</code> and <code>SELECT @varname</code> with per-session state</li>
+<li>compatibility rewrite for WordPress-style non-aggregate <code>GROUP BY</code> de-dup queries when grouped columns map to the full projected column set, including wildcard projections after schema expansion, simple <code>HAVING</code> predicates over grouped projected columns / aliases, and <code>SQL_CALC_FOUND_ROWS</code> / <code>FOUND_ROWS()</code> flows</li>
+<li>wildcard projection execution for supported join shapes, including <code>SELECT *</code>, qualified <code>table.*</code> / <code>db.table.*</code>, and <code>SQL_CALC_FOUND_ROWS</code> / <code>FOUND_ROWS()</code> flows over those wildcard join result sets</li>
+<li>explicit <code>CROSS JOIN</code> and top-level comma-separated <code>FROM</code> lists for common compatibility-style join queries</li>
+<li><code>NATURAL JOIN</code> for automatic column-name-based join conditions</li>
+<li><code>FULL OUTER JOIN</code> with full execution support (not just parsed)</li>
+<li>derived tables / FROM subqueries (<code>SELECT * FROM (SELECT ...) AS alias</code>)</li>
+<li>common table expressions (CTEs): <code>WITH name AS (SELECT ...) SELECT * FROM name</code></li>
+<li>MySQL-style column <code>DEFAULT</code> handling for <code>CREATE TABLE</code> / <code>ALTER TABLE ... ADD COLUMN</code>, including <code>SHOW FULL COLUMNS</code> / <code>SHOW CREATE TABLE</code> output</li>
+<li><code>KEY</code> / <code>UNIQUE KEY</code> metadata from MySQL DDL (including <code>ALTER TABLE ... ADD [UNIQUE] KEY</code> and <code>ALTER TABLE ... RENAME [KEY|INDEX]</code>), surfaced through <code>SHOW INDEX</code> / <code>SHOW CREATE TABLE</code></li>
+<li><code>DISTINCT</code>, <code>IN (...)</code> / <code>NOT IN (...)</code>, <code>LIKE</code> / <code>NOT LIKE</code>, <code>IS NULL</code> / <code>IS NOT NULL</code>, and parenthesized <code>AND</code> / <code>OR</code> predicate trees for common WordPress query shapes, with <code>NULL</code> values now treated as SQL-style unknowns in comparison / <code>IN</code> / <code>LIKE</code> predicates</li>
+<li>broader MySQL scalar-function coverage for <code>LOWER</code> / <code>UPPER</code>, <code>LENGTH</code> / <code>CHAR_LENGTH</code>, <code>TRIM</code> / <code>LTRIM</code> / <code>RTRIM</code>, <code>LEFT</code> / <code>RIGHT</code>, <code>SUBSTRING</code> / <code>SUBSTR</code>, <code>REPLACE</code>, <code>NULLIF</code>, <code>IF</code>, <code>LOCATE</code>, <code>INSTR</code>, <code>FIND_IN_SET</code>, <code>ISNULL</code>, <code>ABS</code>, <code>ROUND</code>, <code>FLOOR</code>, <code>CEIL</code> / <code>CEILING</code>, <code>MOD</code>, <code>LEAST</code>, <code>GREATEST</code>, <code>COALESCE</code>, <code>IFNULL</code>, <code>CONCAT</code>, <code>CONCAT_WS</code>, <code>REPEAT</code>, <code>REVERSE</code>, <code>LPAD</code>, <code>RPAD</code>, <code>SPACE</code>, <code>HEX</code>, <code>UNHEX</code>, <code>FORMAT</code>, <code>SIGN</code>, <code>SQRT</code>, <code>POW</code> / <code>POWER</code>, <code>TRUNCATE</code>, <code>LOG</code> / <code>LN</code>, <code>LOG2</code>, <code>LOG10</code>, <code>EXP</code>, <code>PI</code>, <code>RAND</code>, <code>UUID</code>, <code>SLEEP</code>, <code>BENCHMARK</code>, <code>FIELD</code>, <code>ELT</code>, <code>INET_ATON</code>, <code>INET_NTOA</code>, <code>BIN</code>, <code>OCT</code>, <code>CONV</code>, <code>CRC32</code>, <code>MD5</code>, <code>SHA1</code> / <code>SHA</code>, <code>SHA2</code>, <code>INSERT</code> (string), <code>MAKE_SET</code>, <code>EXPORT_SET</code>, <code>QUOTE</code>, <code>SUBSTRING_INDEX</code>, <code>ASCII</code>, <code>ORD</code>, <code>CHAR</code>, <code>STRCMP</code>, <code>BIT_LENGTH</code>, <code>OCTET_LENGTH</code>, <code>REGEXP_REPLACE</code>, <code>REGEXP_SUBSTR</code>, <code>TO_BASE64</code>, <code>FROM_BASE64</code>, <code>DEGREES</code>, <code>RADIANS</code>, <code>PERIOD_ADD</code>, <code>PERIOD_DIFF</code>, <code>MAKEDATE</code>, and <code>MAKETIME</code> in translated projections and simple predicates</li>
+<li>JSON function coverage: <code>JSON_EXTRACT</code>, <code>JSON_UNQUOTE</code>, <code>JSON_OBJECT</code>, <code>JSON_ARRAY</code>, <code>JSON_CONTAINS</code>, <code>JSON_LENGTH</code>, <code>JSON_TYPE</code>, <code>JSON_VALID</code>, <code>JSON_SET</code>, <code>JSON_KEYS</code>, <code>JSON_MERGE_PRESERVE</code>, <code>JSON_REMOVE</code>, <code>JSON_REPLACE</code>, and <code>JSON_INSERT</code></li>
+<li>baseline translated date/time scalar functions for <code>DATE</code>, <code>YEAR</code>, <code>MONTH</code>, <code>DAY</code> / <code>DAYOFMONTH</code>, <code>WEEKDAY</code>, <code>DAYOFWEEK</code>, <code>DAYOFYEAR</code>, <code>MONTHNAME</code>, <code>DAYNAME</code>, <code>QUARTER</code>, <code>LAST_DAY</code>, <code>EXTRACT(&lt;unit&gt; FROM ...)</code>, <code>HOUR</code>, <code>MINUTE</code>, <code>SECOND</code>, <code>UNIX_TIMESTAMP</code>, <code>DATE_FORMAT</code>, <code>FROM_UNIXTIME</code>, <code>DATEDIFF</code>, <code>TIMESTAMPDIFF</code>, baseline interval arithmetic through <code>DATE_ADD</code> / <code>DATE_SUB</code> (with <code>INTERVAL &lt;expr&gt; &lt;unit&gt;</code> syntax) and <code>TIMESTAMPADD</code>, <code>NOW</code> / <code>CURRENT_TIMESTAMP</code> / <code>LOCALTIMESTAMP</code>, <code>CURDATE</code> / <code>CURRENT_DATE</code> / <code>CURTIME</code> / <code>CURRENT_TIME</code> / <code>LOCALTIME</code>, <code>STR_TO_DATE</code>, <code>WEEK</code>, <code>YEARWEEK</code>, <code>CONVERT_TZ</code>, <code>UTC_TIMESTAMP</code>, <code>UTC_DATE</code>, <code>UTC_TIME</code>, <code>SYSDATE</code>, <code>ADDTIME</code>, <code>SUBTIME</code>, <code>TIME_TO_SEC</code>, and <code>SEC_TO_TIME</code></li>
+<li>baseline translated <code>CASE ... WHEN ... THEN ... ELSE ... END</code> and <code>CAST(... AS ...)</code> expression support in projections, simple predicates, and scalar-expression <code>ORDER BY</code> clauses for the current translated subset</li>
+<li>baseline translated arithmetic expression support for <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>, and <code>%</code> in projections, simple predicates, and scalar-expression <code>ORDER BY</code> clauses, including numeric ordering/filtering patterns such as <code>col + 0</code></li>
+<li>secondary-index-backed duplicate-key enforcement for <code>PRIMARY KEY</code> / <code>UNIQUE KEY</code> writes (including <code>PRIMARY KEY</code>-changing <code>UPDATE</code>s), declared PK / <code>UNIQUE KEY</code> conflict routing for <code>REPLACE</code> and <code>ON DUPLICATE KEY UPDATE</code>, duplicate-row rejection when creating a MySQL compatibility <code>UNIQUE INDEX</code> over existing data, durable per-table secondary-index cache metadata (<code>tables/&lt;db&gt;/&lt;table&gt;.sidx.json</code>) that reloads on reopen, and MySQL-style duplicate-key wire errors (<code>1062</code> / <code>23000</code>)</li>
+<li><code>SHOW VARIABLES</code>, <code>SHOW STATUS</code>, <code>SHOW CHARACTER SET</code>, <code>SHOW COLLATION</code>, <code>SHOW ENGINES</code>, <code>SHOW GRANTS</code> (including compatibility values for WordPress/common bootstrap variables such as <code>sql_auto_is_null</code>, charset/collation variables, <code>time_zone</code>, and <code>transaction_isolation</code>; unfiltered and scoped forms like <code>SHOW [SESSION|GLOBAL] VARIABLES</code>; simple <code>WHERE Variable_name ...</code> / <code>WHERE Charset ...</code> filters; plus wildcard patterns like <code>SHOW VARIABLES LIKE 'character_set_%'</code>)</li>
+<li><code>information_schema.schemata</code> virtual table</li>
+<li><code>information_schema.tables</code> virtual table with real table metadata</li>
+<li><code>information_schema.columns</code> virtual table with column metadata, ordinal positions, nullable/PK info</li>
+<li><code>information_schema.statistics</code> virtual table with real index data from PK + secondary indexes</li>
+<li><code>information_schema.key_column_usage</code> virtual table (PK + UNIQUE key columns)</li>
+<li><code>information_schema.table_constraints</code> virtual table (PK + UNIQUE constraints)</li>
+<li><code>information_schema.character_sets</code> virtual table</li>
+<li><code>information_schema.collations</code> virtual table</li>
+<li><code>information_schema.engines</code> virtual table</li>
+<li><code>information_schema.routines</code> virtual table (empty stub)</li>
+<li><code>information_schema.triggers</code> virtual table (empty stub)</li>
+<li><code>information_schema.views</code> virtual table (empty stub)</li>
+<li><code>information_schema.processlist</code> virtual table (single-row stub)</li>
+<li><code>information_schema.user_privileges</code> virtual table (single-row stub)</li>
+<li>limited subquery compatibility rewrites for common adoption paths: <code>... WHERE &lt;col&gt; [NOT] IN (SELECT ...)</code>, <code>... WHERE [NOT] EXISTS (SELECT ...)</code>, and simple scalar comparison predicates such as <code>... WHERE &lt;expr&gt; = (SELECT ...)</code>, including parenthesized top-level <code>AND</code> / <code>OR</code> boolean trees that mix one or more of those predicates with translated non-subquery filters, negated <code>NOT (...)</code> wrappers when the resulting boolean tree can be pushed back into the translated comparison subset, recursive execution when nested inner subqueries also fit the current compatibility path, plus simple correlated rewrites for base-table subqueries whose outer references are top-level equality clauses (including equality-based correlated <code>IN</code> and multi-column <code>EXISTS</code> membership rewrites; scalar subqueries currently require a single projected column and at most one row)</li>
+<li><code>USER()</code> / <code>CURRENT_USER()</code> / <code>SESSION_USER()</code> / <code>SYSTEM_USER()</code> session functions</li>
+<li><code>LAST_INSERT_ID()</code> function with session tracking</li>
+<li><code>CONNECTION_ID()</code> function</li>
+<li><code>EXPLAIN</code> with real table name extraction from inner query (SELECT/UPDATE/DELETE/INSERT)</li>
+<li><code>DO</code> statement</li>
+<li><code>SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code> (no-op stubs)</li>
+<li><code>SET GLOBAL</code> forms (no-op compat)</li>
+<li><code>SET autocommit</code> (including qualified/session forms), <code>BEGIN</code>, <code>COMMIT</code>, <code>ROLLBACK</code>, and <code>START TRANSACTION</code></li>
+<li><code>FLUSH</code> / <code>ANALYZE</code> / <code>OPTIMIZE</code> / <code>CHECK</code> / <code>REPAIR TABLE</code> (no-op compat)</li>
+<li><code>KILL</code> command (no-op)</li>
+<li>compatibility no-op handling for <code>LOCK TABLES</code> / <code>UNLOCK TABLES</code></li>
+<li><code>crates/skeindb/tests/cluster_rpc.rs</code> now executes the entire compatibility corpus end-to-end over the MySQL port, so the corpus is enforced as a runtime baseline instead of only documented, including scalar-function, arithmetic-expression, extended date/time-function/formatting coverage (now including <code>DATEDIFF</code> / <code>TIMESTAMPDIFF</code>, <code>WEEKDAY</code> / <code>DAYOFWEEK</code> / <code>DAYOFYEAR</code>, <code>MONTHNAME</code> / <code>DAYNAME</code>, <code>QUARTER</code>, <code>LAST_DAY</code>, <code>EXTRACT(&lt;unit&gt; FROM ...)</code>, plus baseline interval arithmetic through <code>DATE_ADD</code> / <code>DATE_SUB</code> / <code>TIMESTAMPADD</code>), single-result aggregate <code>HAVING</code> without <code>GROUP BY</code>, grouped-aggregate <code>HAVING</code>, non-aggregate wildcard <code>GROUP BY</code> de-dup coverage, <code>CASE</code> / <code>CAST</code>, expression-ordering, projection aliases with or without <code>AS</code>, wildcard join projection coverage (<code>SELECT *</code>, qualified <code>table.*</code>, and schema-qualified <code>db.table.*</code>), explicit <code>CROSS JOIN</code>, comma-list join coverage, baseline <code>JOIN ... USING (...)</code> explicit-projection coverage, parenthesized boolean-tree correlated/nested-subquery coverage, simple scalar-subquery comparison coverage, simple correlated <code>EXISTS</code> coverage, duplicate-check coverage for creating MySQL compatibility unique indexes, <code>BETWEEN</code> / <code>NOT BETWEEN</code>, <code>COUNT(DISTINCT col)</code>, <code>GROUP_CONCAT()</code>, <code>INSERT ... SELECT</code>, <code>UNION</code> / <code>UNION ALL</code>, <code>TRUNCATE TABLE</code>, <code>DROP DATABASE</code>, <code>RENAME TABLE</code>, session functions (<code>USER()</code>, <code>LAST_INSERT_ID()</code>, <code>CONNECTION_ID()</code>), <code>EXPLAIN</code> stub, <code>DO</code> statement, <code>SAVEPOINT</code> stubs, locking hint stripping, <code>information_schema.schemata</code> / <code>information_schema.statistics</code>, expanded <code>SHOW</code> commands, WordPress Site Health-style <code>information_schema.TABLES</code> storage summaries, WordPress Users-screen role counts built from <code>COUNT(NULLIF(&lt;predicate&gt;, false))</code>, and the full set of additional scalar and date/time functions listed above, plus derived tables (FROM subqueries), CTEs (<code>WITH...AS</code>), <code>REGEXP</code>/<code>RLIKE</code>/<code>NOT REGEXP</code>, <code>&lt;=&gt;</code> (NULL-safe equality), <code>NATURAL JOIN</code>, <code>FULL OUTER JOIN</code>, multi-table <code>DELETE</code>, multi-table <code>UPDATE</code> (executed), 14 JSON functions (<code>JSON_EXTRACT</code>/<code>JSON_UNQUOTE</code>/<code>JSON_OBJECT</code>/<code>JSON_ARRAY</code>/<code>JSON_CONTAINS</code>/<code>JSON_LENGTH</code>/<code>JSON_TYPE</code>/<code>JSON_VALID</code>/<code>JSON_SET</code>/<code>JSON_KEYS</code>/<code>JSON_MERGE_PRESERVE</code>/<code>JSON_REMOVE</code>/<code>JSON_REPLACE</code>/<code>JSON_INSERT</code>), additional scalar functions (<code>FIELD</code>/<code>ELT</code>, <code>INET_ATON</code>/<code>INET_NTOA</code>, <code>BIN</code>/<code>OCT</code>/<code>CONV</code>, <code>CRC32</code>, <code>MD5</code>, <code>SHA1</code>/<code>SHA</code>, <code>SHA2</code>, <code>INSERT</code>/<code>MAKE_SET</code>/<code>EXPORT_SET</code>/<code>QUOTE</code>), 9 <code>information_schema</code> virtual tables (<code>tables</code>/<code>columns</code>/<code>schemata</code>/<code>statistics</code>/<code>key_column_usage</code>/<code>table_constraints</code>/<code>character_sets</code>/<code>collations</code>/<code>engines</code>), <code>SHOW ENGINES</code>, <code>GROUP_CONCAT</code> with <code>SEPARATOR</code>/<code>DISTINCT</code>/<code>ORDER BY</code> stripping, and <code>EXPLAIN</code> with real table extraction. The corpus has expanded to 1657 lines with about 678 semicolon-terminated SQL statements covering all previously TODO-gated features (IF/NULLIF, EXISTS/NOT EXISTS, REGEXP, CAST, COUNT DISTINCT, window functions, CTEs, RIGHT/CROSS/NATURAL/FULL OUTER JOIN, derived tables, IN/scalar subqueries, multi-table DELETE/UPDATE, LOCK/UNLOCK, INFORMATION_SCHEMA), plus new coverage for INSERT...SELECT, DO, EXPLAIN, SAVEPOINT, CREATE/DROP VIEW, system variables (@@version, @@autocommit, etc.), session functions (CURRENT_USER, CONNECTION_ID, FOUND_ROWS), locking hints (FOR UPDATE/FOR SHARE), extended SHOW commands, SET GLOBAL, and additional scalar functions (RAND, UUID, SLEEP, BENCHMARK, ISNULL, FIND_IN_SET, ADDTIME, SUBTIME, CONVERT_TZ, WEEKDAY, MONTHNAME, DAYNAME, QUARTER, SYSDATE, etc.). Separate MySQL-wire regressions now also pin real WordPress installer/admin seed queries: escaped single-row <code>INSERT</code>s, trailing <code>/* LOCK */</code> comments, serialized <code>_site_transient_wp_theme_files_patterns-*</code> option upserts, <code>information_schema.TABLES</code> probes using <code>TABLE_NAME IN (...)</code> plus <code>ENGINE = ...</code>, and the WordPress admin Users/Site Health query shapes exercised in the live smoke.</li>
+<li>The primary working interface in the scaffold is <strong>SkeinQL JSON-RPC over HTTP</strong>.</li>
+<li>The SQL story is split:</li>
+<li><strong>SkeinQL</strong> includes a full query/expression layer intended to cover common SQL patterns.</li>
+<li>A shipped but intentionally narrow <strong>SQL→SkeinQL translation layer</strong> now provides the current MySQL-ish subset; broader parity work is still ongoing.</li>
+</ul>
+<p>If you want “drop-in MySQL for real apps”, the next concrete milestones are:
+1) broaden <code>COM_QUERY</code> parity beyond the current WordPress-class baseline with stricter parity tests (deeper correlated/nested subqueries beyond the current recursive <code>IN</code> / <code>EXISTS</code> / simple scalar-compare compatibility path, broader function/date/time/cast parity beyond the current scalar + date/time baseline, and broader <code>ALTER TABLE</code> variants beyond the current <code>ADD/MODIFY/CHANGE/RENAME COLUMN/RENAME [KEY|INDEX]/RENAME TO/DROP COLUMN</code> plus index metadata surface)
+2) deepen prepared-statement parity (complex-query metadata, stricter driver/cursor semantics, fuller protocol coverage) and optimizer parity for production drivers, even though prepare-time metadata now also covers supported scalar-expression projections including baseline arithmetic, broader scalar/date-time functions including <code>FIND_IN_SET</code> / <code>ISNULL</code>, <code>DATE_FORMAT</code> / <code>FROM_UNIXTIME</code>, <code>DATEDIFF</code> / <code>TIMESTAMPDIFF</code>, <code>WEEKDAY</code> / <code>DAYOFWEEK</code> / <code>DAYOFYEAR</code>, <code>MONTHNAME</code> / <code>DAYNAME</code>, <code>QUARTER</code>, <code>LAST_DAY</code>, <code>EXTRACT(&lt;unit&gt; FROM ...)</code>, and baseline interval arithmetic through <code>DATE_ADD</code> / <code>DATE_SUB</code> / <code>TIMESTAMPADD</code>, supported subquery-compat <code>SELECT</code>s whose <code>WHERE</code> clauses rewrite cleanly, the current projection-level scalar-subquery slice, embedded scalar-subquery arithmetic, plus <code>CASE</code> / <code>CAST</code> and simple aggregate / grouped-aggregate compatibility shims</p>
+<hr />
+<h2 id="compatibility-telemetry-and-migration-hints">Compatibility telemetry and migration hints<a class="headerlink" href="#compatibility-telemetry-and-migration-hints" title="Permanent link">¶</a></h2>
+<p>A central research idea in SkeinDB is to <em>instrument</em> the compatibility layer:</p>
+<ul>
+<li>track which SQL features a workload actually uses</li>
+<li>emit <strong>automatic migration hints</strong> (MySQL → SkeinQL)</li>
+<li>provide “compatibility coverage” metrics (what percentage of a real workload would run)</li>
+</ul>
+<p>See:
+- <code>docs/COMPAT_TELEMETRY.md</code>
+- the paper section “Compatibility telemetry + migration hints”</p>
+<hr />
+<h2 id="suggested-implementation-plan">Suggested implementation plan<a class="headerlink" href="#suggested-implementation-plan" title="Permanent link">¶</a></h2>
+<p>A staged plan that keeps SkeinDB single-binary:</p>
+<p>1) <strong>Protocol skeleton</strong>
+   - handle handshake + capability flags
+   - accept a connection and respond to a fixed <code>SELECT 1</code></p>
+<p>2) <strong>Minimal SQL subset</strong>
+   - implement <code>SELECT ... FROM table WHERE pk = ?</code>
+   - implement parameter binding</p>
+<p>3) <strong>Translation to SkeinQL</strong>
+   - parse SQL into an AST
+   - translate to SkeinQL <code>Query</code> + <code>Expr</code></p>
+<p>4) <strong>Coverage + correctness</strong>
+   - expand supported functions, joins, aggregation
+   - add golden tests (same query → same result) against MySQL</p>
+<p>5) <strong>Performance work</strong>
+   - prepared statement caching
+   - vectorized execution path for common scans</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/MYSQL_COMPAT.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="skeinql.html"><span>← Previous</span>SkeinQL reference</a>
+<a class="next" href="pg-compat.html"><span>Next →</span>PostgreSQL compatibility</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#what-mysql-compatibility-means-here">What “MySQL compatibility” means here</a><ul>
+<li><a href="#1-mysql-protocol-compatibility">1) MySQL protocol compatibility</a></li>
+<li><a href="#2-sql-dialect-compatibility">2) SQL dialect compatibility</a></li>
+</ul>
+</li>
+<li><a href="#current-status-in-this-repository">Current status in this repository</a></li>
+<li><a href="#compatibility-telemetry-and-migration-hints">Compatibility telemetry and migration hints</a></li>
+<li><a href="#suggested-implementation-plan">Suggested implementation plan</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

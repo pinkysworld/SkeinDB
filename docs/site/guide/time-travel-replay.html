@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Time-travel queries and reproducible replay bundles — SkeinDB Docs</title>
+<meta name="description" content="Time-travel queries and reproducible replay bundles — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html" class="active">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Time-travel queries and reproducible replay bundles</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="time-travel-queries-and-reproducible-replay-bundles">Time-travel queries and reproducible replay bundles<a class="headerlink" href="#time-travel-queries-and-reproducible-replay-bundles" title="Permanent link">¶</a></h1>
+<p>Status: Implemented (T180-T184 complete)
+Last updated: 2026-04-20</p>
+<p>This document specifies two related capabilities:</p>
+<ol>
+<li>Time-travel queries: allow applications and administrators to query data "as of" a previous point in time.</li>
+<li>Reproducible replay bundles: export a self-contained artifact containing schema snapshots, retained row versions, and change-event metadata for deterministic replays in a clean environment.</li>
+</ol>
+<p>These features build on SkeinDB's MVCC model (commit timestamps) and the retained change log.
+Time travel is useful for auditing, debugging, and point-in-time analytics.
+Replay bundles are useful for reproducing production-only bugs, doing incident response, and validating correctness after engine changes.</p>
+<p>Current implementation note:</p>
+<ul>
+<li>Time-travel queries are true MVCC <code>as_of</code> reads over retained row versions.</li>
+<li>Replay bundles are currently snapshot-based rather than full WAL-replay artifacts because the engine does not yet retain historical update payloads for every row version transition. The exported bundle includes enough schema, retained rows, tombstones, and change-event metadata to deterministically re-materialize a clean workspace and verify its integrity via canonical checksums.</li>
+<li>SkeinAdmin now exposes a dedicated <code>Time Travel &amp; Replay</code> page for <code>query.select as_of</code>, <code>maintenance.history.*</code> retention controls, replay bundle export/download/import, and integrity verification summaries driven by <code>maintenance.replay.run</code>.</li>
+</ul>
+<h2 id="1-time-travel-semantics">1. Time travel semantics<a class="headerlink" href="#1-time-travel-semantics" title="Permanent link">¶</a></h2>
+<h3 id="11-as-of-reads">1.1 As-of reads<a class="headerlink" href="#11-as-of-reads" title="Permanent link">¶</a></h3>
+<ul>
+<li>Each committed write transaction is assigned a monotonically increasing commit timestamp (<code>commit_ts</code>).</li>
+<li>Each row version stores <code>commit_ts</code> and (optionally) <code>end_ts</code> (or a tombstone marker).</li>
+<li>An as-of read at timestamp <code>T</code> returns the newest row version with <code>commit_ts &lt;= T</code> that is not deleted as of <code>T</code>.</li>
+</ul>
+<p>Visibility rules:</p>
+<ul>
+<li>If a row was inserted after <code>T</code>, it is invisible.</li>
+<li>If a row was deleted at time <code>D</code>, it is visible for <code>T &lt; D</code> and invisible for <code>T &gt;= D</code>.</li>
+<li>For updates, the old version remains visible before the update commit timestamp.</li>
+</ul>
+<h3 id="12-isolation">1.2 Isolation<a class="headerlink" href="#12-isolation" title="Permanent link">¶</a></h3>
+<ul>
+<li>As-of reads are snapshot reads pinned to a historical timestamp.</li>
+<li>A transaction may be started with an <code>as_of</code> timestamp; all reads observe that snapshot.</li>
+<li>Writes are rejected in a historical snapshot transaction by default (<code>read_only=true</code>), to prevent confusing "time-travel writes".</li>
+</ul>
+<h3 id="13-retention-and-garbage-collection">1.3 Retention and garbage collection<a class="headerlink" href="#13-retention-and-garbage-collection" title="Permanent link">¶</a></h3>
+<p>Time travel requires retaining old versions. SkeinDB supports a retention policy:</p>
+<ul>
+<li><code>retain_versions</code>: duration or minimum horizon expressed as an oldest retained <code>commit_ts</code>.</li>
+<li><code>retain_wal</code>: duration or LSN horizon (affects replay bundle exportability).</li>
+</ul>
+<p>Garbage collection removes:</p>
+<ul>
+<li>row versions older than the retention horizon,</li>
+<li>and ValueStore objects that are unreferenced by any retained row version.</li>
+</ul>
+<h4 id="131-maintenancehistory-rpc-surface-t182">1.3.1 <code>maintenance.history.*</code> RPC surface (T182)<a class="headerlink" href="#131-maintenancehistory-rpc-surface-t182" title="Permanent link">¶</a></h4>
+<p>The retention policy is configured through the <code>settings.*</code> subsystem and the
+following three RPC methods (matching the <code>maintenance.compaction.*</code> layout):</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Direction</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>maintenance.history.status</code></td>
+<td>read-only</td>
+<td>Returns live/tombstone/purgeable row counts per table, the <code>oldest_tombstone_commit_ts_ms</code>, the effective <code>horizon_ms</code>, and the persisted retention policy. Included in the read-only RPC allowlist.</td>
+</tr>
+<tr>
+<td><code>maintenance.history.set_policy</code></td>
+<td>write</td>
+<td>Persists <code>history.retention.enabled</code> (bool) and <code>history.retention.window_ms</code> (u64). When enabled, an absent explicit <code>horizon_ms</code> in subsequent calls resolves to <code>now_ms - window_ms</code>.</td>
+</tr>
+<tr>
+<td><code>maintenance.history.gc</code></td>
+<td>write</td>
+<td>Permanently removes MVCC tombstones whose <code>commit_ts_ms &lt;= horizon_ms</code>. Accepts an explicit <code>horizon_ms</code> parameter; otherwise uses the policy-derived horizon.</td>
+</tr>
+</tbody>
+</table>
+<p>Horizon resolution precedence:</p>
+<ol>
+<li>Explicit <code>params.horizon_ms</code> (if provided, wins outright).</li>
+<li><code>history.retention.enabled == true</code> and <code>history.retention.window_ms &gt; 0</code> → <code>now_ms - window_ms</code>.</li>
+<li>Otherwise <code>None</code> (status reports all tombstones as purgeable; GC purges all timestamped tombstones).</li>
+</ol>
+<p>Safety rule: tombstones with <code>commit_ts_ms == 0</code> are <strong>never</strong> purged. These
+originate from the pre-T180 era when tombstones did not carry a commit
+timestamp; retaining them avoids accidentally resurrecting rows whose
+deletion point cannot be proven. Operators should monitor the status
+surface's <code>oldest_tombstone_commit_ts_ms</code> to confirm the steady state.</p>
+<p>After a successful GC pass per table the engine:</p>
+<ol>
+<li>Rebuilds the primary-key index (<code>pk_index</code>) since retained-row indices shift.</li>
+<li>Bumps <code>schema.table_version</code> so secondary indexes refresh lazily on next use.</li>
+<li>Clears cached vector indexes (stored row indices are stale).</li>
+<li>Persists the table to disk (best-effort; the first error is returned as <code>history_gc_partial</code> after the in-memory pass completes).</li>
+</ol>
+<h3 id="14-sql-compatibility-surface">1.4 SQL compatibility surface<a class="headerlink" href="#14-sql-compatibility-surface" title="Permanent link">¶</a></h3>
+<p>Because SQL/MySQL is a compatibility ingress, SkeinDB exposes time travel to SQL clients without requiring new SQL syntax:</p>
+<ul>
+<li>Session variable: <code>SET @@skein.as_of = '2026-01-01T00:00:00Z';</code> affects subsequent <code>SELECT</code> statements (read-only).</li>
+<li>Query hint: <code>SELECT /*+ SKEIN_AS_OF('2026-01-01T00:00:00Z') */ ...;</code> overrides session setting for the statement.</li>
+</ul>
+<p>The default remains current-time behavior.</p>
+<h2 id="2-replay-bundles">2. Replay bundles<a class="headerlink" href="#2-replay-bundles" title="Permanent link">¶</a></h2>
+<h3 id="21-goals">2.1 Goals<a class="headerlink" href="#21-goals" title="Permanent link">¶</a></h3>
+<p>A replay bundle should allow:</p>
+<ul>
+<li>reconstructing database state at a chosen point (LSN or commit_ts),</li>
+<li>replaying a sequence of operations deterministically,</li>
+<li>sharing a minimal artifact with developers without exposing unrelated data (optional redaction).</li>
+</ul>
+<h3 id="22-bundle-contents">2.2 Bundle contents<a class="headerlink" href="#22-bundle-contents" title="Permanent link">¶</a></h3>
+<p>A bundle currently includes:</p>
+<ul>
+<li>a schema snapshot for each exported table,</li>
+<li>retained row versions for each exported table, including tombstones and commit timestamps,</li>
+<li>a filtered <code>ChangeEvent</code> slice for the selected tables and optional LSN bounds,</li>
+<li>a manifest (JSON) containing:</li>
+<li>engine version and storage mode,</li>
+<li>generated timestamp,</li>
+<li>start/end LSN and start/end commit timestamps when derivable from the retained change slice,</li>
+<li>per-table checksums plus an overall bundle checksum,</li>
+<li>row/table/change counts.</li>
+</ul>
+<p>The current format intentionally omits raw WAL/value-object payload history. That keeps the implementation honest to the engine’s retained state while still providing a deterministic verification artifact.</p>
+<h3 id="23-deterministic-replay-model">2.3 Deterministic replay model<a class="headerlink" href="#23-deterministic-replay-model" title="Permanent link">¶</a></h3>
+<p>Replay currently works as a deterministic import-and-verify flow:</p>
+<ol>
+<li><code>maintenance.replay.export</code> captures schema snapshots, retained row versions, and filtered change metadata into a typed bundle.</li>
+<li><code>maintenance.replay.import</code> materializes the bundle into a hidden replay workspace under <code>.replay_workspaces/&lt;workspace_id&gt;</code>.</li>
+<li><code>maintenance.replay.run</code> reopens that workspace, rebuilds observed table snapshots from disk, and recomputes canonical per-table and bundle checksums.</li>
+<li>The run succeeds only if the observed checksum and table-level checksums exactly match the manifest.</li>
+</ol>
+<p>The included change metadata preserves execution context for debugging and future evolution, but the current implementation does not attempt to re-execute mutations from WAL records. Replay bundles are therefore intended for deterministic validation/debugging, not live replication.</p>
+<h3 id="24-redaction-modes-optional">2.4 Redaction modes (optional)<a class="headerlink" href="#24-redaction-modes-optional" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>full</code>: include all referenced values (default).</li>
+<li><code>schema_only</code>: include schema + statement shapes without payload values.</li>
+<li><code>selective</code>: include only values for listed tables/keys.</li>
+</ul>
+<p>Redaction must be used carefully because it can change query plans and outcomes.</p>
+<h2 id="3-apis">3. APIs<a class="headerlink" href="#3-apis" title="Permanent link">¶</a></h2>
+<h3 id="31-skeinql-additions">3.1 SkeinQL additions<a class="headerlink" href="#31-skeinql-additions" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>query.select</code>: add optional <code>as_of</code> ISO timestamp.</li>
+<li><code>tx.begin</code>: add optional <code>as_of</code> timestamp; default <code>read_only=true</code> for historical snapshots.</li>
+<li><code>maintenance.replay.export</code>: creates a replay bundle from all tables or a selected database, with optional <code>from_lsn</code> / <code>to_lsn</code> filtering for included change-event metadata.</li>
+<li><code>maintenance.replay.import</code>: imports a bundle into a hidden replay workspace identified by <code>workspace_id</code>.</li>
+<li><code>maintenance.replay.run</code>: reopens a replay workspace and reports checksum verification results (<code>expected_checksum</code>, <code>observed_checksum</code>, table checksums, and replayed table/row/change counts).</li>
+</ul>
+<h3 id="32-cli-additions">3.2 CLI additions<a class="headerlink" href="#32-cli-additions" title="Permanent link">¶</a></h3>
+<ul>
+<li><code>skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --out file.sreplay</code></li>
+<li><code>skeindb replay verify --bundle file.sreplay</code></li>
+<li><code>skeindb replay run --bundle file.sreplay</code></li>
+</ul>
+<h2 id="4-observability">4. Observability<a class="headerlink" href="#4-observability" title="Permanent link">¶</a></h2>
+<p>Current runtime behavior:</p>
+<ul>
+<li>Replay bundles are exported/imported through SkeinQL and the CLI.</li>
+<li>Imported workspaces are stored under the engine data dir in <code>.replay_workspaces/</code> and can be rerun deterministically.</li>
+<li>The manifest checksum is derived from canonicalized table snapshots plus retained change metadata, and <code>maintenance.replay.run</code> fails if the imported workspace diverges.</li>
+</ul>
+<p>Future observability work should expose at least:</p>
+<ul>
+<li><code>history.retained_bytes</code></li>
+<li><code>history.oldest_retained_commit_ts</code></li>
+<li><code>replay.exports_total</code></li>
+<li><code>replay.imports_total</code></li>
+<li><code>replay.verify_failures_total</code></li>
+</ul>
+<h2 id="5-testing">5. Testing<a class="headerlink" href="#5-testing" title="Permanent link">¶</a></h2>
+<p>Minimum tests:</p>
+<ul>
+<li>visibility correctness across insert/update/delete at different <code>as_of</code> timestamps.</li>
+<li>retention GC does not delete versions required by policy.</li>
+<li>replay bundle round trip: export -&gt; import -&gt; checksum matches reference snapshot.</li>
+</ul>
+<p>Shipped coverage for the replay bundle path includes:</p>
+<ul>
+<li>CLI parse tests for <code>skeindb replay export</code> and <code>skeindb replay verify</code>.</li>
+<li>Engine roundtrip unit test <code>replay_bundle_export_import_run_roundtrip</code>.</li>
+<li>HTTP/RPC integration test <code>t183_replay_bundle_export_import_run_roundtrip</code>.</li>
+</ul>
+<hr />
+<h2 id="research-extension-geo-distributed-replay-bundles-for-edge-caching">Research extension: Geo-distributed replay bundles for edge caching<a class="headerlink" href="#research-extension-geo-distributed-replay-bundles-for-edge-caching" title="Permanent link">¶</a></h2>
+<p>Replay bundles are designed for debugging and reproducibility, but they can also serve as a <strong>partial replication</strong> primitive for edge deployments.
+See: <code>docs/research_agenda/R14_geo-distributed-replay-bundles-for-edge-caching.md</code>.</p>
+<p>Adaptation sketch:
+- Edge nodes maintain bounded WAL windows ("bundle coverage") for hot tables.
+- A router can choose edge vs origin based on a staleness bound (bounded-staleness reads).
+- Bundles can be compacted and redacted (privacy policies) before distribution.
+- Prototype methods: <code>edge.bundle.request</code>, <code>edge.bundle.apply</code>, <code>edge.bundle.status</code>.</p>
+<hr />
+<h2 id="research-extension-performance-annotated-replay-bundles">Research extension: Performance-annotated replay bundles<a class="headerlink" href="#research-extension-performance-annotated-replay-bundles" title="Permanent link">¶</a></h2>
+<p>Correctness replay is often not sufficient for performance investigations.
+The agenda proposes extending bundles to capture performance-critical state (LSM layout metadata, cache warm-hints, and timing annotations) to enable reproducible performance regression tests.
+See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.md</code>.</p>
+<p>Adaptation sketch:
+- Extend the bundle format with optional sections: <code>lsm_state</code>, <code>cache_warm</code>, and <code>timing</code>.
+- Provide a deterministic replay runner that replays operations while injecting timing.
+- Provide a variance report (how close replayed p95/p99 are to the captured baseline).</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/TIME_TRAVEL_REPLAY.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/TIME_TRAVEL_REPLAY.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="audit-wal.html"><span>← Previous</span>Audit WAL</a>
+<a class="next" href="compaction-scheduler.html"><span>Next →</span>Compaction scheduler</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-time-travel-semantics">1. Time travel semantics</a><ul>
+<li><a href="#11-as-of-reads">1.1 As-of reads</a></li>
+<li><a href="#12-isolation">1.2 Isolation</a></li>
+<li><a href="#13-retention-and-garbage-collection">1.3 Retention and garbage collection</a></li>
+<li><a href="#14-sql-compatibility-surface">1.4 SQL compatibility surface</a></li>
+</ul>
+</li>
+<li><a href="#2-replay-bundles">2. Replay bundles</a><ul>
+<li><a href="#21-goals">2.1 Goals</a></li>
+<li><a href="#22-bundle-contents">2.2 Bundle contents</a></li>
+<li><a href="#23-deterministic-replay-model">2.3 Deterministic replay model</a></li>
+<li><a href="#24-redaction-modes-optional">2.4 Redaction modes (optional)</a></li>
+</ul>
+</li>
+<li><a href="#3-apis">3. APIs</a><ul>
+<li><a href="#31-skeinql-additions">3.1 SkeinQL additions</a></li>
+<li><a href="#32-cli-additions">3.2 CLI additions</a></li>
+</ul>
+</li>
+<li><a href="#4-observability">4. Observability</a></li>
+<li><a href="#5-testing">5. Testing</a></li>
+<li><a href="#research-extension-geo-distributed-replay-bundles-for-edge-caching">Research extension: Geo-distributed replay bundles for edge caching</a></li>
+<li><a href="#research-extension-performance-annotated-replay-bundles">Research extension: Performance-annotated replay bundles</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hybrid Row + Column Snapshots (HTAP-lite) — SkeinDB Docs</title>
+<meta name="description" content="Hybrid Row + Column Snapshots (HTAP-lite) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html" class="active">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Hybrid Row + Column Snapshots (HTAP-lite)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="hybrid-row-column-snapshots-htap-lite">Hybrid Row + Column Snapshots (HTAP-lite)<a class="headerlink" href="#hybrid-row-column-snapshots-htap-lite" title="Permanent link">¶</a></h1>
+<p>Status: Prototype in progress
+Last updated: 2026-04-20</p>
+<p>Goal:
+Accelerate analytic queries (scans, aggregates) without sacrificing OLTP writes.</p>
+<p>SkeinDB remains row/MVCC first. Column snapshots are optional, read-optimized, and built asynchronously from a stable MVCC snapshot.</p>
+<hr />
+<h2 id="1-terminology">1) Terminology<a class="headerlink" href="#1-terminology" title="Permanent link">¶</a></h2>
+<ul>
+<li>Row store: MVCC row versions (primary truth)</li>
+<li>Column snapshot: read-only columnar representation of a subset of rows at a snapshot_ts</li>
+</ul>
+<hr />
+<h2 id="2-snapshot-creation">2) Snapshot creation<a class="headerlink" href="#2-snapshot-creation" title="Permanent link">¶</a></h2>
+<p>A snapshot build chooses:
+- db + table
+- optional projected columns
+- snapshot_ts</p>
+<p>Process:
+1) scan table rows and filter them through the current <code>row_visible_at(...)</code> semantics
+2) normalize <code>snapshot_ts</code> from micros to commit-ts millis when needed
+3) materialize primary-key columns plus projected values for rows visible at <code>snapshot_ts</code>
+4) persist the in-memory snapshot cache to <code>snapshots.json</code>
+5) write <code>manifest.json</code> plus one <code>col-XXXX.cseg</code> file per stored column under <code>data/snapshots/</code></p>
+<p>Snapshots are immutable.</p>
+<p>Prototype note:
+- The current implementation is consistent with SkeinDB's existing <code>AS OF</code> visibility behavior.
+- It does not yet reconstruct overwritten historical row versions beyond what the current row store retains.</p>
+<hr />
+<h2 id="3-file-layout">3) File layout<a class="headerlink" href="#3-file-layout" title="Permanent link">¶</a></h2>
+<p>data/
+  snapshots.json
+  snapshots/
+    snap-<snapshot_id>/
+      manifest.json
+      col-0001.cseg
+      col-0002.cseg</p>
+<p>Current prototype:
+- <code>snapshots.json</code> at the data dir root stores snapshot metadata + row values used by the runtime.
+- Each snapshot also gets a best-effort sidecar directory with <code>manifest.json</code> and <code>.cseg</code> files.
+- Snapshot directories are rebuilt on persist and removed when the snapshot disappears from <code>snapshots.json</code>.</p>
+<p>Manifest fields:
+- <code>format_version</code>
+- <code>id</code>, <code>db</code>, <code>table</code>
+- <code>columns</code>, <code>pk_columns</code>
+- <code>snapshot_ts</code>, <code>table_version</code>, <code>row_count</code>
+- <code>segments[]</code> with <code>column</code>, <code>is_pk</code>, <code>file</code>, <code>row_count</code>, <code>non_null_count</code>, <code>encoding</code></p>
+<hr />
+<h2 id="4-column-segment-format-cseg-v1">4) Column segment format (cseg v1)<a class="headerlink" href="#4-column-segment-format-cseg-v1" title="Permanent link">¶</a></h2>
+<p>A column segment stores a column for a row range.</p>
+<p>Header:
+- magic = <code>SKNCSEG1</code>
+- format_ver = <code>u32</code> (current: <code>1</code>)
+- kind = <code>u8</code> (<code>0</code> = value column, <code>1</code> = primary-key column)
+- snapshot_ts = <code>u64</code>
+- row_count = <code>u64</code>
+- db name (VarU length + UTF-8 bytes)
+- table name (VarU length + UTF-8 bytes)
+- column name (VarU length + UTF-8 bytes)
+- null bitmap (VarU length + bytes)</p>
+<p>Body:
+- non-null values are stored in row order as <code>VarU length + JSON-encoded Lit payload</code>
+- nulls are reconstructed from the null bitmap
+- manifest entries reserve <code>min_value</code> / <code>max_value</code> for future statistics, but the current writer leaves them unset</p>
+<p>Implementation note:
+The current writer uses <code>plain+null_bitmap</code> only. Dictionary, RLE, and richer stats remain future work.</p>
+<hr />
+<h2 id="5-query-planning">5) Query planning<a class="headerlink" href="#5-query-planning" title="Permanent link">¶</a></h2>
+<p>Planner chooses:
+- row scan for hot data not covered by snapshots
+- column scan for covered ranges when query is:
+  - read-only
+  - aggregation-heavy
+  - uses a subset of columns available in snapshot</p>
+<p>Current prototype:
+- Simple single-table SELECT execution can now read required columns directly from <code>manifest.json</code> + <code>.cseg</code> sidecars.
+- Primary-key columns are always eligible because they are stored as dedicated segments even when they are not part of the projected snapshot column list.
+- Execution is still row-wise after load: predicates, ordering, projection, and patch-key extraction run over a lightweight column-scan cursor.
+- The optimizer now routes into snapshot scans only for current-time reads when a covering snapshot is cheaper than a row scan and no better row-side prefilter path is available.
+- Historical <code>AS OF</code> reads and selective vector/index-prefilter paths stay on the row engine.</p>
+<p>Hybrid plan:
+- scan column snapshots for cold partitions
+- scan row store for newest partitions
+- merge results</p>
+<hr />
+<h2 id="6-consistency">6) Consistency<a class="headerlink" href="#6-consistency" title="Permanent link">¶</a></h2>
+<p>A column snapshot is consistent at snapshot_ts.</p>
+<p>Queries at current time may combine:
+- cold snapshot portion (at snapshot_ts)
+- hot row portion (at current snapshot)</p>
+<p>To avoid anomalies, hybrid queries should run at a chosen snapshot_ts and treat:
+- snapshots built at &lt;= snapshot_ts are eligible
+- newer changes are read from row store and merged</p>
+<hr />
+<h2 id="7-maintenance-and-refresh">7) Maintenance and refresh<a class="headerlink" href="#7-maintenance-and-refresh" title="Permanent link">¶</a></h2>
+<p>Policies:
+- build snapshots periodically (nightly)
+- build snapshots when a partition becomes cold
+- rebuild snapshots after major compactions</p>
+<p>Current prototype:
+- Incremental refresh applies inserts/updates/deletes to in-memory snapshots.
+- Refresh also rewrites the snapshot <code>manifest.json</code> and <code>.cseg</code> sidecars.
+- Snapshots are invalidated if primary key data is missing.</p>
+<hr />
+<h2 id="8-metrics">8) Metrics<a class="headerlink" href="#8-metrics" title="Permanent link">¶</a></h2>
+<p>Expose:
+- snapshot_build_time
+- snapshot_bytes
+- snapshot_query_hit_rate
+- snapshot_rows_covered</p>
+<hr />
+<h2 id="research-extension-adaptive-row-column-hybrid-execution">Research extension: Adaptive row-column hybrid execution<a class="headerlink" href="#research-extension-adaptive-row-column-hybrid-execution" title="Permanent link">¶</a></h2>
+<p>The baseline column snapshot design is an <strong>explicit</strong> HTAP-lite capability.
+The 2026 research agenda proposes making snapshot materialization <strong>adaptive</strong> based on observed query patterns.
+See: <code>docs/research_agenda/R02_adaptive-row-column-hybrid-execution.md</code>.</p>
+<p>Key adaptation points:
+- Add a cost model: snapshot build cost vs projected query savings.
+- Observe hot projections (frequently used column subsets) via query fingerprints.
+- Extend dependency tracking to column granularity so snapshots can be incrementally refreshed or invalidated.
+- Implement an online controller that decides <strong>when</strong> to create/refresh snapshots within configured resource budgets.</p>
+<p>Prototype (scaffold status):
+- Cost model, pattern tracking, and online controller are implemented for single-table SELECTs.
+- Snapshots persist in <code>snapshots.json</code>, emit sidecar <code>.cseg</code> artifacts, and are loaded best-effort on startup when <code>table_version</code> still matches.
+- Snapshot reader + column scan execution are in place for simple single-table SELECTs.
+- A basic optimizer rule now routes covered current-time single-table SELECTs into snapshot scans when the snapshot cost model beats a row scan and no selective row-side path wins first.
+- Broader hybrid merge planning remains follow-up work beyond T102.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/COLUMN_SNAPSHOTS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/COLUMN_SNAPSHOTS.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="delta-values.html"><span>← Previous</span>Delta-chained values</a>
+<a class="next" href="convergent-encryption.html"><span>Next →</span>Convergent encryption</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-terminology">1) Terminology</a></li>
+<li><a href="#2-snapshot-creation">2) Snapshot creation</a></li>
+<li><a href="#3-file-layout">3) File layout</a></li>
+<li><a href="#4-column-segment-format-cseg-v1">4) Column segment format (cseg v1)</a></li>
+<li><a href="#5-query-planning">5) Query planning</a></li>
+<li><a href="#6-consistency">6) Consistency</a></li>
+<li><a href="#7-maintenance-and-refresh">7) Maintenance and refresh</a></li>
+<li><a href="#8-metrics">8) Metrics</a></li>
+<li><a href="#research-extension-adaptive-row-column-hybrid-execution">Research extension: Adaptive row-column hybrid execution</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

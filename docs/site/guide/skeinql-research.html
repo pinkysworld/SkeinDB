@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinQL Research Extensions (Experimental) — SkeinDB Docs</title>
+<meta name="description" content="SkeinQL Research Extensions (Experimental) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html" class="active">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>SkeinQL Research Extensions (Experimental)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeinql-research-extensions-experimental">SkeinQL Research Extensions (Experimental)<a class="headerlink" href="#skeinql-research-extensions-experimental" title="Permanent link">¶</a></h1>
+<p>This document lists <strong>experimental</strong> SkeinQL method families that support the <strong>20-proposal research agenda</strong>.</p>
+<p>Principles:
+- These methods are <strong>not required</strong> for MySQL compatibility.
+- They should be implemented behind feature flags and exposed only when enabled.
+- For each family, the canonical research description is in <code>docs/research_agenda/</code>.</p>
+<h2 id="1-dp-differential-privacy">1. dp.* — Differential privacy<a class="headerlink" href="#1-dp-differential-privacy" title="Permanent link">¶</a></h2>
+<p>Related: R04</p>
+<ul>
+<li><code>dp.aggregate</code> — aggregates with DP parameters (epsilon, delta, mechanism)</li>
+<li><code>dp.budget.get</code> / <code>dp.budget.set</code> — budget tracking and policies</li>
+<li><code>dp.audit.log</code> — budget consumption events</li>
+</ul>
+<h2 id="2-oblivious-oblivious-execution-policies">2. oblivious.* — Oblivious execution policies<a class="headerlink" href="#2-oblivious-oblivious-execution-policies" title="Permanent link">¶</a></h2>
+<p>Related: R05</p>
+<ul>
+<li><code>oblivious.policy.get</code> / <code>oblivious.policy.set</code></li>
+<li><code>oblivious.explain</code> — show which operators will be padded/shuffled</li>
+</ul>
+<h2 id="3-forensic-forensic-wal-queries-with-proofs">3. forensic.* — Forensic WAL queries with proofs<a class="headerlink" href="#3-forensic-forensic-wal-queries-with-proofs" title="Permanent link">¶</a></h2>
+<p>Related: R06</p>
+<ul>
+<li><code>forensic.query</code> — run a forensic query over the hash-chained WAL</li>
+<li><code>forensic.verify</code> — verify returned proofs</li>
+<li><code>forensic.export</code> — export a signed/anchored report bundle</li>
+</ul>
+<h2 id="4-merge-optimistic-writes-with-merge-semantics">4. merge.* — Optimistic writes with merge semantics<a class="headerlink" href="#4-merge-optimistic-writes-with-merge-semantics" title="Permanent link">¶</a></h2>
+<p>Related: R07</p>
+<ul>
+<li><code>merge.register</code> — register a merge function (Wasm module reference)</li>
+<li><code>merge.apply</code> — apply merge to conflicting versions (server-driven)</li>
+<li><code>merge.simulate</code> — test merges without committing</li>
+<li><code>merge.wasm.register</code> / <code>merge.wasm.list</code> / <code>merge.wasm.drop</code> — manage Wasm merge modules</li>
+</ul>
+<h2 id="5-view-materialized-views-incremental-maintenance">5. view.* — Materialized views + incremental maintenance<a class="headerlink" href="#5-view-materialized-views-incremental-maintenance" title="Permanent link">¶</a></h2>
+<p>Related: R08</p>
+<ul>
+<li><code>view.create</code> / <code>view.drop</code></li>
+<li><code>view.refresh</code> — full recompute</li>
+<li><code>view.status</code> — lag/last refresh</li>
+<li><code>view.explain_deps</code> — dependency graph edges</li>
+</ul>
+<h2 id="6-transport-protocol-negotiation-hints">6. transport.* — Protocol negotiation hints<a class="headerlink" href="#6-transport-protocol-negotiation-hints" title="Permanent link">¶</a></h2>
+<p>Related: R09</p>
+<ul>
+<li><code>transport.capabilities</code> — advertise supported transports (HTTP/1.1, HTTP/2, QUIC)</li>
+</ul>
+<h2 id="7-vector-embeddings-ann-search">7. vector.* — Embeddings &amp; ANN search<a class="headerlink" href="#7-vector-embeddings-ann-search" title="Permanent link">¶</a></h2>
+<p>Related: R10</p>
+<ul>
+<li><code>vector.insert</code> — store embedding values (ValueKind::Embedding)</li>
+<li><code>vector.search</code> — ANN query (LSH buckets + refine)</li>
+<li><code>vector.index.status</code> — index health and coverage</li>
+</ul>
+<h2 id="8-ai-ai-assisted-query-workflows">8. ai.* — AI-assisted query workflows<a class="headerlink" href="#8-ai-ai-assisted-query-workflows" title="Permanent link">¶</a></h2>
+<p>Related: R11, R12</p>
+<ul>
+<li><code>ai.autoparam.classify</code> — classify literals (semantic-constant vs parameterizable)</li>
+<li><code>ai.autoparam.analyze</code> — extract literals from SQL and classify them</li>
+<li><code>ai.nl.translate</code> — prompt packaging + optional rule-based translation (read-only by default)</li>
+<li><code>ai.nl.explain</code> — explanation + preview rows for verification</li>
+<li><code>ai.nl.execute</code> — execution gated by approval token</li>
+</ul>
+<h2 id="9-causal-causal-consistency-via-etag-chains">9. causal.* — Causal consistency via ETag chains<a class="headerlink" href="#9-causal-causal-consistency-via-etag-chains" title="Permanent link">¶</a></h2>
+<p>Related: R13</p>
+<ul>
+<li><code>query.select</code> / <code>query.execute_prepared</code> accept <code>cache.min_causality</code></li>
+<li>query results include <code>causality</code> tokens (etag_chain_v1)</li>
+<li><code>causal.session.begin</code> / <code>causal.session.end</code> (future)</li>
+</ul>
+<h2 id="10-edge-replay-bundles-as-edge-replication-primitive">10. edge.* — Replay bundles as edge replication primitive<a class="headerlink" href="#10-edge-replay-bundles-as-edge-replication-primitive" title="Permanent link">¶</a></h2>
+<p>Related: R14</p>
+<ul>
+<li><code>edge.bundle.request</code> — request bounded WAL slice / replay bundle</li>
+<li>windows: table + seq bounds + max events</li>
+<li>redaction: <code>none</code> | <code>hash_pk</code> | <code>drop_pk</code></li>
+<li><code>edge.bundle.apply</code> — apply bundle coverage to the edge node</li>
+<li><code>edge.bundle.status</code> — coverage + bounded-staleness routing verdict</li>
+</ul>
+<h2 id="11-schema-extensions-conflict-free-schema-evolution">11. schema.* (extensions) — Conflict-free schema evolution<a class="headerlink" href="#11-schema-extensions-conflict-free-schema-evolution" title="Permanent link">¶</a></h2>
+<p>Related: R15</p>
+<ul>
+<li><code>schema.propose_change</code> — propose schema evolution changeset</li>
+<li><code>schema.merge_status</code> — show divergence/merge plan</li>
+<li><code>schema.apply_merge</code> — apply merged schema</li>
+<li>Prototype change ops: <code>add_column</code> (nullable/default support)</li>
+</ul>
+<h2 id="12-advisor-extensions-dependency-driven-index-synthesis">12. advisor.* (extensions) — Dependency-driven index synthesis<a class="headerlink" href="#12-advisor-extensions-dependency-driven-index-synthesis" title="Permanent link">¶</a></h2>
+<p>Related: R16</p>
+<ul>
+<li><code>advisor.index_synthesize</code> — propose indexes based on dependency analysis</li>
+<li><code>advisor.apply_index</code> — apply an index suggestion (in-memory secondary index)</li>
+<li><code>advisor.dismiss</code> — suppress a suggestion</li>
+<li><code>advisor.history</code> — list advisor actions</li>
+</ul>
+<h2 id="13-migration-extensions-intent-inference">13. migration.* (extensions) — Intent inference<a class="headerlink" href="#13-migration-extensions-intent-inference" title="Permanent link">¶</a></h2>
+<p>Related: R17</p>
+<ul>
+<li><code>migration.intent_report</code> — detect idioms (pagination, polling, hierarchy self-joins, recursive CTEs, EXISTS membership, COALESCE defaults)</li>
+<li><code>migration.rewrite_preview</code> — show suggested SkeinQL migration</li>
+</ul>
+<p>Example (intent_report):</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;...&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;window_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60000</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Example (rewrite_preview):</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;...&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="14-replay-extensions-performance-replay">14. replay.* (extensions) — Performance replay<a class="headerlink" href="#14-replay-extensions-performance-replay" title="Permanent link">¶</a></h2>
+<p>Related: R18</p>
+<ul>
+<li><code>replay.bundle.export_perf</code> — export bundle with performance state</li>
+<li><code>replay.bundle.import_perf</code> — restore performance state</li>
+<li><code>replay.run_perf</code> — deterministic runner</li>
+</ul>
+<h2 id="15-wasm-extensions-wasm-native-operators">15. wasm.* (extensions) — Wasm-native operators<a class="headerlink" href="#15-wasm-extensions-wasm-native-operators" title="Permanent link">¶</a></h2>
+<p>Related: R19</p>
+<ul>
+<li><code>wasm.plan.compile</code> — compile plan subset to Wasm (see <code>docs/WASM_OPERATORS.md</code>)</li>
+<li><code>wasm.plan.run</code> — run compiled plan (sandbox)</li>
+</ul>
+<h2 id="16-energy-energy-aware-scheduling">16. energy.* — Energy-aware scheduling<a class="headerlink" href="#16-energy-energy-aware-scheduling" title="Permanent link">¶</a></h2>
+<p>Related: R20</p>
+<ul>
+<li><code>energy.policy.set</code> — compaction energy policies</li>
+<li><code>energy.status</code> — current energy signals and scheduling decisions</li>
+</ul>
+<hr />
+<p><strong>Important:</strong> method shapes are intentionally left high-level in this document. Use the proposal docs to define exact parameter schemas.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/SKEINQL_RESEARCH_EXTENSIONS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL_RESEARCH_EXTENSIONS.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="skeinir.html"><span>← Previous</span>SkeinIR</a>
+<a class="next" href="wasm-udfs.html"><span>Next →</span>Wasm UDFs</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-dp-differential-privacy">1. dp.* — Differential privacy</a></li>
+<li><a href="#2-oblivious-oblivious-execution-policies">2. oblivious.* — Oblivious execution policies</a></li>
+<li><a href="#3-forensic-forensic-wal-queries-with-proofs">3. forensic.* — Forensic WAL queries with proofs</a></li>
+<li><a href="#4-merge-optimistic-writes-with-merge-semantics">4. merge.* — Optimistic writes with merge semantics</a></li>
+<li><a href="#5-view-materialized-views-incremental-maintenance">5. view.* — Materialized views + incremental maintenance</a></li>
+<li><a href="#6-transport-protocol-negotiation-hints">6. transport.* — Protocol negotiation hints</a></li>
+<li><a href="#7-vector-embeddings-ann-search">7. vector.* — Embeddings &amp; ANN search</a></li>
+<li><a href="#8-ai-ai-assisted-query-workflows">8. ai.* — AI-assisted query workflows</a></li>
+<li><a href="#9-causal-causal-consistency-via-etag-chains">9. causal.* — Causal consistency via ETag chains</a></li>
+<li><a href="#10-edge-replay-bundles-as-edge-replication-primitive">10. edge.* — Replay bundles as edge replication primitive</a></li>
+<li><a href="#11-schema-extensions-conflict-free-schema-evolution">11. schema.* (extensions) — Conflict-free schema evolution</a></li>
+<li><a href="#12-advisor-extensions-dependency-driven-index-synthesis">12. advisor.* (extensions) — Dependency-driven index synthesis</a></li>
+<li><a href="#13-migration-extensions-intent-inference">13. migration.* (extensions) — Intent inference</a></li>
+<li><a href="#14-replay-extensions-performance-replay">14. replay.* (extensions) — Performance replay</a></li>
+<li><a href="#15-wasm-extensions-wasm-native-operators">15. wasm.* (extensions) — Wasm-native operators</a></li>
+<li><a href="#16-energy-energy-aware-scheduling">16. energy.* — Energy-aware scheduling</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

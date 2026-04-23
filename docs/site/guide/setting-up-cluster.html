@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Setting up a 3-node cluster — SkeinDB Docs</title>
+<meta name="description" content="Setting up a 3-node cluster — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html" class="active">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Setting up a 3-node cluster</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="setting-up-a-3-node-cluster">Setting up a 3-node cluster<a class="headerlink" href="#setting-up-a-3-node-cluster" title="Permanent link">¶</a></h1>
+<p>This tutorial brings up a <strong>3-node SkeinDB cluster</strong> on one machine using different ports. The same commands work across three hosts — only the bind addresses change.</p>
+<p>Prerequisite: <a href="quickstart.html">Quickstart</a> completed, <code>skeindb</code> binary available on <code>$PATH</code>.</p>
+<h2 id="1-start-the-first-node-seed">1. Start the first node (seed)<a class="headerlink" href="#1-start-the-first-node-seed" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span>./data/n1<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--http<span class="w"> </span><span class="m">8001</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--mysql<span class="w"> </span><span class="m">3301</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--node-id<span class="w"> </span>n1<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-bind<span class="w"> </span><span class="m">127</span>.0.0.1:7001
+</code></pre></div>
+
+<p>The first node generates a <strong>cluster id</strong> and a <strong>join token</strong> on first boot. Copy the join token from the startup log (or from <code>./data/n1/cluster/join_token.txt</code>).</p>
+<div class="codehilite"><pre><span></span><code>cluster id: 8c2f…a9
+join token: jt_a3d8c1…
+</code></pre></div>
+
+<h2 id="2-join-two-more-nodes">2. Join two more nodes<a class="headerlink" href="#2-join-two-more-nodes" title="Permanent link">¶</a></h2>
+<p>On the same machine (different ports):</p>
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span>./data/n2<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--http<span class="w"> </span><span class="m">8002</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--mysql<span class="w"> </span><span class="m">3302</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--node-id<span class="w"> </span>n2<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-bind<span class="w"> </span><span class="m">127</span>.0.0.1:7002<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-join<span class="w"> </span><span class="m">127</span>.0.0.1:7001<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-join-token<span class="w"> </span>jt_a3d8c1…
+</code></pre></div>
+
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--data<span class="w"> </span>./data/n3<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--http<span class="w"> </span><span class="m">8003</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--mysql<span class="w"> </span><span class="m">3303</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--node-id<span class="w"> </span>n3<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-bind<span class="w"> </span><span class="m">127</span>.0.0.1:7003<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-join<span class="w"> </span><span class="m">127</span>.0.0.1:7001<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--cluster-join-token<span class="w"> </span>jt_a3d8c1…
+</code></pre></div>
+
+<h2 id="3-verify-the-topology">3. Verify the topology<a class="headerlink" href="#3-verify-the-topology" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8001/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;cluster.topology&quot;,&quot;params&quot;:{}}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>Or open <code>http://127.0.0.1:8001/admin</code> → <strong>Cluster</strong> panel. You should see three nodes and one primary.</p>
+<h2 id="4-write-on-the-primary-read-on-a-replica">4. Write on the primary, read on a replica<a class="headerlink" href="#4-write-on-the-primary-read-on-a-replica" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Write via primary (n1)</span>
+curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8001/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;schema.create_database&quot;,&quot;params&quot;:{&quot;db&quot;:&quot;shop&quot;}}&#39;</span>
+
+<span class="c1"># Read via replica (n2)</span>
+curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8002/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;cluster.topology&quot;,&quot;params&quot;:{}}&#39;</span>
+</code></pre></div>
+
+<p>Replicas accept read queries but forward writes. RPC fanout is recursion-suppressed, so cluster-wide operations are exactly-once.</p>
+<h2 id="5-simulate-a-failure">5. Simulate a failure<a class="headerlink" href="#5-simulate-a-failure" title="Permanent link">¶</a></h2>
+<p>Stop <code>n1</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Ctrl+C on n1, or:</span>
+skeindb<span class="w"> </span>admin<span class="w"> </span>cluster.demote<span class="w"> </span>--node-id<span class="w"> </span>n1<span class="w"> </span>--http<span class="w"> </span>http://127.0.0.1:8002
+</code></pre></div>
+
+<p>Promote a replica from the admin UI or via SkeinQL:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8002/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;skeinql&quot;:&quot;1.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;cluster.promote&quot;,&quot;params&quot;:{&quot;node_id&quot;:&quot;n2&quot;}}&#39;</span>
+</code></pre></div>
+
+<h2 id="6-production-notes">6. Production notes<a class="headerlink" href="#6-production-notes" title="Permanent link">¶</a></h2>
+<ul>
+<li>Put each node on its own host with a fixed <code>--cluster-bind</code> that is reachable from the other nodes.</li>
+<li>Rotate the join token regularly: <code>cluster.rotate_join_token</code>.</li>
+<li>Use <strong>separate networks</strong> for <code>--http</code> (applications) and <code>--cluster-bind</code> (inter-node).</li>
+<li>See <a href="clustering.html">Clustering</a> for shard placement, replication factors, and rolling upgrade procedure.</li>
+<li>See <a href="observability.html">Observability</a> to wire Prometheus + Grafana.</li>
+</ul>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="clustering.html">Clustering reference</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="audit-wal.html">Audit WAL</a> — tamper-evident audit chain across nodes.</li>
+<li><a href="cas-replication.html">CAS replication</a> — dedup-aware replication internals.</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/setting-up-cluster.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/setting-up-cluster.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="admin-tour.html"><span>← Previous</span>Admin console tour</a>
+<a class="next" href="getting-started.html"><span>Next →</span>Getting Started</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-start-the-first-node-seed">1. Start the first node (seed)</a></li>
+<li><a href="#2-join-two-more-nodes">2. Join two more nodes</a></li>
+<li><a href="#3-verify-the-topology">3. Verify the topology</a></li>
+<li><a href="#4-write-on-the-primary-read-on-a-replica">4. Write on the primary, read on a replica</a></li>
+<li><a href="#5-simulate-a-failure">5. Simulate a failure</a></li>
+<li><a href="#6-production-notes">6. Production notes</a></li>
+<li><a href="#next">Next</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

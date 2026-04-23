@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL in 5 minutes — SkeinDB Docs</title>
+<meta name="description" content="MySQL in 5 minutes — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html" class="active">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>MySQL in 5 minutes</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="mysql-in-5-minutes">MySQL in 5 minutes<a class="headerlink" href="#mysql-in-5-minutes" title="Permanent link">¶</a></h1>
+<p>SkeinDB speaks the <strong>MySQL wire protocol</strong> out of the box. If you already know MySQL, you can connect with any MySQL client, migrate a schema, and run real queries without installing anything SkeinDB-specific.</p>
+<p>Prerequisite: <a href="quickstart.html">Quickstart</a> completed; <code>skeindb serve</code> running with <code>--mysql 3306</code>.</p>
+<h2 id="1-connect">1. Connect<a class="headerlink" href="#1-connect" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>mysql<span class="w"> </span>-h<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>-P<span class="w"> </span><span class="m">3306</span><span class="w"> </span>-u<span class="w"> </span>root
+</code></pre></div>
+
+<div class="codehilite"><pre><span></span><code><span class="n">mysql</span><span class="o">&gt;</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="k">VERSION</span><span class="p">();</span>
+<span class="o">+</span><span class="c1">--------------------+</span>
+<span class="o">|</span><span class="w"> </span><span class="k">VERSION</span><span class="p">()</span><span class="w">          </span><span class="o">|</span>
+<span class="o">+</span><span class="c1">--------------------+</span>
+<span class="o">|</span><span class="w"> </span><span class="mi">8</span><span class="p">.</span><span class="mi">0</span><span class="p">.</span><span class="mi">0</span><span class="o">-</span><span class="n">skeindb</span><span class="w">      </span><span class="o">|</span>
+<span class="o">+</span><span class="c1">--------------------+</span>
+</code></pre></div>
+
+<h2 id="2-create-a-schema">2. Create a schema<a class="headerlink" href="#2-create-a-schema" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">DATABASE</span><span class="w"> </span><span class="n">shop</span><span class="p">;</span>
+<span class="n">USE</span><span class="w"> </span><span class="n">shop</span><span class="p">;</span>
+
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w">       </span><span class="nb">BIGINT</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">sku</span><span class="w">      </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">UNIQUE</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="w">     </span><span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">price</span><span class="w">    </span><span class="nb">DECIMAL</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">in_stock</span><span class="w"> </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">TRUE</span>
+<span class="p">);</span>
+
+<span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">)</span><span class="w"> </span><span class="k">VALUES</span>
+<span class="w">  </span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SK-001&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SkeinDB hoodie&#39;</span><span class="p">,</span><span class="w">  </span><span class="mi">59</span><span class="p">.</span><span class="mi">00</span><span class="p">),</span>
+<span class="w">  </span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SK-002&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SkeinDB mug&#39;</span><span class="p">,</span><span class="w">     </span><span class="mi">15</span><span class="p">.</span><span class="mi">00</span><span class="p">),</span>
+<span class="w">  </span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SK-003&#39;</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;SkeinDB sticker&#39;</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">.</span><span class="mi">00</span><span class="p">);</span>
+
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">price</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="3-prepared-statements">3. Prepared statements<a class="headerlink" href="#3-prepared-statements" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="k">PREPARE</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="s1">&#39;SELECT name, price FROM products WHERE price &gt;= ?&#39;</span><span class="p">;</span>
+<span class="k">SET</span><span class="w"> </span><span class="o">@</span><span class="k">min</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+<span class="k">EXECUTE</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="o">@</span><span class="k">min</span><span class="p">;</span>
+<span class="k">DEALLOCATE</span><span class="w"> </span><span class="k">PREPARE</span><span class="w"> </span><span class="n">p</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="4-transactions">4. Transactions<a class="headerlink" href="#4-transactions" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code><span class="k">START</span><span class="w"> </span><span class="k">TRANSACTION</span><span class="p">;</span>
+<span class="k">UPDATE</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1</span><span class="p">.</span><span class="mi">1</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="n">SAVEPOINT</span><span class="w"> </span><span class="n">sp1</span><span class="p">;</span>
+<span class="k">UPDATE</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+<span class="k">ROLLBACK</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">SAVEPOINT</span><span class="w"> </span><span class="n">sp1</span><span class="p">;</span>
+<span class="k">COMMIT</span><span class="p">;</span>
+</code></pre></div>
+
+<h2 id="5-what-is-supported">5. What is supported<a class="headerlink" href="#5-what-is-supported" title="Permanent link">¶</a></h2>
+<p>See the <a href="mysql-compat.html">MySQL compatibility</a> page for the complete, authoritative matrix. In short:</p>
+<ul>
+<li><strong>DDL</strong>: <code>CREATE / DROP / ALTER TABLE</code>, primary &amp; unique keys, numeric/string/bool/date types.</li>
+<li><strong>DML</strong>: <code>INSERT / UPDATE / DELETE</code>, <code>REPLACE</code>, <code>INSERT ... ON DUPLICATE KEY UPDATE</code>.</li>
+<li><strong>DQL</strong>: <code>SELECT</code> with <code>WHERE</code>, <code>ORDER BY</code>, <code>GROUP BY</code>, <code>HAVING</code>, <code>LIMIT/OFFSET</code>, joins, subqueries, CTEs for the supported subset.</li>
+<li><strong>Transactions</strong>: <code>BEGIN / COMMIT / ROLLBACK</code>, <code>SAVEPOINT</code>, <code>SET TRANSACTION ISOLATION LEVEL</code>.</li>
+<li><strong>Admin</strong>: <code>SHOW DATABASES / TABLES / COLUMNS / VARIABLES / STATUS</code>, <code>USE</code>, <code>SELECT DATABASE()</code>.</li>
+<li><strong>Prepared statements</strong> (binary protocol) with metadata for common projections.</li>
+<li><strong>Compatibility telemetry</strong>: unsupported features are surfaced in the admin panel and in <a href="compatibility.html">Compatibility telemetry</a>.</li>
+</ul>
+<h2 id="6-migrate-an-existing-schema">6. Migrate an existing schema<a class="headerlink" href="#6-migrate-an-existing-schema" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>mysqldump<span class="w"> </span>--no-data<span class="w"> </span>mysql-source<span class="w"> </span>mydb<span class="w"> </span>&gt;<span class="w"> </span>schema.sql
+mysql<span class="w"> </span>-h<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>-P<span class="w"> </span><span class="m">3306</span><span class="w"> </span>-u<span class="w"> </span>root<span class="w"> </span>mydb<span class="w"> </span>&lt;<span class="w"> </span>schema.sql
+</code></pre></div>
+
+<p>Then watch <strong>Admin → Compatibility</strong> for any statement SkeinDB flagged as unsupported. The <a href="telemetry-and-migration.html">telemetry + migration</a> advisor will suggest a SkeinQL equivalent.</p>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="first-query.html">Your first query (SkeinQL)</a> — the native, strongly typed RPC.</li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a> — partial pg v3 wire is also available.</li>
+<li><a href="configuration.html">Configuration</a> — tuning ports, auth, and storage paths.</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/mysql-in-5-min.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/mysql-in-5-min.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="first-query.html"><span>← Previous</span>Your first query (SkeinQL)</a>
+<a class="next" href="admin-tour.html"><span>Next →</span>Admin console tour</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-connect">1. Connect</a></li>
+<li><a href="#2-create-a-schema">2. Create a schema</a></li>
+<li><a href="#3-prepared-statements">3. Prepared statements</a></li>
+<li><a href="#4-transactions">4. Transactions</a></li>
+<li><a href="#5-what-is-supported">5. What is supported</a></li>
+<li><a href="#6-migrate-an-existing-schema">6. Migrate an existing schema</a></li>
+<li><a href="#next">Next</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

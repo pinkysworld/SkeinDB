@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinDB Project Backlog — SkeinDB Docs</title>
+<meta name="description" content="SkeinDB Project Backlog — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html" class="active">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Research</span> <span>›</span> <span>SkeinDB Project Backlog</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeindb-project-backlog">SkeinDB Project Backlog<a class="headerlink" href="#skeindb-project-backlog" title="Permanent link">¶</a></h1>
+<p>This backlog is designed for small PR-sized tasks.
+Each task should include tests.</p>
+<h2 id="reality-sync-2026-03-30">Reality sync (2026-03-30)<a class="headerlink" href="#reality-sync-2026-03-30" title="Permanent link">¶</a></h2>
+<p>This file now reflects a stricter distinction:
+- <code>[x]</code> = implemented and exercised in runtime/tests.
+- <code>[ ]</code> = still open (including prototype/partial work that still needs hardening).</p>
+<p>For the full implemented-vs-partial matrix (core + research), see:
+- <code>docs/TRUE_STATUS_MATRIX.md</code></p>
+<h2 id="phase-0-repo-setup">Phase 0 — Repo setup<a class="headerlink" href="#phase-0-repo-setup" title="Permanent link">¶</a></h2>
+<ul>
+<li>Status: complete in runtime + tests (<code>crates/skeindb-core/src/lib.rs</code>, <code>crates/skeindb-core/tests/phase0_format.rs</code>)</li>
+<li>[x] T001: Encoding primitives (VarU, Bytes/String, CRC32C)</li>
+<li>[x] T002: FileHeader read/write</li>
+<li>[x] T003: RecordFrame append/iterate</li>
+</ul>
+<p>Phase 0 verification checklist:
+- [x] T001 evidence: VarU and hash/CRC tests (<code>tests::varu_roundtrip_*</code>, <code>tests::value_id_is_stable</code>, <code>tests::audit_hash_is_stable</code>) in <code>crates/skeindb-core/src/lib.rs</code>
+- [x] T002 evidence: FileHeader encode/decode + corruption tests in <code>crates/skeindb-core/src/lib.rs</code> and file roundtrip in <code>crates/skeindb-core/tests/phase0_format.rs</code>
+- [x] T003 evidence: RecordFrame append/decode/iterate + truncation/CRC tests in <code>crates/skeindb-core/src/lib.rs</code> and file-backed iteration in <code>crates/skeindb-core/tests/phase0_format.rs</code></p>
+<h2 id="phase-1-storage-core">Phase 1 — Storage core<a class="headerlink" href="#phase-1-storage-core" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T010: MANIFEST.log reader/writer. Latest: <code>crates/skeindb-core/src/manifest.rs</code> now provides a typed append-only MANIFEST implementation over <code>FileHeader(FileKind::Manifest)</code> + <code>RecordFrame</code> payloads with five v1 record variants (<code>AddFile</code>, <code>RemoveFile</code>, <code>SetCurrentVersion</code>, <code>SetLastLsn</code>, <code>CleanShutdown</code>), replayable <code>ManifestState</code> derivation, and file-backed <code>ManifestWriter</code>/<code>ManifestReader</code> APIs. Unit tests cover record encode/decode for all variants, unknown-tag/file-kind rejection, state-apply behavior (add/update/remove), file roundtrip, writer reopen replay, and bad-header rejection.</li>
+<li>[x] T011: WAL writer/reader + recovery. Latest: <code>crates/skeindb-core/src/wal.rs</code> now implements <code>FileHeader(FileKind::Wal)</code> + <code>RecordFrame</code> WAL files with typed v1 body records (<code>BEGIN_TXN</code>, <code>MUTATION</code>, <code>COMMIT_TXN</code>, <code>ABORT_TXN</code>) layered on the existing WAL header prefix, strict read-all and lenient committed-transaction recovery, and a file-backed <code>WalWriter</code> that truncates torn/corrupt tails before appending. Recovery emits only committed txns in log order, discards aborted txns, and reports truncated tail bytes. Unit tests cover v1/v2 record decode/roundtrip, unknown record rejection, committed-only recovery, torn-tail truncation on reopen, and bad-header rejection; integration tests cover file-backed roundtrip and truncated-tail recovery.</li>
+<li>[x] T012: ValueStore (.vseg) append/read + ValueID. Latest: <code>crates/skeindb-core/src/valuestore.rs</code> now adds <code>ValueSegmentWriter</code> / <code>ValueSegmentReader</code> over <code>FileHeader(FileKind::ValSeg)</code> + framed VE1 records, <code>ValueStore::write_segment_file</code> / <code>load_segment_file</code> convenience helpers, explicit <code>ValueId</code> preservation for raw and custom-ID entries, and DELTA persistence via <code>DELTA1</code> payloads stored inside VE1 <code>raw_bytes</code>. Loading recomputes delta depths, validates materialization through the existing hash-checked reconstruction path, and rebuilds learned-index state in memory. Integration tests cover file-backed roundtrip with RAW + DELTA + custom-ID EMBEDDING entries, writer reopen append semantics, and bad-header rejection.</li>
+<li>[x] T013: Sorted runs (.run) + simple LSM (memtable + level0). Latest: <code>crates/skeindb-core/src/run.rs</code> now implements immutable <code>.run</code> files over <code>FileHeader(FileKind::Run)</code> with typed <code>DataBlock</code> / <code>IndexBlock</code> / footer encoding, a <code>RunWriter</code> that enforces strictly increasing keys and block-splits by target size, a <code>RunReader</code> with full-scan and binary-searched point lookups, and a <code>SimpleLsm</code> that keeps a memtable in a <code>BTreeMap</code>, flushes to <code>run-######.run</code>, and reads level0 newest-first. Tests cover out-of-order writer rejection, bad-header rejection, multi-block file roundtrip, memtable flush + overwrite visibility across multiple level0 runs, and reopen/discovery of existing runs.</li>
+<li>[x] T014: RowSeg (.rseg) + RowVersion encoding. Latest: <code>crates/skeindb-core/src/rowseg.rs</code> now implements the RV1 row-version record (<code>rec_type=0x10</code>, <code>rec_ver=1</code>) over <code>FileHeader(FileKind::RowSeg)</code> + <code>RecordFrame</code> framing, with a <code>FilePtr</code> (12-byte <code>file_id</code>+<code>offset</code>) for MVCC chain pointers, <code>RowGroupRef::Inline</code> / <code>RowGroupRef::ValueId</code> group payloads, strict decode (rejects trailing bytes, unknown rec_type/rec_ver, unknown group ref kinds), and <code>RowSegmentWriter::{create,open,append→FilePtr,sync}</code> / <code>RowSegmentReader::{open,read_all,read_at}</code> APIs so callers can chain per-row version histories. Unit tests cover RV1 encode/decode roundtrips, bad header/type/version/trailing-bytes rejection, delete-flag handling, and <code>FilePtr</code> sentinel semantics; integration tests cover file-backed write/read roundtrips with chained <code>prev_ptr</code>, reopen/append semantics, mixed <code>Inline</code>/<code>ValueId</code> groups, and rejection of wrong-<code>FileKind</code> files.</li>
+<li>[x] T015: RowDir (row_id -&gt; head ptr). Latest: <code>crates/skeindb-core/src/rowdir.rs</code> now provides an in-memory <code>BTreeMap&lt;u64, RowDirEntry&gt;</code> mapping <code>row_id</code> to <code>FilePtr</code> head pointers, with <code>Live</code>/<code>Tombstone</code> variants so deletions can shadow older-run state. Persistence reuses the existing <code>.run</code> format: <code>flush_to_run</code> writes sorted big-endian <code>row_id</code> keys with <code>[tag=0][FilePtr(12)]</code> live values or <code>[tag=1]</code> tombstones; <code>load_from_run</code>/<code>from_run</code> replays them, applying tombstones as removals and live entries as upserts. Unit tests cover put/get/remove/forget, sorted iteration, live/tombstone encode-decode, and bad tag/length rejection. Integration tests (<code>crates/skeindb-core/tests/rowdir.rs</code>) cover file-backed roundtrip preserving row_id order, tombstone-in-newer-run shadowing older-run live entries, live-in-newer overriding live-in-older, empty-run roundtrip, and tombstone-only run shadowing multiple live entries.</li>
+<li>[x] T016: MVCC visibility. Latest: <code>crates/skeindb-core/src/mvcc.rs</code> now resolves snapshot visibility by walking <code>RowVersion::prev_ptr</code> chains over <code>.rseg</code> records loaded through <code>RowSegmentReader</code>, using <code>begin_ts != 0 &amp;&amp; begin_ts &lt;= snapshot_ts &amp;&amp; (end_ts == 0 || end_ts &gt; snapshot_ts)</code> as the committed-visibility rule and treating <code>Snapshot::latest()</code> as <code>+INF</code>. <code>resolve_head</code> starts from an explicit <code>FilePtr</code>, <code>resolve_row_id</code> starts from <code>RowDir::get(row_id)</code>, and <code>MvccLookup</code> distinguishes missing rows, visible live rows, and visible delete markers. The module includes a <code>RowVersionResolver</code> trait plus <code>RowSegmentSet</code> for file-backed multi-segment lookup, cycle / row-id / table-id mismatch detection, and staged-row skipping (<code>begin_ts == 0</code>). Unit tests cover snapshot-window evaluation, delete-marker visibility, historical chain walking, staged-head fallback, and cycle / row-id mismatch detection; integration tests (<code>crates/skeindb-core/tests/mvcc.rs</code>) cover file-backed delete-marker history, RowDir-based lookup across multiple segment files, and staged-head fallback to the previous committed version.</li>
+</ul>
+<h2 id="phase-2-sql-virtual-metadata">Phase 2 — SQL + virtual metadata<a class="headerlink" href="#phase-2-sql-virtual-metadata" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T020: Catalog schema + TableDef</li>
+<li>[x] T021: information_schema.tables + columns</li>
+<li>[x] T022: Minimal executor: CREATE TABLE, INSERT, SELECT scan+filter+limit</li>
+</ul>
+<h2 id="phase-3-mysql-protocol">Phase 3 — MySQL protocol<a class="headerlink" href="#phase-3-mysql-protocol" title="Permanent link">¶</a></h2>
+<ul>
+<li>Status: baseline protocol plus broad COM_QUERY / COM_STMT compatibility are implemented in runtime/tests; follow-up parity work now continues through corpus growth and later backlog phases rather than open Phase 3 checkboxes.</li>
+<li>[x] T030: Handshake + mysql_native_password</li>
+<li>[x] T031: COM_QUERY SELECT literals</li>
+<li>[x] T032: SQL translator (subset)</li>
+<li>[x] T033: DDL/DML subset for corpus.sql</li>
+<li>[x] T034: SQL_CALC_FOUND_ROWS + FOUND_ROWS</li>
+<li>[x] T035: Index-backed secondary/unique index enforcement for MySQL duplicate-key semantics (runtime duplicate-key checks now reuse the shared secondary-index cache, including <code>PRIMARY KEY</code>-changing <code>UPDATE</code>s; MySQL duplicate-key failures now surface as <code>1062</code> / <code>23000</code> on the wire; creating a MySQL compatibility <code>UNIQUE INDEX</code> still rejects pre-existing duplicate rows; and per-table secondary-index cache metadata now persists/reloads on reopen)</li>
+<li>[x] T036: Broaden COM_QUERY parity for WordPress-class workloads (the MySQL listener now covers the checked-in WordPress-style corpus and companion integration tests, including grouped/simple aggregate shims with <code>HAVING</code>, projection-grouped <code>GROUP BY</code> de-dup including wildcard projections after expansion, <code>SQL_CALC_FOUND_ROWS</code>, wildcard join projections, top-level comma joins and left-associative join chains, parenthesized boolean predicates, index DDL, bootstrap/session compatibility <code>SET</code> and <code>SHOW</code> forms, recursive/nested compatibility rewrites for the current subquery subset, and compatibility no-op <code>LOCK TABLES</code> / <code>UNLOCK TABLES</code>)</li>
+<li>[x] T037: Deepen COM_STMT parity beyond the current baseline (complex-query result metadata, stricter driver/cursor semantics, fuller protocol coverage; prepare-time metadata now also covers supported scalar-expression projections including baseline arithmetic, broader scalar/date-time functions including <code>FIND_IN_SET</code> / <code>ISNULL</code>, <code>DATE_FORMAT</code> / <code>FROM_UNIXTIME</code>, <code>DATEDIFF</code> / <code>TIMESTAMPDIFF</code>, <code>WEEKDAY</code> / <code>DAYOFWEEK</code> / <code>DAYOFYEAR</code>, <code>MONTHNAME</code> / <code>DAYNAME</code>, <code>QUARTER</code>, <code>LAST_DAY</code>, <code>EXTRACT(&lt;unit&gt; FROM ...)</code>, and baseline interval arithmetic through <code>DATE_ADD</code> / <code>DATE_SUB</code> / <code>TIMESTAMPADD</code>, supported subquery-compat <code>SELECT</code>s whose <code>WHERE</code> clauses rewrite cleanly, including the current <code>IN</code> / <code>EXISTS</code> / simple scalar-compare subset, the current nested compatibility path, limited negated boolean-tree wrappers when they can still rewrite cleanly, supported projection-level scalar subqueries, embedded scalar-subquery arithmetic, plus <code>CASE</code> / <code>CAST</code> plus simple aggregate / grouped-aggregate compatibility queries). Progress: the new scalar/date-time functions, <code>COM_INIT_DB</code>, and <code>COM_STATISTICS</code> wire commands broaden the prepared-statement surface, and the latest slice adds dedicated unit + MySQL-wire regressions for projection-subquery metadata parity.</li>
+<li>[x] T038: Broaden COM_QUERY beyond the current WordPress-class baseline (deeper correlated/nested subqueries beyond the current recursive <code>IN</code> / <code>EXISTS</code> / simple scalar-compare compatibility path, broader join parity beyond the current left-associative <code>ON</code> plus simple base-table <code>USING</code> subset, broader date/time/function parity beyond the current scalar/date-time baseline, and broader <code>ALTER TABLE</code> variants beyond the current <code>ADD/MODIFY/CHANGE/RENAME COLUMN/RENAME [KEY|INDEX]/RENAME TO/DROP COLUMN</code> plus index metadata surface). Progress: significant surface expansion — added <code>BETWEEN</code>/<code>NOT BETWEEN</code>, <code>COUNT(DISTINCT col)</code>, <code>GROUP_CONCAT()</code>, <code>INSERT ... SELECT</code>, <code>UNION</code>/<code>UNION ALL</code>, <code>TRUNCATE TABLE</code>, <code>DROP DATABASE</code>, <code>RENAME TABLE</code>, <code>EXPLAIN</code> stub, <code>DO</code>, <code>SAVEPOINT</code> stubs, <code>CREATE VIEW</code>/<code>DROP VIEW</code> stubs, locking hint stripping, session functions (<code>USER()</code>, <code>LAST_INSERT_ID()</code>, <code>CONNECTION_ID()</code>), <code>information_schema.schemata</code>/<code>statistics</code>, expanded <code>SHOW</code> commands (WARNINGS, ERRORS, PROCESSLIST, TRIGGERS, EVENTS, PROCEDURE STATUS, FUNCTION STATUS, PLUGINS, PROFILES, CREATE DATABASE), <code>SET GLOBAL</code>/<code>FLUSH</code>/<code>ANALYZE</code>/<code>OPTIMIZE</code>/<code>CHECK</code>/<code>REPAIR</code>/<code>KILL</code> no-ops, and 30+ additional scalar/date-time functions. Corpus expanded from 772→947 lines (283 statements). Latest batch: derived tables (FROM subqueries), CTEs (<code>WITH...AS</code>), <code>REGEXP</code>/<code>RLIKE</code>/<code>NOT REGEXP</code>, <code>&lt;=&gt;</code> (NULL-safe equality), <code>NATURAL JOIN</code>, <code>FULL OUTER JOIN</code> (fully executed), multi-table <code>DELETE</code>, multi-table <code>UPDATE</code> (stub), 11 JSON functions (<code>JSON_EXTRACT</code>, <code>JSON_UNQUOTE</code>, <code>JSON_OBJECT</code>, <code>JSON_ARRAY</code>, <code>JSON_CONTAINS</code>, <code>JSON_LENGTH</code>, <code>JSON_TYPE</code>, <code>JSON_VALID</code>, <code>JSON_SET</code>, <code>JSON_KEYS</code>, <code>JSON_MERGE_PRESERVE</code>), plus <code>FIELD</code>/<code>ELT</code>, <code>INET_ATON</code>/<code>INET_NTOA</code>, <code>BIN</code>/<code>OCT</code>/<code>CONV</code>, and hash functions (<code>CRC32</code>, <code>MD5</code>, <code>SHA1</code>/<code>SHA</code>, <code>SHA2</code>). Corpus now at 1130 lines (over 374 statements). Latest batch: multi-column <code>GROUP BY</code> with multiple group columns and aggregates, 12 new scalar functions (<code>SUBSTRING_INDEX</code>, <code>ASCII</code>, <code>ORD</code>, <code>CHAR</code>, <code>STRCMP</code>, <code>BIT_LENGTH</code>, <code>OCTET_LENGTH</code>, <code>REGEXP_REPLACE</code>, <code>REGEXP_SUBSTR</code>, <code>TO_BASE64</code>, <code>FROM_BASE64</code>), 5 new <code>information_schema</code> stub tables (<code>routines</code>, <code>triggers</code>, <code>views</code>, <code>processlist</code>, <code>user_privileges</code>). Latest batch: window functions (<code>ROW_NUMBER()</code>/<code>RANK()</code>/<code>DENSE_RANK()</code> with <code>OVER(PARTITION BY ... ORDER BY ...)</code>), <code>SET @var = ...</code>/<code>SELECT @var</code> user variables, <code>BIT_AND()</code>/<code>BIT_OR()</code>/<code>BIT_XOR()</code> bitwise aggregates, multi-table <code>UPDATE</code> (upgraded from stub to real per-row implementation), 6 new scalar functions (<code>DEGREES</code>, <code>RADIANS</code>, <code>PERIOD_ADD</code>, <code>PERIOD_DIFF</code>, <code>MAKEDATE</code>, <code>MAKETIME</code>). Corpus now at 1240+ lines (over 370 statements). Latest batch: corpus.sql fully expanded — all 16+ TODO blocks uncommented (IF/NULLIF, EXISTS, REGEXP, CAST, COUNT DISTINCT, INFORMATION_SCHEMA, LOCK/UNLOCK, window functions, CTEs, RIGHT/CROSS JOIN, derived tables, NOT EXISTS, IN/scalar subquery, multi-table DELETE/UPDATE, nested functions, SHOW PROCESSLIST/PLUGINS). ~60 new SQL statements added covering additional JOINs, INSERT...SELECT, DO, EXPLAIN, SHOW variants, system variables (@@version etc.), maintenance no-ops, CREATE/DROP VIEW, SAVEPOINT, GROUP_CONCAT DISTINCT, multi-column GROUP BY, session functions, locking hints, scalar functions, SET GLOBAL. Corpus now at 1657 lines (about 678 semicolon-terminated SQL statements) after the fully expanded compatibility sweep. Latest batch: correlated subqueries in projection (<code>SELECT name, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) FROM users</code>), binary comparison operators in scalar expressions (<code>&gt;</code>, <code>&lt;</code>, <code>&gt;=</code>, <code>&lt;=</code>, <code>=</code>, <code>!=</code>, <code>&lt;&gt;</code>), multi-aggregate GROUP BY with ORDER BY support over JOINs, embedded subquery pre-evaluation in arithmetic expressions (<code>salary - (SELECT AVG(salary) FROM users)</code>), expression-based UPDATE SET values with per-row evaluation (<code>UPDATE users SET salary = salary * 1.1 WHERE ...</code> via <code>data_update_exprs</code> engine method), WordPress Site Health-style <code>information_schema.TABLES</code> storage summaries, WordPress Users-screen role counts via <code>COUNT(NULLIF(&lt;predicate&gt;, false))</code>, and dedicated MySQL-wire regressions for WordPress installer/admin seed queries. A fresh live WordPress admin sweep across the core dashboard/content/settings surfaces now finishes with an empty <code>debug.log</code>; only the theme-owned <code>nav-menus</code> / <code>widgets</code> pages still return non-database 500s. Deeper parity work is still ongoing.</li>
+</ul>
+<h2 id="phase-4-web-console">Phase 4 — Web console<a class="headerlink" href="#phase-4-web-console" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T040: HTTP API <code>/api/v1/sql/exec</code></li>
+<li>[x] T041: Console UI scaffold</li>
+<li>[x] T042: Schema browser + SQL editor</li>
+<li>[x] T043: Data browse/edit + import/export (CSV + JSON export/import)</li>
+<li>[x] T044: Users/privileges + status dashboard</li>
+</ul>
+<h2 id="phase-5-skeinql-native-api">Phase 5 - SkeinQL native API<a class="headerlink" href="#phase-5-skeinql-native-api" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T050: Define SkeinQL request/response types + error model (docs/SKEINQL.md)</li>
+<li>[x] T051: Implement HTTP RPC endpoint POST /api/v1/rpc (system.ping, system.version)</li>
+<li>[x] T052: Implement schema.* methods (list/describe/create/drop)</li>
+<li>[x] T053: Implement query.select (single-table scan + filter + limit) over SkeinIR</li>
+<li>[x] T054: Implement tx.begin/commit/rollback via SkeinQL</li>
+</ul>
+<h2 id="phase-6-cache-coherent-http-queries-etags">Phase 6 - Cache-coherent HTTP queries (ETags)<a class="headerlink" href="#phase-6-cache-coherent-http-queries-etags" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T060: Row ETags for data.get and If-Match support for data.update</li>
+<li>[x] T061: Planner dependency sets for simple indexed queries</li>
+<li>[x] T062: query.prepare + GET /api/v1/q/{query_id} with ETag/If-None-Match</li>
+<li>[x] T063: SSE subscription to ETag changes (query.subscribe)</li>
+</ul>
+<h2 id="phase-7-delta-chained-values">Phase 7 - Delta-chained values<a class="headerlink" href="#phase-7-delta-chained-values" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T070: Add ValueEntry kind DELTA + patch codec (docs/DELTA_VALUES.md)</li>
+<li>[x] T071: Delta selection policy + metrics</li>
+<li>[x] T072: Compaction rebase (limit delta chain depth)</li>
+</ul>
+<h2 id="phase-8-wasm-extensions">Phase 8 - Wasm extensions<a class="headerlink" href="#phase-8-wasm-extensions" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T080: Module store + catalog metadata for UDFs (docs/WASM_UDFS.md). Latest: <code>crates/skeindb-core/src/wasm_catalog.rs</code> now stores Wasm modules as immutable <code>ValueKind::BlobChunk</code> values inside <code>ValueStore</code> and tracks typed metadata in a <code>WasmModuleCatalog</code> persisted as <code>wasm_catalog.json</code> (format v1). Catalog entries include <code>module_id</code>, optional <code>name</code>, UDF kind (<code>scalar</code> / <code>aggregate</code> / <code>table</code>), ABI string, entrypoint symbol, <code>ValueId</code>, size, creation timestamp, and capability metadata (<code>allowed_hostcalls</code>, per-table read/write permissions, determinism, fuel/memory/output budgets). The core API supports install/list/get/drop, overwrite-on-install, module-byte materialization back out of <code>ValueStore</code>, strict validation for empty ids/entrypoints/ABIs/modules, and strict JSON load validation for unsupported format versions or malformed <code>value_id</code> hex. Unit tests cover install/overwrite/drop flows, invalid-request rejection, and value-id hex roundtrip; integration tests cover catalog + <code>.vseg</code> roundtrip preserving both metadata and module bytes plus JSON-load rejection for bad format versions and malformed <code>value_id</code> strings.</li>
+<li>[x] T081: Scalar UDF execution sandbox with resource limits. Latest: <code>crates/skeindb-core/src/wasm_udf.rs</code> now executes scalar Wasm modules directly from <code>WasmModuleCatalog</code> + <code>ValueStore</code> via <code>wasmtime</code>, using the <code>skein.wasm.udf.v1</code> ABI with host-side value encoding, a required exported <code>memory</code>, <code>skein_alloc(len)</code> allocator, and a scalar entrypoint export (typically <code>skein_scalar(ptr, len) -&gt; u64</code>, returning <code>ptr&lt;&lt;32 | len</code>). The sandbox enforces capability-gated imports (currently only <code>skein.log_debug</code> mapped from <code>allowed_hostcalls = ["log.debug"]</code>), memory size limits via store resource limiting, output byte limits via <code>max_output_bytes</code>, and keeps filesystem/network/clock/random unavailable by exposing no such imports. Unit tests cover scalar value encode/decode roundtrips and trailing-byte rejection; integration tests cover constant-value execution, hostcall denial/allow flows for <code>log.debug</code>, output-size rejection, and memory-growth failure beyond the configured limit.</li>
+<li>[x] T082: Safe cancellation (fuel/time budget) + tests. Latest: <code>crates/skeindb-core/src/wasm_udf.rs</code> now enforces per-module <code>max_fuel</code> budgets via Wasmtime fuel metering when configured, adds a bounded wall-clock deadline via epoch interruption, and surfaces explicit <code>FuelExhausted</code> / <code>TimeoutExceeded</code> errors instead of collapsing cancellation into generic execution failures. The default <code>execute_scalar_udf(...)</code> path keeps a conservative host timeout, while <code>execute_scalar_udf_with_options(...)</code> allows embedders and tests to override it. Integration tests now cover deterministic infinite-loop cancellation on fuel exhaustion, host timeout cancellation when <code>max_fuel = 0</code>, and successful execution of a later UDF after a cancelled call.</li>
+<li>[x] T083: Aggregate and table-function UDFs. Latest: <code>crates/skeindb-core/src/wasm_udf.rs</code> now executes aggregate and table Wasm modules through the same Wasmtime sandbox used for scalar UDFs. Aggregate modules consume a one-shot encoded row batch via <code>execute_aggregate_udf(...)</code> and return a single encoded value; table modules consume encoded args via <code>execute_table_udf(...)</code> and return an encoded row set. Shared <code>encode_rows(...)</code> / <code>decode_rows(...)</code> helpers define the row-batch ABI, and the runtime reuses the existing capability checks, memory/output limits, and T082 fuel/timeout cancellation path for all three module kinds. Unit tests now cover row-batch encode/decode roundtrips; integration tests cover an aggregate module that sums row values and a table module that materializes rows from input arguments.</li>
+</ul>
+<h2 id="phase-9-tamper-evident-wal-audit">Phase 9 - Tamper-evident WAL audit<a class="headerlink" href="#phase-9-tamper-evident-wal-audit" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T090: WALHeader v2 with hash chaining (docs/AUDIT_WAL.md)</li>
+<li>[x] T091: checkpoint anchors + audit status</li>
+<li>[x] T092: audit verify CLI/API + console page. Latest: SkeinAdmin's Forensics panel now exposes <code>maintenance.audit_status</code> and <code>maintenance.audit_verify</code> alongside the prototype <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> tools.</li>
+</ul>
+<h2 id="phase-10-hybrid-rowcolumn-snapshots">Phase 10 - Hybrid row/column snapshots<a class="headerlink" href="#phase-10-hybrid-rowcolumn-snapshots" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md). Latest: snapshot builds now honor <code>snapshot_ts</code>, persist <code>manifest.json</code> + <code>.cseg</code> sidecars under <code>data/snapshots/</code>, and keep those artifacts in sync during incremental refresh.</li>
+<li>[x] T101: Snapshot reader + column scan operator. Latest: simple single-table SELECT execution now loads projected and PK columns from snapshot manifests and <code>.cseg</code> sidecars instead of cloning in-memory snapshot rows.</li>
+<li>[x] T102: Optimizer rule: use column snapshots for covered ranges. Latest: an explicit optimizer rule now chooses snapshot scans only for covered current-time single-table SELECTs when the cost model beats a row scan and no better vector/index-prefilter path exists.</li>
+</ul>
+<h2 id="phase-11-compatibility-telemetry-and-migration-hints">Phase 11 - Compatibility telemetry and migration hints<a class="headerlink" href="#phase-11-compatibility-telemetry-and-migration-hints" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T110: Feature flag instrumentation in MySQL translator</li>
+<li>[x] T111: Internal storage for telemetry counters + query fingerprints (optional)</li>
+<li>[x] T112: telemetry.compat_summary endpoint + console dashboard</li>
+<li>[x] T113: telemetry.migration_hints generator (MySQL patterns -&gt; SkeinQL calls)</li>
+</ul>
+<h2 id="phase-12-standalone-management-console-skeinadmin">Phase 12 - Standalone management console (SkeinAdmin)<a class="headerlink" href="#phase-12-standalone-management-console-skeinadmin" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T120: SkeinAdmin placeholder scaffold (web/skeinadmin) + connection profiles</li>
+<li>[x] T121: SkeinAdmin pages: schema/data/sql workspace</li>
+<li>[x] T122: SkeinAdmin security: token UI + role-aware navigation. Latest: dedicated Security panel remains reachable from both sidebar and top-tab navigation, with create/list/revoke token flows using modal confirmations instead of browser dialogs.</li>
+<li>[x] T123: SkeinAdmin cluster page (cluster.*) + actions. Latest: join/leave/remove/promote controls are all surfaced in the live cluster panel.</li>
+<li>[x] T124: SkeinAdmin observability page (stats.*) — comprehensive dashboard with runtime, storage/dedup, MVCC/compaction, query/cache stats + auto-refresh</li>
+<li>[x] T125: SkeinAdmin Easy Viewer (phpMyAdmin-inspired) — sidebar tree, sub-tabs, inline editing, search, export, operations. Latest: inline New DB flow, live create-table SQL preview, duplicate-column / identifier validation before create, required-field validation before insert, column sorting (click-to-sort headers), styled modal confirmations (replacing browser confirm()), search operator dropdown (LIKE/=/!=/&gt;/&lt;/BETWEEN/IS NULL/IS NOT NULL/REGEXP), visual query builder tab (column picker, WHERE condition builder, ORDER BY/LIMIT, SQL preview, execute/copy/send), 5 new dashboard cards (Top Tables, Slow Query Log, Active Sessions, Index Health, Research Track Status)</li>
+<li>[x] T126: SkeinAdmin Engine Config panel — checkbox toggles for dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC. Latest: storage mode selector is aligned with the real runtime values <code>json</code>, <code>segment</code>, and <code>hybrid</code>.</li>
+</ul>
+<h2 id="phase-13-observability-and-server-load-statistics">Phase 13 - Observability and server load statistics<a class="headerlink" href="#phase-13-observability-and-server-load-statistics" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T130: stats.snapshot and basic counters in server</li>
+<li>[x] T131: query fingerprinting + top_queries / slow_queries</li>
+<li>[x] T132: GET /metrics (Prometheus-style) + labels</li>
+<li>[x] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction — Overview dashboard with stat cards, dedup bar chart, auto-refresh</li>
+</ul>
+<h2 id="phase-14-cluster-management-and-scale-out">Phase 14 - Cluster management and scale-out<a class="headerlink" href="#phase-14-cluster-management-and-scale-out" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T140: Node identity (node_id) + cluster config model</li>
+<li>[x] T141: Replication transport protocol (primary -&gt; replica fanout over SkeinQL RPC)</li>
+<li>[x] T142: CAS object pull protocol (replica fetch missing ValueIDs; objects.need/missing/fetch RPCs + Bloom contains)</li>
+<li>[x] T143: Read-only replica serving + router (cluster.route_query RPC + replica write rejection)</li>
+<li>[x] T144: cluster.* SkeinQL endpoints + join tokens + promote replica</li>
+<li>[x] T145: Sharding metadata + router prototype (single-shard txns)</li>
+</ul>
+<h2 id="phase-15-additional-performance-improvements">Phase 15 - Additional performance improvements<a class="headerlink" href="#phase-15-additional-performance-improvements" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T150: Schema flag for interned columns + ValueID-first predicate ops (docs/PERFORMANCE.md)</li>
+<li>[x] T151: Late materialization (decode only projected columns)</li>
+<li>[x] T152: Batch (vectorized) scan/filter/project pipeline</li>
+<li>[x] T153: MVCC Visible Version Index cache. Latest: <code>crates/skeindb-core/src/mvcc.rs</code> now exposes a bounded <code>VisibleVersionIndex</code> keyed by <code>row_id + snapshot_epoch_bucket</code>, validates cached entries against the current <code>RowDir</code> head pointer plus the cached version's exact visibility window before reuse, and falls back to normal chain walking on head changes or same-bucket timestamp drift. Unit tests cover cache hits, same-bucket revalidation, head-change invalidation, and bounded eviction; integration tests cover file-backed reuse over <code>RowSegmentSet</code> + <code>RowDir</code>.</li>
+</ul>
+<h2 id="phase-16-query-coalescing-thundering-herd-protection">Phase 16 - Query coalescing (thundering herd protection)<a class="headerlink" href="#phase-16-query-coalescing-thundering-herd-protection" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T160: Query fingerprint canonicalization (SkeinIR + SkeinQL) + auth scope keying</li>
+<li>[x] T161: In-flight query map (leader/joiner) with cancellation semantics</li>
+<li>[x] T162: Enable coalescing for GET /api/v1/q/{query_id} (cacheable) + tests</li>
+<li>[x] T163: Metrics + limits + SkeinAdmin dashboard widget</li>
+</ul>
+<h2 id="phase-17-cas-aware-replication-bandwidth-bounds-object-aware-sync">Phase 17 - CAS-aware replication bandwidth bounds (object-aware sync)<a class="headerlink" href="#phase-17-cas-aware-replication-bandwidth-bounds-object-aware-sync" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T165: Bloom summaries for ValueID existence (per valseg + union)</li>
+<li>[x] T166: Object pull protocol (batch missing ValueIDs, fetch objects, verify hashes). Latest: added replica-side <code>objects.pull</code>, which batches locally-missing ValueIDs, calls remote <code>objects.fetch</code>, validates a lossless transferred VE1 payload (<code>entry_b64</code>) against the requested ValueID before import, and recursively fetches missing delta-base dependencies so pulled entries remain materializable after ingest. Tests cover batch fetching with local-hit skipping, delta-base dependency pulling, and hash-mismatch rejection.</li>
+<li>[x] T167: Replication metrics: object hit-rate, saved bytes, ref-bytes vs obj-bytes. Latest: added <code>ReplicationObjectCounters</code> to the server counters, instrumented <code>objects.need</code> / <code>objects.missing</code> / <code>objects.fetch</code> with hit/miss accounting and byte accounting (hits accumulate <code>ref_bytes</code>, fetches accumulate <code>obj_bytes</code>), exposed a new <code>cluster.replication_stats</code> RPC (read-only, capability-listed) reporting <code>need_*</code>, <code>missing_*</code>, <code>fetch_*</code>, <code>ref_bytes</code>, <code>obj_bytes</code>, <code>hit_rate</code>, <code>saved_bytes_ratio</code>, and <code>last_updated_ms</code>, and embedded the same JSON under <code>stats.snapshot.cluster.replication_objects</code>. One end-to-end integration test (<code>cluster_replication_stats_tracks_hits_misses_and_bytes</code>) verifies the counters advance correctly across seed → need → missing → fetch → stats.snapshot.</li>
+<li>[x] T168: Shard move/rebalance uses object manifests + progress reporting. Latest: <code>cluster.shard.move</code> / <code>cluster.shard.rebalance</code> now build shard-scoped object manifests from live row versions, ask the destination node which ValueIDs are missing via <code>objects.need</code>, pull only the missing objects via <code>objects.pull</code> before updating placement, and return manifest/progress summaries including total/missing object counts and bytes plus batch/pull/store outcomes. Tests cover engine-side manifest deduplication and an end-to-end shard move that transfers missing objects to a destination node.</li>
+</ul>
+<h2 id="phase-18-self-tuning-index-advisor">Phase 18 - Self-tuning index advisor<a class="headerlink" href="#phase-18-self-tuning-index-advisor" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T170: Telemetry feature extraction (predicates/order/group/join keys) + privacy-safe storage</li>
+<li>[x] T171: Candidate index generator + duplication/prefix checks. Latest: advisor synthesis now suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and any suggestion IDs that were previously applied or dismissed.</li>
+<li>[x] T172: Benefit estimator (Level 0 rule-based) + SkeinQL advisor.* endpoints</li>
+<li>[x] T173: Apply suggestion (CREATE INDEX) + progress + rollback-on-failure. Latest: <code>advisor.apply_index</code> now queues background secondary-index builds, <code>advisor.history</code> records queued/building/completed/failed lifecycle state with progress percentages, and failed builds record rollback metadata before the suggestion can surface again.</li>
+<li>[x] T174: SkeinAdmin "Index Advisor" page + before/after performance report</li>
+</ul>
+<h2 id="phase-19-time-travel-and-replay-bundles">Phase 19 - Time travel and replay bundles<a class="headerlink" href="#phase-19-time-travel-and-replay-bundles" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T180: MVCC as_of reads (planner + executor) + SkeinQL <code>as_of</code> parameter (docs/TIME_TRAVEL_REPLAY.md)</li>
+<li>[x] T181: SQL compatibility surface for as_of reads (session variable + query hint). Latest: <code>MySqlSessionState</code> now carries a <code>skein_as_of_ms</code> field; <code>SET @@skein.as_of = '&lt;iso&gt;' | &lt;epoch_ms&gt; | NULL | DEFAULT</code> parses ISO-8601 (with <code>Z</code> / <code>±HH:MM</code> offsets, fractional seconds) and integer epoch-milliseconds values to control time-travel reads for subsequent SELECTs. Optimizer-style query hint <code>/*+ SKEIN_AS_OF('&lt;ts&gt;') */</code> extracted and stripped in <code>sql_exec</code> before parsing to override the session value per-statement. Both forms thread through to the MVCC-aware <code>query_select</code> as_of filter (T180). 5 unit tests (<code>parse_as_of_timestamp_accepts_iso_and_epoch_forms</code>, <code>parse_skein_as_of_assignment_value_handles_null_default_and_iso</code>, <code>extract_skein_as_of_hint_strips_hint_and_returns_epoch_ms</code>, plus 2 integration tests) cover parsing, session SET/clear, and SELECT filtering via both hint and session variable.</li>
+<li>[x] T182: History retention policy + garbage collection for old versions. Latest: new <code>maintenance.history.*</code> RPC surface — <code>maintenance.history.status</code> reports per-table live/tombstone/purgeable counts plus <code>oldest_tombstone_commit_ts_ms</code>; <code>maintenance.history.set_policy</code> persists <code>history.retention.enabled</code> and <code>history.retention.window_ms</code> via the settings subsystem; <code>maintenance.history.gc</code> purges MVCC tombstones whose <code>commit_ts_ms &lt;= horizon</code> (explicit params or derived from retention policy). Pre-T180 tombstones (<code>commit_ts_ms == 0</code>) are always retained for safety. GC rebuilds the <code>pk_index</code>, bumps <code>table_version</code> so secondary indexes refresh lazily, clears cached vector indexes, and persists each touched table. <code>maintenance.history.status</code> is included in the read-only RPC allowlist alongside <code>maintenance.compaction.status</code>. Three engine unit tests (<code>history_gc_purges_old_tombstones_and_preserves_live_rows</code>, <code>history_gc_retains_pre_t180_tombstones</code>, <code>history_gc_horizon_filters_recent_tombstones</code>) cover the basic purge path, the pre-T180 safety retention, and the <code>commit_ts_ms &gt; horizon</code> filter.</li>
+<li>[x] T183: Replay bundle format + export/import tooling + deterministic replay runner. Latest: <code>maintenance.replay.export</code> now emits a typed replay bundle containing table schema snapshots, retained row versions, filtered <code>ChangeEvent</code> metadata, per-table checksums, and an overall manifest checksum; <code>maintenance.replay.import</code> materializes that bundle into a hidden <code>.replay_workspaces/&lt;workspace_id&gt;</code> data root; and <code>maintenance.replay.run</code> reopens the imported workspace and verifies deterministic integrity by recomputing canonical table and bundle checksums. The CLI now exposes <code>skeindb replay export</code>, <code>skeindb replay verify</code>, and <code>skeindb replay run</code>, and the server advertises the new replay methods through the SkeinQL RPC surface. Coverage includes CLI parse tests, an engine roundtrip unit test (<code>replay_bundle_export_import_run_roundtrip</code>), and an HTTP/RPC integration test (<code>t183_replay_bundle_export_import_run_roundtrip</code>).</li>
+<li>[x] T184: SkeinAdmin pages for time travel and replay bundles + integrity status. Latest: SkeinAdmin now exposes a dedicated <code>Time Travel &amp; Replay</code> panel with point-in-time <code>query.select</code> execution via <code>as_of</code>, live history retention/status controls backed by <code>maintenance.history.*</code>, replay bundle export/download/import flows backed by <code>maintenance.replay.*</code>, session-local replay workspace tracking, and a rendered checksum/integrity summary after <code>maintenance.replay.run</code>. Asset coverage includes <code>skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls</code>.</li>
+</ul>
+<h2 id="phase-20-dedup-preserving-encryption">Phase 20 - Dedup-preserving encryption<a class="headerlink" href="#phase-20-dedup-preserving-encryption" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T190: Key management + AEAD wrappers (ENC_RANDOM, ENC_MLE_DB) (docs/CONVERGENT_ENCRYPTION.md). Latest: <code>skeindb-core</code> now exposes a standalone encryption baseline via <code>encryption::DatabaseKeyManager</code>, database-scoped encryption profiles, active key selection, and <code>EncryptionEnvelope</code> wrappers for <code>ENC_RANDOM</code> and <code>ENC_MLE_DB</code>. <code>ENC_RANDOM</code> derives a mode-specific AES-256-GCM-SIV key from the database master secret and uses randomized nonces; <code>ENC_MLE_DB</code> derives a deterministic content key from the database master secret plus a SHA-256 plaintext digest and returns an envelope carrying the derivation salt for later persistence work in T191. Focused integration coverage lives in <code>crates/skeindb-core/tests/encryption.rs</code>.</li>
+<li>[ ] T191: ValueStore encryption metadata + encrypt/decrypt paths</li>
+<li>[ ] T192: Key rotation + background re-encryption task + progress reporting</li>
+<li>[ ] T193: settings.encryption.* SkeinQL endpoints + SkeinAdmin UI + audit notes</li>
+</ul>
+<h2 id="phase-21-workload-guided-compaction-scheduler">Phase 21 - Workload-guided compaction scheduler<a class="headerlink" href="#phase-21-workload-guided-compaction-scheduler" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T200: Telemetry signals for compaction (L0 pressure, stalls, latencies) (docs/COMPACTION_SCHEDULER.md). Latest: <code>stats.snapshot</code> now scans live <code>.rseg</code> segment files for L0 pressure, records bounded soft/hard pressure events, and exposes recent point/range/write rates plus read/write latency percentiles for SkeinAdmin and future scheduler inputs.</li>
+<li>[x] T201: Budget-based compaction scheduler + peak windows + bounds enforcement. Latest: persisted <code>compaction.*</code> settings now drive a live heuristic scheduler state in <code>stats.snapshot.compaction.scheduler</code>, including configured/effective IO+CPU budgets, peak-window scaling, task priority scoring, and hard-pressure safe-mode write throttling for write-classified SkeinQL/HTTP requests.</li>
+<li>[x] T202: maintenance.compaction.* endpoints (status/set_policy/pause/resume). Latest: <code>maintenance.compaction.status</code>, <code>maintenance.compaction.set_policy</code>, <code>maintenance.compaction.pause</code>, and <code>maintenance.compaction.resume</code> now expose and persist runtime scheduler policy through the main RPC surface.</li>
+<li>[x] T203: Evaluation harness scripts + dashboards for stall rate and p99 latency. Latest: <code>eval/compaction_scheduler_dashboard.py</code> now emits a deterministic summary JSON, timeline CSV, and self-contained HTML dashboard comparing fixed leveling, fixed tiering, and workload-guided policies on stall rate and p99 latency.</li>
+</ul>
+<h2 id="phase-22-sql-autoparameterization-and-plan-cache">Phase 22 - SQL autoparameterization and plan cache<a class="headerlink" href="#phase-22-sql-autoparameterization-and-plan-cache" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T210: SQL normalization (fingerprints) + parameter extraction (docs/AUTOPARAMETERIZATION.md)</li>
+<li>[x] T211: Plan cache keyed by fingerprint + schema version + session flags</li>
+<li>[x] T212: Integrate autoparam with query coalescing, ETag caching, and telemetry</li>
+<li>[x] T213: SQL session variable: <code>SET @@skein.autoparameterize = 1</code> + safety rules</li>
+<li>[x] T214: SkeinAdmin top queries grouped by fingerprint + suggested parameter schemas</li>
+</ul>
+<h2 id="phase-23-cdc-and-dependency-driven-changefeeds">Phase 23 - CDC and dependency-driven changefeeds<a class="headerlink" href="#phase-23-cdc-and-dependency-driven-changefeeds" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T220: WAL-to-change-event translator (table-level insert/update/delete) (docs/CDC_CHANGEFEED.md). Latest: the persisted CDC change log now records <code>commit_ts_ms</code> plus <code>lsn</code>-style sequence metadata for table-level insert/update/delete events and acts as the retained WAL-equivalent source for <code>cdc.poll</code> / SSE replay.</li>
+<li>[x] T221: cdc.subscribe_table + cdc.poll/cdc.ack/cdc.close endpoints</li>
+<li>[x] T222: Dependency-driven query changefeeds (cdc.subscribe_query) using ETag dependency sets. Latest: prepared queries can now create CDC subscriptions through <code>cdc.subscribe_query</code>, and <code>cdc.poll</code> emits dependency-driven <code>invalidate</code> events carrying the current query ETag whenever a change touches one of the prepared query's dependency tables.</li>
+<li>[x] T223: SSE streaming endpoint + backpressure + reconnect semantics. Latest: <code>GET /api/v1/cdc/sse/{sub_id}</code> now streams both table CDC events and query invalidation events as SSE, replays from the in-memory change log in bounded batches, and resumes from <code>Last-Event-ID</code> or <code>from_offset</code> after reconnects.</li>
+<li>[x] T224: Retention + resnapshot protocol when WAL horizon is exceeded. Latest: bounded retained CDC history now reports <code>earliest_offset</code> / <code>latest_offset</code>, <code>cdc.poll</code> returns explicit <code>resnapshot_required</code> responses when a consumer falls behind the retained horizon, and SSE emits a <code>resnapshot</code> control event with the same recovery metadata.</li>
+<li>[x] T225: SkeinAdmin CDC page + subscription management + lag visualization. Latest: SkeinAdmin now exposes a dedicated CDC panel for table subscribe/poll/ack/close flows with session-local lag bars and recent-event inspection.</li>
+</ul>
+<h2 id="phase-24-website-and-documentation-site-polish">Phase 24 - Website and documentation site polish<a class="headerlink" href="#phase-24-website-and-documentation-site-polish" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T230: Homepage: add Docs nav CTA, mobile hamburger menu, maturity badges on feature cards, fix broken links (architecture image, paper), consistent API endpoints</li>
+<li>[x] T231: Docs site homepage: sync with public site (mobile menu, Docs CTA, maturity badges, fixed quickstart endpoint, correct paper link)</li>
+<li>[x] T232: Docs landing (docs.html): add client-side search/filter, mobile menu, polished footer, keyword metadata on cards</li>
+<li>[x] T233: Footer overhaul across all pages — structured 4-column footer with Product/Documentation/Community sections</li>
+<li>[x] T234: Research tracks on public site converted to clickable links pointing to docs/site/research pages</li>
+</ul>
+<hr />
+<h2 id="phase-25-postgresql-wire-protocol-compatibility">Phase 25 — PostgreSQL wire protocol compatibility<a class="headerlink" href="#phase-25-postgresql-wire-protocol-compatibility" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T400: PG v3 wire protocol primitives (<code>pg_wire.rs</code>) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/cleartext auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.</li>
+<li>[x] T401: SCRAM-SHA-256 authentication — RFC 5802/7677 SASL exchange with trust mode fallback. Implements full SCRAM-SHA-256 state machine in <code>pg_wire::scram</code> module: HMAC-SHA-256, PBKDF2-HMAC-SHA256 (4096 iterations), ScramCredentials (stored_key + server_key derivation), ScramServer (client-first → server-first → client-final → server-final with proof verification). Wire helpers: <code>write_auth_sasl</code>, <code>write_auth_sasl_continue</code>, <code>write_auth_sasl_final</code>, <code>parse_sasl_initial_response</code>, <code>parse_sasl_response</code>. PG connection handler upgraded from cleartext to SCRAM-SHA-256 when <code>SKEINDB_TOKEN</code> is set; trust mode when unset. Deterministic salt derivation via <code>pg_scram_salt_for_token</code>. 12 new unit tests (HMAC known vector, PBKDF2, credential derivation, full exchange success/failure, GS2 header rejection, nonce missing, SASL message parsing).</li>
+<li>[x] T402: PG session state — <code>pg_settings</code> HashMap on <code>MySqlSessionState</code> initialized with 13 PG defaults; <code>SET key = value</code> / <code>SET key TO value</code> parsing (with LOCAL/SESSION prefix support); <code>RESET key</code> / <code>RESET ALL</code>; <code>pg_bootstrap_setting_value</code> reads session overrides first; <code>ParameterStatus</code> sent to client on SET/RESET; <code>SHOW</code> and <code>current_setting()</code> now reflect session values. 9 unit tests.</li>
+<li>[x] T403: PG connection handler + listener (in <code>server.rs</code>) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via <code>--pg</code> flag, default 5432, 0 disables)</li>
+<li>[x] T404: PG SQL dialect parser (<code>pg_rewrite_sql</code>) — double-quoted identifiers → backtick-quoted, $$dollar quoting$$ → single-quoted, :: type casts → CAST(… AS …), IS [NOT] DISTINCT FROM → null_safe_eq, FETCH FIRST n ROWS ONLY → LIMIT n, ARRAY[…] → PG array literal string. ILIKE and boolean literals were already implemented. RETURNING deferred to T405 (DML).</li>
+<li>[x] T405: PG DML extensions — <code>ON CONFLICT DO NOTHING</code> → <code>INSERT IGNORE INTO</code>, <code>ON CONFLICT (...) DO UPDATE SET ... EXCLUDED.col</code> → <code>ON DUPLICATE KEY UPDATE ... VALUES(col)</code> via <code>pg_rewrite_on_conflict</code> post-pass; <code>INSERT/UPDATE/DELETE ... RETURNING col1, col2, *</code> extracted and stripped at <code>pg_dispatch_sql</code> level with follow-up SELECT using PK lookup for INSERT RETURNING; <code>COPY FROM STDIN</code> / <code>COPY TO STDOUT</code> returns proper <code>0A000</code> (feature not supported) error. 14 unit tests.</li>
+<li>[x] T406: PG DDL — SERIAL/BIGSERIAL/SMALLSERIAL → auto_increment + i64 type, CREATE SCHEMA → CREATE DATABASE alias (with IF NOT EXISTS), CREATE INDEX CONCURRENTLY (accepted/ignored), CREATE INDEX IF NOT EXISTS, COMMENT ON (silently accepted). 9 unit tests.</li>
+<li>[x] T407: PG type OID mapping + encoding — bool→16, i64→20, text→25, jsonb→3802, timestamp→1114, arrays; text + binary format. Added 11 array OID constants (BOOL_ARRAY, INT4_ARRAY, INT8_ARRAY, FLOAT4_ARRAY, FLOAT8_ARRAY, TEXT_ARRAY, VARCHAR_ARRAY, DATE_ARRAY, TIMESTAMP_ARRAY, JSONB_ARRAY, UUID_ARRAY) with <code>array_element_oid</code>/<code>scalar_to_array_oid</code> utilities. Enhanced type inference heuristic from 3 to 10 types (bool, i64, f64, date, time, datetime, uuid, json, bytes, string). Added <code>encode_binary_value()</code> for PG binary wire format (BOOL, INT4, INT8, FLOAT4, FLOAT8, TEXT, VARCHAR, JSON, JSONB, UUID, BYTEA). Bind handler now accepts binary result format codes and stores them in PgPortal; Execute path applies format-aware encoding via <code>pg_format_code_at</code> — binary columns use <code>encode_binary_value</code>, text columns use <code>pg_text_value_for_column</code>. 29 new unit tests.</li>
+<li>[x] T408: PG result encoding — RowDescription, DataRow, CommandComplete ("INSERT 0 1"), ErrorResponse with SQLSTATE codes. Latest: simple and extended PG queries now emit typed text-format <code>RowDescription</code> metadata for common numeric/text results, <code>DataRow</code> payloads, PG-style <code>CommandComplete</code> tags for DML/DDL, and <code>ErrorResponse</code> SQLSTATEs end-to-end over the live listener.</li>
+<li>[x] T409: PG system catalogs (<code>pg_catalog.rs</code>) — pg_database, pg_namespace, pg_class, pg_attribute, pg_type, pg_index, pg_constraint, pg_proc (stubs), pg_settings, pg_stat_activity. Latest: all ten catalog tables are now served through the shared virtual-table executor, including <code>pg_class</code> (tables + index entries with relkind <code>r</code>/<code>i</code>), <code>pg_attribute</code> (column metadata with SkeinDB→PG type OID mapping), <code>pg_index</code> (primary key + secondary indexes with <code>indkey</code> position vectors), and <code>pg_constraint</code> (primary key <code>p</code> + unique <code>u</code> constraints with <code>conkey</code> arrays). Column-level OID overrides ensure correct wire types for all catalog-specific columns (OID, bool, int4, float4).</li>
+<li>[x] T410: PG startup query handling — <code>SELECT version()</code>, <code>current_database()</code>, <code>current_schema()</code>, <code>SHOW server_version</code>, <code>SHOW server_version_num</code>, <code>SHOW standard_conforming_strings</code>, <code>SHOW max_identifier_length</code>, <code>SHOW transaction isolation level</code>, and <code>SELECT current_setting(...)</code> for the common startup/bootstrap probes used by psql/Django/Rails/SQLAlchemy-style clients</li>
+<li>[x] T411: PG extended query protocol — Parse/Bind/Describe/Execute/Sync/Close/Flush, named statements + portals, $1/$2 parameter placeholders. Latest: the PG listener now keeps connection-local prepared statements and portals, supports text-format <code>Parse</code> / <code>Bind</code> / statement+portal <code>Describe</code> / <code>Execute</code> / <code>Close</code> / <code>Flush</code>, substitutes <code>$1</code>/<code>$2</code> placeholders through the shared SQL engine, and uses <code>Sync</code> to recover cleanly after extended-protocol errors.</li>
+<li>[x] T412: PG function mapping (<code>pg_functions.rs</code>) — string_agg, array_agg, gen_random_uuid, to_char/to_timestamp, date_trunc, extract(epoch FROM ...), jsonb_build_object, -&gt;&gt;/#&gt;&gt; operators, || concat, ~/~* regex, ARRAY operations, unnest</li>
+<li>[x] T413: PG transaction semantics — ReadyForQuery status byte (I/T/E), failed-tx-block semantics, SAVEPOINT/RELEASE/ROLLBACK TO. Latest: the PG listener now preserves session state across simple queries, emits <code>ReadyForQuery</code> as <code>I</code> / <code>T</code> / <code>E</code>, rejects commands in aborted transaction blocks with <code>25P02</code>, treats <code>COMMIT</code> after an aborted transaction as a rollback, and wires <code>SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code> into the existing undo-log bookkeeping.</li>
+<li>[x] T414: PG SQLSTATE error codes — 42P01 (undefined table), 42703 (undefined column), 23505 (unique violation), 42601 (syntax error), etc. Latest: PG simple-query errors now translate shared-engine/MySQL-style failures into PostgreSQL SQLSTATEs, including undefined tables, undefined columns, unique violations, syntax-path parser errors, unsupported features, savepoint lookup failures, and failed-transaction-block errors.</li>
+<li>[x] T415: PG compatibility test corpus (<code>tests/compat/pg_corpus.sql</code>) — mirror MySQL corpus structure for PG dialect. Latest: <code>tests/compat/pg_corpus.sql</code> now exercises the current PG baseline over the live listener, covering startup probes, shared-engine SQL, and transaction/savepoint behavior through a dedicated <code>pg_compat_corpus_roundtrip</code> integration test.</li>
+<li>[x] T416: PG unit tests — SQLSTATE error code mapping (7 tests), type OID mapping for all MySqlStmtColumnType variants, pg_text_value bool normalization + null handling, sql_type_to_desc PG type coverage (serial/boolean/real/decimal/json/blob/timestamp), sql_detect_verb for CREATE/DROP SCHEMA and COMMENT ON, pg_rewrite_sql edge cases (casts in function args, nested parens, mixed features). 19 new tests added in this pass, bringing total PG unit test count to ~40.</li>
+<li>[x] T417: PG integration tests — SCRAM-SHA-256 auth (success + wrong-password rejection), binary result format via extended query, type OID inference for BOOL/INT8/FLOAT8/TEXT literals. 4 new integration tests added covering the T401 SCRAM handshake end-to-end, binary DataRow encoding, and RowDescription type OID correctness.</li>
+<li>[x] T418: PG compatibility documentation (<code>docs/PG_COMPAT.md</code>) — refreshed to the current partial baseline (startup/auth, SSL rejection, simple query, tx/savepoint semantics, text-format extended query protocol, and PG corpus coverage) and linked backlog gaps</li>
+</ul>
+<h2 id="phase-26-distribution-and-installation">Phase 26 - Distribution and installation<a class="headerlink" href="#phase-26-distribution-and-installation" title="Permanent link">¶</a></h2>
+<ul>
+<li>[x] T419: Debian packaging metadata + signed apt repository publication pipeline. Latest: <code>cargo-deb</code> metadata is wired into <code>crates/skeindb/Cargo.toml</code>, and tagged releases can publish a signed <code>apt</code> branch with <code>Packages</code>, <code>Release</code>, <code>InRelease</code>, and exported key material.</li>
+<li>[x] T420: Homebrew tap formula + release automation. Latest: the repo now ships <code>Formula/skeindb.rb</code> for tap-based installs, supports immediate <code>HEAD</code> installs from this repo, and tagged releases auto-render a stable formula from the release source tarball.</li>
+</ul>
+<hr />
+<h2 id="research-agenda-extensions-optional">Research Agenda Extensions (Optional)<a class="headerlink" href="#research-agenda-extensions-optional" title="Permanent link">¶</a></h2>
+<p>The repository includes a January 2026 research agenda with 20 proposals.</p>
+<ul>
+<li>Overview: <code>docs/RESEARCH_AGENDA.md</code></li>
+<li>Task-level research tasks (T230+): <code>docs/RESEARCH_BACKLOG.md</code></li>
+</ul>
+<p>These items are intentionally separated from the core phases above to keep the main build plan focused.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/PROJECT_BACKLOG.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PROJECT_BACKLOG.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="true-status-matrix.html"><span>← Previous</span>True status matrix</a>
+<span></span>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#reality-sync-2026-03-30">Reality sync (2026-03-30)</a></li>
+<li><a href="#phase-0-repo-setup">Phase 0 — Repo setup</a></li>
+<li><a href="#phase-1-storage-core">Phase 1 — Storage core</a></li>
+<li><a href="#phase-2-sql-virtual-metadata">Phase 2 — SQL + virtual metadata</a></li>
+<li><a href="#phase-3-mysql-protocol">Phase 3 — MySQL protocol</a></li>
+<li><a href="#phase-4-web-console">Phase 4 — Web console</a></li>
+<li><a href="#phase-5-skeinql-native-api">Phase 5 - SkeinQL native API</a></li>
+<li><a href="#phase-6-cache-coherent-http-queries-etags">Phase 6 - Cache-coherent HTTP queries (ETags)</a></li>
+<li><a href="#phase-7-delta-chained-values">Phase 7 - Delta-chained values</a></li>
+<li><a href="#phase-8-wasm-extensions">Phase 8 - Wasm extensions</a></li>
+<li><a href="#phase-9-tamper-evident-wal-audit">Phase 9 - Tamper-evident WAL audit</a></li>
+<li><a href="#phase-10-hybrid-rowcolumn-snapshots">Phase 10 - Hybrid row/column snapshots</a></li>
+<li><a href="#phase-11-compatibility-telemetry-and-migration-hints">Phase 11 - Compatibility telemetry and migration hints</a></li>
+<li><a href="#phase-12-standalone-management-console-skeinadmin">Phase 12 - Standalone management console (SkeinAdmin)</a></li>
+<li><a href="#phase-13-observability-and-server-load-statistics">Phase 13 - Observability and server load statistics</a></li>
+<li><a href="#phase-14-cluster-management-and-scale-out">Phase 14 - Cluster management and scale-out</a></li>
+<li><a href="#phase-15-additional-performance-improvements">Phase 15 - Additional performance improvements</a></li>
+<li><a href="#phase-16-query-coalescing-thundering-herd-protection">Phase 16 - Query coalescing (thundering herd protection)</a></li>
+<li><a href="#phase-17-cas-aware-replication-bandwidth-bounds-object-aware-sync">Phase 17 - CAS-aware replication bandwidth bounds (object-aware sync)</a></li>
+<li><a href="#phase-18-self-tuning-index-advisor">Phase 18 - Self-tuning index advisor</a></li>
+<li><a href="#phase-19-time-travel-and-replay-bundles">Phase 19 - Time travel and replay bundles</a></li>
+<li><a href="#phase-20-dedup-preserving-encryption">Phase 20 - Dedup-preserving encryption</a></li>
+<li><a href="#phase-21-workload-guided-compaction-scheduler">Phase 21 - Workload-guided compaction scheduler</a></li>
+<li><a href="#phase-22-sql-autoparameterization-and-plan-cache">Phase 22 - SQL autoparameterization and plan cache</a></li>
+<li><a href="#phase-23-cdc-and-dependency-driven-changefeeds">Phase 23 - CDC and dependency-driven changefeeds</a></li>
+<li><a href="#phase-24-website-and-documentation-site-polish">Phase 24 - Website and documentation site polish</a></li>
+<li><a href="#phase-25-postgresql-wire-protocol-compatibility">Phase 25 — PostgreSQL wire protocol compatibility</a></li>
+<li><a href="#phase-26-distribution-and-installation">Phase 26 - Distribution and installation</a></li>
+<li><a href="#research-agenda-extensions-optional">Research Agenda Extensions (Optional)</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

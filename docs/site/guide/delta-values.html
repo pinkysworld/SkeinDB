@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Delta-chained MVCC Values (Design) — SkeinDB Docs</title>
+<meta name="description" content="Delta-chained MVCC Values (Design) — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../index.html#research">Research</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="index.html" class="active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html" class="active">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Delta-chained MVCC Values (Design)</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="delta-chained-mvcc-values-design">Delta-chained MVCC Values (Design)<a class="headerlink" href="#delta-chained-mvcc-values-design" title="Permanent link">¶</a></h1>
+<p>Status: Draft
+Last updated: 2026-01-17</p>
+<p>Goal:
+Reduce write amplification when large values (TEXT/JSON/BLOB) change slightly across MVCC versions.</p>
+<p>SkeinDB already supports value interning (content-addressed ValueStore). Delta values extend this by allowing a ValueStore entry to be stored as a patch against a base value, rather than as a full copy.</p>
+<p>This feature is intended to be optional and policy-controlled.</p>
+<hr />
+<h2 id="1-high-level-idea">1) High-level idea<a class="headerlink" href="#1-high-level-idea" title="Permanent link">¶</a></h2>
+<p>In classic MVCC, an UPDATE creates a new version of a row. If a large column changes (even slightly), the new version may store the entire new value.</p>
+<p>Delta values store:
+- base ValueID (the previous value)
+- a patch that transforms base -&gt; new
+- metadata needed for safe reconstruction and validation</p>
+<p>The ValueID remains the content-hash of the FULL reconstructed value. This preserves dedup semantics and keeps external references stable.</p>
+<hr />
+<h2 id="2-valuestore-format-extension">2) ValueStore format extension<a class="headerlink" href="#2-valuestore-format-extension" title="Permanent link">¶</a></h2>
+<p>Add a new ValueEntry kind:
+- val_kind = DELTA</p>
+<p>Conceptual payload:</p>
+<p>DELTA1:
+- base_vid[16]
+- delta_codec u8
+- full_len VarU
+- patch_bytes Bytes</p>
+<p>Where:
+- delta_codec identifies the patch encoding.
+- patch_bytes are typically compressed.</p>
+<p>ValueID rules:
+- value_id is computed over the reconstructed bytes (full value), not patch_bytes.</p>
+<p>Safety rules:
+- On read, reconstruct bytes then verify hash matches value_id.</p>
+<hr />
+<h2 id="3-patch-encoding-v1-recommendation">3) Patch encoding (v1 recommendation)<a class="headerlink" href="#3-patch-encoding-v1-recommendation" title="Permanent link">¶</a></h2>
+<p>Use a simple instruction stream similar to COPY/ADD patches:</p>
+<p>Patch:
+- target_len VarU
+- op_count VarU
+- repeated ops:
+  - op_tag u8
+    - 0 = COPY (from base)
+      - base_off VarU
+      - len VarU
+    - 1 = ADD (literal)
+      - bytes Bytes</p>
+<p>This patch format is:
+- deterministic
+- easy to validate (bounds checks)
+- simple to implement</p>
+<p>Future codecs:
+- a more compact delta (VCDIFF-like)
+- specialized JSON diff (structural)</p>
+<hr />
+<h2 id="4-delta-selection-policy">4) Delta selection policy<a class="headerlink" href="#4-delta-selection-policy" title="Permanent link">¶</a></h2>
+<p>Delta creation should be selective.</p>
+<p>Recommended policy knobs:
+- delta_min_bytes: only consider DELTA if full_len &gt;= threshold
+- delta_max_chain: maximum allowed delta depth (default 4)
+- delta_min_savings_ratio: require patch_len &lt;= full_len * ratio (e.g., 0.7)
+- delta_columns: allowlist of columns eligible for deltas</p>
+<p>When a new value is written:
+1) If prior value exists and column is eligible, compute patch.
+2) If patch is small enough, store DELTA entry keyed by ValueID(full).
+3) Else store RAW entry.</p>
+<hr />
+<h2 id="5-reading-delta-values">5) Reading DELTA values<a class="headerlink" href="#5-reading-delta-values" title="Permanent link">¶</a></h2>
+<p>To materialize a ValueID:
+- Load ValueEntry by ValueID.
+- If RAW, return bytes.
+- If DELTA:
+  1) recursively materialize base_vid
+  2) apply patch to base bytes
+  3) validate full hash</p>
+<p>Caching:
+- cache reconstructed bytes for hot values
+- cache base values to reduce recursion cost</p>
+<hr />
+<h2 id="6-compaction-and-rebasing">6) Compaction and rebasing<a class="headerlink" href="#6-compaction-and-rebasing" title="Permanent link">¶</a></h2>
+<p>Delta chains should be bounded.</p>
+<p>During compaction:
+- if a DELTA chain depth &gt; delta_max_chain, rewrite the value as RAW (or as a shorter delta against a nearer base)</p>
+<p>This trades storage for read latency stability.</p>
+<hr />
+<h2 id="7-interaction-with-chunked-blobs">7) Interaction with chunked BLOBs<a class="headerlink" href="#7-interaction-with-chunked-blobs" title="Permanent link">¶</a></h2>
+<p>Recommended split:
+- Use DELTA for TEXT/JSON where edits are localized.
+- Use chunked BLOBs for very large binary values.</p>
+<p>Chunking and delta can coexist:
+- A BLOB manifest may itself be delta-encoded (optional), but start simple.</p>
+<hr />
+<h2 id="8-observability">8) Observability<a class="headerlink" href="#8-observability" title="Permanent link">¶</a></h2>
+<p>Expose metrics:
+- delta_values_written
+- delta_bytes_saved_estimate
+- avg_delta_chain_depth
+- delta_read_reconstruct_time</p>
+<p>These are critical for tuning.</p>
+<hr />
+<h2 id="9-research-extension-delta-chain-topology-optimization">9) Research extension: delta-chain topology optimization<a class="headerlink" href="#9-research-extension-delta-chain-topology-optimization" title="Permanent link">¶</a></h2>
+<p>The baseline design above uses <strong>linear</strong> delta chains with periodic rebasing.
+The research agenda proposes exploring richer topologies to improve historical reads and long version chains.
+See: <code>docs/research_agenda/R03_delta-chain-topology-optimization.md</code>.</p>
+<p>Candidate extensions (experimental):
+- <strong>Periodic full snapshots:</strong> store a RAW snapshot every K deltas (fixed or adaptive) to bound reconstruction cost.
+- <strong>Skip pointers (skip-list style):</strong> allow DELTA entries to include optional “skip base” pointers at geometric intervals, enabling O(log n) reconstruction steps for deep histories.
+- <strong>Tree-structured deltas:</strong> when branches occur (e.g., concurrent updates), allow multiple child deltas to reference shared snapshots.</p>
+<p>Compaction interaction:
+- Compaction can opportunistically restructure delta topology, amortizing reorganization costs.
+- Policy may be <strong>per-key</strong> based on observed access patterns (latest-only vs frequent time-travel reads).</p>
+<p>Prototype status (scaffold):
+- ValueStore supports delta patches using COPY/ADD encoding (prefix/suffix diff).
+- Delta policy knobs live in <code>ValueStoreConfig.delta_policy</code> (min_bytes, max_chain, snapshot_interval, min_savings_ratio, max_skip).
+- Skip patches are stored at geometric distances (2, 4, 8, ...) when enabled.
+- <code>ValueStore::compact_deltas</code> rewrites deep chains to RAW and rebuilds skip patches.</p>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/DELTA_VALUES.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/DELTA_VALUES.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="on-disk-format.html"><span>← Previous</span>On-disk format</a>
+<a class="next" href="column-snapshots.html"><span>Next →</span>Column snapshots</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-high-level-idea">1) High-level idea</a></li>
+<li><a href="#2-valuestore-format-extension">2) ValueStore format extension</a></li>
+<li><a href="#3-patch-encoding-v1-recommendation">3) Patch encoding (v1 recommendation)</a></li>
+<li><a href="#4-delta-selection-policy">4) Delta selection policy</a></li>
+<li><a href="#5-reading-delta-values">5) Reading DELTA values</a></li>
+<li><a href="#6-compaction-and-rebasing">6) Compaction and rebasing</a></li>
+<li><a href="#7-interaction-with-chunked-blobs">7) Interaction with chunked BLOBs</a></li>
+<li><a href="#8-observability">8) Observability</a></li>
+<li><a href="#9-research-extension-delta-chain-topology-optimization">9) Research extension: delta-chain topology optimization</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>
