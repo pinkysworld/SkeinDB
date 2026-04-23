@@ -5064,6 +5064,92 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("t183_replay_bundle")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS replay_events (id INT PRIMARY KEY, payload TEXT)",
+        "INSERT INTO replay_events (id, payload) VALUES (1, 'one')",
+        "INSERT INTO replay_events (id, payload) VALUES (2, 'two')",
+        "UPDATE replay_events SET payload = 'two-updated' WHERE id = 2",
+        "DELETE FROM replay_events WHERE id = 1",
+    ] {
+        let resp = client
+            .post(format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": "t183",
+                "method": "sql.exec",
+                "params": { "default_db": "test", "sql": sql }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success(), "sql should succeed: {sql}");
+    }
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t183",
+            "method": "maintenance.replay.export",
+            "params": { "db": "test", "bundle_id": "rpc_bundle" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let bundle = body
+        .get("result")
+        .and_then(|result| result.get("bundle"))
+        .cloned()
+        .expect("export should return bundle");
+    assert_eq!(bundle["manifest"]["bundle_id"].as_str(), Some("rpc_bundle"));
+    assert_eq!(bundle["manifest"]["table_count"].as_u64(), Some(1));
+    assert_eq!(bundle["manifest"]["change_count"].as_u64(), Some(4));
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t183",
+            "method": "maintenance.replay.import",
+            "params": {
+                "bundle": bundle,
+                "workspace_id": "rpc_roundtrip"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let import_result = body.get("result").expect("import should return result");
+    assert_eq!(import_result["ok"].as_bool(), Some(true));
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t183",
+            "method": "maintenance.replay.run",
+            "params": { "workspace_id": "rpc_roundtrip" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let run_result = body.get("result").expect("run should return result");
+    assert_eq!(run_result["ok"].as_bool(), Some(true));
+    assert_eq!(
+        run_result["expected_checksum"].as_str(),
+        run_result["observed_checksum"].as_str()
+    );
+    assert_eq!(run_result["replayed_tables"].as_u64(), Some(1));
+    assert_eq!(run_result["replayed_changes"].as_u64(), Some(4));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn telemetry_and_plan_cache_integration() -> anyhow::Result<()> {
     // T110-T113 + T211-T213: Telemetry + plan cache integration test
     let _guard = cluster_test_guard().await;

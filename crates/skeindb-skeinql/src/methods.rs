@@ -1525,6 +1525,168 @@ pub struct EdgeBundleStatusResult {
 }
 
 // --------------------------------
+// maintenance.replay.*
+// --------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundleTableSchema {
+    pub columns: Vec<SchemaColumnInfo>,
+
+    #[serde(default)]
+    pub primary_key: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_mysql: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub table_version: u64,
+
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub auto_inc_next: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundleRowEntry {
+    pub row: RowObject,
+    pub version: u64,
+
+    #[serde(default)]
+    pub deleted: bool,
+
+    #[serde(default)]
+    pub commit_ts_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundleChangeEvent {
+    pub seq: u64,
+    pub db: String,
+    pub table: String,
+    pub op: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<Vec<Lit>>,
+
+    #[serde(default)]
+    pub commit_ts_ms: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lsn: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplayBundleTableChecksum {
+    pub table: BaseTableRef,
+    pub checksum: String,
+    pub row_count: u64,
+    pub live_row_count: u64,
+    pub tombstone_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundleTable {
+    pub table: BaseTableRef,
+    pub schema: ReplayBundleTableSchema,
+    pub rows: Vec<ReplayBundleRowEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundleManifest {
+    pub format_version: u32,
+    pub bundle_id: String,
+    pub generated_at_ms: u64,
+    pub engine_version: String,
+    pub storage_mode: String,
+    pub checksum: String,
+    pub table_checksums: Vec<ReplayBundleTableChecksum>,
+    pub table_count: u64,
+    pub row_count: u64,
+    pub live_row_count: u64,
+    pub tombstone_count: u64,
+    pub change_count: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_lsn: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_lsn: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_commit_ts_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_commit_ts_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundle {
+    pub manifest: ReplayBundleManifest,
+    pub tables: Vec<ReplayBundleTable>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<ReplayBundleChangeEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayExportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_lsn: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_lsn: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayExportResult {
+    pub bundle: ReplayBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayImportParams {
+    pub bundle: ReplayBundle,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayImportResult {
+    pub ok: bool,
+    pub workspace_id: String,
+    pub bundle_id: String,
+    pub workspace_path: String,
+    pub checksum: String,
+    pub imported_tables: u64,
+    pub imported_rows: u64,
+    pub imported_changes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayRunParams {
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceReplayRunResult {
+    pub ok: bool,
+    pub workspace_id: String,
+    pub bundle_id: String,
+    pub workspace_path: String,
+    pub expected_checksum: String,
+    pub observed_checksum: String,
+    pub table_checksums: Vec<ReplayBundleTableChecksum>,
+    pub replayed_tables: u64,
+    pub replayed_rows: u64,
+    pub replayed_changes: u64,
+}
+
+// --------------------------------
 // merge.* (research / experimental)
 // --------------------------------
 

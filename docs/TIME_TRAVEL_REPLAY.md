@@ -1,16 +1,22 @@
 # Time-travel queries and reproducible replay bundles
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Implemented (T180-T184 complete)
+Last updated: 2026-04-20
 
 This document specifies two related capabilities:
 
 1. Time-travel queries: allow applications and administrators to query data "as of" a previous point in time.
-2. Reproducible replay bundles: export a self-contained artifact containing schema and WAL history for deterministic replays in a clean environment.
+2. Reproducible replay bundles: export a self-contained artifact containing schema snapshots, retained row versions, and change-event metadata for deterministic replays in a clean environment.
 
-These features build on SkeinDB's MVCC model (commit timestamps) and write-ahead log (WAL).
+These features build on SkeinDB's MVCC model (commit timestamps) and the retained change log.
 Time travel is useful for auditing, debugging, and point-in-time analytics.
 Replay bundles are useful for reproducing production-only bugs, doing incident response, and validating correctness after engine changes.
+
+Current implementation note:
+
+- Time-travel queries are true MVCC `as_of` reads over retained row versions.
+- Replay bundles are currently snapshot-based rather than full WAL-replay artifacts because the engine does not yet retain historical update payloads for every row version transition. The exported bundle includes enough schema, retained rows, tombstones, and change-event metadata to deterministically re-materialize a clean workspace and verify its integrity via canonical checksums.
+- SkeinAdmin now exposes a dedicated `Time Travel & Replay` page for `query.select as_of`, `maintenance.history.*` retention controls, replay bundle export/download/import, and integrity verification summaries driven by `maintenance.replay.run`.
 
 ## 1. Time travel semantics
 
@@ -95,27 +101,30 @@ A replay bundle should allow:
 
 ### 2.2 Bundle contents
 
-A bundle includes:
+A bundle currently includes:
 
-- a schema snapshot (catalog tables + schema version map at `start_lsn`),
-- a WAL slice (records from `start_lsn` to `end_lsn`),
-- optional ValueStore objects referenced by the WAL slice (content-addressed, deduplicated),
+- a schema snapshot for each exported table,
+- retained row versions for each exported table, including tombstones and commit timestamps,
+- a filtered `ChangeEvent` slice for the selected tables and optional LSN bounds,
 - a manifest (JSON) containing:
-  - engine version, build identifier (if available),
-  - start/end LSN and start/end timestamps,
-  - checksums for integrity (leveraging AUDIT_WAL hash chaining if enabled),
-  - redaction policy metadata.
+  - engine version and storage mode,
+  - generated timestamp,
+  - start/end LSN and start/end commit timestamps when derivable from the retained change slice,
+  - per-table checksums plus an overall bundle checksum,
+  - row/table/change counts.
+
+The current format intentionally omits raw WAL/value-object payload history. That keeps the implementation honest to the engine’s retained state while still providing a deterministic verification artifact.
 
 ### 2.3 Deterministic replay model
 
-Replay applies WAL records in commit order.
-To improve determinism during debugging:
+Replay currently works as a deterministic import-and-verify flow:
 
-- use the WAL-defined record ordering,
-- fix randomness seeds used by internal scheduling during replay,
-- disable background compaction (or run it in deterministic mode with a fixed plan).
+1. `maintenance.replay.export` captures schema snapshots, retained row versions, and filtered change metadata into a typed bundle.
+2. `maintenance.replay.import` materializes the bundle into a hidden replay workspace under `.replay_workspaces/<workspace_id>`.
+3. `maintenance.replay.run` reopens that workspace, rebuilds observed table snapshots from disk, and recomputes canonical per-table and bundle checksums.
+4. The run succeeds only if the observed checksum and table-level checksums exactly match the manifest.
 
-Replay bundles are intended for debugging/validation, not for live replication.
+The included change metadata preserves execution context for debugging and future evolution, but the current implementation does not attempt to re-execute mutations from WAL records. Replay bundles are therefore intended for deterministic validation/debugging, not live replication.
 
 ### 2.4 Redaction modes (optional)
 
@@ -131,19 +140,25 @@ Redaction must be used carefully because it can change query plans and outcomes.
 
 - `query.select`: add optional `as_of` ISO timestamp.
 - `tx.begin`: add optional `as_of` timestamp; default `read_only=true` for historical snapshots.
-- `maintenance.replay.export`: creates a replay bundle.
-- `maintenance.replay.import`: imports a bundle into a temporary replay workspace.
-- `maintenance.replay.run`: replays until target LSN/ts and reports checksums.
+- `maintenance.replay.export`: creates a replay bundle from all tables or a selected database, with optional `from_lsn` / `to_lsn` filtering for included change-event metadata.
+- `maintenance.replay.import`: imports a bundle into a hidden replay workspace identified by `workspace_id`.
+- `maintenance.replay.run`: reopens a replay workspace and reports checksum verification results (`expected_checksum`, `observed_checksum`, table checksums, and replayed table/row/change counts).
 
 ### 3.2 CLI additions
 
-- `skeindb replay export --db mydb --from-lsn X --to-lsn Y --out file.sreplay`
+- `skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --out file.sreplay`
 - `skeindb replay verify --bundle file.sreplay`
-- `skeindb replay run --bundle file.sreplay --until-ts <iso>`
+- `skeindb replay run --bundle file.sreplay`
 
 ## 4. Observability
 
-Expose at least:
+Current runtime behavior:
+
+- Replay bundles are exported/imported through SkeinQL and the CLI.
+- Imported workspaces are stored under the engine data dir in `.replay_workspaces/` and can be rerun deterministically.
+- The manifest checksum is derived from canonicalized table snapshots plus retained change metadata, and `maintenance.replay.run` fails if the imported workspace diverges.
+
+Future observability work should expose at least:
 
 - `history.retained_bytes`
 - `history.oldest_retained_commit_ts`
@@ -158,6 +173,12 @@ Minimum tests:
 - visibility correctness across insert/update/delete at different `as_of` timestamps.
 - retention GC does not delete versions required by policy.
 - replay bundle round trip: export -> import -> checksum matches reference snapshot.
+
+Shipped coverage for the replay bundle path includes:
+
+- CLI parse tests for `skeindb replay export` and `skeindb replay verify`.
+- Engine roundtrip unit test `replay_bundle_export_import_run_roundtrip`.
+- HTTP/RPC integration test `t183_replay_bundle_export_import_run_roundtrip`.
 
 ---
 

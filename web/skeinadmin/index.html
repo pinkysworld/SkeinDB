@@ -356,6 +356,7 @@
           <button class="nav-item" data-panel="import" data-scope="admin">Import / Export</button>
           <button class="nav-item" data-panel="telemetry" data-scope="admin">Telemetry</button>
           <button class="nav-item" data-panel="cdc" data-scope="admin">CDC</button>
+          <button class="nav-item" data-panel="replay" data-scope="admin">Time Travel &amp; Replay</button>
           <div class="nav-group-title">Research (R01-R20)</div>
           <button class="nav-item" data-panel="research" data-scope="admin">Agenda Dashboard</button>
           <button class="nav-item" data-panel="vectors" data-scope="admin">Vectors (R10)</button>
@@ -411,6 +412,7 @@
           <button class="tab-btn" data-panel="settings">Settings</button>
           <button class="tab-btn" data-panel="telemetry" data-scope="admin">Telemetry</button>
           <button class="tab-btn" data-panel="cdc" data-scope="admin">CDC</button>
+          <button class="tab-btn" data-panel="replay" data-scope="admin">Replay</button>
           <button class="tab-btn" data-panel="security" data-scope="admin">Security</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
@@ -997,6 +999,51 @@
             <div class="card wide"><h2>Recent Events</h2>
               <div class="hint">Latest poll result for the selected subscription.</div>
               <div class="table-wrap" style="max-height:320px"><table id="cdcEventGrid"></table></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TIME TRAVEL / REPLAY --><section class="panel" data-panel="replay">
+          <div class="panel-grid">
+            <div class="card wide"><h2>Point-in-Time Query Runner</h2>
+              <div class="callout">Run <code>query.select</code> against a historical MVCC snapshot. Enter an ISO-8601 timestamp or epoch milliseconds in <code>as_of</code>, seed a query from the selected table, and inspect the returned rows directly in the grid below.</div>
+              <div class="row"><div class="field"><label>Database</label><input id="ttDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="ttTable" placeholder="events" /></div><div class="field"><label>AS OF</label><input id="ttAsOf" placeholder="2026-01-01T00:00:00Z or 1767225600000" /></div><div class="field"><label>Limit</label><input id="ttLimit" type="number" value="50" min="1" /></div></div>
+              <div class="actions"><button id="btnTimeTravelSeed" class="sm">Seed Selected Table</button><button id="btnTimeTravelRun" class="primary sm">Run As Of</button><button id="btnTimeTravelClear" class="ghost sm">Clear</button></div>
+              <div class="field"><label>Query JSON</label><textarea id="ttQuery" rows="5" placeholder='{"with":[],"body":{"select":{"projection":[{"expr":{"col":"id"},"as":null}],"from":[{"db":"app","table":"events"}]}}}'></textarea></div>
+              <div id="ttSummary" class="hint" style="margin-bottom:8px">Seed a query from the selected table or paste a full <code>query.select</code> payload, then add an <code>as_of</code> timestamp to inspect historical rows.</div>
+              <div class="table-wrap" style="max-height:320px"><table id="ttResultGrid"></table></div>
+              <pre id="ttOut">Ready.</pre>
+            </div>
+
+            <div class="card"><h2>History Retention &amp; GC</h2>
+              <div class="callout">Inspect <code>maintenance.history.status</code>, persist the retention policy with <code>maintenance.history.set_policy</code>, and run garbage collection over eligible tombstones with <code>maintenance.history.gc</code>.</div>
+              <div class="row"><div class="field"><label>Retention Enabled</label><select id="historyEnabled"><option value="true">true</option><option value="false">false</option></select></div><div class="field"><label>Window (ms)</label><input id="historyWindowMs" type="number" value="604800000" min="0" /></div></div>
+              <div class="row"><div class="field"><label>Status / GC Horizon (ms)</label><input id="historyHorizonMs" type="number" min="0" placeholder="optional explicit horizon" /></div></div>
+              <div class="actions"><button id="btnHistoryStatus" class="sm">Load Status</button><button id="btnHistorySetPolicy" class="primary sm">Save Policy</button><button id="btnHistoryGc" class="danger sm">Run GC</button></div>
+              <div id="historySummary" class="hint" style="margin-top:8px">Load history status to inspect retained tombstones, policy state, and purgeable rows.</div>
+              <div class="table-wrap" style="margin-top:8px;max-height:260px"><table id="historyTableGrid"></table></div>
+              <pre id="historyOut">Ready.</pre>
+            </div>
+
+            <div class="card wide"><h2>Replay Bundle Export &amp; Import</h2>
+              <div class="callout">Export snapshot-based replay bundles with <code>maintenance.replay.export</code>, download them as <code>.sreplay</code> JSON artifacts, import them into hidden replay workspaces, and rerun integrity verification through <code>maintenance.replay.run</code>.</div>
+              <div class="row"><div class="field"><label>Database Filter</label><input id="replayDb" placeholder="app (optional)" /></div><div class="field"><label>From LSN</label><input id="replayFromLsn" type="number" min="0" placeholder="optional" /></div><div class="field"><label>To LSN</label><input id="replayToLsn" type="number" min="0" placeholder="optional" /></div><div class="field"><label>Bundle ID</label><input id="replayBundleId" placeholder="replay_bundle_debug" /></div></div>
+              <div class="actions"><button id="btnReplayExport" class="primary sm">Export Bundle</button><button id="btnReplayDownload" class="sm">Download Last Bundle</button><button id="btnReplayUseLastBundle" class="ghost sm">Use Last Bundle</button></div>
+              <div class="row"><div class="field"><label>Workspace ID</label><input id="replayWorkspaceId" placeholder="replay_debug" /></div><div class="field"><label>Session Workspaces</label><select id="replayWorkspaceSelect"><option value="">No session imports</option></select></div><div class="field"><label>Load Bundle File</label><input id="replayBundleFile" type="file" accept=".sreplay,application/json" /></div></div>
+              <div id="replayWorkspaceSummary" class="hint" style="margin-bottom:8px">No replay workspaces tracked in this browser session yet. Import a bundle or type a workspace ID manually.</div>
+              <div class="field"><label>Replay Bundle JSON</label><textarea id="replayBundleJson" rows="8" placeholder='{"manifest":{"bundle_id":"replay_bundle"},"tables":[],"changes":[]}'></textarea></div>
+              <div class="actions"><button id="btnReplayImport" class="secondary sm">Import Bundle</button><button id="btnReplayRunIntegrity" class="sm">Run Integrity Check</button></div>
+              <pre id="replayOut">Ready.</pre>
+            </div>
+
+            <div class="card"><h2>Latest Bundle</h2>
+              <div id="replayBundleSummary" class="hint">Export a replay bundle or load one from disk to inspect its manifest.</div>
+              <div class="table-wrap" style="margin-top:8px;max-height:320px"><table id="replayManifestTable"></table></div>
+            </div>
+
+            <div class="card wide"><h2>Integrity Status</h2>
+              <div id="replayIntegritySummary" class="hint">Run a replay workspace integrity check to compare the manifest checksum against the imported workspace state.</div>
+              <div class="table-wrap" style="margin-top:8px;max-height:320px"><table id="replayIntegrityTable"></table></div>
             </div>
           </div>
         </section>

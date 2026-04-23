@@ -1,6 +1,12 @@
+use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use skeindb_skeinql::methods::{
+    MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
+    ReplayBundle,
+};
 
 mod engine;
 mod nl_eval;
@@ -90,6 +96,34 @@ fn audit_verify_failure_message(report: &AuditVerifyReport) -> String {
     )
 }
 
+fn replay_temp_dir(name: &str) -> anyhow::Result<PathBuf> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("skeindb_{name}_{}_{}", std::process::id(), suffix));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn run_replay_bundle_in_workspace(
+    bundle: &ReplayBundle,
+    workspace_root: &std::path::Path,
+    workspace_id: &str,
+) -> anyhow::Result<skeindb_skeinql::methods::MaintenanceReplayRunResult> {
+    let engine =
+        engine::Engine::open_with_storage_mode_name(workspace_root, &bundle.manifest.storage_mode)?;
+    let _ = engine.maintenance_replay_import(MaintenanceReplayImportParams {
+        bundle: bundle.clone(),
+        workspace_id: Some(workspace_id.to_string()),
+    })?;
+    engine.maintenance_replay_run(MaintenanceReplayRunParams {
+        workspace_id: workspace_id.to_string(),
+    })
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum StorageModeArg {
     Json,
@@ -151,6 +185,61 @@ mod tests {
                 assert_eq!(pg, 0);
             }
             _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn replay_export_parses_flags() {
+        let cli = Cli::try_parse_from([
+            "skeindb",
+            "replay",
+            "export",
+            "--data",
+            "./data",
+            "--db",
+            "app",
+            "--from-lsn",
+            "10",
+            "--to-lsn",
+            "20",
+            "--out",
+            "bundle.sreplay",
+        ])
+        .expect("parse replay export");
+        match cli.command {
+            Commands::Replay { command } => match command {
+                ReplayCommands::Export {
+                    data,
+                    db,
+                    from_lsn,
+                    to_lsn,
+                    out,
+                } => {
+                    assert_eq!(data, "./data");
+                    assert_eq!(db.as_deref(), Some("app"));
+                    assert_eq!(from_lsn, Some(10));
+                    assert_eq!(to_lsn, Some(20));
+                    assert_eq!(out, "bundle.sreplay");
+                }
+                _ => panic!("expected replay export command"),
+            },
+            _ => panic!("expected replay command"),
+        }
+    }
+
+    #[test]
+    fn replay_verify_parses_bundle_path() {
+        let cli =
+            Cli::try_parse_from(["skeindb", "replay", "verify", "--bundle", "bundle.sreplay"])
+                .expect("parse replay verify");
+        match cli.command {
+            Commands::Replay { command } => match command {
+                ReplayCommands::Verify { bundle } => {
+                    assert_eq!(bundle, "bundle.sreplay");
+                }
+                _ => panic!("expected replay verify command"),
+            },
+            _ => panic!("expected replay command"),
         }
     }
 
@@ -362,6 +451,12 @@ enum Commands {
         snapshot_ts: u64,
     },
 
+    /// Export, verify, and run deterministic replay bundles.
+    Replay {
+        #[command(subcommand)]
+        command: ReplayCommands,
+    },
+
     /// Evaluate NL-to-SkeinQL datasets (experimental).
     NlEval {
         /// Dataset JSONL path
@@ -375,6 +470,46 @@ enum Commands {
         /// Maximum examples to process
         #[arg(long)]
         limit: Option<usize>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ReplayCommands {
+    /// Export a replay bundle from a data directory.
+    Export {
+        /// Data directory
+        #[arg(long, default_value = "./data")]
+        data: String,
+
+        /// Optional database filter
+        #[arg(long)]
+        db: Option<String>,
+
+        /// Inclusive lower bound for bundled change events
+        #[arg(long)]
+        from_lsn: Option<u64>,
+
+        /// Inclusive upper bound for bundled change events
+        #[arg(long)]
+        to_lsn: Option<u64>,
+
+        /// Output replay bundle path (.sreplay)
+        #[arg(long)]
+        out: String,
+    },
+
+    /// Verify a replay bundle by materializing it in a temporary workspace.
+    Verify {
+        /// Replay bundle path
+        #[arg(long)]
+        bundle: String,
+    },
+
+    /// Run a replay bundle in a temporary deterministic workspace.
+    Run {
+        /// Replay bundle path
+        #[arg(long)]
+        bundle: String,
     },
 }
 
@@ -455,6 +590,88 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Commands::Replay { command } => match command {
+            ReplayCommands::Export {
+                data,
+                db,
+                from_lsn,
+                to_lsn,
+                out,
+            } => {
+                let engine = engine::Engine::open(&data)?;
+                let result = engine.maintenance_replay_export(MaintenanceReplayExportParams {
+                    db,
+                    from_lsn,
+                    to_lsn,
+                    bundle_id: None,
+                })?;
+                let out_path = PathBuf::from(out);
+                if let Some(parent) = out_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent)?;
+                    }
+                }
+                fs::write(&out_path, serde_json::to_vec_pretty(&result.bundle)?)?;
+                println!(
+                    "Wrote replay bundle {} with {} table(s), {} row(s), and {} change event(s) to {}",
+                    result.bundle.manifest.bundle_id,
+                    result.bundle.manifest.table_count,
+                    result.bundle.manifest.row_count,
+                    result.bundle.manifest.change_count,
+                    out_path.display()
+                );
+                println!("Checksum: {}", result.bundle.manifest.checksum);
+                Ok(())
+            }
+            ReplayCommands::Verify { bundle } => {
+                let bundle_path = PathBuf::from(bundle);
+                let bundle: ReplayBundle = serde_json::from_slice(&fs::read(&bundle_path)?)?;
+                let temp = replay_temp_dir("replay_verify")?;
+                let result = run_replay_bundle_in_workspace(&bundle, &temp, "verify")?;
+                fs::remove_dir_all(&temp).ok();
+                println!(
+                    "Verified replay bundle {}: checksum {} (tables={}, rows={}, changes={})",
+                    result.bundle_id,
+                    result.observed_checksum,
+                    result.replayed_tables,
+                    result.replayed_rows,
+                    result.replayed_changes
+                );
+                if result.ok {
+                    Ok(())
+                } else {
+                    anyhow::bail!(
+                        "replay verification failed: expected_checksum={}, observed_checksum={}",
+                        result.expected_checksum,
+                        result.observed_checksum
+                    );
+                }
+            }
+            ReplayCommands::Run { bundle } => {
+                let bundle_path = PathBuf::from(bundle);
+                let bundle: ReplayBundle = serde_json::from_slice(&fs::read(&bundle_path)?)?;
+                let temp = replay_temp_dir("replay_run")?;
+                let result = run_replay_bundle_in_workspace(&bundle, &temp, "run")?;
+                println!(
+                    "Replay run {} completed in {}: checksum {} (tables={}, rows={}, changes={})",
+                    result.bundle_id,
+                    result.workspace_path,
+                    result.observed_checksum,
+                    result.replayed_tables,
+                    result.replayed_rows,
+                    result.replayed_changes
+                );
+                if result.ok {
+                    Ok(())
+                } else {
+                    anyhow::bail!(
+                        "replay run failed: expected_checksum={}, observed_checksum={}",
+                        result.expected_checksum,
+                        result.observed_checksum
+                    );
+                }
+            }
+        },
         Commands::NlEval {
             dataset,
             execute,

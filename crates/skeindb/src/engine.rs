@@ -45,6 +45,8 @@ use skeindb_skeinql::methods::{
     EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult, EdgeBundleRoute,
     EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams, ForensicExportResult,
     ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams, ForensicVerifyResult,
+    MaintenanceReplayExportParams, MaintenanceReplayExportResult, MaintenanceReplayImportParams,
+    MaintenanceReplayImportResult, MaintenanceReplayRunParams, MaintenanceReplayRunResult,
     MergeApplyParams, MergeApplyResult, MergeFunctionRef, MergePolicySpec, MergeRegisterParams,
     MergeRegisterResult, MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities,
     MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
@@ -52,15 +54,16 @@ use skeindb_skeinql::methods::{
     MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
     MigrationIntentSuggestion, MigrationRewritePreview, MigrationRewritePreviewParams,
     MigrationRewritePreviewResult, ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy,
-    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams, RowObject,
-    SchemaApplyMergeParams, SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp,
-    SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult,
-    SchemaProposeChangeParams, SchemaProposeChangeResult, VectorIndexStatusParams,
-    VectorIndexStatusResult, VectorInsertParams, VectorInsertResult, VectorSearchMatch,
-    VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams,
-    ViewDropResult, ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams,
-    ViewRefreshResult, ViewStatusParams, ViewStatusResult, WasmPlanCompileParams,
-    WasmPlanCompileResult,
+    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams, ReplayBundle,
+    ReplayBundleChangeEvent, ReplayBundleManifest, ReplayBundleRowEntry, ReplayBundleTable,
+    ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
+    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
+    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
+    SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
+    VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
+    VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
+    ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult,
+    ViewStatusParams, ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -219,6 +222,14 @@ impl TableStorageMode {
             "dual" | "hybrid" => Some(Self::Dual),
             "json" => Some(Self::Json),
             _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Segment => "segment",
+            Self::Dual => "hybrid",
         }
     }
 
@@ -529,6 +540,8 @@ const SCHEMA_FLAGS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
 const CHANGE_LOG_FORMAT_VERSION: u32 = 1;
+const REPLAY_BUNDLE_FORMAT_VERSION: u32 = 1;
+const REPLAY_WORKSPACES_DIR: &str = ".replay_workspaces";
 
 const DP_BUDGET_FORMAT_VERSION: u32 = 2;
 const DP_AUDIT_FORMAT_VERSION: u32 = 1;
@@ -5795,6 +5808,374 @@ impl Engine {
     }
 
     // -----------------------------
+    // maintenance.replay.* (T183)
+    // -----------------------------
+
+    pub fn maintenance_replay_export(
+        &self,
+        params: MaintenanceReplayExportParams,
+    ) -> anyhow::Result<MaintenanceReplayExportResult> {
+        if let (Some(from), Some(to)) = (params.from_lsn, params.to_lsn) {
+            if from > to {
+                anyhow::bail!(
+                    "invalid_request: from_lsn ({from}) must be less than or equal to to_lsn ({to})"
+                );
+            }
+        }
+        if let Some(db) = params.db.as_deref() {
+            if !self.catalog.databases.contains_key(db) {
+                anyhow::bail!("not_found: unknown database '{db}'");
+            }
+        }
+
+        let mut keys = self
+            .tables
+            .keys()
+            .filter(|key| {
+                params
+                    .db
+                    .as_deref()
+                    .map(|db| key.db.eq_ignore_ascii_case(db))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort_by(|a, b| a.db.cmp(&b.db).then_with(|| a.table.cmp(&b.table)));
+        if keys.is_empty() {
+            anyhow::bail!("not_found: no tables selected for replay export");
+        }
+
+        let mut tables = Vec::new();
+        let mut table_checksums = Vec::new();
+        let mut row_count = 0u64;
+        let mut live_row_count = 0u64;
+        let mut tombstone_count = 0u64;
+        let selected = keys.iter().cloned().collect::<HashSet<_>>();
+
+        for key in keys.iter() {
+            let schema = self.get_schema(&key.db, &key.table)?;
+            let tdata = self.tables.get(key).ok_or_else(|| {
+                anyhow::anyhow!("not_found: missing table data for {}.{}", key.db, key.table)
+            })?;
+            let table = replay_bundle_table_from_engine(key, schema, tdata);
+            let checksum = replay_bundle_table_checksum(&table)?;
+            row_count = row_count.saturating_add(checksum.row_count);
+            live_row_count = live_row_count.saturating_add(checksum.live_row_count);
+            tombstone_count = tombstone_count.saturating_add(checksum.tombstone_count);
+            tables.push(table);
+            table_checksums.push(checksum);
+        }
+
+        let changes = self
+            .changes
+            .iter()
+            .filter(|event| {
+                selected.contains(&TableKey {
+                    db: event.db.clone(),
+                    table: event.table.clone(),
+                })
+            })
+            .filter(|event| {
+                let lsn = event.lsn.unwrap_or(event.seq);
+                params.from_lsn.map(|from| lsn >= from).unwrap_or(true)
+                    && params.to_lsn.map(|to| lsn <= to).unwrap_or(true)
+            })
+            .map(|event| ReplayBundleChangeEvent {
+                seq: event.seq,
+                db: event.db.clone(),
+                table: event.table.clone(),
+                op: event.op.clone(),
+                pk: event.pk.clone(),
+                commit_ts_ms: event.commit_ts_ms,
+                lsn: event.lsn,
+            })
+            .collect::<Vec<_>>();
+
+        let bundle_id = params
+            .bundle_id
+            .unwrap_or_else(|| format!("replay_bundle_{:x}", now_millis()));
+        let checksum = replay_bundle_checksum(self.storage_mode.as_str(), &tables, &changes)?;
+        let start_commit_ts_ms = changes
+            .iter()
+            .map(|event| event.commit_ts_ms)
+            .filter(|ts| *ts > 0)
+            .min()
+            .or_else(|| {
+                tables
+                    .iter()
+                    .flat_map(|table| table.rows.iter().map(|row| row.commit_ts_ms))
+                    .filter(|ts| *ts > 0)
+                    .min()
+            });
+        let end_commit_ts_ms = changes
+            .iter()
+            .map(|event| event.commit_ts_ms)
+            .filter(|ts| *ts > 0)
+            .max()
+            .or_else(|| {
+                tables
+                    .iter()
+                    .flat_map(|table| table.rows.iter().map(|row| row.commit_ts_ms))
+                    .filter(|ts| *ts > 0)
+                    .max()
+            });
+        let start_lsn = changes
+            .first()
+            .and_then(|event| event.lsn.or(Some(event.seq)));
+        let end_lsn = changes
+            .last()
+            .and_then(|event| event.lsn.or(Some(event.seq)));
+
+        let bundle = ReplayBundle {
+            manifest: ReplayBundleManifest {
+                format_version: REPLAY_BUNDLE_FORMAT_VERSION,
+                bundle_id,
+                generated_at_ms: now_millis(),
+                engine_version: env!("CARGO_PKG_VERSION").to_string(),
+                storage_mode: self.storage_mode.as_str().to_string(),
+                checksum,
+                table_checksums,
+                table_count: tables.len() as u64,
+                row_count,
+                live_row_count,
+                tombstone_count,
+                change_count: changes.len() as u64,
+                start_lsn,
+                end_lsn,
+                start_commit_ts_ms,
+                end_commit_ts_ms,
+            },
+            tables,
+            changes,
+        };
+
+        replay_bundle_verify(&bundle)?;
+        Ok(MaintenanceReplayExportResult { bundle })
+    }
+
+    pub fn maintenance_replay_import(
+        &self,
+        params: MaintenanceReplayImportParams,
+    ) -> anyhow::Result<MaintenanceReplayImportResult> {
+        replay_bundle_verify(&params.bundle)?;
+        let workspace_id = validate_replay_workspace_id(
+            params
+                .workspace_id
+                .as_deref()
+                .unwrap_or(&format!("replay_{:x}", now_millis())),
+        )?;
+        let workspace_dir = self.replay_workspace_dir(&workspace_id);
+        if workspace_dir.exists() {
+            fs::remove_dir_all(&workspace_dir)?;
+        }
+        if let Err(err) = self.materialize_replay_bundle_workspace(&params.bundle, &workspace_dir) {
+            let _ = fs::remove_dir_all(&workspace_dir);
+            return Err(err);
+        }
+
+        Ok(MaintenanceReplayImportResult {
+            ok: true,
+            workspace_id,
+            bundle_id: params.bundle.manifest.bundle_id.clone(),
+            workspace_path: workspace_dir.display().to_string(),
+            checksum: params.bundle.manifest.checksum.clone(),
+            imported_tables: params.bundle.manifest.table_count,
+            imported_rows: params.bundle.manifest.row_count,
+            imported_changes: params.bundle.manifest.change_count,
+        })
+    }
+
+    pub fn maintenance_replay_run(
+        &self,
+        params: MaintenanceReplayRunParams,
+    ) -> anyhow::Result<MaintenanceReplayRunResult> {
+        let workspace_id = validate_replay_workspace_id(&params.workspace_id)?;
+        let workspace_dir = self.replay_workspace_dir(&workspace_id);
+        if !workspace_dir.exists() {
+            anyhow::bail!("not_found: unknown replay workspace '{workspace_id}'");
+        }
+        let bundle_path = Self::replay_workspace_bundle_path(&workspace_dir);
+        let bundle = load_json::<ReplayBundle>(&bundle_path)
+            .ok_or_else(|| anyhow::anyhow!("not_found: replay bundle metadata missing"))?;
+        replay_bundle_verify(&bundle)?;
+
+        let replay =
+            Self::open_with_storage_mode_name(&workspace_dir, &bundle.manifest.storage_mode)?;
+        let mut observed_tables = Vec::new();
+        for table in bundle.tables.iter() {
+            let key = replay_bundle_table_key(&table.table);
+            let schema = replay.get_schema(&key.db, &key.table)?;
+            let tdata = replay.tables.get(&key).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "not_found: replay workspace missing table {}.{}",
+                    key.db,
+                    key.table
+                )
+            })?;
+            observed_tables.push(replay_bundle_table_from_engine(&key, schema, tdata));
+        }
+        let observed_changes = replay
+            .changes
+            .iter()
+            .map(|event| ReplayBundleChangeEvent {
+                seq: event.seq,
+                db: event.db.clone(),
+                table: event.table.clone(),
+                op: event.op.clone(),
+                pk: event.pk.clone(),
+                commit_ts_ms: event.commit_ts_ms,
+                lsn: event.lsn,
+            })
+            .collect::<Vec<_>>();
+        let observed_checksum = replay_bundle_checksum(
+            &bundle.manifest.storage_mode,
+            &observed_tables,
+            &observed_changes,
+        )?;
+        let mut observed_table_checksums = observed_tables
+            .iter()
+            .map(replay_bundle_table_checksum)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        observed_table_checksums.sort_by(|a, b| {
+            a.table
+                .db
+                .cmp(&b.table.db)
+                .then_with(|| a.table.table.cmp(&b.table.table))
+        });
+        let mut expected_table_checksums = bundle.manifest.table_checksums.clone();
+        expected_table_checksums.sort_by(|a, b| {
+            a.table
+                .db
+                .cmp(&b.table.db)
+                .then_with(|| a.table.table.cmp(&b.table.table))
+        });
+        let ok = observed_checksum == bundle.manifest.checksum
+            && observed_table_checksums == expected_table_checksums
+            && observed_changes.len() == bundle.changes.len();
+        let replayed_rows = observed_table_checksums
+            .iter()
+            .map(|entry| entry.row_count)
+            .sum::<u64>();
+
+        Ok(MaintenanceReplayRunResult {
+            ok,
+            workspace_id,
+            bundle_id: bundle.manifest.bundle_id.clone(),
+            workspace_path: workspace_dir.display().to_string(),
+            expected_checksum: bundle.manifest.checksum.clone(),
+            observed_checksum,
+            table_checksums: observed_table_checksums,
+            replayed_tables: bundle.tables.len() as u64,
+            replayed_rows,
+            replayed_changes: observed_changes.len() as u64,
+        })
+    }
+
+    fn materialize_replay_bundle_workspace(
+        &self,
+        bundle: &ReplayBundle,
+        workspace_dir: &Path,
+    ) -> anyhow::Result<()> {
+        fs::create_dir_all(workspace_dir)?;
+        let mut replay =
+            Self::open_with_storage_mode_name(workspace_dir, &bundle.manifest.storage_mode)?;
+        replay.catalog = Catalog::default();
+        replay.tables.clear();
+        replay.changes = bundle
+            .changes
+            .iter()
+            .map(|event| ChangeEvent {
+                seq: event.seq,
+                db: event.db.clone(),
+                table: event.table.clone(),
+                op: event.op.clone(),
+                pk: event.pk.clone(),
+                query_id: None,
+                etag: None,
+                commit_ts_ms: event.commit_ts_ms,
+                lsn: event.lsn,
+            })
+            .collect();
+        replay.change_seq = replay.changes.last().map(|event| event.seq).unwrap_or(0);
+
+        for table in bundle.tables.iter() {
+            let db = table.table.db.clone();
+            let table_name = table.table.table.clone();
+            let schema = TableSchema {
+                columns: table
+                    .schema
+                    .columns
+                    .iter()
+                    .map(|column| ColumnSchema {
+                        name: column.name.clone(),
+                        r#type: column.r#type.clone(),
+                        nullable: column.nullable,
+                        auto_increment: column.auto_increment,
+                    })
+                    .collect(),
+                primary_key: table.schema.primary_key.clone(),
+                compat_mysql: table.schema.compat_mysql.clone(),
+                table_version: table.schema.table_version,
+                auto_inc_next: table
+                    .schema
+                    .auto_inc_next
+                    .iter()
+                    .map(|(column, next)| (column.clone(), *next))
+                    .collect(),
+            };
+            replay
+                .catalog
+                .databases
+                .entry(db.clone())
+                .or_default()
+                .tables
+                .insert(table_name.clone(), schema.clone());
+
+            let mut tdata = TableData::default();
+            tdata.rows = table
+                .rows
+                .iter()
+                .map(|row| RowEntry {
+                    row: row.row.clone(),
+                    version: row.version,
+                    deleted: row.deleted,
+                    commit_ts_ms: row.commit_ts_ms,
+                })
+                .collect();
+            for (idx, entry) in tdata.rows.iter().enumerate() {
+                if entry.deleted {
+                    continue;
+                }
+                let pk = extract_pk(&schema, &entry.row)?;
+                let key = pk_key(&pk);
+                if tdata.pk_index.insert(key, idx).is_some() {
+                    anyhow::bail!(
+                        "invalid_replay_bundle: duplicate primary key in {}.{}",
+                        db,
+                        table_name
+                    );
+                }
+            }
+            replay.tables.insert(
+                TableKey {
+                    db,
+                    table: table_name,
+                },
+                tdata,
+            );
+        }
+
+        replay.rebuild_value_store_from_tables_best_effort();
+        replay.persist_catalog()?;
+        for table in bundle.tables.iter() {
+            replay.persist_table(&table.table.db, &table.table.table)?;
+        }
+        replay.persist_changes_best_effort();
+        save_json(&Self::replay_workspace_bundle_path(workspace_dir), bundle)?;
+        Ok(())
+    }
+
+    // -----------------------------
     // edge.* (research)
     // -----------------------------
 
@@ -7646,6 +8027,18 @@ impl Engine {
 
     fn changes_path(&self) -> PathBuf {
         self.data_dir.join("changes.json")
+    }
+
+    fn replay_workspaces_dir(&self) -> PathBuf {
+        self.data_dir.join(REPLAY_WORKSPACES_DIR)
+    }
+
+    fn replay_workspace_dir(&self, workspace_id: &str) -> PathBuf {
+        self.replay_workspaces_dir().join(workspace_id)
+    }
+
+    fn replay_workspace_bundle_path(workspace_dir: &Path) -> PathBuf {
+        workspace_dir.join("bundle.json")
     }
 
     fn load_changes_best_effort(&mut self) {
@@ -18137,6 +18530,204 @@ fn fingerprint_json(value: &serde_json::Value) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
     let id = value_id(&bytes);
     hex16(&id)
+}
+
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(child) = map.get(&key) {
+                    out.insert(key, canonicalize_json_value(child));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(canonicalize_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn replay_bundle_table_key(table: &BaseTableRef) -> TableKey {
+    TableKey {
+        db: table.db.clone(),
+        table: table.table.clone(),
+    }
+}
+
+fn replay_bundle_table_schema_from_table_schema(schema: &TableSchema) -> ReplayBundleTableSchema {
+    ReplayBundleTableSchema {
+        columns: schema
+            .columns
+            .iter()
+            .map(|column| SchemaColumnInfo {
+                name: column.name.clone(),
+                r#type: column.r#type.clone(),
+                nullable: column.nullable,
+                auto_increment: column.auto_increment,
+            })
+            .collect(),
+        primary_key: schema.primary_key.clone(),
+        compat_mysql: schema.compat_mysql.clone(),
+        table_version: schema.table_version,
+        auto_inc_next: schema
+            .auto_inc_next
+            .iter()
+            .map(|(column, next)| (column.clone(), *next))
+            .collect(),
+    }
+}
+
+fn replay_bundle_table_from_engine(
+    key: &TableKey,
+    schema: &TableSchema,
+    tdata: &TableData,
+) -> ReplayBundleTable {
+    ReplayBundleTable {
+        table: BaseTableRef {
+            db: key.db.clone(),
+            table: key.table.clone(),
+            r#as: None,
+        },
+        schema: replay_bundle_table_schema_from_table_schema(schema),
+        rows: tdata
+            .rows
+            .iter()
+            .map(|entry| ReplayBundleRowEntry {
+                row: entry.row.clone(),
+                version: entry.version,
+                deleted: entry.deleted,
+                commit_ts_ms: entry.commit_ts_ms,
+            })
+            .collect(),
+    }
+}
+
+fn replay_bundle_table_checksum(
+    table: &ReplayBundleTable,
+) -> anyhow::Result<ReplayBundleTableChecksum> {
+    let checksum_value = canonicalize_json_value(&serde_json::to_value(table)?);
+    let row_count = table.rows.len() as u64;
+    let tombstone_count = table.rows.iter().filter(|row| row.deleted).count() as u64;
+    let live_row_count = row_count.saturating_sub(tombstone_count);
+    Ok(ReplayBundleTableChecksum {
+        table: table.table.clone(),
+        checksum: fingerprint_json(&checksum_value),
+        row_count,
+        live_row_count,
+        tombstone_count,
+    })
+}
+
+fn replay_bundle_checksum(
+    storage_mode: &str,
+    tables: &[ReplayBundleTable],
+    changes: &[ReplayBundleChangeEvent],
+) -> anyhow::Result<String> {
+    let checksum_value = canonicalize_json_value(&serde_json::json!({
+        "storage_mode": storage_mode,
+        "tables": tables,
+        "changes": changes,
+    }));
+    Ok(fingerprint_json(&checksum_value))
+}
+
+fn replay_bundle_verify(bundle: &ReplayBundle) -> anyhow::Result<()> {
+    if bundle.manifest.format_version != REPLAY_BUNDLE_FORMAT_VERSION {
+        anyhow::bail!(
+            "invalid_replay_bundle: unsupported format_version {}",
+            bundle.manifest.format_version
+        );
+    }
+    if bundle.manifest.bundle_id.trim().is_empty() {
+        anyhow::bail!("invalid_replay_bundle: bundle_id must not be empty");
+    }
+
+    let mut expected_table_checksums = bundle
+        .tables
+        .iter()
+        .map(replay_bundle_table_checksum)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    expected_table_checksums.sort_by(|a, b| {
+        a.table
+            .db
+            .cmp(&b.table.db)
+            .then_with(|| a.table.table.cmp(&b.table.table))
+    });
+
+    let mut manifest_table_checksums = bundle.manifest.table_checksums.clone();
+    manifest_table_checksums.sort_by(|a, b| {
+        a.table
+            .db
+            .cmp(&b.table.db)
+            .then_with(|| a.table.table.cmp(&b.table.table))
+    });
+
+    if expected_table_checksums != manifest_table_checksums {
+        anyhow::bail!("invalid_replay_bundle: table_checksums mismatch");
+    }
+
+    let row_count = expected_table_checksums
+        .iter()
+        .map(|entry| entry.row_count)
+        .sum::<u64>();
+    let live_row_count = expected_table_checksums
+        .iter()
+        .map(|entry| entry.live_row_count)
+        .sum::<u64>();
+    let tombstone_count = expected_table_checksums
+        .iter()
+        .map(|entry| entry.tombstone_count)
+        .sum::<u64>();
+    if bundle.manifest.table_count != bundle.tables.len() as u64
+        || bundle.manifest.row_count != row_count
+        || bundle.manifest.live_row_count != live_row_count
+        || bundle.manifest.tombstone_count != tombstone_count
+        || bundle.manifest.change_count != bundle.changes.len() as u64
+    {
+        anyhow::bail!("invalid_replay_bundle: manifest counts mismatch");
+    }
+
+    let checksum = replay_bundle_checksum(
+        &bundle.manifest.storage_mode,
+        &bundle.tables,
+        &bundle.changes,
+    )?;
+    if checksum != bundle.manifest.checksum {
+        anyhow::bail!("invalid_replay_bundle: checksum mismatch");
+    }
+
+    Ok(())
+}
+
+pub(crate) const REPLAY_WORKSPACE_ID_MAX_LEN: usize = 128;
+
+fn validate_replay_workspace_id(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("invalid_request: workspace_id must not be empty");
+    }
+    if trimmed.len() > REPLAY_WORKSPACE_ID_MAX_LEN {
+        anyhow::bail!(
+            "invalid_request: workspace_id must be at most {REPLAY_WORKSPACE_ID_MAX_LEN} characters"
+        );
+    }
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        anyhow::bail!(
+            "invalid_request: workspace_id may only contain ASCII letters, digits, '_' or '-'"
+        );
+    }
+    Ok(trimmed.to_string())
 }
 
 fn hex16(id: &[u8; 16]) -> String {
@@ -34880,6 +35471,123 @@ mod tests {
         let status = engine.maintenance_history_status(Some(horizon_before));
         assert_eq!(status["total_tombstones"].as_u64().unwrap(), 1);
         assert_eq!(status["total_purgeable"].as_u64().unwrap(), 0);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("replay_bundle_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "one".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "payload",
+                        Lit::Str {
+                            v: "two".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.data_update(
+            &table,
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 2 },
+                },
+            ),
+            &row(&[(
+                "payload",
+                Lit::Str {
+                    v: "two-updated".to_string(),
+                },
+            )]),
+            None,
+            None,
+            &[],
+        )?;
+        engine.data_delete(
+            &table,
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            ),
+            None,
+            &[],
+        )?;
+
+        let exported = engine.maintenance_replay_export(MaintenanceReplayExportParams {
+            db: Some("app".to_string()),
+            from_lsn: None,
+            to_lsn: None,
+            bundle_id: Some("roundtrip_bundle".to_string()),
+        })?;
+        assert_eq!(exported.bundle.manifest.table_count, 1);
+        assert_eq!(exported.bundle.manifest.change_count, 4);
+
+        let imported = engine.maintenance_replay_import(MaintenanceReplayImportParams {
+            bundle: exported.bundle.clone(),
+            workspace_id: Some("roundtrip".to_string()),
+        })?;
+        assert!(imported.ok);
+
+        let replayed = engine.maintenance_replay_run(MaintenanceReplayRunParams {
+            workspace_id: "roundtrip".to_string(),
+        })?;
+        assert!(replayed.ok);
+        assert_eq!(replayed.expected_checksum, replayed.observed_checksum);
+        assert_eq!(replayed.replayed_tables, 1);
+        assert_eq!(replayed.replayed_changes, 4);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

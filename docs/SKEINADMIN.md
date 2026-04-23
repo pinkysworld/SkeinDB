@@ -192,8 +192,10 @@ Security note:
 - Graceful shutdown trigger (admin action that checkpoints and marks cluster node offline)
 
 ### 4.8.1 Time travel & replay
-- Point-in-time query runner (as_of)
-- Replay bundle export/import/verify
+- Point-in-time query runner built on `query.select as_of`, with ISO/epoch timestamp entry, seeded query JSON from the selected table, and inline result-grid rendering.
+- History retention dashboard built on `maintenance.history.status`, showing per-table live/tombstone/purgeable counts plus the effective retention policy.
+- History retention policy save + GC controls via `maintenance.history.set_policy` and `maintenance.history.gc`.
+- Replay bundle export/download/import/integrity flows built on `maintenance.replay.export`, `maintenance.replay.import`, and `maintenance.replay.run`, including session-local replay workspace tracking and checksum summaries.
 
 ### 4.9 Server Load & Statistics
 (See docs/OBSERVABILITY.md)
@@ -323,7 +325,7 @@ SkeinAdmin should support:
 - SA07: Stats dashboard (stats.*)
 - SA08: Cluster dashboard (cluster.*)
 - SA09: Index Advisor page (advisor.*) — implemented prototype; online build progress remains backlog
-- SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*)
+- SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*) — implemented with the dedicated `Time Travel & Replay` panel, including `maintenance.history.*` retention controls and replay integrity summaries.
 - SA11: Encryption + key rotation UI (settings.encryption + status/progress)
 - SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work
 - SA13: Compaction scheduler policy UI (maintenance.compaction.*)

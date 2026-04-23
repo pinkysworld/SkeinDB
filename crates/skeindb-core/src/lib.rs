@@ -12,6 +12,7 @@
 
 use thiserror::Error;
 
+pub mod encryption;
 pub mod manifest;
 pub mod mvcc;
 pub mod rowdir;

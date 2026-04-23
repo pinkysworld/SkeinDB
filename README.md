@@ -4,7 +4,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-04-19.
+Last updated: 2026-04-23.
 
 SkeinDB is a single-binary database server that combines:
 

@@ -80,3 +80,57 @@ fn skeinadmin_cdc_panel_exposes_subscription_controls() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-panel=\"replay\"",
+        "Point-in-Time Query Runner",
+        "btnTimeTravelSeed",
+        "btnTimeTravelRun",
+        "btnHistoryStatus",
+        "btnHistorySetPolicy",
+        "btnHistoryGc",
+        "btnReplayExport",
+        "btnReplayImport",
+        "btnReplayRunIntegrity",
+        "replayBundleSummary",
+        "replayIntegritySummary",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin replay html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function renderReplayPanel()",
+        "async function timeTravelRunQuery()",
+        "async function historyLoadStatus()",
+        "async function historySavePolicy()",
+        "async function historyRunGc()",
+        "async function replayExportBundle()",
+        "async function replayImportBundle()",
+        "async function replayRunIntegrity()",
+        "maintenance.history.status",
+        "maintenance.history.set_policy",
+        "maintenance.history.gc",
+        "maintenance.replay.export",
+        "maintenance.replay.import",
+        "maintenance.replay.run",
+        "wire('btnTimeTravelRun', timeTravelRunQuery);",
+        "wire('btnReplayRunIntegrity', replayRunIntegrity);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin replay js should contain {marker}"
+        );
+    }
+}

@@ -21,6 +21,7 @@ Implemented navigation areas:
 - **Admin lifecycle controls** (connect/disconnect + graceful `system.shutdown`)
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)
 - **Settings Manager** (`settings.get` / `settings.set`, including `cluster.state.v1`)
+- **Time Travel & Replay** (`query.select as_of`, `maintenance.history.*`, `maintenance.replay.*`, bundle download/import, integrity summary)
 - **RPC Explorer** (full method-level access)
   - includes CDC cursor helpers such as `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close`
 - **Migration Assistant** (intent + rewrite preview)
@@ -31,7 +32,7 @@ Roadmap areas:
 - **Views** (incremental maintenance)
 - **CDC** dedicated subscriptions page + lag visualization
 - **Forensics** (hash-chained WAL verification + proofs)
-- **Replay** (time travel, reproducible replays, performance replays)
+- **Performance Replay extensions** (timing capture / variance analysis beyond current snapshot-based replay bundles)
 - Experimental: **Embeddings**, **NL Query**
 
 For the full console specification, see: `docs/SKEINADMIN.md`.

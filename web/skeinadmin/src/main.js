@@ -40,7 +40,12 @@ const STATE = {
   advisorHistory: [],
   advisorSelection: null,
   cdcSubscriptions: [],
-  cdcSelectedSubId: ''
+  cdcSelectedSubId: '',
+  replayHistoryStatus: null,
+  replayLastBundle: null,
+  replayImports: [],
+  replaySelectedWorkspaceId: '',
+  replayLastRun: null
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +61,7 @@ const PANEL_META = {
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
   telemetry:  { title: 'Telemetry Center',     subtitle: 'Inspect compatibility, feature usage, plan cache, and query pressure.' },
   cdc:        { title: 'CDC Manager',          subtitle: 'Subscribe to table changefeeds, poll events, ACK offsets, and inspect lag.' },
+  replay:     { title: 'Time Travel & Replay', subtitle: 'Run point-in-time queries, manage history retention, and verify replay bundles.' },
   security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
@@ -111,6 +117,7 @@ const FEATURE_CENTER = [
   { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
   { title: 'CDC', desc: 'Table subscriptions, polling, ACKs, and lag view.', panel: 'cdc' },
+  { title: 'Time Travel & Replay', desc: 'As-of queries, retention controls, and replay integrity checks.', panel: 'replay' },
   { title: 'Security', desc: 'API tokens, grants, and sensitive controls.', panel: 'security' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
   { title: 'Differential Privacy', desc: 'DP aggregates w/ Laplace noise.', panel: 'privacy' },
@@ -161,6 +168,7 @@ const RPC_TEMPLATES = [
   { label: 'data.update', method: 'data.update', params: { table:{db:'demo',table:'users'}, where:{op:'eq',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, set:{name:{t:'str',v:'Ada Lovelace'}}, limit:1 } },
   { label: 'data.delete', method: 'data.delete', params: { table:{db:'demo',table:'users'}, where:{op:'eq',a:{col:'id'},b:{lit:{t:'i64',v:1}}}, limit:1 } },
   { label: 'query.select', method: 'query.select', params: { query:{schema:'demo',table:'users',select:[{col:'id'},{col:'name'}]}, result_format:'rows_json' } },
+  { label: 'query.select (as_of)', method: 'query.select', params: { query:{schema:'demo',table:'users',select:[{col:'id'},{col:'name'}]}, as_of:{t:'datetime',iso:'2026-01-01T00:00:00Z'}, result_format:'rows_json' } },
   { label: 'query.patch', method: 'query.patch', params: { query:{schema:'demo',table:'users',select:[{col:'id'}]}, base_etag:'', include_full:true, result_format:'rows_json' } },
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
   { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregate:{op:'count',col:'id'}, epsilon:1.0 } },
@@ -182,6 +190,12 @@ const RPC_TEMPLATES = [
   { label: 'cdc.poll', method: 'cdc.poll', params: { sub_id:'sub_1', from_offset:0, limit:200 } },
   { label: 'cdc.ack', method: 'cdc.ack', params: { sub_id:'sub_1', offset:42 } },
   { label: 'cdc.close', method: 'cdc.close', params: { sub_id:'sub_1' } },
+  { label: 'maintenance.history.status', method: 'maintenance.history.status', params: { horizon_ms: 1767225600000 } },
+  { label: 'maintenance.history.set_policy', method: 'maintenance.history.set_policy', params: { enabled: true, window_ms: 604800000 } },
+  { label: 'maintenance.history.gc', method: 'maintenance.history.gc', params: { horizon_ms: 1767225600000 } },
+  { label: 'maintenance.replay.export', method: 'maintenance.replay.export', params: { db:'demo', bundle_id:'replay_bundle_demo' } },
+  { label: 'maintenance.replay.import', method: 'maintenance.replay.import', params: { bundle:{manifest:{bundle_id:'replay_bundle_demo'},tables:[],changes:[]}, workspace_id:'replay_demo' } },
+  { label: 'maintenance.replay.run', method: 'maintenance.replay.run', params: { workspace_id:'replay_demo' } },
   { label: 'settings.get', method: 'settings.get', params: { keys:['cluster.state.v1'] } },
   { label: 'settings.list', method: 'settings.list', params: {} },
   { label: 'cluster.status', method: 'cluster.status', params: {} },
@@ -284,7 +298,7 @@ function setConnStatus(kind, message, detail) {
 
 function setSelectedDb(db) {
   STATE.selectedDb = (db || '').trim();
-  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb'].forEach(id => {
+  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb','ttDb','replayDb'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedDb;
   });
   const easyDb = $('easyCreateDb');
@@ -293,7 +307,7 @@ function setSelectedDb(db) {
 
 function setSelectedTable(table) {
   STATE.selectedTable = (table || '').trim();
-  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable'].forEach(id => {
+  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable','ttTable'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedTable;
   });
   const easyTable = $('easyCreateTableName');
@@ -388,6 +402,16 @@ function parseJsonInput(raw, label) {
 function parseJsonArrayInput(id, label) {
   const raw = $(id) ? $(id).value.trim() : ''; if (!raw) return undefined;
   const p = parseJsonInput(raw, label); if (!Array.isArray(p)) throw new Error(label + ' must be array'); return p;
+}
+
+function parseOptionalU64Input(id, label) {
+  const raw = $(id) ? $(id).value.trim() : '';
+  if (!raw) return undefined;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(label + ' must be a non-negative integer');
+  }
+  return value;
 }
 
 function cleanParams(p) {
@@ -821,12 +845,18 @@ function disconnect() {
   setConnStatus('warn', 'Disconnected', 'Disconnected.');
   showToast('Disconnected', 'info');
   STATE.methods = []; STATE.dbTree = {};
+  STATE.replayHistoryStatus = null;
+  STATE.replayLastBundle = null;
+  STATE.replayImports = [];
+  STATE.replaySelectedWorkspaceId = '';
+  STATE.replayLastRun = null;
   setSelectedDb(''); setSelectedTable('');
   renderDbTree({}, '');
   dataFormApplyColumns([], []);
   easyApplyColumns([], []);
   easyRefreshTargetsFromTree();
   renderTable('browseTable', [], []); renderTable('easyDataGrid', [], []); renderTable('structureTable', [], []); renderTable('sqlTable', [], []);
+  renderTable('ttResultGrid', [], []); renderTable('historyTableGrid', [], []); renderTable('replayManifestTable', [], []); renderTable('replayIntegrityTable', [], []);
   updateContext();
 }
 
@@ -3413,6 +3443,414 @@ function formatUiTimestamp(ms) {
   return new Date(ms).toLocaleString();
 }
 
+// ---------------------------------------------------------------------------
+// Time travel + replay (Phase 19 / T184)
+// ---------------------------------------------------------------------------
+function replayHydrateDefaultsFromContext() {
+  const replayDb = $('replayDb');
+  const ttDb = $('ttDb');
+  const ttTable = $('ttTable');
+  if (replayDb && !replayDb.value.trim() && STATE.selectedDb) replayDb.value = STATE.selectedDb;
+  if (ttDb && !ttDb.value.trim() && STATE.selectedDb) ttDb.value = STATE.selectedDb;
+  if (ttTable && !ttTable.value.trim() && STATE.selectedTable) ttTable.value = STATE.selectedTable;
+}
+
+function buildAsOfLit(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return undefined;
+  if (/^[0-9]+$/.test(value)) return { t: 'u64', v: Number(value) };
+  return { t: 'datetime', iso: value };
+}
+
+function replayFindImport(workspaceId) {
+  return (STATE.replayImports || []).find((entry) => entry.workspace_id === workspaceId) || null;
+}
+
+function replayRememberImport(entry) {
+  STATE.replayImports = (STATE.replayImports || []).filter((item) => item.workspace_id !== entry.workspace_id);
+  STATE.replayImports.unshift(entry);
+  if (STATE.replayImports.length > 12) STATE.replayImports = STATE.replayImports.slice(0, 12);
+}
+
+function renderHistoryStatusCard(status) {
+  const summary = $('historySummary');
+  const enabledSelect = $('historyEnabled');
+  const windowInput = $('historyWindowMs');
+  if (!status) {
+    if (summary) summary.innerHTML = 'Load history status to inspect retained tombstones, active policy, and purgeable rows.';
+    renderTable('historyTableGrid', ['Table', 'Live', 'Tombstones', 'Purgeable', 'Oldest Tombstone'], [['--', 'No history status loaded yet', '', '', '']]);
+    return;
+  }
+
+  const policy = status.policy || {};
+  if (enabledSelect && document.activeElement !== enabledSelect) enabledSelect.value = policy.enabled ? 'true' : 'false';
+  if (windowInput && document.activeElement !== windowInput && Number.isFinite(policy.window_ms)) windowInput.value = String(policy.window_ms || 0);
+
+  if (summary) {
+    const horizonText = status.horizon_ms === null || status.horizon_ms === undefined
+      ? 'policy/default'
+      : formatUiTimestamp(Number(status.horizon_ms));
+    summary.innerHTML = '<strong>Policy</strong>: ' + escapeHtml(policy.enabled ? 'enabled' : 'disabled')
+      + ' | <strong>Window</strong>: ' + escapeHtml(String(Number(policy.window_ms) || 0)) + ' ms'
+      + ' | <strong>Live rows</strong>: ' + escapeHtml(String(Number(status.total_live_rows) || 0))
+      + ' | <strong>Tombstones</strong>: ' + escapeHtml(String(Number(status.total_tombstones) || 0))
+      + ' | <strong>Purgeable</strong>: ' + escapeHtml(String(Number(status.total_purgeable) || 0))
+      + '<br><strong>Oldest tombstone</strong>: ' + escapeHtml(formatUiTimestamp(Number(status.oldest_tombstone_commit_ts_ms) || 0))
+      + ' | <strong>Evaluated horizon</strong>: ' + escapeHtml(horizonText);
+  }
+
+  const rows = Array.isArray(status.tables)
+    ? status.tables.map((table) => [
+        (table.db || '') + '.' + (table.table || ''),
+        Number(table.live_rows) || 0,
+        Number(table.tombstones) || 0,
+        Number(table.purgeable) || 0,
+        formatUiTimestamp(Number(table.oldest_tombstone_commit_ts_ms) || 0),
+      ])
+    : [];
+  renderTable('historyTableGrid', ['Table', 'Live', 'Tombstones', 'Purgeable', 'Oldest Tombstone'], rows.length ? rows : [['--', 'No tables reported', '', '', '']]);
+}
+
+function renderReplayBundleSummary(bundle) {
+  const summary = $('replayBundleSummary');
+  if (!bundle || typeof bundle !== 'object' || !bundle.manifest) {
+    if (summary) summary.innerHTML = 'Export a replay bundle or load one from disk to inspect its manifest.';
+    renderTable('replayManifestTable', ['Field', 'Value'], [['Bundle', 'No replay bundle loaded']]);
+    return;
+  }
+
+  const manifest = bundle.manifest || {};
+  const lsnRange = (manifest.start_lsn ?? '--') + ' → ' + (manifest.end_lsn ?? '--');
+  const commitRange = formatUiTimestamp(Number(manifest.start_commit_ts_ms) || 0) + ' → ' + formatUiTimestamp(Number(manifest.end_commit_ts_ms) || 0);
+  if (summary) {
+    summary.innerHTML = '<strong>' + escapeHtml(manifest.bundle_id || 'bundle') + '</strong>'
+      + ' | <strong>Tables</strong>: ' + escapeHtml(String(Number(manifest.table_count) || 0))
+      + ' | <strong>Rows</strong>: ' + escapeHtml(String(Number(manifest.row_count) || 0))
+      + ' | <strong>Changes</strong>: ' + escapeHtml(String(Number(manifest.change_count) || 0))
+      + '<br><strong>Checksum</strong>: ' + escapeHtml(manifest.checksum || '--');
+  }
+
+  renderTable('replayManifestTable', ['Field', 'Value'], [
+    ['Bundle ID', manifest.bundle_id || '--'],
+    ['Format Version', manifest.format_version ?? '--'],
+    ['Generated', formatUiTimestamp(Number(manifest.generated_at_ms) || 0)],
+    ['Engine Version', manifest.engine_version || '--'],
+    ['Storage Mode', manifest.storage_mode || '--'],
+    ['Table Count', Number(manifest.table_count) || 0],
+    ['Row Count', Number(manifest.row_count) || 0],
+    ['Live Rows', Number(manifest.live_row_count) || 0],
+    ['Tombstones', Number(manifest.tombstone_count) || 0],
+    ['Change Count', Number(manifest.change_count) || 0],
+    ['LSN Range', lsnRange],
+    ['Commit Range', commitRange],
+    ['Checksum', manifest.checksum || '--'],
+  ]);
+}
+
+function renderReplayWorkspaceOptions() {
+  const select = $('replayWorkspaceSelect');
+  const input = $('replayWorkspaceId');
+  const summary = $('replayWorkspaceSummary');
+  const imports = Array.isArray(STATE.replayImports)
+    ? STATE.replayImports.slice().sort((a, b) => (b.imported_at_ms || 0) - (a.imported_at_ms || 0))
+    : [];
+
+  if (STATE.replaySelectedWorkspaceId && !imports.some((entry) => entry.workspace_id === STATE.replaySelectedWorkspaceId)) {
+    STATE.replaySelectedWorkspaceId = '';
+  }
+  if (!STATE.replaySelectedWorkspaceId && imports.length) {
+    STATE.replaySelectedWorkspaceId = imports[0].workspace_id;
+  }
+
+  if (select) {
+    select.innerHTML = imports.length
+      ? imports.map((entry) => '<option value="' + escapeHtml(entry.workspace_id) + '">' + escapeHtml(entry.workspace_id + ' · ' + (entry.bundle_id || 'bundle')) + '</option>').join('')
+      : '<option value="">No session imports</option>';
+    select.disabled = !imports.length;
+    select.value = STATE.replaySelectedWorkspaceId || '';
+  }
+
+  if (input && document.activeElement !== input && STATE.replaySelectedWorkspaceId) {
+    input.value = STATE.replaySelectedWorkspaceId;
+  }
+
+  if (summary) {
+    if (!imports.length) {
+      summary.innerHTML = 'No replay workspaces tracked in this browser session yet. Import a bundle or type a workspace ID manually.';
+    } else {
+      summary.innerHTML = imports.map((entry) => {
+        const run = entry.last_run_result;
+        const runLabel = !run ? 'imported' : (run.ok ? 'checksum verified' : 'checksum mismatch');
+        return '<strong>' + escapeHtml(entry.workspace_id) + '</strong> → ' + escapeHtml(entry.bundle_id || 'bundle') + ' (' + escapeHtml(runLabel) + ')';
+      }).join('<br>');
+    }
+  }
+}
+
+function renderReplayIntegrity(result) {
+  const summary = $('replayIntegritySummary');
+  if (!result) {
+    if (summary) summary.innerHTML = 'Run a replay workspace integrity check to compare manifest and observed checksums.';
+    renderTable('replayIntegrityTable', ['Table', 'Rows', 'Live', 'Tombstones', 'Checksum'], [['--', 'No integrity run yet', '', '', '']]);
+    return;
+  }
+
+  if (summary) {
+    summary.innerHTML = '<strong>Workspace</strong>: ' + escapeHtml(result.workspace_id || '--')
+      + ' | <strong>Bundle</strong>: ' + escapeHtml(result.bundle_id || '--')
+      + ' | <strong>Status</strong>: ' + escapeHtml(result.ok ? 'PASS' : 'FAIL')
+      + '<br><strong>Expected checksum</strong>: ' + escapeHtml(result.expected_checksum || '--')
+      + '<br><strong>Observed checksum</strong>: ' + escapeHtml(result.observed_checksum || '--')
+      + ' | <strong>Replayed rows</strong>: ' + escapeHtml(String(Number(result.replayed_rows) || 0))
+      + ' | <strong>Replayed changes</strong>: ' + escapeHtml(String(Number(result.replayed_changes) || 0));
+  }
+
+  const rows = Array.isArray(result.table_checksums)
+    ? result.table_checksums.map((entry) => [
+        (entry.table?.db || '') + '.' + (entry.table?.table || ''),
+        Number(entry.row_count) || 0,
+        Number(entry.live_row_count) || 0,
+        Number(entry.tombstone_count) || 0,
+        entry.checksum || '--',
+      ])
+    : [];
+  renderTable('replayIntegrityTable', ['Table', 'Rows', 'Live', 'Tombstones', 'Checksum'], rows.length ? rows : [['--', 'No table checksums returned', '', '', '']]);
+}
+
+function renderReplayPanel() {
+  replayHydrateDefaultsFromContext();
+  renderHistoryStatusCard(STATE.replayHistoryStatus);
+  renderReplayBundleSummary(STATE.replayLastBundle);
+  renderReplayWorkspaceOptions();
+  renderReplayIntegrity(STATE.replayLastRun);
+}
+
+async function timeTravelSeedQuery() {
+  try {
+    replayHydrateDefaultsFromContext();
+    const db = ($('ttDb')?.value || '').trim();
+    const table = ($('ttTable')?.value || '').trim();
+    if (!db || !table) throw new Error('Database and table are required');
+    const limit = parseOptionalU64Input('ttLimit', 'Point-in-time limit') || 50;
+    const res = await call('schema.describe_table', { db, table }, 'ttOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    const columns = Array.isArray(result.columns) ? result.columns.map((col) => col.name).filter(Boolean) : [];
+    if (!columns.length) throw new Error('No columns found for ' + db + '.' + table);
+    const query = {
+      with: [],
+      body: {
+        select: {
+          projection: columns.map((name) => ({ expr: { col: name }, as: null })),
+          from: [tableRef(db, table)],
+        },
+      },
+      order_by: [],
+      limit: { limit, offset: 0 },
+    };
+    if ($('ttQuery')) $('ttQuery').value = JSON.stringify(query, null, 2);
+    if ($('ttSummary')) $('ttSummary').innerHTML = 'Seeded <strong>' + escapeHtml(db + '.' + table) + '</strong> with ' + escapeHtml(String(columns.length)) + ' projected column(s).';
+    setOut({ seeded: true, db, table, columns, limit }, 'ttOut');
+    showToast('Time-travel query seeded from ' + db + '.' + table + '.', 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'ttOut');
+  }
+}
+
+async function timeTravelRunQuery() {
+  try {
+    const query = parseJsonInput($('ttQuery')?.value || '', 'Time-travel query');
+    if (!query) throw new Error('Query JSON is required');
+    const asOf = buildAsOfLit($('ttAsOf')?.value || '');
+    const res = await call('query.select', cleanParams({ query, as_of: asOf, result_format: 'rows_json' }), 'ttOut');
+    const result = unwrapRpcResult(res, 'query.select');
+    const data = result?.data;
+    if (data) {
+      const columns = (data.columns || []).map((col, idx) => typeof col === 'string' ? col : (col?.name || ('col' + (idx + 1))));
+      renderTable('ttResultGrid', columns, data.rows || []);
+      if ($('ttSummary')) {
+        const asOfLabel = asOf ? (asOf.iso || String(asOf.v)) : 'current snapshot';
+        $('ttSummary').innerHTML = 'Showing <strong>' + escapeHtml(String((data.rows || []).length)) + '</strong> row(s) for <strong>' + escapeHtml(asOfLabel) + '</strong>.';
+      }
+    } else {
+      renderTable('ttResultGrid', [], []);
+    }
+    setOut(result, 'ttOut');
+    showToast('Point-in-time query executed.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'ttOut');
+  }
+}
+
+function timeTravelClear() {
+  if ($('ttAsOf')) $('ttAsOf').value = '';
+  if ($('ttQuery')) $('ttQuery').value = '';
+  renderTable('ttResultGrid', [], []);
+  if ($('ttSummary')) $('ttSummary').innerHTML = 'Seed a query from the selected table or paste a full <code>query.select</code> payload, then add an <code>as_of</code> timestamp to inspect historical rows.';
+  setOut('Ready.', 'ttOut');
+}
+
+async function historyLoadStatus() {
+  try {
+    const horizonMs = parseOptionalU64Input('historyHorizonMs', 'History horizon');
+    const res = await call('maintenance.history.status', cleanParams({ horizon_ms: horizonMs }), 'historyOut');
+    const result = unwrapRpcResult(res, 'maintenance.history.status');
+    STATE.replayHistoryStatus = result;
+    renderReplayPanel();
+    setOut(result, 'historyOut');
+    showToast('History status loaded.', 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'historyOut');
+  }
+}
+
+async function historySavePolicy() {
+  try {
+    const enabled = $('historyEnabled')?.value === 'true';
+    const windowMs = parseOptionalU64Input('historyWindowMs', 'Retention window');
+    const res = await call('maintenance.history.set_policy', cleanParams({ enabled, window_ms: windowMs }), 'historyOut');
+    const result = unwrapRpcResult(res, 'maintenance.history.set_policy');
+    if (!STATE.replayHistoryStatus) STATE.replayHistoryStatus = {};
+    STATE.replayHistoryStatus.policy = result.policy || { enabled, window_ms: windowMs || 0 };
+    renderReplayPanel();
+    setOut(result, 'historyOut');
+    showToast('History retention policy saved.', 'success');
+    await historyLoadStatus();
+  } catch (e) {
+    setOut({ error: String(e) }, 'historyOut');
+  }
+}
+
+async function historyRunGc() {
+  try {
+    const horizonMs = parseOptionalU64Input('historyHorizonMs', 'History horizon');
+    const label = horizonMs === undefined ? 'the active retention horizon' : ('horizon ' + horizonMs);
+    const ok = await skeinModal('🧹', 'Run History GC', 'Permanently remove purgeable tombstones using <b>' + escapeHtml(label) + '</b>? Pre-T180 tombstones remain protected.', [
+      { label: 'Cancel', value: false },
+      { label: 'Run GC', value: true, cls: 'danger' },
+    ]);
+    if (!ok) return;
+    const res = await call('maintenance.history.gc', cleanParams({ horizon_ms: horizonMs }), 'historyOut');
+    const result = unwrapRpcResult(res, 'maintenance.history.gc');
+    setOut(result, 'historyOut');
+    showToast('History GC completed.', 'success');
+    await historyLoadStatus();
+  } catch (e) {
+    setOut({ error: String(e) }, 'historyOut');
+  }
+}
+
+function replayBundleFromText() {
+  const raw = $('replayBundleJson')?.value.trim() || '';
+  if (!raw) {
+    if (STATE.replayLastBundle) return STATE.replayLastBundle;
+    throw new Error('Export a replay bundle first or paste a replay bundle JSON document');
+  }
+  const bundle = parseJsonInput(raw, 'Replay bundle');
+  if (!bundle || typeof bundle !== 'object') throw new Error('Replay bundle must be a JSON object');
+  return bundle;
+}
+
+function replayLoadBundleIntoEditor(bundle) {
+  STATE.replayLastBundle = bundle;
+  if ($('replayBundleJson')) $('replayBundleJson').value = JSON.stringify(bundle, null, 2);
+  renderReplayPanel();
+}
+
+function replayUseLastBundle() {
+  try {
+    if (!STATE.replayLastBundle) throw new Error('No replay bundle available in this browser session');
+    replayLoadBundleIntoEditor(STATE.replayLastBundle);
+    setOut({ bundle_id: STATE.replayLastBundle.manifest?.bundle_id || null }, 'replayOut');
+    showToast('Loaded the latest replay bundle into the editor.', 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
+async function replayExportBundle() {
+  try {
+    replayHydrateDefaultsFromContext();
+    const db = ($('replayDb')?.value || '').trim() || undefined;
+    const fromLsn = parseOptionalU64Input('replayFromLsn', 'From LSN');
+    const toLsn = parseOptionalU64Input('replayToLsn', 'To LSN');
+    const bundleId = ($('replayBundleId')?.value || '').trim() || undefined;
+    const res = await call('maintenance.replay.export', cleanParams({ db, from_lsn: fromLsn, to_lsn: toLsn, bundle_id: bundleId }), 'replayOut');
+    const result = unwrapRpcResult(res, 'maintenance.replay.export');
+    replayLoadBundleIntoEditor(result.bundle);
+    setOut(result, 'replayOut');
+    showToast('Replay bundle exported.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
+function replayDownloadBundle() {
+  try {
+    const bundle = replayBundleFromText();
+    replayLoadBundleIntoEditor(bundle);
+    const bundleId = bundle.manifest?.bundle_id || 'replay_bundle';
+    downloadBlob(JSON.stringify(bundle, null, 2), bundleId + '.sreplay', 'application/json');
+    showToast('Replay bundle downloaded.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
+async function replayImportBundle() {
+  try {
+    const bundle = replayBundleFromText();
+    const workspaceId = ($('replayWorkspaceId')?.value || '').trim() || undefined;
+    replayLoadBundleIntoEditor(bundle);
+    const res = await call('maintenance.replay.import', cleanParams({ bundle, workspace_id: workspaceId }), 'replayOut');
+    const result = unwrapRpcResult(res, 'maintenance.replay.import');
+    replayRememberImport({ ...result, imported_at_ms: Date.now(), last_run_result: null });
+    STATE.replaySelectedWorkspaceId = result.workspace_id;
+    if ($('replayWorkspaceId')) $('replayWorkspaceId').value = result.workspace_id;
+    renderReplayPanel();
+    setOut({ import: result, bundle_manifest: bundle.manifest || null }, 'replayOut');
+    showToast('Replay workspace ' + result.workspace_id + ' imported.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
+async function replayRunIntegrity() {
+  try {
+    const workspaceId = (($('replayWorkspaceId')?.value || $('replayWorkspaceSelect')?.value || '').trim());
+    if (!workspaceId) throw new Error('Workspace ID is required');
+    const res = await call('maintenance.replay.run', { workspace_id: workspaceId }, 'replayOut');
+    const result = unwrapRpcResult(res, 'maintenance.replay.run');
+    STATE.replayLastRun = result;
+    STATE.replaySelectedWorkspaceId = result.workspace_id;
+    const entry = replayFindImport(result.workspace_id);
+    if (entry) {
+      entry.last_run_result = result;
+      entry.last_run_at_ms = Date.now();
+    }
+    renderReplayPanel();
+    setOut(result, 'replayOut');
+    showToast(result.ok ? ('Replay integrity verified for ' + result.workspace_id + '.') : ('Replay integrity check failed for ' + result.workspace_id + '.'), result.ok ? 'success' : 'error');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
+async function replayBundleFileChanged(event) {
+  try {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    if ($('replayBundleJson')) $('replayBundleJson').value = text;
+    const bundle = parseJsonInput(text, 'Replay bundle file');
+    STATE.replayLastBundle = bundle;
+    renderReplayPanel();
+    setOut({ loaded_file: file.name, bundle_id: bundle?.manifest?.bundle_id || null }, 'replayOut');
+    showToast('Replay bundle ' + file.name + ' loaded.', 'info');
+  } catch (e) {
+    setOut({ error: String(e) }, 'replayOut');
+  }
+}
+
 function cdcHydrateDefaultsFromContext() {
   const dbInput = $('cdcDb');
   const tableInput = $('cdcTable');
@@ -4180,6 +4618,7 @@ function setActivePanel(panel, updateHash) {
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   updateHeader(panel); updateContext();
   if (panel === 'cdc') renderCdcPanel();
+  if (panel === 'replay') renderReplayPanel();
   if (updateHash) window.location.hash = panel;
 }
 
@@ -4625,6 +5064,35 @@ wire('btnCdcAck', cdcAck);
 wire('btnCdcClose', cdcClose);
 const cdcSubIdSelect = $('cdcSubId');
 if (cdcSubIdSelect) cdcSubIdSelect.addEventListener('change', () => { STATE.cdcSelectedSubId = cdcSubIdSelect.value; renderCdcPanel(); });
+
+// Time travel + replay
+wire('btnTimeTravelSeed', timeTravelSeedQuery);
+wire('btnTimeTravelRun', timeTravelRunQuery);
+wire('btnTimeTravelClear', timeTravelClear);
+wire('btnHistoryStatus', historyLoadStatus);
+wire('btnHistorySetPolicy', historySavePolicy);
+wire('btnHistoryGc', historyRunGc);
+wire('btnReplayExport', replayExportBundle);
+wire('btnReplayDownload', replayDownloadBundle);
+wire('btnReplayUseLastBundle', replayUseLastBundle);
+wire('btnReplayImport', replayImportBundle);
+wire('btnReplayRunIntegrity', replayRunIntegrity);
+const replayWorkspaceSelect = $('replayWorkspaceSelect');
+if (replayWorkspaceSelect) replayWorkspaceSelect.addEventListener('change', () => {
+  STATE.replaySelectedWorkspaceId = replayWorkspaceSelect.value;
+  const input = $('replayWorkspaceId');
+  if (input) input.value = STATE.replaySelectedWorkspaceId;
+  renderReplayPanel();
+});
+const replayBundleFile = $('replayBundleFile');
+if (replayBundleFile) replayBundleFile.addEventListener('change', replayBundleFileChanged);
+const replayBundleJson = $('replayBundleJson');
+if (replayBundleJson) replayBundleJson.addEventListener('change', () => {
+  try {
+    STATE.replayLastBundle = parseJsonInput(replayBundleJson.value, 'Replay bundle');
+    renderReplayPanel();
+  } catch (_) {}
+});
 
 // Forensics
 wire('btnForAuditStatus', forAuditStatus);

@@ -1,7 +1,7 @@
 # Dedup-preserving encryption (message-locked / convergent mode)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Partial (T190 implemented; T191-T193 open)
+Last updated: 2026-04-23
 
 SkeinDB's storage design uses content addressing and optional deduplication in the ValueStore.
 Traditional randomized encryption breaks deduplication because identical plaintexts produce different ciphertexts.
@@ -18,6 +18,13 @@ security tradeoffs and safe defaults.
 Naive deterministic encryption enables deduplication but can leak information (equality and,
 in some cases, permit brute-force confirmation attacks on low-entropy values). Therefore this
 feature MUST be opt-in and MUST offer safer scope defaults.
+
+Current implementation note:
+
+- T190 is now implemented in `skeindb-core::encryption` as a standalone database-scoped key manager plus AEAD wrapper layer.
+- `ENC_RANDOM` uses AES-256-GCM-SIV with a randomized 96-bit nonce under a mode-specific key derived from the active database master secret.
+- `ENC_MLE_DB` derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts. The returned `EncryptionEnvelope` carries the derivation salt so later storage integration can decrypt the object without redesigning the wrapper contract.
+- ValueStore metadata, encrypted on-disk entries, and `ValueID = hash(stored_bytes)` integration are still pending in T191, so this phase does not yet change any on-disk format.
 
 ## 2. Threat model (explicit)
 
@@ -44,12 +51,14 @@ SkeinDB supports the following encryption modes:
 - Provides strong confidentiality but DOES NOT preserve dedup across independently encrypted
   copies.
 - Dedup may still happen at the database level if the same ciphertext is reused (rare).
+- Current T190 wrapper: AES-256-GCM-SIV with a mode-specific key derived from the active database master secret and a fresh 96-bit nonce per object.
 
 ### 3.3 ENC_MLE_DB (dedup-preserving within a database/tenant)
 
 - Deterministic AEAD is used.
 - A per-database (or per-tenant) master secret prevents cross-tenant confirmation attacks.
 - Identical plaintexts within the same database produce identical ciphertexts, enabling dedup.
+- Current T190 wrapper: derive a content key from `(database master secret, SHA-256(plaintext))` via HKDF, derive a separate 96-bit AEAD nonce from the same `(master_key, plaintext_digest)` via a distinct HKDF info label, then encrypt with AES-256-GCM-SIV. Both derivations are deterministic, so identical plaintexts within a database still produce identical ciphertexts; no fixed or zero nonce is reused. The wrapper returns the derivation salt in the envelope so decryption remains possible before T191 finalizes persistent metadata.
 
 ### 3.4 ENC_MLE_OPRF (server-aided, optional)
 
@@ -116,6 +125,13 @@ Key storage options (deployment-dependent):
 - environment variable for development
 - external KMS (future)
 
+Current T190 surface:
+
+- `DatabaseKeyManager::register_database_key(db_id, key_id, master_key)` registers a 32-byte database master secret.
+- `DatabaseKeyManager::set_active_database_key(db_id, key_id)` switches the active key for future encryptions.
+- `DatabaseKeyManager::set_database_mode(db_id, mode)` enables `ENC_OFF`, `ENC_RANDOM`, or `ENC_MLE_DB` per database profile.
+- `DatabaseKeyManager::encrypt(...)` and `DatabaseKeyManager::decrypt(...)` operate over `EncryptionContext` + `EncryptionEnvelope` wrappers only; they do not yet mutate ValueStore persistence.
+
 ## 6. API surface
 
 ### 6.1 Settings
@@ -150,6 +166,12 @@ Functional tests:
 - encrypt/decrypt round trip for each mode
 - ValueID equality for identical values in ENC_MLE_DB
 - key rotation correctness (mixed keys)
+
+Shipped T190 coverage:
+
+- `crates/skeindb-core/tests/encryption.rs::enc_random_roundtrip_uses_randomized_nonces`
+- `crates/skeindb-core/tests/encryption.rs::enc_mle_db_roundtrip_is_deterministic_within_database_scope`
+- `crates/skeindb-core/tests/encryption.rs::enc_mle_db_binds_context_and_database_key_scope`
 
 Evaluation metrics:
 - dedup ratio with/without encryption

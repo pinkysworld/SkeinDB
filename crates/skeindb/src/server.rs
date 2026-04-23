@@ -37,7 +37,8 @@ use skeindb_skeinql::{
         DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
         DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, EdgeBundleApplyParams,
         EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
-        ForensicVerifyParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
+        ForensicVerifyParams, MaintenanceReplayExportParams, MaintenanceReplayImportParams,
+        MaintenanceReplayRunParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
         MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
         MigrationRewritePreviewParams, ObjectsPullParams, ObliviousExplainParams,
         ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
@@ -16139,6 +16140,31 @@ pub(crate) async fn handle_rpc(
                 }
 
                 // --------------------
+                // maintenance.replay.* (T183)
+                // --------------------
+                "maintenance.replay.export" => {
+                    let p: MaintenanceReplayExportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.maintenance_replay_export(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "maintenance.replay.import" => {
+                    let p: MaintenanceReplayImportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.maintenance_replay_import(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "maintenance.replay.run" => {
+                    let p: MaintenanceReplayRunParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.maintenance_replay_run(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+
+                // --------------------
                 // edge.* (research)
                 // --------------------
                 "edge.bundle.request" => {
@@ -25971,6 +25997,8 @@ fn is_read_only_method(method: &str) -> bool {
             | "maintenance.audit_status"
             | "maintenance.compaction.status"
             | "maintenance.history.status"
+            | "maintenance.replay.export"
+            | "maintenance.replay.run"
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
@@ -26146,6 +26174,9 @@ fn system_capabilities(state: &AppState) -> Value {
         "maintenance.history.status",
         "maintenance.history.set_policy",
         "maintenance.history.gc",
+        "maintenance.replay.export",
+        "maintenance.replay.import",
+        "maintenance.replay.run",
         "edge.bundle.request",
         "edge.bundle.apply",
         "edge.bundle.status",

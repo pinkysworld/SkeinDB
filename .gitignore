@@ -2,6 +2,7 @@ target/
 target_*/
 dist/
 .DS_Store
+data/.replay_workspaces/
 AGENTS.md
 **/AGENTS.md
 .codex/
