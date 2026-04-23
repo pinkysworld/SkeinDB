@@ -591,6 +591,7 @@
                 <button class="easy-tab" data-etab="search">Search</button>
                 <button class="easy-tab" data-etab="query">Query Builder</button>
                 <button class="easy-tab" data-etab="create">New Table</button>
+                <button class="easy-tab" data-etab="design">Design (WYSIWYG)</button>
                 <button class="easy-tab" data-etab="export">Export</button>
                 <button class="easy-tab" data-etab="operations">Operations</button>
                 <button class="easy-tab" data-etab="sql">SQL</button>
@@ -715,6 +716,46 @@
                 </div>
                 <div class="field" style="margin-top:12px"><label>Preview</label><div class="hint">Live SQL preview. Easy Viewer flags duplicate columns and unquoted identifier issues here before you create the table.</div><pre id="easyCreatePreview">CREATE TABLE demo.my_table (...);</pre></div>
                 <pre id="easyCreateOut" class="hint" style="margin-top:8px">Define columns and click Create Table.</pre>
+              </div>
+              <!-- Design (WYSIWYG) Tab -->
+              <div class="easy-tab-pane" data-etab="design">
+                <div class="hint" style="margin-bottom:8px">
+                  WYSIWYG schema editor. Pick a table on the left, edit columns inline, then preview &amp; apply the generated <code>ALTER TABLE</code> plan. Add / drop / rename / retype columns are supported. Renames are detected automatically when you change a column's name without dropping it. Each <code>ALTER</code> statement is executed individually; the run halts on the first error.
+                </div>
+                <div class="actions" style="margin-bottom:8px">
+                  <button id="easyDesignLoad" class="sm primary">Load selected table</button>
+                  <button id="easyDesignAddCol" class="sm">+ Add column</button>
+                  <button id="easyDesignReset" class="ghost sm">Reset draft</button>
+                  <span id="easyDesignStatus" class="hint" style="margin-left:8px">No table loaded.</span>
+                </div>
+                <div class="easy-col-builder">
+                  <table class="easy-col-table">
+                    <thead>
+                      <tr>
+                        <th>Original name</th>
+                        <th>New name</th>
+                        <th>Type</th>
+                        <th>Nullable</th>
+                        <th>Default</th>
+                        <th>Auto Inc</th>
+                        <th>PK</th>
+                        <th>Action</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody id="easyDesignRows"></tbody>
+                  </table>
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>Planned ALTER statements</label>
+                  <div class="hint">Computed by diffing the loaded snapshot against your edits. Empty means no changes.</div>
+                  <pre id="easyDesignPreview">-- Load a table to begin.</pre>
+                </div>
+                <div class="actions" style="margin-top:8px">
+                  <button id="easyDesignPreviewBtn" class="sm">Refresh preview</button>
+                  <button id="easyDesignApply" class="primary">Apply changes</button>
+                </div>
+                <pre id="easyDesignOut" class="hint" style="margin-top:8px">Pick a table from the left tree, then click "Load selected table".</pre>
               </div>
               <!-- Export Tab -->
               <div class="easy-tab-pane" data-etab="export">

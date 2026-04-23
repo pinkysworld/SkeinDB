@@ -133,6 +133,56 @@ pub struct ServeOpts {
     pub quic_key: Option<PathBuf>,
 }
 
+fn print_startup_banner(opts: &ServeOpts) {
+    let host = if opts.bind == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        opts.bind.as_str()
+    };
+    let mysql = if opts.mysql_port == 0 {
+        "disabled".to_string()
+    } else {
+        format!("{}:{}", host, opts.mysql_port)
+    };
+    let pg = if opts.pg_port == 0 {
+        "disabled".to_string()
+    } else {
+        format!("{}:{}", host, opts.pg_port)
+    };
+    let quic = match opts.quic_port {
+        Some(port) => format!("{}:{} (TLS)", host, port),
+        None => "disabled".to_string(),
+    };
+    let banner = format!(
+        "\n\
+\x20 SkeinDB v{ver}\n\
+\x20 ----------------------------------------------------------------\n\
+\x20 Data dir         : {data}\n\
+\x20 Storage mode     : {mode}\n\
+\x20 HTTP / SkeinQL   : http://{host}:{http}\n\
+\x20 SkeinAdmin UI    : http://{host}:{http}/admin\n\
+\x20 MySQL listener   : {mysql}\n\
+\x20 PostgreSQL       : {pg}\n\
+\x20 QUIC transport   : {quic}\n\
+\x20 Cluster port     : {cluster}\n\
+\x20 Health           : http://{host}:{http}/health\n\
+\x20 Metrics          : http://{host}:{http}/metrics\n\
+\x20 Compat docs      : docs/MYSQL_COMPAT.md, docs/PG_COMPAT.md\n\
+\x20 Status matrix    : docs/TRUE_STATUS_MATRIX.md\n\
+\x20 ----------------------------------------------------------------\n",
+        ver = env!("CARGO_PKG_VERSION"),
+        data = opts.data_dir,
+        mode = opts.storage_mode,
+        host = host,
+        http = opts.http_port,
+        mysql = mysql,
+        pg = pg,
+        quic = quic,
+        cluster = opts.cluster_port,
+    );
+    println!("{}", banner);
+}
+
 #[derive(Clone, Copy)]
 struct TransportCapabilities {
     http: bool,
@@ -13354,6 +13404,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         storage_mode = %opts.storage_mode,
         "SkeinDB server starting"
     );
+    print_startup_banner(&opts);
     if opts.mysql_port == 0 {
         tracing::info!("MySQL listener disabled (--mysql 0)");
     } else {

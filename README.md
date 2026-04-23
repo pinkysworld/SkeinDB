@@ -53,8 +53,9 @@ The short version: SkeinDB already runs as a real server with a usable admin con
 - **MySQL:** broad compatibility layer with prepared statements, wide `COM_QUERY` coverage, compatibility shims for real application workloads, and corpus-backed regression coverage.
 - **WordPress:** install/admin-style compatibility is far enough along to be used as a live smoke target, including Users and Site Health query coverage.
 - **PostgreSQL:** partial PG v3 baseline with trust/cleartext auth, managed DB-user passwords, SSL rejection, startup probes, simple queries, and failed-transaction blocking.
-- **Admin/UI:** SkeinAdmin is no longer a placeholder; it is an active part of the product surface.
+- **Admin/UI:** SkeinAdmin is no longer a placeholder; it is an active part of the product surface. Easy Viewer now ships a **WYSIWYG schema editor** (Easy Viewer → Design tab) that diffs your in-browser edits against the live table and emits a `ALTER TABLE` plan you can preview before applying.
 - **Storage:** default row persistence is `segment` mode using `.rseg`, with fallback/hybrid support still present.
+- **CLI:** `skeindb version` prints a runtime banner with format and dialect doc pointers; `skeindb info --data ./data [--json]` summarises catalog state, storage mode, and default ports for ops use; `skeindb serve` prints a startup banner with the resolved data dir, storage mode, and listener URLs (HTTP / SkeinAdmin / MySQL / PostgreSQL / QUIC / cluster).
 - **Status tracking:** the authoritative runtime truth lives in `docs/TRUE_STATUS_MATRIX.md`, with the roadmap in `docs/PROJECT_BACKLOG.md`.
 
 If you want the most honest snapshot of what is implemented versus planned, start here:

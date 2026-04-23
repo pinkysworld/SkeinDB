@@ -131,12 +131,13 @@ Security note:
 - **Left sidebar** with collapsible database/table tree, filter input, New DB button, and reload
 - **Inline database creation** from the sidebar with guided validation instead of browser prompts
 - **Breadcrumb navigation** showing Server › Database › Table context
-- **Sub-tabs** per table: Browse, Structure, Insert, Search, New Table, Export, Operations
+- **Sub-tabs** per table: Browse, Structure, Insert, Search, Query Builder, New Table, Design (WYSIWYG), Export, Operations, SQL
 - **Browse tab**: paginated data grid with per-row Edit/Copy/Delete buttons, inline editing, check-all bulk delete, configurable rows-per-page
 - **Structure tab**: column listing with type, nullable, and primary-key info
 - **Insert tab**: form-based row insert with labeled fields per column and required-field validation before RPC submit
 - **Search tab**: condition-based search with column/operator/value fields
 - **New Table tab**: column builder with name, type, nullable, PK checkboxes plus live SQL preview and duplicate/identifier checks before create
+- **Design (WYSIWYG) tab**: load an existing table, edit columns inline (rename / retype / nullable / default / auto-increment / drop), preview the auto-generated `ALTER TABLE` plan (`ADD COLUMN` / `DROP COLUMN` / `RENAME COLUMN` / `MODIFY COLUMN` / `CHANGE COLUMN`), and apply changes one statement at a time via `sql.exec`. The run halts on the first error and the diff is reset after a successful apply.
 - **Export tab**: export table data as CSV or SQL, plus structure-only SQL export
 - **Operations tab**: truncate table, drop table, and drop database with confirmation dialogs
 - **Toast notifications** for success, error, and info feedback

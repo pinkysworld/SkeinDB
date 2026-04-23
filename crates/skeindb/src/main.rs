@@ -124,6 +124,85 @@ fn run_replay_bundle_in_workspace(
     })
 }
 
+fn run_info_command(data: &str, json: bool) -> anyhow::Result<()> {
+    let data_path = PathBuf::from(data);
+    let exists = data_path.exists();
+    let mut databases: Vec<(String, usize)> = Vec::new();
+    let mut total_tables = 0usize;
+    let mut storage_mode = String::from("(unopened)");
+    if exists {
+        match engine::Engine::open(&data_path) {
+            Ok(engine) => {
+                storage_mode = engine.storage_mode_name().to_string();
+                for db in engine.list_databases() {
+                    let tables = engine.list_tables(&db).unwrap_or_default();
+                    total_tables += tables.len();
+                    databases.push((db, tables.len()));
+                }
+            }
+            Err(err) => {
+                if json {
+                    let payload = serde_json::json!({
+                        "ok": false,
+                        "data_dir": data_path.display().to_string(),
+                        "error": err.to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    return Ok(());
+                } else {
+                    eprintln!("warning: failed to open data dir: {err}");
+                }
+            }
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "data_dir": data_path.display().to_string(),
+            "data_dir_exists": exists,
+            "storage_mode": storage_mode,
+            "databases": databases.iter().map(|(name, tables)| serde_json::json!({
+                "name": name,
+                "table_count": tables,
+            })).collect::<Vec<_>>(),
+            "total_databases": databases.len(),
+            "total_tables": total_tables,
+            "default_ports": {
+                "http": 8080u16,
+                "mysql": 3306u16,
+                "pg": 5432u16,
+                "cluster": 9090u16,
+            },
+            "docs": {
+                "mysql_compat": "docs/MYSQL_COMPAT.md",
+                "pg_compat": "docs/PG_COMPAT.md",
+                "true_status": "docs/TRUE_STATUS_MATRIX.md",
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("SkeinDB v{}", env!("CARGO_PKG_VERSION"));
+        println!("Data dir       : {}", data_path.display());
+        println!("Data dir exists: {}", exists);
+        println!("Storage mode   : {storage_mode}");
+        println!("Databases      : {}", databases.len());
+        println!("Total tables   : {total_tables}");
+        if !databases.is_empty() {
+            println!("\nCatalog:");
+            for (name, tables) in &databases {
+                println!("  - {name}  ({tables} table(s))");
+            }
+        }
+        println!("\nDefault ports  : http=8080, mysql=3306, pg=5432, cluster=9090");
+        println!("MySQL compat   : adoption layer (see docs/MYSQL_COMPAT.md)");
+        println!("PG compat      : partial baseline (see docs/PG_COMPAT.md)");
+        println!("Status matrix  : docs/TRUE_STATUS_MATRIX.md");
+    }
+    Ok(())
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum StorageModeArg {
     Json,
@@ -457,6 +536,17 @@ enum Commands {
         command: ReplayCommands,
     },
 
+    /// Print a runtime summary for a data directory (version, storage mode, databases, tables).
+    Info {
+        /// Data directory
+        #[arg(long, default_value = "./data")]
+        data: String,
+
+        /// Output as JSON instead of a human-readable summary
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// Evaluate NL-to-SkeinQL datasets (experimental).
     NlEval {
         /// Dataset JSONL path
@@ -549,12 +639,17 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Commands::Version => {
-            println!("SkeinDB scaffold v{}", env!("CARGO_PKG_VERSION"));
-            println!("On-disk format: v0.2 (v0.1 compatible) - see docs/ON_DISK_FORMAT.md");
-            println!("SkeinIR: v1 - see docs/SKEINIR.md");
-            println!("SkeinQL: v1.0 - see docs/SKEINQL.md");
+            println!("SkeinDB v{}", env!("CARGO_PKG_VERSION"));
+            println!("Build target   : {}", env!("CARGO_PKG_NAME"));
+            println!("On-disk format : v0.2 (v0.1 compatible) - see docs/ON_DISK_FORMAT.md");
+            println!("SkeinIR        : v1   - see docs/SKEINIR.md");
+            println!("SkeinQL        : v1.0 - see docs/SKEINQL.md");
+            println!("MySQL compat   : adoption layer - see docs/MYSQL_COMPAT.md");
+            println!("PG compat      : partial baseline - see docs/PG_COMPAT.md");
+            println!("Status matrix  : docs/TRUE_STATUS_MATRIX.md");
             Ok(())
         }
+        Commands::Info { data, json } => run_info_command(&data, json),
         Commands::AuditVerify { data } => {
             let report = collect_audit_verify_report(&data)?;
             println!(

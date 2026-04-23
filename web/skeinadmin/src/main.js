@@ -33,6 +33,9 @@ const STATE = {
   easyGridInsertDraft: {},
   easyGridCheckedRows: {},
   easySubTab: 'browse',
+  easyDesignTable: null,
+  easyDesignOriginal: null,
+  easyDesignDraft: null,
   easySortColumn: '',
   easySortDir: 'asc',
   qbConditions: [],
@@ -2665,6 +2668,279 @@ async function easyDoCreateDb() {
   }
 }
 
+// ----------------------------------------------------------------
+// WYSIWYG Design tab (Easy Viewer -> Design)
+// Loads a table's columns via schema.describe_table, lets the user
+// rename / retype / add / drop / mark-nullable, then computes an
+// ALTER TABLE plan by diffing original vs draft and applies it via
+// sql.exec one statement at a time.
+// ----------------------------------------------------------------
+
+const EASY_DESIGN_KINDS = ['string', 'i64', 'f64', 'bool', 'json', 'bytes', 'time', 'date', 'datetime', 'decimal'];
+
+function easyDesignSetState(message) {
+  const el = $('easyDesignStatus');
+  if (el) el.textContent = message;
+}
+
+function easyDesignNormalizeColumn(col, primaryKeySet) {
+  return {
+    original_name: col.name,
+    name: col.name,
+    kind: (col.type && col.type.kind) ? String(col.type.kind) : 'string',
+    nullable: !!col.nullable,
+    primary: primaryKeySet.has(col.name),
+    auto_increment: !!col.auto_increment,
+    default: col.default == null ? '' : (typeof col.default === 'object' ? JSON.stringify(col.default) : String(col.default)),
+    action: 'keep' // 'keep' | 'drop'
+  };
+}
+
+async function easyDesignLoad() {
+  try {
+    const ref = easyReadTableRef();
+    const res = await call('schema.describe_table', { db: ref.db, table: ref.table }, 'easyDesignOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    const pk = new Set(Array.isArray(result.primary_key) ? result.primary_key : []);
+    const cols = (result.columns || []).map((col) => easyDesignNormalizeColumn(col, pk));
+    STATE.easyDesignTable = { db: ref.db, table: ref.table };
+    STATE.easyDesignOriginal = JSON.parse(JSON.stringify(cols));
+    STATE.easyDesignDraft = cols;
+    easyDesignSetState('Loaded ' + ref.db + '.' + ref.table + ' (' + cols.length + ' columns).');
+    easyDesignRender();
+    easyDesignRefreshPreview();
+    setOut({ ok: true, loaded: ref.db + '.' + ref.table, columns: cols.length }, 'easyDesignOut');
+  } catch (e) {
+    easyShowToast('Design load failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyDesignOut');
+  }
+}
+
+function easyDesignRender() {
+  const tbody = $('easyDesignRows');
+  if (!tbody) return;
+  const rows = STATE.easyDesignDraft || [];
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="hint" style="padding:8px">No columns loaded. Click "Load selected table" to begin.</td></tr>';
+    return;
+  }
+  const kindOptions = EASY_DESIGN_KINDS.map((k) => '<option value="' + k + '">' + k + '</option>').join('');
+  tbody.innerHTML = rows.map((row, idx) => {
+    const isNew = row.original_name == null;
+    const dropped = row.action === 'drop';
+    const rowStyle = dropped ? 'opacity:0.45;text-decoration:line-through' : (isNew ? 'background:rgba(0,160,80,0.08)' : '');
+    const orig = isNew ? '<em>(new)</em>' : escapeHtml(row.original_name);
+    const kindSelect = '<select data-design-idx="' + idx + '" data-design-field="kind">' +
+      EASY_DESIGN_KINDS.map((k) => '<option value="' + k + '"' + (row.kind === k ? ' selected' : '') + '>' + k + '</option>').join('') + '</select>';
+    const action = isNew
+      ? '<span class="hint">new</span>'
+      : (dropped
+          ? '<button class="sm" data-design-idx="' + idx + '" data-design-action="undrop">Undo drop</button>'
+          : '<button class="sm" data-design-idx="' + idx + '" data-design-action="drop">Drop</button>');
+    const removeBtn = isNew
+      ? '<button class="ghost sm" data-design-idx="' + idx + '" data-design-action="remove">Remove</button>'
+      : '';
+    return '<tr style="' + rowStyle + '">' +
+      '<td>' + orig + '</td>' +
+      '<td><input type="text" data-design-idx="' + idx + '" data-design-field="name" value="' + escapeHtml(row.name) + '"' + (dropped ? ' disabled' : '') + ' /></td>' +
+      '<td>' + kindSelect + '</td>' +
+      '<td style="text-align:center"><input type="checkbox" data-design-idx="' + idx + '" data-design-field="nullable"' + (row.nullable ? ' checked' : '') + (dropped ? ' disabled' : '') + ' /></td>' +
+      '<td><input type="text" data-design-idx="' + idx + '" data-design-field="default" value="' + escapeHtml(row.default || '') + '" placeholder="(none)"' + (dropped ? ' disabled' : '') + ' /></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-design-idx="' + idx + '" data-design-field="auto_increment"' + (row.auto_increment ? ' checked' : '') + (dropped ? ' disabled' : '') + ' /></td>' +
+      '<td style="text-align:center"><input type="checkbox" data-design-idx="' + idx + '" data-design-field="primary"' + (row.primary ? ' checked' : '') + (dropped ? ' disabled' : '') + ' /></td>' +
+      '<td>' + action + '</td>' +
+      '<td>' + removeBtn + '</td>' +
+      '</tr>';
+  }).join('');
+  // wire input/change handlers
+  tbody.querySelectorAll('[data-design-field]').forEach((el) => {
+    const idx = parseInt(el.getAttribute('data-design-idx'), 10);
+    const field = el.getAttribute('data-design-field');
+    const handler = () => {
+      const row = STATE.easyDesignDraft[idx];
+      if (!row) return;
+      if (el.type === 'checkbox') row[field] = !!el.checked;
+      else row[field] = el.value;
+      easyDesignRefreshPreview();
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  });
+  tbody.querySelectorAll('[data-design-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.getAttribute('data-design-idx'), 10);
+      const action = btn.getAttribute('data-design-action');
+      const row = STATE.easyDesignDraft[idx];
+      if (!row) return;
+      if (action === 'drop') row.action = 'drop';
+      else if (action === 'undrop') row.action = 'keep';
+      else if (action === 'remove') STATE.easyDesignDraft.splice(idx, 1);
+      easyDesignRender();
+      easyDesignRefreshPreview();
+    });
+  });
+}
+
+function easyDesignAddColumn() {
+  if (!STATE.easyDesignTable) {
+    easyShowToast('Load a table first.', 'info');
+    return;
+  }
+  STATE.easyDesignDraft = STATE.easyDesignDraft || [];
+  STATE.easyDesignDraft.push({
+    original_name: null,
+    name: 'new_col_' + (STATE.easyDesignDraft.length + 1),
+    kind: 'string',
+    nullable: true,
+    primary: false,
+    auto_increment: false,
+    default: '',
+    action: 'keep'
+  });
+  easyDesignRender();
+  easyDesignRefreshPreview();
+}
+
+function easyDesignReset() {
+  if (!STATE.easyDesignOriginal) {
+    easyShowToast('Nothing to reset.', 'info');
+    return;
+  }
+  STATE.easyDesignDraft = JSON.parse(JSON.stringify(STATE.easyDesignOriginal));
+  easyDesignRender();
+  easyDesignRefreshPreview();
+}
+
+function easyDesignSqlType(kind) {
+  const k = String(kind || 'string').toLowerCase();
+  switch (k) {
+    case 'i64': return 'BIGINT';
+    case 'f64': return 'DOUBLE';
+    case 'bool': return 'BOOLEAN';
+    case 'json': return 'JSON';
+    case 'bytes': return 'BLOB';
+    case 'time': return 'TIME';
+    case 'date': return 'DATE';
+    case 'datetime': return 'DATETIME';
+    case 'decimal': return 'DECIMAL';
+    case 'string':
+    default:
+      return 'VARCHAR(255)';
+  }
+}
+
+function easyDesignColumnSpec(row) {
+  let spec = quoteIdent(row.name) + ' ' + easyDesignSqlType(row.kind);
+  if (!row.nullable) spec += ' NOT NULL';
+  if (row.auto_increment) spec += ' AUTO_INCREMENT';
+  if (row.default && row.default.trim()) spec += ' DEFAULT ' + row.default.trim();
+  return spec;
+}
+
+function quoteIdent(name) {
+  // Conservative backtick quoting matching MySQL identifier rules.
+  return '`' + String(name || '').replace(/`/g, '``') + '`';
+}
+
+function easyDesignBuildAlterPlan() {
+  const ref = STATE.easyDesignTable;
+  if (!ref) return { statements: [], summary: 'No table loaded.' };
+  const original = STATE.easyDesignOriginal || [];
+  const draft = STATE.easyDesignDraft || [];
+  const tableRef = quoteIdent(ref.db) + '.' + quoteIdent(ref.table);
+  const stmts = [];
+  const notes = [];
+  const seenOriginals = new Set();
+
+  draft.forEach((row) => {
+    const name = (row.name || '').trim();
+    if (row.original_name == null) {
+      if (row.action === 'drop') return; // never created
+      if (!name) { notes.push('-- skipped: new column missing name'); return; }
+      stmts.push('ALTER TABLE ' + tableRef + ' ADD COLUMN ' + easyDesignColumnSpec(row) + ';');
+      return;
+    }
+    seenOriginals.add(row.original_name);
+    if (row.action === 'drop') {
+      stmts.push('ALTER TABLE ' + tableRef + ' DROP COLUMN ' + quoteIdent(row.original_name) + ';');
+      return;
+    }
+    if (!name) { notes.push('-- skipped: column ' + row.original_name + ' has empty name'); return; }
+    const orig = original.find((o) => o.original_name === row.original_name);
+    if (!orig) return;
+    const renamed = row.original_name !== name;
+    const retyped = orig.kind !== row.kind
+      || orig.nullable !== row.nullable
+      || orig.auto_increment !== row.auto_increment
+      || (orig.default || '') !== (row.default || '');
+    if (renamed && retyped) {
+      stmts.push('ALTER TABLE ' + tableRef + ' CHANGE COLUMN ' + quoteIdent(row.original_name) + ' ' + easyDesignColumnSpec(row) + ';');
+    } else if (renamed) {
+      stmts.push('ALTER TABLE ' + tableRef + ' RENAME COLUMN ' + quoteIdent(row.original_name) + ' TO ' + quoteIdent(name) + ';');
+    } else if (retyped) {
+      stmts.push('ALTER TABLE ' + tableRef + ' MODIFY COLUMN ' + easyDesignColumnSpec(row) + ';');
+    }
+  });
+
+  // Detect implicit drops (rows removed entirely from draft).
+  original.forEach((orig) => {
+    if (!seenOriginals.has(orig.original_name)) {
+      stmts.push('ALTER TABLE ' + tableRef + ' DROP COLUMN ' + quoteIdent(orig.original_name) + ';');
+    }
+  });
+
+  const summary = stmts.length
+    ? stmts.length + ' statement(s) planned.'
+    : 'No changes.';
+  return { statements: stmts, notes, summary };
+}
+
+function easyDesignRefreshPreview() {
+  const el = $('easyDesignPreview');
+  if (!el) return;
+  if (!STATE.easyDesignTable) { el.textContent = '-- Load a table to begin.'; return; }
+  const plan = easyDesignBuildAlterPlan();
+  const body = plan.statements.length ? plan.statements.join('\n') : '-- No changes.';
+  const notes = (plan.notes && plan.notes.length) ? '\n\n' + plan.notes.join('\n') : '';
+  el.textContent = '-- ' + plan.summary + '\n' + body + notes;
+}
+
+async function easyDesignApply() {
+  try {
+    if (!STATE.easyDesignTable) throw new Error('Load a table first');
+    const plan = easyDesignBuildAlterPlan();
+    if (!plan.statements.length) {
+      easyShowToast('No changes to apply.', 'info');
+      return;
+    }
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      const ok = window.confirm('Apply ' + plan.statements.length + ' ALTER TABLE statement(s) to '
+        + STATE.easyDesignTable.db + '.' + STATE.easyDesignTable.table + '?');
+      if (!ok) return;
+    }
+    const results = [];
+    for (const sql of plan.statements) {
+      const res = await call('sql.exec', cleanParams({ sql, default_db: STATE.easyDesignTable.db }), 'easyDesignOut');
+      try {
+        unwrapRpcResult(res, 'sql.exec');
+      } catch (err) {
+        results.push({ sql, ok: false, error: err.message });
+        setOut({ applied: results, halted_on: sql, error: err.message }, 'easyDesignOut');
+        easyShowToast('ALTER halted: ' + err.message, 'error');
+        return;
+      }
+      results.push({ sql, ok: true });
+    }
+    easyShowToast('\u2713 Applied ' + results.length + ' ALTER statement(s).', 'success');
+    setOut({ ok: true, applied: results }, 'easyDesignOut');
+    await easyDesignLoad();
+  } catch (e) {
+    easyShowToast('Apply failed: ' + e.message, 'error');
+    setOut({ error: e.message }, 'easyDesignOut');
+  }
+}
+
+
 function easyToggleNewDbForm(show) {
   const form = $('easyNewDbForm');
   if (!form) return;
@@ -4919,6 +5195,11 @@ wire('easyBtnAddCol', easyAddColumn);
 wire('easyBtnSeedCols', easySeedColumns);
 wire('easyBtnDoCreateTable', easyDoCreateTable);
 wire('easyBtnDoCreateDb', easyDoCreateDb);
+wire('easyDesignLoad', easyDesignLoad);
+wire('easyDesignAddCol', easyDesignAddColumn);
+wire('easyDesignReset', easyDesignReset);
+wire('easyDesignPreviewBtn', easyDesignRefreshPreview);
+wire('easyDesignApply', easyDesignApply);
 wire('easyBtnExportData', easyDoExport);
 wire('easyBtnExportStruct', easyDoExportStruct);
 wire('easyBtnTruncate', easyTruncateTable);

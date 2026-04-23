@@ -2,6 +2,8 @@
 
 SkeinDB is designed to be *adoptable* by existing applications that already speak MySQL.
 
+> **Honest scope.** SkeinDB does **not** claim "100% MySQL compatibility" and is not a drop-in replacement for MySQL Server in every workload. "MySQL" is a trademark of Oracle and SkeinDB is not affiliated with or endorsed by Oracle. What we *do* claim is documented coverage of a regression corpus (`tests/compat/corpus.sql`, currently 1658 lines / ~700+ statements covering WordPress-class workloads, `information_schema` introspection, `SET NAMES`, `SHOW VARIABLES`, prepared-statement protocol, and the SQL surface enumerated below) that runs on every commit via [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs).
+
 The **compatibility layer** is intentionally treated as an *adoption surface*:
 - it makes it possible to point existing apps/tools at SkeinDB with minimal change
 - while SkeinDB retains a separate, research-friendly control plane (SkeinQL)

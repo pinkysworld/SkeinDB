@@ -134,3 +134,47 @@ fn skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_easy_design_tab_exposes_wysiwyg_schema_editor() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-etab=\"design\"",
+        "easyDesignLoad",
+        "easyDesignAddCol",
+        "easyDesignReset",
+        "easyDesignPreview",
+        "easyDesignApply",
+        "easyDesignRows",
+        "easyDesignStatus",
+        "Planned ALTER statements",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin design html should contain {marker}"
+        );
+    }
+
+    for ma in [
+        "async function easyDesignLoad()",
+        "function easyDesignBuildAlterPlan()",
+        "function easyDesignAddColumn()",
+        "async function easyDesignApply()",
+        "ALTER TABLE",
+        "DROP COLUMN",
+        "ADD COLUMN",
+        "RENAME COLUMN",
+        "MODIFY COLUMN",
+        "CHANGE COLUMN",
+        "wire('easyDesignLoad', easyDesignLoad);",
+        "wire('easyDesignApply', easyDesignApply);",
+    ] {
+        assert!(js.contains(ma), "skeinadmin design js should contain {ma}");
+    }
+}

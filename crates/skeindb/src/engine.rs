@@ -1408,6 +1408,11 @@ impl Engine {
         v
     }
 
+    /// Public read-only accessor for the active row-persistence mode name (`json`, `segment`, `hybrid`).
+    pub fn storage_mode_name(&self) -> &'static str {
+        self.storage_mode.as_str()
+    }
+
     /// Acquire a lock on the ValueStore for CAS object operations.
     pub fn value_store_lock(&self) -> std::sync::MutexGuard<'_, ValueStore> {
         self.value_store.lock().expect("value_store lock poisoned")
