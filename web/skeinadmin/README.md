@@ -16,7 +16,7 @@ Implemented navigation areas:
   - Condition-based search, column-builder create-table, CSV/SQL export
   - Operations: truncate table, drop table, drop database with confirmation
 - **Schema** / **Data** / **SQL Workspace**
-- **Comprehensive Dashboard** (runtime, storage/dedup stats with bar chart, MVCC/compaction, query/cache metrics, auto-refresh)
+- **Comprehensive Dashboard** (runtime, storage/dedup stats with bar chart, MVCC/compaction, query/cache metrics, auto-refresh; live Top Tables / Slow Query Log / Active Sessions / Index Health cards backed by `information_schema.tables`, `stats.slow_queries`, and `stats.snapshot`)
 - **Engine Config** (toggle dedup, compression, encryption, MVCC, delta chains, time travel, compaction, cache, security, replication, CDC, QUIC via checkboxes)
 - **Admin lifecycle controls** (connect/disconnect + graceful `system.shutdown`)
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)

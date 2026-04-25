@@ -3569,53 +3569,105 @@ function renderSettingsCapabilities(payload) {
 // Dashboard cards – Top Tables, Slow Queries, Sessions, Index Health, Research
 // ---------------------------------------------------------------------------
 
-async function refreshTopTables() {
+function unwrapCellValue(cell) {
+  if (cell && typeof cell === 'object' && 'v' in cell) return cell.v;
+  return cell;
+}
+
+async function silentRpc(method, params) {
   try {
-    const tree = STATE.dbTree || {};
-    const rows = [];
-    for (const db of Object.keys(tree)) {
-      for (const table of (tree[db] || [])) {
-        rows.push([db + '.' + table, '\u2014']);
-      }
+    const baseUrl = getBaseUrl(), token = getToken();
+    return await rpc(baseUrl, token, method, params || {});
+  } catch (e) {
+    return null;
+  }
+}
+
+async function refreshTopTables() {
+  const grid = $('topTablesGrid'); if (!grid) return;
+  try {
+    const res = await silentRpc('sql.exec', {
+      sql: 'SELECT table_schema, table_name, table_rows, data_length FROM information_schema.tables ORDER BY table_rows DESC LIMIT 10'
+    });
+    const result = res?.json?.result;
+    const data = result?.result?.data;
+    if (!data || !Array.isArray(data.rows) || !data.rows.length) {
+      renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], [['No tables found', '\u2014', '\u2014']]);
+      return;
     }
-    rows.sort((a, b) => a[0].localeCompare(b[0]));
-    renderTable('topTablesGrid', ['Table', 'Rows (est.)'], rows.slice(0, 10));
-  } catch (e) { easyShowToast('Top tables: ' + e.message, 'error'); }
+    const rows = data.rows.map(r => {
+      const schema = unwrapCellValue(r[0]) || '';
+      const name = unwrapCellValue(r[1]) || '';
+      const rc = unwrapCellValue(r[2]);
+      const dl = unwrapCellValue(r[3]);
+      return [
+        (schema ? schema + '.' : '') + name,
+        rc == null ? '\u2014' : String(rc),
+        dl == null ? '\u2014' : formatBytes(Number(dl))
+      ];
+    });
+    renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], rows);
+  } catch (e) {
+    renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], [['Error: ' + (e.message || e), '\u2014', '\u2014']]);
+  }
 }
 
 async function refreshSlowQueries() {
+  const grid = $('slowQueryGrid'); if (!grid) return;
   try {
-    const history = STATE.sqlHistory || [];
-    const rows = history.slice(-10).reverse().map(entry => [
-      typeof entry === 'string' ? entry : (entry.sql || ''),
-      typeof entry === 'string' ? '\u2014' : (entry.ms || '\u2014')
+    const res = await silentRpc('stats.slow_queries', { limit: 10, min_ms: 0 });
+    const queries = res?.json?.result?.queries || [];
+    if (!queries.length) {
+      renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], [['No slow queries recorded', '\u2014', '\u2014']]);
+      return;
+    }
+    const rows = queries.map(q => [
+      q.method || '\u2014',
+      q.fingerprint || '\u2014',
+      typeof q.duration_ms === 'number' ? q.duration_ms.toFixed(1) : '\u2014'
     ]);
-    renderTable('slowQueryGrid', ['Query', 'Time (ms)'], rows.length ? rows : [['No queries recorded', '\u2014']]);
-  } catch (e) { easyShowToast('Slow queries: ' + e.message, 'error'); }
+    renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], rows);
+  } catch (e) {
+    renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], [['Error: ' + (e.message || e), '\u2014', '\u2014']]);
+  }
 }
 
 async function refreshActiveSessions() {
+  const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
   try {
-    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-    el('statActiveSessions', '1');
-    el('statIdleSessions', '0');
-    el('statLongestQuery', '<1s');
-  } catch (e) { easyShowToast('Sessions: ' + e.message, 'error'); }
+    const res = await silentRpc('stats.snapshot', {});
+    const snap = res?.json?.result;
+    if (!snap) {
+      el('statActiveSessions', '--');
+      el('statIdleSessions', '--');
+      el('statLongestQuery', '--');
+      return;
+    }
+    const active = snap.sessions?.active ?? snap.connections ?? 0;
+    const openTxns = snap.open_txns ?? 0;
+    const avg = snap.query?.avg_latency_ms;
+    el('statActiveSessions', String(active));
+    el('statIdleSessions', String(openTxns));
+    el('statLongestQuery', typeof avg === 'number' ? avg.toFixed(1) + 'ms' : '--');
+  } catch (e) {
+    el('statActiveSessions', '--');
+    el('statIdleSessions', '--');
+    el('statLongestQuery', '--');
+  }
 }
 
 async function refreshIndexHealth() {
+  const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
   try {
-    const res = await call('advisor.history', {}, 'out');
+    const res = await silentRpc('advisor.history', {});
     const result = res?.json?.result;
     const recs = Array.isArray(result?.recommendations) ? result.recommendations : [];
     const applied = recs.filter(r => r.status === 'applied').length;
     const dismissed = recs.filter(r => r.status === 'dismissed').length;
-    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
     el('statIndexRecs', String(recs.length));
     el('statIndexApplied', String(applied));
     el('statIndexDismissed', String(dismissed));
   } catch (e) {
-    const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
     el('statIndexRecs', '0');
     el('statIndexApplied', '0');
     el('statIndexDismissed', '0');
@@ -3648,19 +3700,23 @@ async function securityCreateToken() {
   const ttlMs = ttlHrs > 0 ? ttlHrs * 3600000 : 0;
   try {
     const r = await call('security.token.create', { role, label, ttl_ms: ttlMs }, 'secTokenOut');
-    if (r?.secret) {
+    const secret = r?.json?.result?.secret;
+    await securityRefreshTokens({ silent: true });
+    if (secret) {
       const el = $('secTokenOut');
-      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + r.secret;
+      if (el) el.textContent = 'Token created. Secret (copy now — shown once):\n' + secret;
     }
-    await securityRefreshTokens();
   } catch (e) { setOut({ error: String(e) }, 'secTokenOut'); }
 }
 
-async function securityRefreshTokens() {
+async function securityRefreshTokens(opts) {
+  const silent = !!(opts && opts.silent);
   try {
-    const r = await call('security.token.list', {}, 'secTokenOut');
+    const r = silent
+      ? await silentRpc('security.token.list', {})
+      : await call('security.token.list', {}, 'secTokenOut');
     const grid = $('secTokenGrid'); if (!grid) return;
-    const tokens = r?.tokens || [];
+    const tokens = r?.json?.result?.tokens || [];
     if (!tokens.length) { grid.innerHTML = '<div class="hint">No tokens created yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>ID</th><th>Role</th><th>Label</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody>';
     tokens.forEach(t => {
@@ -3693,7 +3749,7 @@ async function securityTopQueries() {
   try {
     const r = await call('stats.top_queries', { limit: 20 }, null);
     const grid = $('secTopQueryGrid'); if (!grid) return;
-    const queries = r?.queries || [];
+    const queries = r?.json?.result?.queries || [];
     if (!queries.length) { grid.innerHTML = '<div class="hint">No query statistics available yet.</div>'; return; }
     let h = '<table class="data-table"><thead><tr><th>#</th><th>Fingerprint</th><th>Count</th><th>Avg (ms)</th><th>Last Seen</th></tr></thead><tbody>';
     queries.forEach((q, i) => {
@@ -4895,6 +4951,16 @@ function setActivePanel(panel, updateHash) {
   updateHeader(panel); updateContext();
   if (panel === 'cdc') renderCdcPanel();
   if (panel === 'replay') renderReplayPanel();
+  if (panel === 'overview') {
+    refreshTopTables();
+    refreshSlowQueries();
+    refreshActiveSessions();
+    refreshIndexHealth();
+  }
+  if (panel === 'security') {
+    securityRefreshTokens();
+    securityTopQueries();
+  }
   if (updateHash) window.location.hash = panel;
 }
 
