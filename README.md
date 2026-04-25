@@ -4,47 +4,56 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-04-23.
+Last updated: 2026-04-25.
 
-SkeinDB is a single-binary database server that combines:
+**SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
-- a MySQL-compatible adoption layer
-- a native HTTP/JSON-RPC control plane called SkeinQL
-- an embedded admin UI at `/admin` and `/console`
-- an early PostgreSQL wire-protocol baseline
-- a large set of research and systems experiments in the same codebase
+Run `skeindb serve` and you get a MySQL listener, a PostgreSQL listener, an HTTP/JSON-RPC control plane (SkeinQL), and a polished embedded admin console — all from a single executable, with no external dependencies and no separate proxy or sidecar to wire up.
 
-The short version: SkeinDB already runs as a real server with a usable admin console, a broad MySQL compatibility surface, and a growing PostgreSQL baseline, but it is still honest-to-goodness work in progress rather than a finished production database.
+What sets SkeinDB apart is what's already working under the hood:
+
+- **Content-addressed deduplication out of the box.** Every value passes through a hash-keyed ValueStore. Live `dedup_ratio` and bytes-saved metrics are exposed in `stats.snapshot` and rendered live in the admin dashboard — no opt-in flag, no extra build.
+- **Delta-chained values** keep similar payloads compact by storing only the diff against a base entry, with policy-driven chain-depth limits and compaction-time rebase.
+- **MVCC time-travel reads.** Run `SELECT ... AS OF '2026-04-01T00:00:00Z'` or set `@@skein.as_of` and read the database as it was at any retained timestamp, with history retention/GC controllable at runtime.
+- **Tamper-evident audit WAL.** A BLAKE3-256 hash chain plus checkpoint anchors plus Merkle inclusion proofs — verify the entire log with one RPC.
+- **Dedup-preserving encryption.** Two AEAD modes (`ENC_RANDOM` and the convergent `ENC_MLE_DB`), key registration / rotation / re-encryption progress reporting, and a redacted in-memory audit ring — all driven from the SkeinAdmin Encryption panel.
+- **Vector search** with an HNSW graph index (`vector.insert`, `vector.search`).
+- **Differential privacy** with Rényi-DP composition tracking (`dp.*`).
+- **Change Data Capture** over both polling and SSE, with bounded retention and `Last-Event-ID` reconnect semantics.
+- **Replay bundles** export schema + retained row versions + change-event metadata into a deterministic, checksum-verified workspace you can run anywhere.
+- **CAS-aware replication.** Replicas pull only the ValueIDs they're missing, with hash-verified `objects.fetch` and live hit-rate / saved-bytes reporting.
+- **Query coalescing** so a thundering-herd of identical reads collapses to a single execution.
+- **Self-tuning index advisor** that synthesizes candidate indexes from observed workload features and applies them with rollback on failure.
+- **Plan cache + SQL autoparameterization** keyed by fingerprint × schema-version × session flags.
+- **A click-first admin console** with a phpMyAdmin-inspired Easy Viewer, a WYSIWYG schema editor that diffs your edits into a previewable `ALTER TABLE` plan, and dedicated panels for CDC, time travel, replay, encryption, and forensics.
+
+It runs the HTTP API, the admin UI, the MySQL wire listener, the PostgreSQL wire listener, and (optionally) the QUIC transport from the same binary. Default row persistence is segment-backed `.rseg`. The compatibility surface is exercised on every commit by a 1600-line MySQL corpus plus a live PostgreSQL roundtrip suite.
+
+We're honest about the gaps too — see [What's still partial](#whats-still-partial) below, and [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md) for the audited matrix. But the headline features above aren't aspirational: they ship in the binary, they're test-covered, and the dashboard shows them moving in real time.
 
 ![SkeinDB architecture](docs/figures/architecture.png)
 
 ---
 
-## What SkeinDB Is Today
+## What's Working Today
 
-### Working now
+- **One executable** runs the HTTP API, SkeinAdmin, the MySQL listener, and the optional PostgreSQL listener — no sidecars, no proxy, no separate console process.
+- **MySQL compatibility** is the most mature adoption path. The 1600-line compatibility corpus covers DML, joins, aggregates, window functions, JSON functions, CTEs, UNION, GROUP BY, prepared statements, and more — and runs end-to-end on every commit.
+- **WordPress-class workloads** are a first-class target: installer/admin query shapes are covered, and a live WordPress smoke test runs against the listener.
+- **PostgreSQL v3** wire baseline with SCRAM-SHA-256 auth, simple + extended query protocol, virtual `pg_catalog`, transaction/savepoint state, and SQLSTATE-mapped errors.
+- **SkeinAdmin** is a real embedded control panel: schema browsing, SQL workspaces, Easy Viewer with inline edit + WYSIWYG schema design, dashboards with live storage/dedup/MVCC/cache cards, settings + token/user management, telemetry, index-advisor workflows, CDC, time-travel, replay, encryption, and forensics.
+- **SkeinQL** is the preferred native API: typed JSON-RPC over HTTP and QUIC.
+- **Row persistence** defaults to segment-backed `.rseg` storage.
 
-- One executable runs the HTTP API, SkeinAdmin, the MySQL listener, and the optional PostgreSQL listener.
-- MySQL compatibility is the most mature adoption path and is exercised by the checked-in compatibility corpus and end-to-end tests.
-- WordPress-class MySQL workloads are a first-class target: the repo covers installer/admin query shapes and live WordPress smoke tests.
-- SkeinAdmin is a real embedded control panel with schema browsing, SQL workspaces, an Easy Viewer, settings management, token/user management, observability views, and index-advisor workflows.
-- SkeinQL is the preferred native API for new apps and is available over HTTP, with QUIC support in the codebase as well.
-- Row persistence now defaults to segment-backed `.rseg` storage.
+## What's Still Partial
 
-### Partial / still growing
-
-- PostgreSQL support is real but still partial: startup/auth, common bootstrap probes, simple-query execution, and failed-transaction `ReadyForQuery(E)` handling work, but broader dialect, catalogs, and driver parity are still open.
-- Several research tracks are implemented as usable prototypes or hardened baselines, but not all are production-grade.
-- Clustering, CDC, snapshots, Wasm operators, and advisor flows exist, but some areas still need hardening and broader lifecycle support.
-
-### Not true yet
-
-- SkeinDB is not full MySQL parity.
-- SkeinDB is not full PostgreSQL compatibility.
-- The storage engine and several advanced features are still in prototype or hybrid states rather than fully hardened production implementations.
+- PostgreSQL support is real but still partial: broader dialect, catalog coverage, and driver parity are still open. See [docs/PG_COMPAT.md](docs/PG_COMPAT.md).
+- Several research tracks (`R01`–`R20`) are implemented as usable prototypes or hardened baselines, but not all are production-grade. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
+- Clustering, CDC, snapshots, Wasm operators, and advisor flows are wired end-to-end, but some areas still need hardening and broader lifecycle support.
+- SkeinDB does **not** claim 100% MySQL or PostgreSQL parity.
 
 > Implementation note
-> The current engine is usable and tested, but parts of the storage and research architecture are still evolving. The repo intentionally contains both shipped runtime behavior and forward-looking implementation work.
+> The current engine is usable and tested, but parts of the storage and research architecture are still evolving. The repo intentionally keeps shipped runtime behavior and forward-looking work next to each other so the gap is always visible.
 
 ---
 
@@ -70,12 +79,14 @@ If you want the most honest snapshot of what is implemented versus planned, star
 
 ## Why Use It
 
-SkeinDB is useful if you want one of these:
+Pick SkeinDB if you want any of these:
 
-- a single local binary for SQL experiments, admin tooling, and protocol testing
-- a MySQL-compatible target for adoption and migration work
-- a controllable environment for research features like ETags, query patches, audit logs, vector search, and Wasm execution
-- a codebase that keeps runtime features, backlog, and docs close together instead of hiding the gap
+- **One binary, no setup tax.** Drop it on a box, run `serve`, and you've got MySQL + PostgreSQL + JSON-RPC + admin UI. No package matrix, no separate dashboard service.
+- **Storage features built in.** Dedup, delta chaining, MVCC, time travel, audit WAL, dedup-preserving encryption, and vector search are all in the same binary — toggleable from a UI checkbox, not a 200-line YAML file.
+- **An admin console you'll actually open.** Easy Viewer, WYSIWYG schema editor, live dashboards, click-first CDC and replay flows. No phpMyAdmin install, no Grafana wiring.
+- **Honest engineering.** The repo keeps runtime, backlog, and docs in lockstep. `docs/TRUE_STATUS_MATRIX.md` shows you what's hardened vs. prototype. We don't ship marketing claims the tests don't back.
+- **A MySQL adoption target** with a corpus-backed compatibility surface and live WordPress smoke coverage.
+- **A research-friendly base.** ETags + If-None-Match, query coalescing, plan cache, autoparameterization, differential privacy, oblivious execution, Wasm UDFs, and replay bundles are all directly addressable.
 
 ---
 

@@ -109,7 +109,7 @@ Phase 0 verification checklist:
 - [x] T130: stats.snapshot and basic counters in server
 - [x] T131: query fingerprinting + top_queries / slow_queries
 - [x] T132: GET /metrics (Prometheus-style) + labels
-- [x] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction — Overview dashboard with stat cards, dedup bar chart, auto-refresh
+- [x] T133: Console widgets for CPU/memory/disk/QPS/TPS/compaction — Overview dashboard with stat cards, dedup bar chart, auto-refresh. 2026-04-25 (v0.3.5): `stats.snapshot` now exposes real `storage.total_rows` / `storage.total_tables` / `storage.disk_bytes` (computed by walking the data dir) plus new top-level `mvcc.{versions, delta_chains}` and `cache.{hit_pct, size_bytes, hits, misses}` sections, and a new `etag_hits` counter increments on both `If-None-Match` paths in `GET /api/v1/q/{id}` — the dashboard cards that previously rendered "--" now show live values.
 
 ## Phase 14 - Cluster management and scale-out
 - [x] T140: Node identity (node_id) + cluster config model

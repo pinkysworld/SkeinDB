@@ -1245,6 +1245,11 @@ pub struct EngineStorageStats {
     pub duplicate_bytes: u64,
     pub unique_values: u64,
     pub interned_values: u64,
+    pub total_rows: u64,
+    pub total_tables: u64,
+    pub disk_bytes: u64,
+    pub mvcc_versions: u64,
+    pub delta_chains: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1383,13 +1388,17 @@ impl Engine {
         let mut logical_bytes = 0u64;
         let mut unique_bytes = 0u64;
         let mut unique_values = 0u64;
+        let mut total_rows = 0u64;
+        let mut mvcc_versions = 0u64;
         let mut seen_ids = HashSet::<ValueId>::new();
 
         for tdata in self.tables.values() {
             for entry in tdata.rows.iter() {
+                mvcc_versions = mvcc_versions.saturating_add(entry.version.max(1));
                 if entry.deleted {
                     continue;
                 }
+                total_rows = total_rows.saturating_add(1);
                 for lit in entry.row.values() {
                     let Some(item) = value_store_item(lit) else {
                         continue;
@@ -1404,17 +1413,23 @@ impl Engine {
             }
         }
 
+        let total_tables = self.tables.len() as u64;
         let duplicate_bytes = logical_bytes.saturating_sub(unique_bytes);
         let dedup_ratio = if unique_bytes == 0 {
             1.0
         } else {
             logical_bytes as f64 / unique_bytes as f64
         };
-        let interned_values = self
+        let (interned_values, delta_chains) = self
             .value_store
             .lock()
-            .map(|store| store.stats().entries as u64)
-            .unwrap_or(0);
+            .map(|store| {
+                let s = store.stats();
+                (s.entries as u64, s.delta_values_written)
+            })
+            .unwrap_or((0, 0));
+
+        let disk_bytes = data_dir_size_bytes(&self.data_dir);
 
         EngineStorageStats {
             wal_bytes: self.change_log_bytes(),
@@ -1424,6 +1439,11 @@ impl Engine {
             duplicate_bytes,
             unique_values,
             interned_values,
+            total_rows,
+            total_tables,
+            disk_bytes,
+            mvcc_versions,
+            delta_chains,
         }
     }
 
@@ -19531,6 +19551,30 @@ fn store_value_items(store: &mut ValueStore, items: Vec<ValueStoreItem>) {
     for item in items {
         store.put_with_id(item.kind, item.id, item.bytes);
     }
+}
+
+fn data_dir_size_bytes(dir: &std::path::Path) -> u64 {
+    fn walk(p: &std::path::Path, acc: &mut u64, depth: u32) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(p) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&entry.path(), acc, depth + 1);
+            } else if meta.is_file() {
+                *acc = acc.saturating_add(meta.len());
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(dir, &mut total, 0);
+    total
 }
 
 fn value_store_item(lit: &Lit) -> Option<ValueStoreItem> {

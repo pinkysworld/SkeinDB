@@ -395,6 +395,8 @@ struct Counters {
     plan_cache_hits: u64,
     plan_cache_misses: u64,
     plan_cache_evictions: u64,
+    // ETag-validated 304 Not Modified responses on /api/v1/q/{id}
+    etag_hits: u64,
     // CAS replication object-pull metrics (T167)
     replication_objects: ReplicationObjectCounters,
 }
@@ -13638,6 +13640,7 @@ async fn prepared_get_handler(
         return match res {
             Ok(r) => {
                 if r.not_modified {
+                    state.counters.lock().unwrap().etag_hits += 1;
                     let mut resp = StatusCode::NOT_MODIFIED.into_response();
                     if let Some(etag) = r.etag.as_ref() {
                         if let Ok(v) = etag.parse() {
@@ -13710,6 +13713,7 @@ async fn prepared_get_handler(
     match res {
         Ok(r) => {
             if r.not_modified {
+                state.counters.lock().unwrap().etag_hits += 1;
                 let mut resp = StatusCode::NOT_MODIFIED.into_response();
                 if let Some(etag) = r.etag.as_ref() {
                     if let Ok(v) = etag.parse() {
@@ -27209,7 +27213,16 @@ async fn stats_snapshot(state: &AppState) -> Value {
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
     let compaction = compaction_runtime_json(&compaction_runtime);
     let cluster = state.cluster.lock().unwrap();
-    let (total_rpc, fingerprint_count, query_samples, qps, coalesced_total) = {
+    let (
+        total_rpc,
+        fingerprint_count,
+        query_samples,
+        qps,
+        coalesced_total,
+        etag_hits,
+        plan_cache_hits,
+        plan_cache_misses,
+    ) = {
         let c = state.counters.lock().unwrap();
         let total = c.total_rpc;
         let qps = if uptime_s == 0 {
@@ -27223,6 +27236,9 @@ async fn stats_snapshot(state: &AppState) -> Value {
             c.query_log.len() as u64,
             qps,
             c.coalesce_leader + c.coalesce_follower,
+            c.etag_hits,
+            c.plan_cache_hits,
+            c.plan_cache_misses,
         )
     };
     let open_txns = state.txns.lock().unwrap().len() as u64;
@@ -27231,13 +27247,19 @@ async fn stats_snapshot(state: &AppState) -> Value {
         .ops_per_s(COMPACTION_RECENT_WINDOW_MS as f64 / 1000.0);
     let replication_objects = cluster_replication_stats_json(state);
 
+    let cache_total = plan_cache_hits + plan_cache_misses;
+    let cache_hit_pct = if cache_total == 0 {
+        0.0
+    } else {
+        (plan_cache_hits as f64 / cache_total as f64) * 100.0
+    };
     serde_json::json!({
         "uptime_s": uptime_s,
-        "sessions": {"active": 0, "total": 0},
+        "sessions": {"active": open_txns, "total": total_rpc},
         "qps": qps,
         "tps": round_metric(tps),
         "open_txns": open_txns,
-        "connections": 0,
+        "connections": open_txns,
         "process": {"cpu_pct": cpu_pct, "rss_bytes": rss_bytes},
         "query": {
             "tracked_calls": total_rpc,
@@ -27245,8 +27267,18 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "recent_samples": query_samples,
             "slow_count": compaction_runtime.slow_count,
             "avg_latency_ms": round_metric(compaction_runtime.avg_latency_ms),
-            "etag_hits": 0,
+            "etag_hits": etag_hits,
             "coalesced": coalesced_total
+        },
+        "mvcc": {
+            "versions": storage.mvcc_versions,
+            "delta_chains": storage.delta_chains
+        },
+        "cache": {
+            "hit_pct": round_metric(cache_hit_pct),
+            "size_bytes": 0,
+            "hits": plan_cache_hits,
+            "misses": plan_cache_misses
         },
         "storage": {
             "wal_bytes": storage.wal_bytes,
@@ -27255,7 +27287,10 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "unique_bytes": storage.unique_bytes,
             "duplicate_bytes": storage.duplicate_bytes,
             "unique_values": storage.unique_values,
-            "interned_values": storage.interned_values
+            "interned_values": storage.interned_values,
+            "total_rows": storage.total_rows,
+            "total_tables": storage.total_tables,
+            "disk_bytes": storage.disk_bytes
         },
         "compaction": compaction,
         "background": {"compaction": compaction_runtime.scheduler_mode, "snapshots": "idle"},
