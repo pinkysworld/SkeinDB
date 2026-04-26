@@ -28,6 +28,7 @@ pub const PG_CANCEL_REQUEST_CODE: i32 = 80877102;
 pub const PG_SERVER_VERSION: &str = "16.0 (SkeinDB compatibility)";
 
 /// Backend message tags.
+#[allow(dead_code)]
 pub mod backend {
     pub const AUTHENTICATION: u8 = b'R';
     pub const PARAMETER_STATUS: u8 = b'S';
@@ -86,6 +87,7 @@ impl TxStatus {
 // ---------------------------------------------------------------------------
 
 /// Authentication sub-types (first 4 bytes of AuthenticationXxx payload).
+#[allow(dead_code)]
 pub mod auth {
     pub const OK: i32 = 0;
     pub const CLEARTEXT_PASSWORD: i32 = 3;
@@ -145,6 +147,7 @@ pub mod scram {
         result
     }
 
+    #[cfg(test)]
     fn xor32(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         let mut out = [0u8; 32];
         for i in 0..32 {
@@ -339,7 +342,6 @@ pub mod scram {
     /// Client-side SCRAM-SHA-256 for testing.
     #[cfg(test)]
     pub struct ScramClient {
-        pub username: String,
         pub password: String,
         pub client_nonce: String,
         pub client_first_bare: String,
@@ -353,7 +355,6 @@ pub mod scram {
             let client_first_bare = format!("n={},r={}", username, client_nonce);
             let client_first = format!("n,,{}", client_first_bare);
             Self {
-                username: username.to_string(),
                 password: password.to_string(),
                 client_nonce,
                 client_first_bare,
@@ -543,6 +544,7 @@ pub async fn write_auth_ok(stream: &mut TcpStream) -> anyhow::Result<()> {
 }
 
 /// Build and write an AuthenticationCleartextPassword request.
+#[allow(dead_code)]
 pub async fn write_auth_cleartext_password(stream: &mut TcpStream) -> anyhow::Result<()> {
     let buf = auth::CLEARTEXT_PASSWORD.to_be_bytes();
     write_message(stream, backend::AUTHENTICATION, &buf).await
@@ -796,6 +798,7 @@ pub async fn write_parameter_description(
 // Common PG type OIDs
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub mod oid {
     pub const BOOL: i32 = 16;
     pub const INT8: i32 = 20;

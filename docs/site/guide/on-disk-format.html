@@ -146,7 +146,7 @@ All formats MUST be versioned. Any breaking change requires a format version bum
   wasm_catalog.json           (prototype Wasm UDF catalog, format v1)
   merge_policies.json         (prototype merge policies, format v1)
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
-  views.json                  (prototype materialized views, format v1)
+  views.json                  (prototype materialized views, format v2)
   schema_versions.json        (prototype schema versions, format v1)
   schema_changes.json         (prototype schema change log, format v1)
   schema_flags.json           (prototype schema flags, format v1)
@@ -496,7 +496,62 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 <p>Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
-<h3 id="114-schema_flagsjson">11.4 schema_flags.json<a class="headerlink" href="#114-schema_flagsjson" title="Permanent link">¶</a></h3>
+<h3 id="114-viewsjson">11.4 views.json<a class="headerlink" href="#114-viewsjson" title="Permanent link">¶</a></h3>
+<p>Prototype materialized-view state for <code>view.create/drop/refresh/status/explain_deps</code>.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;views&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_scores&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;select&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;projection&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">&quot;from&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]}},</span><span class="w"> </span><span class="nt">&quot;with&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">&quot;order_by&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]},</span>
+<span class="w">      </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;cnt&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;total&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;pk_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;deps&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;score&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;projection_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;score&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;predicate_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">          </span><span class="nt">&quot;group_by_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Oslo&quot;</span><span class="p">}],</span>
+<span class="w">          </span><span class="nt">&quot;values&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">            </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Oslo&quot;</span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">},</span>
+<span class="w">            </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;f64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">12.0</span><span class="p">}</span>
+<span class="w">          </span><span class="p">]</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;source_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}],</span>
+<span class="w">          </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span>
+<span class="w">            </span><span class="nt">&quot;city&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Oslo&quot;</span><span class="p">},</span>
+<span class="w">            </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">}</span>
+<span class="w">          </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;last_refresh_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;last_change_seq&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;stale&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;last_refresh_mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;incremental&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Format v2 persists dependency-usage breakdown (<code>projection_columns</code>, <code>predicate_columns</code>, <code>group_by_columns</code>) per dependency plus grouped-view <code>source_rows</code> shadow state used by incremental maintenance.
+- Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and <code>source_rows</code> defaults to empty.
+- If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
+<h3 id="115-schema_flagsjson">11.5 schema_flags.json<a class="headerlink" href="#115-schema_flagsjson" title="Permanent link">¶</a></h3>
 <p>Prototype schema metadata for opt-in execution hints that should survive reopen.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -516,7 +571,7 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 - Missing files mean no interned-column flags are active.
 - Unknown <code>format_version</code> values are ignored by the current loader.
 - Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.</p>
-<h3 id="115-wasm_catalogjson">11.5 wasm_catalog.json<a class="headerlink" href="#115-wasm_catalogjson" title="Permanent link">¶</a></h3>
+<h3 id="116-wasm_catalogjson">11.6 wasm_catalog.json<a class="headerlink" href="#116-wasm_catalogjson" title="Permanent link">¶</a></h3>
 <p>Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
 embedded here; they live in the <code>ValueStore</code> and are referenced by <code>value_id</code>.</p>
 <p>Format:</p>
@@ -758,8 +813,9 @@ The FileHeader format_ver remains 1; extensions use new record types and/or high
 <li><a href="#111-security_statejson">11.1 security_state.json</a></li>
 <li><a href="#112-forensic_chainjson">11.2 forensic_chain.json</a></li>
 <li><a href="#113-merge_wasm_registryjson">11.3 merge_wasm_registry.json</a></li>
-<li><a href="#114-schema_flagsjson">11.4 schema_flags.json</a></li>
-<li><a href="#115-wasm_catalogjson">11.5 wasm_catalog.json</a></li>
+<li><a href="#114-viewsjson">11.4 views.json</a></li>
+<li><a href="#115-schema_flagsjson">11.5 schema_flags.json</a></li>
+<li><a href="#116-wasm_catalogjson">11.6 wasm_catalog.json</a></li>
 <li><a href="#116-tablesjson-format-v2">11.6 tables//.json (format v2)</a></li>
 <li><a href="#117-tablesrseg-prototype-segment-container-v1">11.7 tables//.rseg (prototype segment container v1)</a></li>
 <li><a href="#118-tablessidxjson-prototype-secondary-index-cache-v1">11.8 tables//.sidx.json (prototype secondary index cache v1)</a></li>

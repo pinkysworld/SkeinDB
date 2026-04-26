@@ -180,8 +180,8 @@ const RPC_TEMPLATES = [
   { label: 'maintenance.audit_verify', method: 'maintenance.audit_verify', params: {} },
   { label: 'forensic.verify', method: 'forensic.verify', params: { from_id:0, limit:100 } },
   { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50 } },
-  { label: 'view.create', method: 'view.create', params: { db:'demo', name:'active_users', query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
-  { label: 'view.status', method: 'view.status', params: { db:'demo', name:'active_users' } },
+  { label: 'view.create', method: 'view.create', params: { view:{db:'demo',table:'active_users'}, query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
+  { label: 'view.status', method: 'view.status', params: { view:{db:'demo',table:'active_users'} } },
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
   { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { name:'merge_sum', wasm_b64:'AA==' } },
   { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { wasm_b64:'AA==', schema:{columns:[{name:'x',type:'i64'}]} } },
@@ -415,6 +415,95 @@ function parseOptionalU64Input(id, label) {
     throw new Error(label + ' must be a non-negative integer');
   }
   return value;
+}
+
+function readViewRef() {
+  const db = $('viewDb')?.value.trim();
+  const table = $('viewName')?.value.trim();
+  if (!db || !table) throw new Error('DB+name required');
+  return { db, table };
+}
+
+function setViewSummaryMarkup(html) {
+  const el = $('viewSummary');
+  if (!el) return;
+  el.innerHTML = html || 'Load view status or dependency details to inspect freshness and column usage.';
+}
+
+function viewColumnsLabel(columns) {
+  return Array.isArray(columns) && columns.length ? columns.join(', ') : 'none';
+}
+
+function renderViewDependency(dep) {
+  const db = dep && dep.db ? String(dep.db) : '?';
+  const table = dep && dep.table ? String(dep.table) : '?';
+  const columns = viewColumnsLabel(dep && dep.columns);
+  const projection = viewColumnsLabel(dep && dep.projection_columns);
+  const predicate = viewColumnsLabel(dep && dep.predicate_columns);
+  const groupBy = viewColumnsLabel(dep && dep.group_by_columns);
+  return '<div class="callout" style="margin-top:8px">'
+    + '<strong>' + escapeHtml(db + '.' + table) + '</strong>'
+    + '<br><strong>All columns</strong>: ' + escapeHtml(columns)
+    + '<br><strong>Projection</strong>: ' + escapeHtml(projection)
+    + '<br><strong>Predicate</strong>: ' + escapeHtml(predicate)
+    + '<br><strong>Group By</strong>: ' + escapeHtml(groupBy)
+    + '</div>';
+}
+
+function renderViewSummary(result, mode) {
+  if (!result || typeof result !== 'object') {
+    setViewSummaryMarkup('Load view status or dependency details to inspect freshness and column usage.');
+    return;
+  }
+  if (mode === 'status') {
+    const views = Array.isArray(result.views) ? result.views : [];
+    if (!views.length) {
+      setViewSummaryMarkup('No view status returned.');
+      return;
+    }
+    setViewSummaryMarkup(views.map((view) => {
+      const deps = Array.isArray(view.deps) ? view.deps : [];
+      const lastRefresh = Number(view.last_refresh_ms || 0);
+      return '<div><strong>' + escapeHtml(String(view.db || '?') + '.' + String(view.view || '?')) + '</strong>'
+        + ' | <strong>Rows</strong>: ' + escapeHtml(String(Number(view.rows) || 0))
+        + ' | <strong>Stale</strong>: ' + escapeHtml(view.stale ? 'yes' : 'no')
+        + ' | <strong>Mode</strong>: ' + escapeHtml(String(view.last_refresh_mode || 'unknown'))
+        + ' | <strong>Last refresh</strong>: ' + escapeHtml(lastRefresh ? formatAuditTimestamp(lastRefresh) : 'never')
+        + deps.map(renderViewDependency).join('')
+        + '</div>';
+    }).join('<hr>'));
+    return;
+  }
+  if (mode === 'deps') {
+    const deps = Array.isArray(result.deps) ? result.deps : [];
+    if (!deps.length) {
+      setViewSummaryMarkup('No dependency details returned.');
+      return;
+    }
+    setViewSummaryMarkup(deps.map((dep) => {
+      if (dep && dep.transitive) {
+        const items = Array.isArray(dep.transitive) ? dep.transitive : [];
+        return '<div class="callout" style="margin-top:8px"><strong>Transitive deps</strong><br>'
+          + items.map((item) => escapeHtml(String(item.path || '?')) + ' (' + escapeHtml(item.stale ? 'stale' : 'fresh') + ')').join('<br>')
+          + '</div>';
+      }
+      return renderViewDependency(dep);
+    }).join(''));
+    return;
+  }
+  if (mode === 'create') {
+    setViewSummaryMarkup('<strong>View created.</strong> Columns: ' + escapeHtml(viewColumnsLabel(result.columns)));
+    return;
+  }
+  if (mode === 'refresh') {
+    setViewSummaryMarkup('<strong>Refresh complete.</strong> Mode: ' + escapeHtml(String(result.mode || 'unknown'))
+      + ' | <strong>Rows</strong>: ' + escapeHtml(String(Number(result.rows) || 0))
+      + ' | <strong>Last change seq</strong>: ' + escapeHtml(String(Number(result.last_change_seq) || 0)));
+    return;
+  }
+  if (mode === 'drop') {
+    setViewSummaryMarkup('<strong>View dropped.</strong>');
+  }
 }
 
 function cleanParams(p) {
@@ -4613,26 +4702,26 @@ async function forExport() {
 // ---------------------------------------------------------------------------
 async function viewCreate() {
   try {
-    const db = $('viewDb')?.value.trim(), name = $('viewName')?.value.trim(); if (!db || !name) throw new Error('DB+name required');
     const query = parseJsonInput($('viewQuery')?.value,'Query'); if (!query) throw new Error('Query required');
-    await call('view.create',{db,name,query},'viewOut');
-  } catch (e) { setOut({error:String(e)},'viewOut'); }
+    const res = await call('view.create',{view:readViewRef(),query},'viewOut');
+    renderViewSummary(unwrapRpcResult(res, 'view.create'), 'create');
+  } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 async function viewRefresh() {
-  try { const db = $('viewDb')?.value.trim(), name = $('viewName')?.value.trim(); if (!db||!name) throw new Error('DB+name required'); await call('view.refresh',{db,name},'viewOut'); } catch (e) { setOut({error:String(e)},'viewOut'); }
+  try { const res = await call('view.refresh',{view:readViewRef()},'viewOut'); renderViewSummary(unwrapRpcResult(res, 'view.refresh'), 'refresh'); } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 async function viewStatus() {
-  try { const db = $('viewDb')?.value.trim(), name = $('viewName')?.value.trim(); if (!db||!name) throw new Error('DB+name required'); await call('view.status',{db,name},'viewOut'); } catch (e) { setOut({error:String(e)},'viewOut'); }
+  try { const res = await call('view.status',{view:readViewRef()},'viewOut'); renderViewSummary(unwrapRpcResult(res, 'view.status'), 'status'); } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 async function viewDrop() {
-  try { const db = $('viewDb')?.value.trim(), name = $('viewName')?.value.trim(); if (!db||!name) throw new Error('DB+name required'); await call('view.drop',{db,name},'viewOut'); } catch (e) { setOut({error:String(e)},'viewOut'); }
+  try { const res = await call('view.drop',{view:readViewRef()},'viewOut'); renderViewSummary(unwrapRpcResult(res, 'view.drop'), 'drop'); } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 async function viewExplainDeps() {
-  try { const db = $('viewDb')?.value.trim(), name = $('viewName')?.value.trim(); if (!db||!name) throw new Error('DB+name required'); await call('view.explain_deps',{db,name},'viewOut'); } catch (e) { setOut({error:String(e)},'viewOut'); }
+  try { const res = await call('view.explain_deps',{view:readViewRef()},'viewOut'); renderViewSummary(unwrapRpcResult(res, 'view.explain_deps'), 'deps'); } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,6 @@ use skeindb_skeinql::types::{BaseTableRef, Lit, Query, ResultFormat};
 
 #[derive(Debug, Clone, Deserialize)]
 struct NlEvalExample {
-    pub id: Option<String>,
     pub db: String,
     pub request: String,
 
@@ -266,7 +265,6 @@ mod tests {
     #[test]
     fn eval_examples_exact_and_exec_match() -> anyhow::Result<()> {
         let examples = vec![NlEvalExample {
-            id: None,
             db: "app".to_string(),
             request: "list users".to_string(),
             expected_query: serde_json::json!({

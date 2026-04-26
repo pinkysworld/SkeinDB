@@ -632,9 +632,7 @@ enum MySqlStmtColumnType {
 // MySQL column flags (COM_STMT_PREPARE column definition bitmask)
 const MYSQL_COL_FLAG_NOT_NULL: u16 = 0x0001;
 const MYSQL_COL_FLAG_PRIMARY_KEY: u16 = 0x0002;
-const MYSQL_COL_FLAG_UNIQUE_KEY: u16 = 0x0004;
 const MYSQL_COL_FLAG_UNSIGNED: u16 = 0x0020;
-const MYSQL_COL_FLAG_AUTO_INCREMENT: u16 = 0x0200;
 const MYSQL_COL_FLAG_BINARY: u16 = 0x0080;
 const MYSQL_COL_FLAG_NUM: u16 = 0x8000;
 
@@ -673,6 +671,9 @@ struct MySqlPreparedStatement {
     long_data: HashMap<u16, Vec<u8>>,
     cursor: Option<MySqlPreparedCursor>,
 }
+
+type MySqlTextRows = (Vec<String>, Vec<Vec<Option<String>>>);
+type MySqlTextRowsRef<'a> = (&'a [String], &'a [Vec<Option<String>>]);
 
 #[derive(Debug)]
 struct MySqlSessionState {
@@ -2448,9 +2449,9 @@ struct MySqlCompatSimpleAggregateQuery {
 
 #[derive(Debug, Clone)]
 enum MySqlCompatMultiAggregateItem {
-    CountRows { alias: String },
-    CountNonNull { alias: String, column: String },
-    CountPredicate { alias: String, predicate: Expr },
+    Rows { alias: String },
+    NonNull { alias: String, column: String },
+    Predicate { alias: String, predicate: Expr },
 }
 
 #[derive(Debug, Clone)]
@@ -2970,7 +2971,7 @@ fn mysql_parse_multi_aggregate_projection_item(
         .unwrap_or_else(|| expr_trimmed.to_string());
 
     if matches!(expr_lower.as_str(), "count(*)" | "count(1)") {
-        return Some(MySqlCompatMultiAggregateItem::CountRows { alias });
+        return Some(MySqlCompatMultiAggregateItem::Rows { alias });
     }
 
     if !expr_lower.starts_with("count(") || !expr_lower.ends_with(')') {
@@ -2994,7 +2995,7 @@ fn mysql_parse_multi_aggregate_projection_item(
             return None;
         }
         mysql_collect_expr_columns(&predicate, source_columns);
-        return Some(MySqlCompatMultiAggregateItem::CountPredicate { alias, predicate });
+        return Some(MySqlCompatMultiAggregateItem::Predicate { alias, predicate });
     }
 
     if let Some((col, table)) = parse_sql_column_ref(inner) {
@@ -3007,7 +3008,7 @@ fn mysql_parse_multi_aggregate_projection_item(
         {
             source_columns.push(select_expr);
         }
-        return Some(MySqlCompatMultiAggregateItem::CountNonNull { alias, column: col });
+        return Some(MySqlCompatMultiAggregateItem::NonNull { alias, column: col });
     }
 
     None
@@ -3618,9 +3619,7 @@ fn mysql_parse_grouped_aggregate_query(sql: &str) -> Option<MySqlCompatGroupedAg
             } else {
                 None
             };
-            let Some(target) = target else {
-                return None;
-            };
+            let target = target?;
             order_by.push(MySqlCompatGroupedAggregateOrder {
                 target,
                 desc: matches!(item.dir, Some(OrderDir::Desc)),
@@ -4060,16 +4059,16 @@ async fn mysql_try_multi_aggregate_query_outcome(
 
         for (idx, item) in query.items.iter().enumerate() {
             match item {
-                MySqlCompatMultiAggregateItem::CountRows { .. } => {
+                MySqlCompatMultiAggregateItem::Rows { .. } => {
                     counts[idx] = counts[idx].saturating_add(1);
                 }
-                MySqlCompatMultiAggregateItem::CountNonNull { column, .. } => {
+                MySqlCompatMultiAggregateItem::NonNull { column, .. } => {
                     let value = row_get_lit(&row_map, column);
                     if value.is_some() && !matches!(value, Some(Lit::Null)) {
                         counts[idx] = counts[idx].saturating_add(1);
                     }
                 }
-                MySqlCompatMultiAggregateItem::CountPredicate { predicate, .. } => {
+                MySqlCompatMultiAggregateItem::Predicate { predicate, .. } => {
                     if mysql_eval_row_predicate_expr(predicate, &row_map)? {
                         counts[idx] = counts[idx].saturating_add(1);
                     }
@@ -4083,9 +4082,9 @@ async fn mysql_try_multi_aggregate_query_outcome(
             .items
             .iter()
             .map(|item| match item {
-                MySqlCompatMultiAggregateItem::CountRows { alias }
-                | MySqlCompatMultiAggregateItem::CountNonNull { alias, .. }
-                | MySqlCompatMultiAggregateItem::CountPredicate { alias, .. } => alias.clone(),
+                MySqlCompatMultiAggregateItem::Rows { alias }
+                | MySqlCompatMultiAggregateItem::NonNull { alias, .. }
+                | MySqlCompatMultiAggregateItem::Predicate { alias, .. } => alias.clone(),
             })
             .collect(),
         rows: vec![counts
@@ -5587,7 +5586,7 @@ fn mysql_rebuild_select_with_where(
 
 fn mysql_subquery_outcome_result_rows(
     outcome: &MySqlQueryOutcome,
-) -> Result<(&[String], &[Vec<Option<String>>]), RpcError> {
+) -> Result<MySqlTextRowsRef<'_>, RpcError> {
     match outcome {
         MySqlQueryOutcome::ResultSet { columns, rows } => Ok((columns, rows)),
         MySqlQueryOutcome::Ok { .. } => Err(RpcError::new(
@@ -7831,12 +7830,10 @@ fn mysql_stmt_expr_flags(expr: &Expr, table_descs: &[MySqlStmtPrepareTableDesc])
             "add" | "sub" | "mul" | "div" | "mod" => MYSQL_COL_FLAG_NUM,
             _ => 0,
         },
-        Expr::Lit { lit } => match lit {
-            Lit::I64 { .. } | Lit::U64 { .. } | Lit::F64 { .. } | Lit::Bool { .. } => {
-                MYSQL_COL_FLAG_NUM
-            }
-            _ => 0,
-        },
+        Expr::Lit {
+            lit: Lit::I64 { .. } | Lit::U64 { .. } | Lit::F64 { .. } | Lit::Bool { .. },
+        } => MYSQL_COL_FLAG_NUM,
+        Expr::Lit { .. } => 0,
         Expr::Subquery { subquery } => mysql_stmt_scalar_subquery_result_flags(
             mysql_stmt_query_single_projection_flags(&subquery.query, table_descs),
         ),
@@ -8841,9 +8838,7 @@ async fn mysql_rewrite_derived_table(
     Some(result)
 }
 
-fn mysql_extract_result_data(
-    result: &Value,
-) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+fn mysql_extract_result_data(result: &Value) -> Result<MySqlTextRows, String> {
     let data = result
         .get("result")
         .and_then(|v| v.get("data"))
@@ -8973,7 +8968,7 @@ fn mysql_extract_result_data_for_sql(
     result: &Value,
     sql: Option<&str>,
     default_db: Option<&str>,
-) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+) -> Result<MySqlTextRows, String> {
     let (columns, rows) = mysql_extract_result_data(result)?;
     let columns = match sql {
         Some(query) => mysql_relabel_result_columns_for_select(query, default_db, columns),
@@ -8982,9 +8977,7 @@ fn mysql_extract_result_data_for_sql(
     Ok((columns, rows))
 }
 
-fn mysql_extract_show_columns_result(
-    result: &Value,
-) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+fn mysql_extract_show_columns_result(result: &Value) -> Result<MySqlTextRows, String> {
     let desc = result
         .get("result")
         .ok_or_else(|| "missing show_columns result".to_string())?;
@@ -12191,6 +12184,7 @@ fn pg_rewrite_is_distinct_from(sql: &str) -> String {
     sql.to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pg_dispatch_sql(
     state: &AppState,
     stream: &mut TcpStream,
@@ -29778,6 +29772,319 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn view_status_and_explain_deps_report_dependency_usage() -> anyhow::Result<()> {
+        let dir = temp_dir("view_rpc_deps");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+                ("score", Lit::U64 { v: 20 }),
+            ])],
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let view_query = select_query(
+            "app",
+            "users",
+            vec!["id", "city"],
+            Some(gt_expr("score", Lit::U64 { v: 10 })),
+        );
+        let create = call_rpc(
+            &state,
+            "view.create",
+            json!({
+                "view": {"db": "app", "table": "top_users"},
+                "query": view_query,
+            }),
+        )
+        .await;
+        assert!(create.ok);
+
+        let status = call_rpc(
+            &state,
+            "view.status",
+            json!({
+                "view": {"db": "app", "table": "top_users"},
+            }),
+        )
+        .await;
+        assert!(status.ok);
+        let deps = status.result.expect("missing status result")["views"][0]["deps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0]["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("id"), json!("city")]
+        );
+        assert_eq!(
+            deps[0]["predicate_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("score")]
+        );
+
+        let explain = call_rpc(
+            &state,
+            "view.explain_deps",
+            json!({
+                "view": {"db": "app", "table": "top_users"},
+            }),
+        )
+        .await;
+        assert!(explain.ok);
+        let deps = explain.result.expect("missing explain result")["deps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0]["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("id"), json!("city")]
+        );
+        assert_eq!(
+            deps[0]["predicate_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("score")]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn view_grouped_refresh_and_auto_mode_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("view_grouped_rpc");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 7 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 10 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 12 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let grouped_query = json!({
+            "with": [],
+            "body": {
+                "select": {
+                    "projection": [
+                        {"expr": {"col": "city"}, "as": "city"},
+                        {"expr": {"fn": "count", "args": []}, "as": "cnt"},
+                        {"expr": {"fn": "sum", "args": [{"col": "score"}]}, "as": "total"}
+                    ],
+                    "from": [{"db": "app", "table": "users"}],
+                    "group_by": [{"col": "city"}]
+                }
+            },
+            "order_by": []
+        });
+        let create = call_rpc(
+            &state,
+            "view.create",
+            json!({
+                "view": {"db": "app", "table": "city_scores"},
+                "query": grouped_query,
+            }),
+        )
+        .await;
+        assert!(create.ok);
+
+        let select_view = select_query("app", "city_scores", vec!["city", "cnt", "total"], None);
+        let selected = call_rpc(&state, "query.select", json!({ "query": select_view })).await;
+        assert!(selected.ok);
+        let rows = selected.result.expect("missing select result")["data"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+
+        let update_one = call_rpc(
+            &state,
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "set": {
+                    "city": {"t": "str", "v": "Oslo"},
+                    "score": {"t": "u64", "v": 11}
+                },
+                "where": eq_expr("id", Lit::U64 { v: 3 })
+            }),
+        )
+        .await;
+        assert!(update_one.ok);
+
+        let refresh = call_rpc(
+            &state,
+            "view.refresh",
+            json!({
+                "view": {"db": "app", "table": "city_scores"},
+                "mode": "incremental"
+            }),
+        )
+        .await;
+        assert!(refresh.ok);
+        assert_eq!(
+            refresh.result.expect("missing grouped refresh result")["mode"].as_str(),
+            Some("incremental")
+        );
+
+        let update_all = call_rpc(
+            &state,
+            "data.update",
+            json!({
+                "table": {"db": "app", "table": "users"},
+                "set": {"score": {"t": "u64", "v": 99}},
+                "where": {
+                    "op": "ge",
+                    "a": {"col": "id"},
+                    "b": {"lit": {"t": "u64", "v": 1}}
+                }
+            }),
+        )
+        .await;
+        assert!(update_all.ok);
+
+        let auto_refresh = call_rpc(
+            &state,
+            "view.refresh",
+            json!({
+                "view": {"db": "app", "table": "city_scores"},
+                "mode": "auto"
+            }),
+        )
+        .await;
+        assert!(auto_refresh.ok);
+        assert_eq!(
+            auto_refresh.result.expect("missing auto refresh result")["mode"].as_str(),
+            Some("full")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn admin_toolbar_methods_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("toolbar_methods");
         let engine = Engine::open(&dir)?;
@@ -31954,15 +32261,15 @@ mod tests {
         assert_eq!(parsed.items.len(), 3);
         assert!(matches!(
             parsed.items[0],
-            MySqlCompatMultiAggregateItem::CountPredicate { .. }
+            MySqlCompatMultiAggregateItem::Predicate { .. }
         ));
         assert!(matches!(
             parsed.items[1],
-            MySqlCompatMultiAggregateItem::CountPredicate { .. }
+            MySqlCompatMultiAggregateItem::Predicate { .. }
         ));
         assert!(matches!(
             parsed.items[2],
-            MySqlCompatMultiAggregateItem::CountRows { .. }
+            MySqlCompatMultiAggregateItem::Rows { .. }
         ));
     }
 
@@ -35500,7 +35807,7 @@ mod tests {
         let objects = resp.result.unwrap()["objects"].as_array().unwrap().clone();
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0]["id"].as_str().unwrap(), hello_hex);
-        assert_eq!(objects[0]["verified"].as_bool().unwrap(), true);
+        assert!(objects[0]["verified"].as_bool().unwrap());
         assert_eq!(objects[0]["kind"].as_str().unwrap(), "Cell");
         assert!(objects[0]["entry_b64"].as_str().is_some());
 

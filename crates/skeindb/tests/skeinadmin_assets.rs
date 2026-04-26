@@ -225,3 +225,45 @@ fn skeinadmin_encryption_panel_exposes_key_management_controls() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_views_panel_exposes_dependency_usage_summary() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-panel=\"views\"",
+        "Incremental Views (R08)",
+        "btnViewCreate",
+        "btnViewRefresh",
+        "btnViewStatus",
+        "btnViewDrop",
+        "btnViewExplainDeps",
+        "viewSummary",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin views html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function readViewRef()",
+        "function renderViewSummary(result, mode)",
+        "function renderViewDependency(dep)",
+        "view.create',{view:readViewRef(),query}",
+        "view.refresh',{view:readViewRef()}",
+        "view.status',{view:readViewRef()}",
+        "view.drop',{view:readViewRef()}",
+        "view.explain_deps',{view:readViewRef()}",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin views js should contain {marker}"
+        );
+    }
+}

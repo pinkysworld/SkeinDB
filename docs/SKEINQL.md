@@ -1760,6 +1760,9 @@ Result:
 {"ok":true,"columns":["id","city"]}
 ```
 
+`view.create` supports single-table filter/project views and single-table grouped
+views whose projection contains only grouped columns plus `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`.
+
 #### view.drop
 Params:
 
@@ -1786,6 +1789,9 @@ Result:
 {"mode":"incremental","rows":2,"last_change_seq":128}
 ```
 
+When `mode` is `"auto"`, the result `mode` reports the actual path chosen by the
+engine (`"incremental"` or `"full"`).
+
 #### view.status
 Params:
 
@@ -1796,7 +1802,7 @@ Params:
 Result:
 
 ```json
-{"views":[{"db":"mydb","view":"top_users","rows":2,"stale":false}]}
+{"views":[{"db":"mydb","view":"top_users","rows":2,"stale":false,"last_change_seq":128,"last_refresh_mode":"incremental","deps":[{"db":"mydb","table":"users","columns":["id","city","score"],"projection_columns":["id","city"],"predicate_columns":["score"],"group_by_columns":[]}]}]}
 ```
 
 #### view.explain_deps
@@ -1809,7 +1815,7 @@ Params:
 Result:
 
 ```json
-{"deps":[{"db":"mydb","table":"users","columns":["id","city","score"]}]}
+{"deps":[{"db":"mydb","table":"users","columns":["id","city","score"],"projection_columns":["id","city"],"predicate_columns":["score"],"group_by_columns":[]}]}
 ```
 
 ### 10.17 edge.* (experimental)

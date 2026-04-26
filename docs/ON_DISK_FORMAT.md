@@ -28,7 +28,7 @@ data/
   wasm_catalog.json           (prototype Wasm UDF catalog, format v1)
   merge_policies.json         (prototype merge policies, format v1)
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
-  views.json                  (prototype materialized views, format v1)
+  views.json                  (prototype materialized views, format v2)
   schema_versions.json        (prototype schema versions, format v1)
   schema_changes.json         (prototype schema change log, format v1)
   schema_flags.json           (prototype schema flags, format v1)
@@ -427,7 +427,67 @@ Compatibility notes:
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.4 schema_flags.json
+### 11.4 views.json
+
+Prototype materialized-view state for `view.create/drop/refresh/status/explain_deps`.
+
+Format:
+
+```json
+{
+  "format_version": 2,
+  "views": [
+    {
+      "db": "app",
+      "name": "city_scores",
+      "query": {"body": {"select": {"projection": [], "from": []}}, "with": [], "order_by": []},
+      "columns": ["city", "cnt", "total"],
+      "pk_columns": ["city"],
+      "deps": [
+        {
+          "db": "app",
+          "table": "users",
+          "columns": ["city", "score"],
+          "projection_columns": ["city", "score"],
+          "predicate_columns": [],
+          "group_by_columns": ["city"]
+        }
+      ],
+      "rows": [
+        {
+          "pk": [{"t": "str", "v": "Oslo"}],
+          "values": [
+            {"t": "str", "v": "Oslo"},
+            {"t": "u64", "v": 2},
+            {"t": "f64", "v": 12.0}
+          ]
+        }
+      ],
+      "source_rows": [
+        {
+          "pk": [{"t": "u64", "v": 1}],
+          "row": {
+            "id": {"t": "u64", "v": 1},
+            "city": {"t": "str", "v": "Oslo"},
+            "score": {"t": "u64", "v": 5}
+          }
+        }
+      ],
+      "last_refresh_ms": 1730000000000,
+      "last_change_seq": 42,
+      "stale": false,
+      "last_refresh_mode": "incremental"
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Format v2 persists dependency-usage breakdown (`projection_columns`, `predicate_columns`, `group_by_columns`) per dependency plus grouped-view `source_rows` shadow state used by incremental maintenance.
+- Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and `source_rows` defaults to empty.
+- If the file is missing or has an unknown `format_version`, it is ignored.
+
+### 11.5 schema_flags.json
 
 Prototype schema metadata for opt-in execution hints that should survive reopen.
 
@@ -452,7 +512,7 @@ Compatibility notes:
 - Unknown `format_version` values are ignored by the current loader.
 - Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.
 
-### 11.5 wasm_catalog.json
+### 11.6 wasm_catalog.json
 
 Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
 embedded here; they live in the `ValueStore` and are referenced by `value_id`.

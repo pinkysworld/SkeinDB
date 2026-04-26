@@ -39,7 +39,7 @@ Related: R07
 Related: R08
 
 - `view.create` / `view.drop`
-- `view.refresh` — full recompute
+- `view.refresh` — incremental, full, or auto refresh for restricted single-table views (including grouped views)
 - `view.status` — lag/last refresh
 - `view.explain_deps` — dependency graph edges
 

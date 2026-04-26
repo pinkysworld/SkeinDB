@@ -124,7 +124,7 @@
     <article class="doc-article">
       <h1 id="incremental-views-prototype">Incremental Views (Prototype)<a class="headerlink" href="#incremental-views-prototype" title="Permanent link">¶</a></h1>
 <p>Status: Draft
-Last updated: 2026-01-19</p>
+Last updated: 2026-04-25</p>
 <p>This document describes the prototype incremental view maintenance for R08.</p>
 <h2 id="1-overview">1) Overview<a class="headerlink" href="#1-overview" title="Permanent link">¶</a></h2>
 <p>SkeinDB can materialize simple views and refresh them incrementally using the change log.</p>
@@ -134,27 +134,41 @@ Last updated: 2026-01-19</p>
 - <code>view.refresh</code>
 - <code>view.status</code>
 - <code>view.explain_deps</code></p>
-<p>View state is stored in <code>views.json</code> (format v1).</p>
+<p>View state is stored in <code>views.json</code> (format v2).</p>
 <h2 id="2-supported-view-definitions">2) Supported view definitions<a class="headerlink" href="#2-supported-view-definitions" title="Permanent link">¶</a></h2>
 <p>Only a restricted SELECT form is supported:
 - single-table <code>FROM</code> (no joins, no subqueries)
-- no <code>GROUP BY</code>, <code>HAVING</code>, <code>DISTINCT</code>
+- optional <code>GROUP BY</code> over base-table columns only
+- grouped projections may only contain grouped columns plus <code>COUNT</code>, <code>SUM</code>, <code>AVG</code>, <code>MIN</code>, and <code>MAX</code>
+- no <code>HAVING</code> or <code>DISTINCT</code>
 - no <code>ORDER BY</code> or <code>LIMIT</code></p>
 <p>The base table must have a primary key.</p>
 <h2 id="3-incremental-refresh">3) Incremental refresh<a class="headerlink" href="#3-incremental-refresh" title="Permanent link">¶</a></h2>
 <p><code>view.refresh</code> supports:
 - <code>mode: "full"</code>: recompute from scratch
 - <code>mode: "incremental"</code>: apply deltas from the change log
-- <code>mode: "auto"</code>: choose based on a simple cost heuristic</p>
+- <code>mode: "auto"</code>: choose between incremental and full recompute based on changed primary keys, grouped cardinality, and stale state</p>
 <p>Incremental refresh:
 - re-evaluates the view predicate for each changed primary key
-- upserts or removes view rows accordingly</p>
+- upserts or removes view rows accordingly
+- for grouped views, persists the contributing source rows in <code>views.json</code> and recomputes only the touched groups during incremental refresh</p>
 <p>Views are marked <code>stale=true</code> when base tables change.
 Reads may return stale results until the view is refreshed.</p>
 <h2 id="4-dependencies">4) Dependencies<a class="headerlink" href="#4-dependencies" title="Permanent link">¶</a></h2>
-<p><code>view.explain_deps</code> returns the base table and the columns referenced by the view
-projection and predicate. This metadata is used for dependency tracking and future
-optimization work.</p>
+<p><code>view.status</code> and <code>view.explain_deps</code> return one dependency object per base table.
+Each object currently includes:</p>
+<ul>
+<li><code>columns</code>: the full set of columns referenced anywhere in the view definition</li>
+<li><code>projection_columns</code>: columns used by the view projection</li>
+<li><code>predicate_columns</code>: columns used by the <code>WHERE</code> predicate</li>
+<li><code>group_by_columns</code>: columns used by <code>GROUP BY</code> in grouped views</li>
+</ul>
+<p>For the current single-table prototype, this metadata is derived from the same
+query-analysis path used by other planner surfaces and then persisted alongside
+the view entry, which keeps dependency tracking aligned with predicate and
+projection extraction in the rest of the engine across restarts.</p>
+<p>This metadata is intended for dependency tracking, future optimizer work, and
+operator visibility in SkeinAdmin.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/INCREMENTAL_VIEWS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

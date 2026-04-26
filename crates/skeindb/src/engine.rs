@@ -750,7 +750,7 @@ enum WasmPlanOpV1 {
 // view.* (research)
 // -----------------------------
 
-const VIEW_FORMAT_VERSION: u32 = 1;
+const VIEW_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ViewDependency {
@@ -759,12 +759,27 @@ struct ViewDependency {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    projection_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    predicate_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    group_by_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ViewRowDisk {
     pk: Vec<Lit>,
     values: Vec<Lit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewSourceRowDisk {
+    pk: Vec<Lit>,
+    row: RowObject,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -780,6 +795,8 @@ struct ViewEntryDisk {
     deps: Vec<ViewDependency>,
     #[serde(default)]
     rows: Vec<ViewRowDisk>,
+    #[serde(default)]
+    source_rows: Vec<ViewSourceRowDisk>,
     #[serde(default)]
     last_refresh_ms: u64,
     #[serde(default)]
@@ -803,6 +820,12 @@ struct ViewRow {
 }
 
 #[derive(Debug, Clone)]
+struct ViewSourceRow {
+    pk: Vec<Lit>,
+    row: RowObject,
+}
+
+#[derive(Debug, Clone)]
 struct ViewState {
     db: String,
     name: String,
@@ -811,6 +834,7 @@ struct ViewState {
     pk_columns: Vec<String>,
     deps: Vec<ViewDependency>,
     rows: Vec<ViewRow>,
+    source_rows: HashMap<String, ViewSourceRow>,
     pk_index: HashMap<String, usize>,
     last_refresh_ms: u64,
     last_change_seq: u64,
@@ -825,7 +849,6 @@ struct ViewDepEdge {
     view_name: String,
     depends_on_db: String,
     depends_on_table: String,
-    columns: Vec<String>,
     is_view: bool,
     stale: bool,
 }
@@ -1099,6 +1122,38 @@ struct ViewQueryInfo {
     projection: Vec<skeindb_skeinql::types::SelectItem>,
     predicate: Option<Expr>,
     required_cols: Vec<String>,
+    projection_cols: Vec<String>,
+    predicate_cols: Vec<String>,
+    group_by_cols: Vec<String>,
+    group_key_columns: Vec<String>,
+    projection_plan: Vec<ViewProjectionSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewAggregateOp {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone)]
+struct ViewAggregateSpec {
+    op: ViewAggregateOp,
+    column: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum ViewProjectionSpec {
+    GroupKey { column: String },
+    Aggregate { agg: ViewAggregateSpec },
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ViewRefreshStats {
+    change_count: usize,
+    touched_pks: usize,
 }
 
 impl Default for SnapshotCostModel {
@@ -1133,12 +1188,6 @@ impl Default for IndexAdvisor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResultSet {
-    pub columns: Vec<ColumnMeta>,
-    pub rows: Vec<Vec<Lit>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnMeta {
     pub name: String,
     pub r#type: TypeDesc,
@@ -1164,6 +1213,12 @@ pub struct QuerySelectResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire: Option<serde_json::Value>,
 }
+
+type QueryRows = Vec<Vec<Lit>>;
+type QueryRowKeys = Vec<Vec<Lit>>;
+type QuerySelectWithKeys = (Vec<ColumnMeta>, QueryRows, QueryRowKeys);
+type QuerySnapshotRows = (Vec<ColumnMeta>, QueryRows, u64);
+type QuerySnapshotWithKeys = (Vec<ColumnMeta>, QueryRows, QueryRowKeys, u64);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataGetResult {
@@ -3531,6 +3586,7 @@ impl Engine {
     /// - If changed slightly: returns small `added/updated/removed` sets
     /// - If the server cannot compute a patch (cache eviction/restart): returns `reset=true`
     ///   and (optionally) includes `full` so the client can replace state.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_patch(
         &self,
         query: &Query,
@@ -3902,6 +3958,7 @@ impl Engine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_patch_obj(
         &self,
         reset: bool,
@@ -4132,7 +4189,7 @@ impl Engine {
         etag: &str,
         query: &Query,
         args: &[Lit],
-    ) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
+    ) -> anyhow::Result<QuerySelectWithKeys> {
         // Try cache first.
         if let Some(hit) = self.cached_select.lock().unwrap().get_mut(etag) {
             if let Some(keys) = hit.keys.clone() {
@@ -4340,7 +4397,7 @@ impl Engine {
                         let (_, v, _) = embedding_ref(lit).ok()?;
                         Some(v.to_vec())
                     };
-                    let ef_search = (k * 4).max(64).min(512);
+                    let ef_search = (k * 4).clamp(64, 512);
                     let results = hnsw.search(query_vec, k, ef_search, &all_vectors);
                     let mut matches = Vec::new();
                     for (node_idx, _distance) in results {
@@ -6181,17 +6238,19 @@ impl Engine {
                 .tables
                 .insert(table_name.clone(), schema.clone());
 
-            let mut tdata = TableData::default();
-            tdata.rows = table
-                .rows
-                .iter()
-                .map(|row| RowEntry {
-                    row: row.row.clone(),
-                    version: row.version,
-                    deleted: row.deleted,
-                    commit_ts_ms: row.commit_ts_ms,
-                })
-                .collect();
+            let mut tdata = TableData {
+                rows: table
+                    .rows
+                    .iter()
+                    .map(|row| RowEntry {
+                        row: row.row.clone(),
+                        version: row.version,
+                        deleted: row.deleted,
+                        commit_ts_ms: row.commit_ts_ms,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
             for (idx, entry) in tdata.rows.iter().enumerate() {
                 if entry.deleted {
                     continue;
@@ -6917,11 +6976,7 @@ impl Engine {
             .map(|c| c.name)
             .collect::<Vec<_>>();
 
-        let deps = vec![ViewDependency {
-            db: info.base.db.clone(),
-            table: info.base.table.clone(),
-            columns: info.required_cols.clone(),
-        }];
+        let deps = vec![view_dependency_from_info(&info)];
 
         let mut view = ViewState {
             db: params.view.db.clone(),
@@ -6931,6 +6986,7 @@ impl Engine {
             pk_columns: schema.primary_key.clone(),
             deps,
             rows: Vec::new(),
+            source_rows: HashMap::new(),
             pk_index: HashMap::new(),
             last_refresh_ms: 0,
             last_change_seq: 0,
@@ -6980,13 +7036,14 @@ impl Engine {
         let mode = params.mode.as_deref().unwrap_or("auto").to_lowercase();
 
         let refresh = (|| -> anyhow::Result<(u64, String)> {
+            let info = view_query_info(&view.query)?;
+            let stats = self.view_refresh_stats(view.last_change_seq, &info.base);
             let mut used_mode = mode.clone();
             let rows = match mode.as_str() {
                 "full" => self.refresh_view_full(&mut view)?,
                 "incremental" => self.refresh_view_incremental(&mut view)?,
                 _ => {
-                    let change_count = self.view_change_count(&view).unwrap_or(usize::MAX);
-                    let prefer_full = change_count > view.rows.len().saturating_add(1);
+                    let prefer_full = should_refresh_view_full(&view, &info, stats);
                     if prefer_full {
                         used_mode = "full".to_string();
                         self.refresh_view_full(&mut view)?
@@ -7043,13 +7100,7 @@ impl Engine {
                 "view": view.name,
                 "columns": view.columns,
                 "pk_columns": view.pk_columns,
-                "deps": view.deps.iter().map(|d| {
-                    serde_json::json!({
-                        "db": d.db,
-                        "table": d.table,
-                        "columns": d.columns,
-                    })
-                }).collect::<Vec<_>>(),
+                "deps": view.deps.iter().map(view_dependency_json).collect::<Vec<_>>(),
                 "rows": view.rows.len(),
                 "stale": view.stale,
                 "last_refresh_ms": view.last_refresh_ms,
@@ -7079,17 +7130,8 @@ impl Engine {
 
         // Build full transitive dependency graph from this view.
         let graph = self.view_dependency_graph();
-        let direct_deps: Vec<serde_json::Value> = view
-            .deps
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "db": d.db,
-                    "table": d.table,
-                    "columns": d.columns,
-                })
-            })
-            .collect();
+        let direct_deps: Vec<serde_json::Value> =
+            view.deps.iter().map(view_dependency_json).collect();
 
         // Find transitive deps (views that this view depends on transitively).
         let mut transitive = Vec::new();
@@ -7155,6 +7197,10 @@ impl Engine {
     }
 
     fn refresh_view_full(&self, view: &mut ViewState) -> anyhow::Result<u64> {
+        let info = view_query_info(&view.query)?;
+        if view_is_grouped(&info) {
+            return self.refresh_grouped_view_full(view, &info);
+        }
         let (columns, rows, keys) = execute_select_with_keys(self, &view.query, &[], None)?;
         let mut view_rows = Vec::new();
         let mut pk_index = HashMap::new();
@@ -7164,6 +7210,29 @@ impl Engine {
         }
         view.columns = columns.into_iter().map(|c| c.name).collect();
         view.rows = view_rows;
+        view.source_rows.clear();
+        view.pk_index = pk_index;
+        view.last_refresh_ms = now_millis();
+        view.last_change_seq = self.change_seq;
+        view.stale = false;
+        view.last_refresh_mode = "full".to_string();
+        Ok(view.rows.len() as u64)
+    }
+
+    fn refresh_grouped_view_full(
+        &self,
+        view: &mut ViewState,
+        info: &ViewQueryInfo,
+    ) -> anyhow::Result<u64> {
+        let source_rows = self.build_grouped_view_source_rows(info)?;
+        let (rows, pk_index) = build_grouped_view_rows(info, &source_rows)?;
+        view.columns = projection_columns(&info.projection)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        view.pk_columns = info.group_key_columns.clone();
+        view.rows = rows;
+        view.source_rows = source_rows;
         view.pk_index = pk_index;
         view.last_refresh_ms = now_millis();
         view.last_change_seq = self.change_seq;
@@ -7174,6 +7243,9 @@ impl Engine {
 
     fn refresh_view_incremental(&self, view: &mut ViewState) -> anyhow::Result<u64> {
         let info = view_query_info(&view.query)?;
+        if view_is_grouped(&info) {
+            return self.refresh_grouped_view_incremental(view, &info);
+        }
         if view.deps.len() != 1 {
             anyhow::bail!("invalid_request: incremental refresh requires single-table views");
         }
@@ -7247,18 +7319,162 @@ impl Engine {
         Ok(view.rows.len() as u64)
     }
 
-    fn view_change_count(&self, view: &ViewState) -> anyhow::Result<usize> {
-        let info = view_query_info(&view.query)?;
-        let mut count = 0usize;
+    fn refresh_grouped_view_incremental(
+        &self,
+        view: &mut ViewState,
+        info: &ViewQueryInfo,
+    ) -> anyhow::Result<u64> {
+        if view.deps.len() != 1 {
+            anyhow::bail!("invalid_request: incremental refresh requires single-table views");
+        }
+        let schema = self.get_schema(&info.base.db, &info.base.table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("invalid_request: base table has no primary key");
+        }
+        if view.columns.is_empty() {
+            view.columns = projection_columns(&info.projection)
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+        }
+        if view.pk_columns.is_empty() {
+            view.pk_columns = info.group_key_columns.clone();
+        }
+        if !view.rows.is_empty() && view.source_rows.is_empty() {
+            anyhow::bail!("invalid_request: grouped view refresh requires persisted source rows");
+        }
+
+        let mut changes = Vec::new();
         for ev in self.changes.iter() {
             if ev.seq <= view.last_change_seq {
                 continue;
             }
             if ev.db == info.base.db && ev.table == info.base.table {
-                count += 1;
+                changes.push(ev.clone());
             }
         }
-        Ok(count)
+
+        if changes.is_empty() {
+            view.last_refresh_ms = now_millis();
+            view.stale = false;
+            view.last_refresh_mode = "incremental".to_string();
+            return Ok(view.rows.len() as u64);
+        }
+
+        let mut touched_groups = HashMap::new();
+        for change in changes.into_iter() {
+            let Some(pk) = change.pk else {
+                anyhow::bail!("invalid_request: change missing primary key");
+            };
+            if let Some(old_source) = view.source_rows.remove(&pk_key(&pk)) {
+                let group_key = grouped_view_key(info, &old_source.row);
+                touched_groups.insert(pk_key(&group_key), group_key);
+            }
+
+            match change.op.as_str() {
+                "insert" | "update" => {
+                    if let Ok(row) = self.get_row_by_pk(&info.base, &pk) {
+                        let ctx = row_ctx_from_row(&info.alias, &row);
+                        let matches = if let Some(pred) = info.predicate.as_ref() {
+                            eval_predicate(pred, &RowObject::new(), Some(&ctx), &[])?
+                        } else {
+                            true
+                        };
+                        if matches {
+                            let group_key = grouped_view_key(info, &row);
+                            touched_groups.insert(pk_key(&group_key), group_key.clone());
+                            view.source_rows
+                                .insert(pk_key(&pk), ViewSourceRow { pk, row });
+                        }
+                    }
+                }
+                "delete" => {}
+                _ => {
+                    anyhow::bail!("invalid_request: unsupported change op");
+                }
+            }
+
+            view.last_change_seq = view.last_change_seq.max(change.seq);
+        }
+
+        let touched_keys = touched_groups.keys().cloned().collect::<HashSet<_>>();
+        let source_rows = view.source_rows.values().cloned().collect::<Vec<_>>();
+        let mut grouped_sources: HashMap<String, (Vec<Lit>, Vec<ViewSourceRow>)> = HashMap::new();
+        for source in source_rows.iter() {
+            let group_key = grouped_view_key(info, &source.row);
+            let group_key_string = pk_key(&group_key);
+            if !touched_keys.contains(&group_key_string) {
+                continue;
+            }
+            grouped_sources
+                .entry(group_key_string)
+                .or_insert_with(|| (group_key.clone(), Vec::new()))
+                .1
+                .push(source.clone());
+        }
+
+        for (group_key_string, group_key) in touched_groups.into_iter() {
+            if let Some((_, members)) = grouped_sources.get(&group_key_string) {
+                let values = build_grouped_view_values(info, &group_key, members)?;
+                view_upsert_row(view, group_key, values);
+            } else {
+                view_remove_row(view, &group_key);
+            }
+        }
+
+        view.last_refresh_ms = now_millis();
+        view.stale = false;
+        view.last_refresh_mode = "incremental".to_string();
+        Ok(view.rows.len() as u64)
+    }
+
+    fn view_refresh_stats(&self, last_change_seq: u64, base: &BaseTableRef) -> ViewRefreshStats {
+        let mut stats = ViewRefreshStats::default();
+        let mut touched = HashSet::new();
+        for ev in self.changes.iter() {
+            if ev.seq <= last_change_seq {
+                continue;
+            }
+            if ev.db == base.db && ev.table == base.table {
+                stats.change_count = stats.change_count.saturating_add(1);
+                if let Some(pk) = ev.pk.as_ref() {
+                    touched.insert(pk_key(pk));
+                }
+            }
+        }
+        stats.touched_pks = touched.len();
+        stats
+    }
+
+    fn build_grouped_view_source_rows(
+        &self,
+        info: &ViewQueryInfo,
+    ) -> anyhow::Result<HashMap<String, ViewSourceRow>> {
+        let (schema, tdata) = self.get_table(&info.base)?;
+        let mut source_rows = HashMap::new();
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            let ctx = row_ctx_from_row(&info.alias, &entry.row);
+            let matches = if let Some(pred) = info.predicate.as_ref() {
+                eval_predicate(pred, &RowObject::new(), Some(&ctx), &[])?
+            } else {
+                true
+            };
+            if !matches {
+                continue;
+            }
+            let pk = extract_pk(schema, &entry.row)?;
+            source_rows.insert(
+                pk_key(&pk),
+                ViewSourceRow {
+                    pk,
+                    row: entry.row.clone(),
+                },
+            );
+        }
+        Ok(source_rows)
     }
 
     fn get_row_by_pk(&self, table: &BaseTableRef, pk: &[Lit]) -> anyhow::Result<RowObject> {
@@ -7327,7 +7543,6 @@ impl Engine {
                     view_name: key.table.clone(),
                     depends_on_db: dep.db.clone(),
                     depends_on_table: dep.table.clone(),
-                    columns: dep.columns.clone(),
                     is_view: self.views.contains_key(&TableKey {
                         db: dep.db.clone(),
                         table: dep.table.clone(),
@@ -8636,7 +8851,7 @@ impl Engine {
 
     fn load_views_best_effort(&mut self) {
         if let Some(disk) = load_json::<ViewDisk>(&self.views_path()) {
-            if disk.format_version == VIEW_FORMAT_VERSION {
+            if matches!(disk.format_version, 1 | VIEW_FORMAT_VERSION) {
                 let mut map = HashMap::new();
                 for entry in disk.views.into_iter() {
                     let mut rows = Vec::new();
@@ -8649,6 +8864,18 @@ impl Engine {
                             values: row.values,
                         });
                     }
+                    let mut deps = entry.deps;
+                    normalize_view_dependencies(&entry.query, &mut deps);
+                    let mut source_rows = HashMap::new();
+                    for row in entry.source_rows.into_iter() {
+                        source_rows.insert(
+                            pk_key(&row.pk),
+                            ViewSourceRow {
+                                pk: row.pk,
+                                row: row.row,
+                            },
+                        );
+                    }
                     map.insert(
                         TableKey {
                             db: entry.db.clone(),
@@ -8660,8 +8887,9 @@ impl Engine {
                             query: entry.query,
                             columns: entry.columns,
                             pk_columns: entry.pk_columns,
-                            deps: entry.deps,
+                            deps,
                             rows,
+                            source_rows,
                             pk_index,
                             last_refresh_ms: entry.last_refresh_ms,
                             last_change_seq: entry.last_change_seq,
@@ -8683,25 +8911,37 @@ impl Engine {
         let mut views = self
             .views
             .values()
-            .map(|view| ViewEntryDisk {
-                db: view.db.clone(),
-                name: view.name.clone(),
-                query: view.query.clone(),
-                columns: view.columns.clone(),
-                pk_columns: view.pk_columns.clone(),
-                deps: view.deps.clone(),
-                rows: view
-                    .rows
-                    .iter()
-                    .map(|row| ViewRowDisk {
+            .map(|view| {
+                let mut source_rows = view
+                    .source_rows
+                    .values()
+                    .map(|row| ViewSourceRowDisk {
                         pk: row.pk.clone(),
-                        values: row.values.clone(),
+                        row: row.row.clone(),
                     })
-                    .collect(),
-                last_refresh_ms: view.last_refresh_ms,
-                last_change_seq: view.last_change_seq,
-                stale: view.stale,
-                last_refresh_mode: view.last_refresh_mode.clone(),
+                    .collect::<Vec<_>>();
+                source_rows.sort_by(|a, b| pk_key(&a.pk).cmp(&pk_key(&b.pk)));
+                ViewEntryDisk {
+                    db: view.db.clone(),
+                    name: view.name.clone(),
+                    query: view.query.clone(),
+                    columns: view.columns.clone(),
+                    pk_columns: view.pk_columns.clone(),
+                    deps: view.deps.clone(),
+                    rows: view
+                        .rows
+                        .iter()
+                        .map(|row| ViewRowDisk {
+                            pk: row.pk.clone(),
+                            values: row.values.clone(),
+                        })
+                        .collect(),
+                    source_rows,
+                    last_refresh_ms: view.last_refresh_ms,
+                    last_change_seq: view.last_change_seq,
+                    stale: view.stale,
+                    last_refresh_mode: view.last_refresh_mode.clone(),
+                }
             })
             .collect::<Vec<_>>();
         views.sort_by(|a, b| (a.db.clone(), a.name.clone()).cmp(&(b.db.clone(), b.name.clone())));
@@ -10997,7 +11237,7 @@ fn execute_select_with_keys(
     query: &Query,
     args: &[Lit],
     as_of_ms: Option<u64>,
-) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>)> {
+) -> anyhow::Result<QuerySelectWithKeys> {
     let snapshot_info = query_snapshot_info(query);
     let index_infos = query_index_infos(query);
     let QueryBody::Select { select } = query.body.as_ref() else {
@@ -11371,7 +11611,7 @@ fn try_execute_select_snapshot(
     args: &[Lit],
     info: &QuerySnapshotInfo,
     as_of_ms: Option<u64>,
-) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, u64)>> {
+) -> anyhow::Result<Option<QuerySnapshotRows>> {
     let QueryBody::Select { select } = query.body.as_ref() else {
         return Ok(None);
     };
@@ -11461,7 +11701,7 @@ fn try_execute_select_with_keys_snapshot(
     args: &[Lit],
     info: &QuerySnapshotInfo,
     as_of_ms: Option<u64>,
-) -> anyhow::Result<Option<(Vec<ColumnMeta>, Vec<Vec<Lit>>, Vec<Vec<Lit>>, u64)>> {
+) -> anyhow::Result<Option<QuerySnapshotWithKeys>> {
     let QueryBody::Select { select } = query.body.as_ref() else {
         return Ok(None);
     };
@@ -16296,10 +16536,10 @@ fn pg_to_char_format(date: MySqlDateParts, h: u8, mi: u8, s: u8, fmt: &str) -> S
         } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("SS") {
             result.push_str(&format!("{s:02}"));
             i += 2;
-        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("AM") {
-            result.push_str(if h < 12 { "AM" } else { "PM" });
-            i += 2;
-        } else if remaining.len() >= 2 && remaining[..2].eq_ignore_ascii_case("PM") {
+        } else if remaining.len() >= 2
+            && (remaining[..2].eq_ignore_ascii_case("AM")
+                || remaining[..2].eq_ignore_ascii_case("PM"))
+        {
             result.push_str(if h < 12 { "AM" } else { "PM" });
             i += 2;
         } else if remaining.len() >= 2 && &remaining[..2] == "\"\"" {
@@ -16583,14 +16823,9 @@ fn mysql_datetime_add_seconds(value: &Lit, secs: i64) -> Option<Lit> {
         + i64::from(time.second)
         + secs;
     let (new_date, new_time) = mysql_datetime_parts_from_unix_seconds(base);
-    Some(if had_time {
-        Lit::Datetime {
-            iso: mysql_format_datetime_parts(new_date, new_time),
-        }
-    } else {
-        Lit::Datetime {
-            iso: mysql_format_datetime_parts(new_date, new_time),
-        }
+    let _ = had_time;
+    Some(Lit::Datetime {
+        iso: mysql_format_datetime_parts(new_date, new_time),
     })
 }
 
@@ -17825,6 +18060,7 @@ fn forensic_index_by_id(records: &[ForensicRecord], id: u64) -> Option<usize> {
     records.iter().position(|r| r.id == id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn forensic_record_hash(
     prev_hash: &str,
     id: u64,
@@ -17881,6 +18117,7 @@ fn forensic_merkle_root(records: &[ForensicRecord]) -> Option<String> {
 
 /// Generate a Merkle inclusion proof for a specific record index.
 /// Returns the sibling hashes needed to reconstruct the root.
+#[cfg_attr(not(test), allow(dead_code))]
 fn forensic_merkle_proof(records: &[ForensicRecord], target_idx: usize) -> Vec<(String, bool)> {
     if records.is_empty() || target_idx >= records.len() {
         return Vec::new();
@@ -18657,6 +18894,7 @@ fn build_causality_token(deps: &[CausalityDependency]) -> CausalityToken {
 
 /// Merge two causality tokens, taking the component-wise maximum.
 /// This implements vector clock merge semantics: merged[t] = max(a[t], b[t]).
+#[cfg_attr(not(test), allow(dead_code))]
 fn merge_causality_tokens(a: &CausalityToken, b: &CausalityToken) -> CausalityToken {
     let mut merged: BTreeMap<String, CausalityDependency> = BTreeMap::new();
     for dep in a.deps.iter().chain(b.deps.iter()) {
@@ -18681,6 +18919,7 @@ fn merge_causality_tokens(a: &CausalityToken, b: &CausalityToken) -> CausalityTo
 }
 
 /// Check if token `a` causally dominates token `b` (a >= b in all components).
+#[cfg_attr(not(test), allow(dead_code))]
 fn causality_dominates(a: &CausalityToken, b: &CausalityToken) -> bool {
     for dep_b in &b.deps {
         let dep_a = a.deps.iter().find(|d| d.table == dep_b.table);
@@ -19922,11 +20161,11 @@ fn embedding_lsh_bucket(v: &[f32]) -> u64 {
         let id = value_id(&(idx as u64).to_le_bytes());
         let bits = u64_from_id(&id);
         let weight = *value as f64;
-        for bit in 0..64 {
+        for (bit, score) in acc.iter_mut().enumerate() {
             if (bits >> bit) & 1 == 1 {
-                acc[bit] += weight;
+                *score += weight;
             } else {
-                acc[bit] -= weight;
+                *score -= weight;
             }
         }
     }
@@ -20347,9 +20586,7 @@ impl HnswIndex {
                     return None;
                 }
                 let d = {
-                    let Some(v) = all_vectors(self.nodes[n].row_idx) else {
-                        return None;
-                    };
+                    let v = all_vectors(self.nodes[n].row_idx)?;
                     match self.metric {
                         VectorMetric::Cosine => 1.0 - cosine_similarity(&v, &node_vec),
                         VectorMetric::Dot => -dot_product(&v, &node_vec),
@@ -22586,8 +22823,8 @@ fn view_query_info(query: &Query) -> anyhow::Result<ViewQueryInfo> {
     if select.distinct.unwrap_or(false) {
         anyhow::bail!("invalid_request: views do not support DISTINCT");
     }
-    if select.group_by.is_some() || select.having.is_some() {
-        anyhow::bail!("invalid_request: views do not support GROUP BY or HAVING");
+    if select.having.is_some() {
+        anyhow::bail!("invalid_request: views do not support HAVING");
     }
 
     let from = select
@@ -22610,6 +22847,13 @@ fn view_query_info(query: &Query) -> anyhow::Result<ViewQueryInfo> {
     if let Some(pred) = select.r#where.as_ref() {
         collect_expr_cols(pred, &mut refs, &mut has_subquery);
     }
+    let mut group_key_columns = Vec::new();
+    if let Some(group_by) = select.group_by.as_ref() {
+        for expr in group_by.iter() {
+            collect_expr_cols(expr, &mut refs, &mut has_subquery);
+            group_key_columns.push(view_group_expr_column(expr, &alias)?);
+        }
+    }
     if has_subquery {
         anyhow::bail!("invalid_request: views do not support subqueries");
     }
@@ -22628,13 +22872,341 @@ fn view_query_info(query: &Query) -> anyhow::Result<ViewQueryInfo> {
     }
     cols.sort();
 
+    let mut projection_cols = Vec::new();
+    let mut predicate_cols = Vec::new();
+    let mut group_by_cols = Vec::new();
+    let mut projection_plan = Vec::new();
+    if let Some(info) = query_index_infos(query)
+        .into_iter()
+        .find(|info| info.base.db == base.db && info.base.table == base.table)
+    {
+        projection_cols = dedup_in_order(&info.projection_cols);
+
+        let mut predicate_refs = info.eq_cols;
+        predicate_refs.extend(info.range_cols);
+        predicate_refs.extend(info.join_cols);
+        predicate_cols = normalize_columns(&predicate_refs);
+        group_by_cols = dedup_in_order(&info.group_cols);
+    }
+    if !group_key_columns.is_empty() {
+        projection_plan =
+            view_grouped_projection_plan(&select.projection, &group_key_columns, &alias)?;
+    }
+
     Ok(ViewQueryInfo {
         base: base.clone(),
         alias,
         projection: select.projection.clone(),
         predicate: select.r#where.clone(),
         required_cols: cols,
+        projection_cols,
+        predicate_cols,
+        group_by_cols,
+        group_key_columns,
+        projection_plan,
     })
+}
+
+fn view_group_expr_column(expr: &Expr, alias: &str) -> anyhow::Result<String> {
+    let Expr::Col { col, table } = expr else {
+        anyhow::bail!("invalid_request: grouped views require column GROUP BY expressions");
+    };
+    if let Some(table) = table.as_ref() {
+        if table != alias {
+            anyhow::bail!("invalid_request: views cannot reference multiple tables");
+        }
+    }
+    Ok(col.clone())
+}
+
+fn view_grouped_projection_plan(
+    projection: &[skeindb_skeinql::types::SelectItem],
+    group_key_columns: &[String],
+    alias: &str,
+) -> anyhow::Result<Vec<ViewProjectionSpec>> {
+    let group_keys = group_key_columns.iter().cloned().collect::<HashSet<_>>();
+    let mut plan = Vec::new();
+    for item in projection.iter() {
+        match &item.expr {
+            Expr::Col { .. } => {
+                let column = view_group_expr_column(&item.expr, alias)?;
+                if !group_keys.contains(&column) {
+                    anyhow::bail!(
+                        "invalid_request: grouped views require projected columns to be present in GROUP BY"
+                    );
+                }
+                plan.push(ViewProjectionSpec::GroupKey { column });
+            }
+            Expr::Func {
+                name: func_name,
+                args,
+                distinct,
+            } => {
+                if distinct.unwrap_or(false) {
+                    anyhow::bail!(
+                        "invalid_request: grouped views do not support DISTINCT aggregates"
+                    );
+                }
+                let op = match func_name.to_ascii_lowercase().as_str() {
+                    "count" => ViewAggregateOp::Count,
+                    "sum" => ViewAggregateOp::Sum,
+                    "avg" => ViewAggregateOp::Avg,
+                    "min" => ViewAggregateOp::Min,
+                    "max" => ViewAggregateOp::Max,
+                    _ => anyhow::bail!(
+                        "invalid_request: grouped views only support COUNT/SUM/AVG/MIN/MAX"
+                    ),
+                };
+                let column = match op {
+                    ViewAggregateOp::Count if args.is_empty() => None,
+                    ViewAggregateOp::Count
+                    | ViewAggregateOp::Sum
+                    | ViewAggregateOp::Avg
+                    | ViewAggregateOp::Min
+                    | ViewAggregateOp::Max => {
+                        if args.len() != 1 {
+                            anyhow::bail!(
+                                "invalid_request: aggregate requires exactly one column argument"
+                            );
+                        }
+                        Some(view_group_expr_column(&args[0], alias)?)
+                    }
+                };
+                plan.push(ViewProjectionSpec::Aggregate {
+                    agg: ViewAggregateSpec { op, column },
+                });
+            }
+            _ => {
+                anyhow::bail!(
+                    "invalid_request: grouped views only support grouped columns and aggregates in projection"
+                );
+            }
+        }
+    }
+    Ok(plan)
+}
+
+fn view_dependency_from_info(info: &ViewQueryInfo) -> ViewDependency {
+    ViewDependency {
+        db: info.base.db.clone(),
+        table: info.base.table.clone(),
+        columns: info.required_cols.clone(),
+        projection_columns: info.projection_cols.clone(),
+        predicate_columns: info.predicate_cols.clone(),
+        group_by_columns: info.group_by_cols.clone(),
+    }
+}
+
+fn normalize_view_dependencies(query: &Query, deps: &mut [ViewDependency]) {
+    let Ok(info) = view_query_info(query) else {
+        return;
+    };
+    for dep in deps.iter_mut() {
+        if dep.db == info.base.db && dep.table == info.base.table {
+            dep.columns = info.required_cols.clone();
+            dep.projection_columns = info.projection_cols.clone();
+            dep.predicate_columns = info.predicate_cols.clone();
+            dep.group_by_columns = info.group_by_cols.clone();
+        }
+    }
+}
+
+fn view_dependency_json(dep: &ViewDependency) -> serde_json::Value {
+    serde_json::json!({
+        "db": dep.db,
+        "table": dep.table,
+        "columns": dep.columns,
+        "projection_columns": dep.projection_columns,
+        "predicate_columns": dep.predicate_columns,
+        "group_by_columns": dep.group_by_columns,
+    })
+}
+
+fn view_is_grouped(info: &ViewQueryInfo) -> bool {
+    !info.group_key_columns.is_empty()
+}
+
+fn should_refresh_view_full(
+    view: &ViewState,
+    info: &ViewQueryInfo,
+    stats: ViewRefreshStats,
+) -> bool {
+    if stats.change_count == 0 {
+        return false;
+    }
+    if view_is_grouped(info) {
+        if view.rows.is_empty() {
+            return false;
+        }
+        if view.source_rows.is_empty() {
+            return true;
+        }
+        if view.stale && stats.touched_pks >= view.rows.len().max(1) {
+            return true;
+        }
+        let group_threshold = view.rows.len().saturating_add(1);
+        let source_threshold = view.source_rows.len().saturating_div(2).max(1);
+        stats.touched_pks > group_threshold || stats.change_count > source_threshold
+    } else {
+        let row_threshold = view.rows.len().saturating_add(1);
+        if view.stale && stats.touched_pks >= row_threshold {
+            return true;
+        }
+        stats.change_count > row_threshold
+    }
+}
+
+fn grouped_view_key(info: &ViewQueryInfo, row: &RowObject) -> Vec<Lit> {
+    info.group_key_columns
+        .iter()
+        .map(|col| row.get(col).cloned().unwrap_or(Lit::Null))
+        .collect()
+}
+
+fn build_grouped_view_rows(
+    info: &ViewQueryInfo,
+    source_rows: &HashMap<String, ViewSourceRow>,
+) -> anyhow::Result<(Vec<ViewRow>, HashMap<String, usize>)> {
+    let mut groups: HashMap<String, (Vec<Lit>, Vec<ViewSourceRow>)> = HashMap::new();
+    for source in source_rows.values() {
+        let group_key = grouped_view_key(info, &source.row);
+        let key = pk_key(&group_key);
+        groups
+            .entry(key)
+            .or_insert_with(|| (group_key.clone(), Vec::new()))
+            .1
+            .push(source.clone());
+    }
+
+    let mut grouped = groups.into_values().collect::<Vec<_>>();
+    grouped.sort_by(|a, b| pk_key(&a.0).cmp(&pk_key(&b.0)));
+
+    let mut rows = Vec::new();
+    let mut pk_index = HashMap::new();
+    for (idx, (group_key, members)) in grouped.into_iter().enumerate() {
+        let values = build_grouped_view_values(info, &group_key, &members)?;
+        pk_index.insert(pk_key(&group_key), idx);
+        rows.push(ViewRow {
+            pk: group_key,
+            values,
+        });
+    }
+    Ok((rows, pk_index))
+}
+
+fn build_grouped_view_values(
+    info: &ViewQueryInfo,
+    group_key: &[Lit],
+    members: &[ViewSourceRow],
+) -> anyhow::Result<Vec<Lit>> {
+    let mut values = Vec::new();
+    for spec in info.projection_plan.iter() {
+        match spec {
+            ViewProjectionSpec::GroupKey { column } => {
+                let idx = info
+                    .group_key_columns
+                    .iter()
+                    .position(|col| col == column)
+                    .ok_or_else(|| anyhow::anyhow!("invalid_request: missing group key column"))?;
+                values.push(group_key.get(idx).cloned().unwrap_or(Lit::Null));
+            }
+            ViewProjectionSpec::Aggregate { agg } => {
+                values.push(compute_grouped_view_aggregate(agg, members)?);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn compute_grouped_view_aggregate(
+    agg: &ViewAggregateSpec,
+    members: &[ViewSourceRow],
+) -> anyhow::Result<Lit> {
+    match agg.op {
+        ViewAggregateOp::Count => {
+            let count = match agg.column.as_ref() {
+                Some(column) => members
+                    .iter()
+                    .filter(|member| {
+                        member
+                            .row
+                            .get(column)
+                            .is_some_and(|value| !matches!(value, Lit::Null))
+                    })
+                    .count(),
+                None => members.len(),
+            };
+            Ok(Lit::U64 { v: count as u64 })
+        }
+        ViewAggregateOp::Sum => {
+            let column = agg
+                .column
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: sum requires column"))?;
+            let mut sum = 0.0;
+            let mut saw = false;
+            for member in members.iter() {
+                if let Some(value) = member.row.get(column).and_then(lit_to_f64) {
+                    sum += value;
+                    saw = true;
+                }
+            }
+            if saw {
+                Ok(Lit::F64 { v: sum })
+            } else {
+                Ok(Lit::Null)
+            }
+        }
+        ViewAggregateOp::Avg => {
+            let column = agg
+                .column
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: avg requires column"))?;
+            let mut sum = 0.0;
+            let mut count = 0u64;
+            for member in members.iter() {
+                if let Some(value) = member.row.get(column).and_then(lit_to_f64) {
+                    sum += value;
+                    count = count.saturating_add(1);
+                }
+            }
+            if count == 0 {
+                Ok(Lit::Null)
+            } else {
+                Ok(Lit::F64 {
+                    v: sum / count as f64,
+                })
+            }
+        }
+        ViewAggregateOp::Min | ViewAggregateOp::Max => {
+            let column = agg
+                .column
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: min/max requires column"))?;
+            let mut best: Option<Lit> = None;
+            for member in members.iter() {
+                let Some(value) = member.row.get(column) else {
+                    continue;
+                };
+                if matches!(value, Lit::Null) {
+                    continue;
+                }
+                match best.as_ref() {
+                    Some(current) => {
+                        let ord = cmp_lit(value, current)?;
+                        let take = matches!(agg.op, ViewAggregateOp::Min)
+                            .then_some(ord == std::cmp::Ordering::Less)
+                            .unwrap_or(ord == std::cmp::Ordering::Greater);
+                        if take {
+                            best = Some(value.clone());
+                        }
+                    }
+                    None => best = Some(value.clone()),
+                }
+            }
+            Ok(best.unwrap_or(Lit::Null))
+        }
+    }
 }
 
 fn collect_expr_cols(
@@ -30905,7 +31477,7 @@ mod tests {
         manager.record_query(&key, vec!["city".to_string()], 200, 10);
         manager.record_query(&key, vec!["city".to_string()], 200, 20);
 
-        let plan = manager.next_plan(&key, &vec!["id".to_string()], 200, 3, 1, 30);
+        let plan = manager.next_plan(&key, &["id".to_string()], 200, 3, 1, 30);
         assert!(plan.is_some());
         let plan = plan.unwrap();
         assert_eq!(plan.columns, vec!["city".to_string()]);
@@ -33858,7 +34430,7 @@ mod tests {
         let mut rng = DpRng::new(12345);
         for _ in 0..1000 {
             let v = rng.next_f64();
-            assert!(v >= 0.0 && v < 1.0, "next_f64 out of range: {v}");
+            assert!((0.0..1.0).contains(&v), "next_f64 out of range: {v}");
         }
 
         // Verify different seeds produce different sequences.
@@ -34059,6 +34631,776 @@ mod tests {
             },
         })?;
         assert!(!deps.deps.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_query_info_classifies_projection_and_predicate_columns() -> anyhow::Result<()> {
+        let query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+            ],
+            Some(Expr::Op {
+                op: "gt".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "score".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 10 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+
+        let info = view_query_info(&query)?;
+        assert_eq!(
+            info.projection_cols,
+            vec!["id".to_string(), "city".to_string()]
+        );
+        assert_eq!(info.predicate_cols, vec!["score".to_string()]);
+        assert!(info.group_by_cols.is_empty());
+        assert_eq!(
+            info.required_cols,
+            vec!["city".to_string(), "id".to_string(), "score".to_string()]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn view_status_and_explain_deps_include_dependency_usage() -> anyhow::Result<()> {
+        let dir = temp_dir("view_dep_usage");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Oslo".to_string(),
+                    },
+                ),
+                ("score", Lit::U64 { v: 12 }),
+            ])],
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Col {
+                        col: "city".to_string(),
+                        table: None,
+                    },
+                ],
+                Some(Expr::Op {
+                    op: "gt".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "score".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::U64 { v: 10 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                }),
+            ),
+            if_not_exists: None,
+        })?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            }),
+        })?;
+        let deps = status.views[0]["deps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0]["columns"].as_array().cloned().unwrap_or_default(),
+            vec![
+                serde_json::json!("city"),
+                serde_json::json!("id"),
+                serde_json::json!("score"),
+            ]
+        );
+        assert_eq!(
+            deps[0]["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("id"), serde_json::json!("city")]
+        );
+        assert_eq!(
+            deps[0]["predicate_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("score")]
+        );
+        assert_eq!(
+            deps[0]["group_by_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            Vec::<serde_json::Value>::new()
+        );
+
+        let explain = engine.view_explain_deps(ViewExplainDepsParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+        })?;
+        assert_eq!(
+            explain.deps[0]["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("id"), serde_json::json!("city")]
+        );
+        assert_eq!(
+            explain.deps[0]["predicate_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("score")]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_dependency_usage_persists_in_views_json() -> anyhow::Result<()> {
+        let dir = temp_dir("view_dep_usage_disk");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Col {
+                        col: "city".to_string(),
+                        table: None,
+                    },
+                ],
+                Some(Expr::Op {
+                    op: "gt".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "score".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::U64 { v: 10 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                }),
+            ),
+            if_not_exists: None,
+        })?;
+
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("views.json"))?)?;
+        assert_eq!(disk["format_version"].as_u64(), Some(2));
+        let dep = &disk["views"][0]["deps"][0];
+        assert_eq!(
+            dep["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("id"), serde_json::json!("city")]
+        );
+        assert_eq!(
+            dep["predicate_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("score")]
+        );
+
+        let reopened = Engine::open(&dir)?;
+        let status = reopened.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(
+            status.views[0]["deps"][0]["projection_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("id"), serde_json::json!("city")]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_grouped_incremental_refresh_updates_groups() -> anyhow::Result<()> {
+        let dir = temp_dir("view_grouped_refresh");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 7 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 10 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        let grouped_query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![
+                        SelectItem {
+                            expr: Expr::Col {
+                                col: "city".to_string(),
+                                table: None,
+                            },
+                            r#as: Some("city".to_string()),
+                        },
+                        SelectItem {
+                            expr: Expr::Func {
+                                name: "count".to_string(),
+                                args: Vec::new(),
+                                distinct: None,
+                            },
+                            r#as: Some("cnt".to_string()),
+                        },
+                        SelectItem {
+                            expr: Expr::Func {
+                                name: "sum".to_string(),
+                                args: vec![Expr::Col {
+                                    col: "score".to_string(),
+                                    table: None,
+                                }],
+                                distinct: None,
+                            },
+                            r#as: Some("total".to_string()),
+                        },
+                    ],
+                    from: Some(vec![TableRef::Base(BaseTableRef {
+                        db: "app".to_string(),
+                        table: "users".to_string(),
+                        r#as: None,
+                    })]),
+                    r#where: None,
+                    group_by: Some(vec![Expr::Col {
+                        col: "city".to_string(),
+                        table: None,
+                    }]),
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            query: grouped_query,
+            if_not_exists: None,
+        })?;
+
+        let status = engine.view_status(ViewStatusParams {
+            view: Some(BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            }),
+        })?;
+        assert_eq!(
+            status.views[0]["deps"][0]["group_by_columns"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![serde_json::json!("city")]
+        );
+
+        let view_key = TableKey {
+            db: "app".to_string(),
+            table: "city_scores".to_string(),
+        };
+        let grouped_rows = |engine: &Engine| -> BTreeMap<String, (u64, f64)> {
+            let view = engine.views.get(&view_key).expect("view exists");
+            let mut out = BTreeMap::new();
+            for row in view.rows.iter() {
+                let city = match &row.values[0] {
+                    Lit::Str { v } => v.clone(),
+                    other => panic!("expected city string, got {other:?}"),
+                };
+                let count = match &row.values[1] {
+                    Lit::U64 { v } => *v,
+                    other => panic!("expected count u64, got {other:?}"),
+                };
+                let total = match &row.values[2] {
+                    Lit::F64 { v } => *v,
+                    Lit::U64 { v } => *v as f64,
+                    Lit::I64 { v } => *v as f64,
+                    other => panic!("expected numeric total, got {other:?}"),
+                };
+                out.insert(city, (count, total));
+            }
+            out
+        };
+
+        let initial = grouped_rows(&engine);
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial.get("Oslo"), Some(&(2, 12.0)));
+        assert_eq!(initial.get("Tokyo"), Some(&(1, 10.0)));
+        assert_eq!(
+            engine
+                .views
+                .get(&view_key)
+                .map(|view| view.pk_columns.clone()),
+            Some(vec!["city".to_string()])
+        );
+        assert_eq!(
+            engine
+                .views
+                .get(&view_key)
+                .map(|view| view.source_rows.len()),
+            Some(3)
+        );
+
+        let mut set = RowObject::new();
+        set.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        set.insert("score".to_string(), Lit::U64 { v: 11 });
+        let predicate = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 3 },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        let refresh = engine.view_refresh(ViewRefreshParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            mode: Some("incremental".to_string()),
+        })?;
+        assert_eq!(refresh.mode, "incremental");
+
+        let after_move = grouped_rows(&engine);
+        assert_eq!(after_move.len(), 1);
+        assert_eq!(after_move.get("Oslo"), Some(&(3, 23.0)));
+
+        let delete_predicate = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 2 },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        engine.data_delete(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &delete_predicate,
+            None,
+            &[],
+        )?;
+        engine.view_refresh(ViewRefreshParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            mode: Some("incremental".to_string()),
+        })?;
+
+        let after_delete = grouped_rows(&engine);
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete.get("Oslo"), Some(&(2, 16.0)));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_grouped_auto_refresh_prefers_full_for_wide_change_sets() -> anyhow::Result<()> {
+        let dir = temp_dir("view_grouped_auto_refresh");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 7 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 10 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 4 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 12 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            query: Query {
+                with: Vec::new(),
+                body: Box::new(QueryBody::Select {
+                    select: Box::new(SelectBody {
+                        distinct: None,
+                        projection: vec![
+                            SelectItem {
+                                expr: Expr::Col {
+                                    col: "city".to_string(),
+                                    table: None,
+                                },
+                                r#as: Some("city".to_string()),
+                            },
+                            SelectItem {
+                                expr: Expr::Func {
+                                    name: "count".to_string(),
+                                    args: Vec::new(),
+                                    distinct: None,
+                                },
+                                r#as: Some("cnt".to_string()),
+                            },
+                        ],
+                        from: Some(vec![TableRef::Base(BaseTableRef {
+                            db: "app".to_string(),
+                            table: "users".to_string(),
+                            r#as: None,
+                        })]),
+                        r#where: None,
+                        group_by: Some(vec![Expr::Col {
+                            col: "city".to_string(),
+                            table: None,
+                        }]),
+                        having: None,
+                    }),
+                }),
+                order_by: Vec::new(),
+                limit: None,
+                lock: None,
+            },
+            if_not_exists: None,
+        })?;
+
+        let mut set = RowObject::new();
+        set.insert("score".to_string(), Lit::U64 { v: 99 });
+        let predicate = Expr::Op {
+            op: "ge".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        let refresh = engine.view_refresh(ViewRefreshParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            mode: Some("auto".to_string()),
+        })?;
+        assert_eq!(refresh.mode, "full");
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -35667,6 +37009,7 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn history_gc_retains_pre_t180_tombstones() -> anyhow::Result<()> {
         let dir = temp_dir("history_gc_pre_t180");
         let mut engine = Engine::open(&dir)?;
