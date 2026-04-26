@@ -545,6 +545,21 @@
                   <span style="color:var(--accent-2)">&#x25A0; Saved by dedup</span>
                 </div>
               </div>
+              <div style="margin-top:12px">
+                <div class="stat-label" style="margin-bottom:4px">Learned ValueID Index (R01)</div>
+                <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+                  <div class="stat"><div class="stat-label">Lookup Samples</div><div class="stat-value" id="statLookupTotal">--</div></div>
+                  <div class="stat"><div class="stat-label">Hot Prefixes</div><div class="stat-value" id="statLookupBuckets">--</div></div>
+                  <div class="stat"><div class="stat-label">Model Shift</div><div class="stat-value" id="statLookupShift">--</div></div>
+                  <div class="stat"><div class="stat-label">Top Bucket</div><div class="stat-value" id="statLookupTop">--</div></div>
+                  <div class="stat"><div class="stat-label">Model</div><div class="stat-value" id="statLearnedBuilt">--</div></div>
+                  <div class="stat"><div class="stat-label">Segments</div><div class="stat-value" id="statLearnedSegments">--</div></div>
+                  <div class="stat"><div class="stat-label">Keys</div><div class="stat-value" id="statLearnedKeys">--</div></div>
+                  <div class="stat"><div class="stat-label">Max Error</div><div class="stat-value" id="statLearnedError">--</div></div>
+                  <div class="stat"><div class="stat-label">Search Window</div><div class="stat-value" id="statLearnedWindow">--</div></div>
+                  <div class="stat"><div class="stat-label">Model Bytes</div><div class="stat-value" id="statLearnedBytes">--</div></div>
+                </div>
+              </div>
             </div>
 
             <!-- MVCC & Compaction -->
@@ -1105,6 +1120,15 @@
               </div>
               <pre id="engineOut" style="margin-top:12px">Load current config to see active settings.</pre>
             </div>
+            <div class="card wide"><h2>Compaction Scheduler (R20)</h2>
+              <div class="callout">Inspect and update the adaptive compaction scheduler through <code>maintenance.compaction.*</code>. Peak windows and budgets shape write pressure and energy-aware scheduling behavior.</div>
+              <div class="row"><div class="field"><label>Policy</label><select id="compactionPolicy"><option value="workload_guided">workload_guided</option><option value="fixed_leveling">fixed_leveling</option><option value="fixed_tiering">fixed_tiering</option></select></div><div class="field"><label>Enabled</label><select id="compactionEnabled"><option value="">keep</option><option value="true">true</option><option value="false">false</option></select></div><div class="field"><label>Paused</label><select id="compactionPaused"><option value="">keep</option><option value="false">false</option><option value="true">true</option></select></div></div>
+              <div class="row"><div class="field"><label>Max L0 Files</label><input id="compactionMaxL0Files" type="number" min="1" placeholder="16" /></div><div class="field"><label>Max L0 Bytes</label><input id="compactionMaxL0Bytes" type="number" min="1" placeholder="67108864" /></div><div class="field"><label>Max IO B/s</label><input id="compactionMaxIo" type="number" min="1" placeholder="33554432" /></div><div class="field"><label>Max CPU %</label><input id="compactionMaxCpu" type="number" min="1" max="100" step="0.1" placeholder="35" /></div></div>
+              <div class="field"><label>Peak Windows</label><textarea id="compactionPeakWindows" rows="2" placeholder="08:00-18:00"></textarea></div>
+              <div class="actions"><button id="btnCompactionStatus" class="sm">Status</button><button id="btnCompactionSavePolicy" class="primary sm">Save Policy</button><button id="btnCompactionPause" class="ghost sm">Pause</button><button id="btnCompactionResume" class="secondary sm">Resume</button></div>
+              <div id="compactionSummary" class="hint" style="margin-top:8px">Load status to inspect scheduler mode, workload pressure, safe-mode state, and active peak windows.</div>
+              <pre id="compactionOut">Ready.</pre>
+            </div>
           </div>
         </section>
 
@@ -1303,6 +1327,17 @@
               <div class="field"><label>Replay Bundle JSON</label><textarea id="replayBundleJson" rows="8" placeholder='{"manifest":{"bundle_id":"replay_bundle"},"tables":[],"changes":[]}'></textarea></div>
               <div class="actions"><button id="btnReplayImport" class="secondary sm">Import Bundle</button><button id="btnReplayRunIntegrity" class="sm">Run Integrity Check</button></div>
               <pre id="replayOut">Ready.</pre>
+            </div>
+
+            <div class="card wide"><h2>Edge Bundles (R14)</h2>
+              <div class="callout">Request edge-cache bundles for table change windows, apply coverage received from another edge workspace, and check whether a query can route against local edge coverage.</div>
+              <div class="row"><div class="field"><label>DB</label><input id="edgeDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="edgeTable" placeholder="events" /></div><div class="field"><label>Bundle ID</label><input id="edgeBundleId" placeholder="edge_bundle_debug" /></div></div>
+              <div class="row"><div class="field"><label>From Seq</label><input id="edgeFromSeq" type="number" min="0" placeholder="0" /></div><div class="field"><label>To Seq</label><input id="edgeToSeq" type="number" min="0" placeholder="optional" /></div><div class="field"><label>Max Events</label><input id="edgeMaxEvents" type="number" min="0" placeholder="100" /></div></div>
+              <div class="row"><div class="field"><label>Redaction</label><select id="edgeRedactionMode"><option value="hash_pk">hash_pk</option><option value="none">none</option><option value="drop_pk">drop_pk</option></select></div><div class="field"><label>Salt</label><input id="edgeRedactionSalt" placeholder="optional" /></div><div class="field"><label>Max Lag</label><input id="edgeMaxLag" type="number" min="0" placeholder="100" /></div></div>
+              <div class="field"><label>Status Query JSON</label><textarea id="edgeStatusQuery" rows="3" placeholder='{"schema":"app","table":"events","select":[{"col":"id"}]}'></textarea></div>
+              <div class="field"><label>Edge Bundle JSON</label><textarea id="edgeBundleJson" rows="6" placeholder='{"bundle_id":"edge_bundle","coverage":[],"records":[]}'></textarea></div>
+              <div class="actions"><button id="btnEdgeRequest" class="primary sm">Request Bundle</button><button id="btnEdgeApply" class="secondary sm">Apply Bundle</button><button id="btnEdgeStatus" class="sm">Status</button></div>
+              <pre id="edgeOut">Ready.</pre>
             </div>
 
             <div class="card"><h2>Latest Bundle</h2>

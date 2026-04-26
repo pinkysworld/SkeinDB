@@ -17,6 +17,7 @@ The same UI bundle powers both routes, with mode-aware navigation and controls.
 Recent UI updates:
 - **v0.3.4 polish**: live wiring for the previously-stubbed Overview cards (Top Tables / Slow Query Log / Active Sessions / Index Health) via `information_schema.tables`, `stats.slow_queries`, and `stats.snapshot`; Security panel response-shape fixes for create/list/top-queries flows; auto-refresh on Overview/Security tab switches; Active Sessions labels aligned with `stats.snapshot` (`Sessions` / `Open Txns` / `Avg Latency`).
 - **Overview dashboard** now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage & deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC & compaction (versions, delta chains, L0 files, stall rate), query & cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
+- **Research runtime wiring**: R01 learned ValueID lookup histograms/model reports appear in Overview via `stats.snapshot`; R14 edge bundles are now first-class Replay panel controls; R20 compaction scheduler policy/status/pause/resume are first-class Engine panel controls.
 - **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.
@@ -122,6 +123,7 @@ Security note:
 - **Server Info**: version, SkeinQL version, transport mode, ping latency, method count, database count
 - **Runtime**: uptime (human-readable), CPU %, RSS memory, QPS/TPS, open transactions, connections
 - **Storage & Deduplication**: dedup ratio, dedup enabled status, saved bytes, logical/unique bytes, interned/unique values, savings %, total rows, total tables, disk size, WAL size, visual bar chart showing unique vs saved breakdown
+- **Learned ValueID Index (R01)**: lookup sample count, hot-prefix histogram summary, model shift, built/pending state, segment count, key count, max error, max search window, and model/fallback byte estimate from `stats.snapshot.storage.learned_index`
 - **MVCC & Compaction**: MVCC versions, delta chains, compaction runs, compaction status, L0 files, stall rate
 - **Query & Cache**: cache hit %, cache size, slow queries, avg latency, ETag hits, coalesced queries
 - **Auto-refresh**: manual refresh button + auto-refresh toggle (5s interval)
@@ -167,6 +169,7 @@ Security note:
 - **Storage Engine**: deduplication on/off, compression, encryption at rest, storage mode (`json` / `segment` / `hybrid`)
 - **MVCC & Versioning**: MVCC toggle, delta-chained values, time travel, version retention days
 - **Compaction**: auto compaction, energy-aware scheduling (R20), max L0 files threshold
+- **Compaction Scheduler (R20)**: live scheduler status, policy update, pause, and resume controls backed by `maintenance.compaction.status`, `maintenance.compaction.set_policy`, `maintenance.compaction.pause`, and `maintenance.compaction.resume`
 - **Cache & Query**: query cache, query coalescing, autoparameterization, cache size (MB)
 - **Audit & Security**: tamper-evident WAL (R06), differential privacy (R04), oblivious execution (R05)
 - **Replication & CDC**: replication toggle, CDC changefeeds, QUIC transport (R09)
@@ -198,6 +201,7 @@ Security note:
 - History retention dashboard built on `maintenance.history.status`, showing per-table live/tombstone/purgeable counts plus the effective retention policy.
 - History retention policy save + GC controls via `maintenance.history.set_policy` and `maintenance.history.gc`.
 - Replay bundle export/download/import/integrity flows built on `maintenance.replay.export`, `maintenance.replay.import`, and `maintenance.replay.run`, including session-local replay workspace tracking and checksum summaries.
+- Edge bundle request/apply/status workflows built on `edge.bundle.request`, `edge.bundle.apply`, and `edge.bundle.status`, including redaction mode, sequence windows, and query route checks.
 
 ### 4.9 Server Load & Statistics
 (See docs/OBSERVABILITY.md)
@@ -330,7 +334,7 @@ SkeinAdmin should support:
 - SA10: Time travel + replay bundle UI (query.select as_of + maintenance.replay.*) — implemented with the dedicated `Time Travel & Replay` panel, including `maintenance.history.*` retention controls and replay integrity summaries.
 - SA11: Encryption + key rotation UI (settings.encryption + status/progress)
 - SA12: CDC subscriptions UI (cdc.*) + lag visualization — implemented for table subscriptions with session-local handle tracking; query subscriptions and streaming remain backlog work
-- SA13: Compaction scheduler policy UI (maintenance.compaction.*)
+- SA13: Compaction scheduler policy UI (maintenance.compaction.*) — implemented with status, policy update, pause, and resume controls in Engine Config
 - SA14: Autoparameterization and plan-cache widgets
 - SA15: Forensics page (`maintenance.audit_*`, `forensic.*`) + proof verification UI
 - SA16: Views page (view.*) + dependency visualization

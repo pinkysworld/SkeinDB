@@ -52,6 +52,7 @@ const STATE = {
   cdcSelectedSubId: '',
   replayHistoryStatus: null,
   replayLastBundle: null,
+  edgeLastBundle: null,
   replayImports: [],
   replaySelectedWorkspaceId: '',
   replayLastRun: null
@@ -70,7 +71,7 @@ const PANEL_META = {
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
   telemetry:  { title: 'Telemetry Center',     subtitle: 'Inspect compatibility, feature usage, plan cache, and query pressure.' },
   cdc:        { title: 'CDC Manager',          subtitle: 'Subscribe to tables or prepared queries, poll events, ACK offsets, and inspect lag.' },
-  replay:     { title: 'Time Travel & Replay', subtitle: 'Run point-in-time queries, manage history retention, and verify replay bundles.' },
+  replay:     { title: 'Time Travel & Replay', subtitle: 'Run point-in-time queries, manage history retention, verify replay bundles, and manage edge bundles.' },
   security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
   users:      { title: 'Users & Grants',       subtitle: 'Create users, assign roles, grant database privileges.' },
@@ -92,26 +93,26 @@ const PANEL_META = {
 // Research tracks
 // ---------------------------------------------------------------------------
 const RESEARCH_TRACKS = [
-  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['system.capabilities'], status: 'prototype' },
-  { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities'], status: 'hardened' },
-  { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['settings.get'], status: 'hardened' },
+  { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['stats.snapshot', 'system.capabilities'], panel: 'overview', status: 'prototype' },
+  { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities', 'settings.get'], panel: 'engine', status: 'hardened' },
+  { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['stats.snapshot', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
-  { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], status: 'hardened' },
+  { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
   { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
   { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'prototype' },
-  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch'], status: 'hardened' },
-  { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'rpc', status: 'hardened' },
+  { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch', 'query.select'], panel: 'workspace', status: 'hardened' },
+  { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'replay', status: 'hardened' },
   { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with propose/merge/apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
   { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
-  { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['system.capabilities'], status: 'prototype' },
+  { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['maintenance.replay.export', 'maintenance.replay.import', 'maintenance.replay.run'], panel: 'replay', status: 'prototype' },
   { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
-  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['system.capabilities'], status: 'prototype' }
+  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['maintenance.compaction.status', 'maintenance.compaction.set_policy', 'maintenance.compaction.pause', 'maintenance.compaction.resume'], panel: 'engine', status: 'prototype' }
 ];
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ const FEATURE_CENTER = [
   { title: 'CDC', desc: 'Table subscriptions, polling, ACKs, and lag view.', panel: 'cdc' },
   { title: 'CDC Query Feeds', desc: 'Subscribe prepared queries to invalidation streams.', panel: 'cdc' },
   { title: 'Time Travel & Replay', desc: 'As-of queries, retention controls, and replay integrity checks.', panel: 'replay' },
+  { title: 'Edge Bundles', desc: 'Request/apply edge coverage bundles.', panel: 'replay' },
   { title: 'Security', desc: 'API tokens, grants, and sensitive controls.', panel: 'security' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
   { title: 'Differential Privacy', desc: 'DP aggregates w/ Laplace noise.', panel: 'privacy' },
@@ -171,6 +173,8 @@ const RPC_TEMPLATES = [
   { label: 'system.shutdown', method: 'system.shutdown', params: {} },
   { label: 'system.capabilities', method: 'system.capabilities', params: {} },
   { label: 'stats.snapshot', method: 'stats.snapshot', params: {} },
+  { label: 'stats.top_queries', method: 'stats.top_queries', params: { limit: 10 } },
+  { label: 'stats.slow_queries', method: 'stats.slow_queries', params: { limit: 10, min_ms: 0 } },
   { label: 'schema.list_databases', method: 'schema.list_databases', params: {} },
   { label: 'schema.list_tables', method: 'schema.list_tables', params: { db: 'demo' } },
   { label: 'schema.create_database', method: 'schema.create_database', params: { db: 'demo' } },
@@ -212,6 +216,10 @@ const RPC_TEMPLATES = [
   { label: 'maintenance.history.status', method: 'maintenance.history.status', params: { horizon_ms: 1767225600000 } },
   { label: 'maintenance.history.set_policy', method: 'maintenance.history.set_policy', params: { enabled: true, window_ms: 604800000 } },
   { label: 'maintenance.history.gc', method: 'maintenance.history.gc', params: { horizon_ms: 1767225600000 } },
+  { label: 'maintenance.compaction.status', method: 'maintenance.compaction.status', params: {} },
+  { label: 'maintenance.compaction.set_policy', method: 'maintenance.compaction.set_policy', params: { policy: 'workload_guided', enabled: true, paused: false, max_l0_files: 16, budget: { max_io_bytes_per_s: 33554432, max_cpu_pct: 35 }, peak_windows: ['08:00-18:00'] } },
+  { label: 'maintenance.compaction.pause', method: 'maintenance.compaction.pause', params: {} },
+  { label: 'maintenance.compaction.resume', method: 'maintenance.compaction.resume', params: {} },
   { label: 'maintenance.replay.export', method: 'maintenance.replay.export', params: { db:'demo', bundle_id:'replay_bundle_demo' } },
   { label: 'maintenance.replay.import', method: 'maintenance.replay.import', params: { bundle:{manifest:{bundle_id:'replay_bundle_demo'},tables:[],changes:[]}, workspace_id:'replay_demo' } },
   { label: 'maintenance.replay.run', method: 'maintenance.replay.run', params: { workspace_id:'replay_demo' } },
@@ -233,7 +241,10 @@ const RPC_TEMPLATES = [
   { label: 'plan_cache.status', method: 'plan_cache.status', params: {} },
   { label: 'plan_cache.clear', method: 'plan_cache.clear', params: {} },
   { label: 'stats.coalescing', method: 'stats.coalescing', params: {} },
-  { label: 'transport.capabilities', method: 'transport.capabilities', params: {} }
+  { label: 'transport.capabilities', method: 'transport.capabilities', params: {} },
+  { label: 'edge.bundle.request', method: 'edge.bundle.request', params: { windows: [{ table: { db: 'demo', table: 'users' }, from_seq: 0, max_events: 100 }], redaction: { mode: 'hash_pk', salt: 'demo' }, bundle_id: 'edge_bundle_demo' } },
+  { label: 'edge.bundle.apply', method: 'edge.bundle.apply', params: { bundle: { bundle_id: 'edge_bundle_demo', generated_at_ms: 0, redaction: { mode: 'hash_pk' }, coverage: [], records: [] } } },
+  { label: 'edge.bundle.status', method: 'edge.bundle.status', params: { max_lag: 100 } }
 ];
 
 const SCHEMA_TYPE_OPTIONS = ['i64', 'u64', 'f64', 'bool', 'string', 'json', 'datetime', 'date', 'uuid', 'bytes'];
@@ -318,7 +329,7 @@ function setConnStatus(kind, message, detail) {
 
 function setSelectedDb(db) {
   STATE.selectedDb = (db || '').trim();
-  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb','ttDb','replayDb'].forEach(id => {
+  ['schemaDb','dataDb','dataFormDb','dpDb','oblDb','vecDb','viewDb','mergeDb','advDb','importDb','nlDb','clusterShardDb','ttDb','replayDb','edgeDb'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedDb;
   });
   const easyDb = $('easyCreateDb');
@@ -328,7 +339,7 @@ function setSelectedDb(db) {
 
 function setSelectedTable(table) {
   STATE.selectedTable = (table || '').trim();
-  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable','ttTable'].forEach(id => {
+  ['schemaTable','dataTable','dataFormTable','dpTable','oblTable','vecTable','mergeTable','advTable','importTable','clusterShardTable','ttTable','edgeTable'].forEach(id => {
     const el = $(id); if (el) el.value = STATE.selectedTable;
   });
   const easyTable = $('easyCreateTableName');
@@ -1049,6 +1060,20 @@ function updateStats(s) {
   setStat('statDiskSize', formatBytes(storage.disk_bytes));
   setStat('statWalSize', formatBytes(storage.wal_bytes));
 
+  const lookup = storage.value_lookup || {};
+  const topBucket = Array.isArray(lookup.top_buckets) && lookup.top_buckets.length ? lookup.top_buckets[0] : null;
+  setStat('statLookupTotal', formatNumber(lookup.total_lookups));
+  setStat('statLookupBuckets', lookup.non_empty_buckets !== undefined ? String(lookup.non_empty_buckets) : '--');
+  setStat('statLookupShift', Number.isFinite(lookup.model_shift_l1) ? lookup.model_shift_l1.toFixed(3) : '--');
+  setStat('statLookupTop', topBucket ? (topBucket.prefix_hex + ' / ' + (Number.isFinite(topBucket.share) ? (topBucket.share * 100).toFixed(1) + '%' : formatNumber(topBucket.count))) : '--');
+  const learned = storage.learned_index || {};
+  setStat('statLearnedBuilt', learned.enabled === false ? 'disabled' : (learned.built ? 'built' : 'pending'));
+  setStat('statLearnedSegments', formatNumber(learned.segment_count));
+  setStat('statLearnedKeys', formatNumber(learned.total_keys));
+  setStat('statLearnedError', learned.max_error !== undefined ? String(learned.max_error) : '--');
+  setStat('statLearnedWindow', learned.max_search_window !== undefined ? String(learned.max_search_window) : '--');
+  setStat('statLearnedBytes', formatBytes((Number(learned.approx_model_bytes) || 0) + (Number(learned.approx_fallback_bytes) || 0)));
+
   // Dedup bar
   const barUnique = $('dedupBarUnique'), barSaved = $('dedupBarSaved');
   if (barUnique && barSaved && logical > 0) {
@@ -1161,6 +1186,7 @@ function disconnect() {
   STATE.schemaLastIndexTable = '';
   STATE.replayHistoryStatus = null;
   STATE.replayLastBundle = null;
+  STATE.edgeLastBundle = null;
   STATE.replayImports = [];
   STATE.replaySelectedWorkspaceId = '';
   STATE.replayLastRun = null;
@@ -3976,6 +4002,94 @@ function engineResetDefaults() {
   setOut({ reset: true, note: 'Defaults applied locally. Click Save to persist.' }, 'engineOut');
 }
 
+function renderCompactionSummary(result) {
+  const el = $('compactionSummary');
+  if (!el || !result || typeof result !== 'object') return;
+  const cfg = result.scheduler || result.config || {};
+  const workload = result.workload || {};
+  const pressure = result.pressure || {};
+  const activeWindow = cfg.peak_window
+    ? ((cfg.peak_window.start || '--') + '-' + (cfg.peak_window.end || '--'))
+    : 'none';
+  el.innerHTML = '<strong>Status</strong>: ' + escapeHtml(result.status || 'unknown')
+    + ' | <strong>Mode</strong>: ' + escapeHtml(cfg.mode || cfg.policy || 'unknown')
+    + ' | <strong>Paused</strong>: ' + escapeHtml(String(!!cfg.paused))
+    + '<br><strong>L0</strong>: ' + escapeHtml(String(result.l0_files ?? '--')) + ' file(s), ' + escapeHtml(formatBytes(Number(result.l0_bytes) || 0))
+    + ' | <strong>Hard pressure</strong>: ' + escapeHtml(String(!!pressure.hard_limit_exceeded))
+    + ' | <strong>Active peak window</strong>: ' + escapeHtml(activeWindow)
+    + '<br><strong>Workload</strong>: reads ' + escapeHtml(String(workload.point_reads_per_s ?? '--'))
+    + '/s, ranges ' + escapeHtml(String(workload.range_reads_per_s ?? '--'))
+    + '/s, writes ' + escapeHtml(String(workload.write_ops_per_s ?? '--')) + '/s';
+}
+
+async function compactionStatus() {
+  try {
+    const res = await call('maintenance.compaction.status', {}, 'compactionOut');
+    const result = unwrapRpcResult(res, 'maintenance.compaction.status');
+    renderCompactionSummary(result);
+    setOut(result, 'compactionOut');
+  } catch (e) { setOut({ error: String(e) }, 'compactionOut'); }
+}
+
+function readCompactionPolicyPatch() {
+  const payload = {};
+  const policy = $('compactionPolicy')?.value || 'workload_guided';
+  payload.policy = policy;
+  const enabled = $('compactionEnabled')?.value || '';
+  const paused = $('compactionPaused')?.value || '';
+  if (enabled) payload.enabled = enabled === 'true';
+  if (paused) payload.paused = paused === 'true';
+  const maxL0Files = parseOptionalU64Input('compactionMaxL0Files', 'Max L0 files');
+  const maxL0Bytes = parseOptionalU64Input('compactionMaxL0Bytes', 'Max L0 bytes');
+  const maxIo = parseOptionalU64Input('compactionMaxIo', 'Max IO bytes per second');
+  const rawCpu = $('compactionMaxCpu')?.value.trim() || '';
+  if (maxL0Files !== undefined) payload.max_l0_files = maxL0Files;
+  if (maxL0Bytes !== undefined) payload.max_l0_bytes = maxL0Bytes;
+  const budget = {};
+  if (maxIo !== undefined) budget.max_io_bytes_per_s = maxIo;
+  if (rawCpu) {
+    const maxCpu = Number.parseFloat(rawCpu);
+    if (!Number.isFinite(maxCpu) || maxCpu <= 0 || maxCpu > 100) throw new Error('Max CPU % must be > 0 and <= 100');
+    budget.max_cpu_pct = maxCpu;
+  }
+  if (Object.keys(budget).length) payload.budget = budget;
+  const peakWindows = ($('compactionPeakWindows')?.value || '')
+    .split(/\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (peakWindows.length) payload.peak_windows = peakWindows;
+  return payload;
+}
+
+async function compactionSavePolicy() {
+  try {
+    const payload = readCompactionPolicyPatch();
+    const res = await call('maintenance.compaction.set_policy', payload, 'compactionOut');
+    const result = unwrapRpcResult(res, 'maintenance.compaction.set_policy');
+    renderCompactionSummary(result);
+    setOut({ saved: true, config: payload, status: result }, 'compactionOut');
+    showToast('Compaction policy saved.', 'success');
+  } catch (e) { setOut({ error: String(e) }, 'compactionOut'); }
+}
+
+async function compactionPause() {
+  try {
+    const res = await call('maintenance.compaction.pause', {}, 'compactionOut');
+    const result = unwrapRpcResult(res, 'maintenance.compaction.pause');
+    renderCompactionSummary(result);
+    setOut(result, 'compactionOut');
+  } catch (e) { setOut({ error: String(e) }, 'compactionOut'); }
+}
+
+async function compactionResume() {
+  try {
+    const res = await call('maintenance.compaction.resume', {}, 'compactionOut');
+    const result = unwrapRpcResult(res, 'maintenance.compaction.resume');
+    renderCompactionSummary(result);
+    setOut(result, 'compactionOut');
+  } catch (e) { setOut({ error: String(e) }, 'compactionOut'); }
+}
+
 // ---------------------------------------------------------------------------
 // Users & Grants (T044 – admin.user.* RPCs)
 // ---------------------------------------------------------------------------
@@ -4821,6 +4935,76 @@ async function replayBundleFileChanged(event) {
   } catch (e) {
     setOut({ error: String(e) }, 'replayOut');
   }
+}
+
+function edgeHydrateDefaultsFromContext() {
+  const dbInput = $('edgeDb');
+  const tableInput = $('edgeTable');
+  if (dbInput && !dbInput.value.trim() && STATE.selectedDb) dbInput.value = STATE.selectedDb;
+  if (tableInput && !tableInput.value.trim() && STATE.selectedTable) tableInput.value = STATE.selectedTable;
+}
+
+function edgeBundleFromText() {
+  const raw = $('edgeBundleJson')?.value.trim() || '';
+  if (!raw) {
+    if (STATE.edgeLastBundle) return STATE.edgeLastBundle;
+    throw new Error('Request an edge bundle first or paste an edge bundle JSON document');
+  }
+  const bundle = parseJsonInput(raw, 'Edge bundle');
+  if (!bundle || typeof bundle !== 'object') throw new Error('Edge bundle must be a JSON object');
+  return bundle;
+}
+
+function edgeLoadBundleIntoEditor(bundle) {
+  STATE.edgeLastBundle = bundle;
+  if ($('edgeBundleJson')) $('edgeBundleJson').value = JSON.stringify(bundle, null, 2);
+}
+
+async function edgeRequestBundle() {
+  try {
+    edgeHydrateDefaultsFromContext();
+    const table = readDbTable('edgeDb', 'edgeTable');
+    const fromSeq = parseOptionalU64Input('edgeFromSeq', 'From seq');
+    const toSeq = parseOptionalU64Input('edgeToSeq', 'To seq');
+    const maxEvents = parseOptionalU64Input('edgeMaxEvents', 'Max events');
+    const bundleId = ($('edgeBundleId')?.value || '').trim() || undefined;
+    const redactionMode = $('edgeRedactionMode')?.value || 'hash_pk';
+    const redactionSalt = ($('edgeRedactionSalt')?.value || '').trim() || undefined;
+    const res = await call('edge.bundle.request', {
+      windows: [cleanParams({ table, from_seq: fromSeq, to_seq: toSeq, max_events: maxEvents })],
+      redaction: cleanParams({ mode: redactionMode, salt: redactionSalt }),
+      bundle_id: bundleId,
+    }, 'edgeOut');
+    const result = unwrapRpcResult(res, 'edge.bundle.request');
+    edgeLoadBundleIntoEditor(result.bundle);
+    setOut(result, 'edgeOut');
+    showToast('Edge bundle requested.', 'success');
+  } catch (e) { setOut({ error: String(e) }, 'edgeOut'); }
+}
+
+async function edgeApplyBundle() {
+  try {
+    const bundle = edgeBundleFromText();
+    edgeLoadBundleIntoEditor(bundle);
+    const res = await call('edge.bundle.apply', { bundle }, 'edgeOut');
+    const result = unwrapRpcResult(res, 'edge.bundle.apply');
+    setOut(result, 'edgeOut');
+    showToast(result.applied ? 'Edge coverage applied.' : 'Edge coverage already current.', 'success');
+  } catch (e) { setOut({ error: String(e) }, 'edgeOut'); }
+}
+
+async function edgeStatus() {
+  try {
+    const rawQuery = ($('edgeStatusQuery')?.value || '').trim();
+    const maxLag = parseOptionalU64Input('edgeMaxLag', 'Max lag');
+    const params = cleanParams({
+      query: rawQuery ? parseJsonInput(rawQuery, 'Edge status query') : undefined,
+      max_lag: maxLag,
+    });
+    const res = await call('edge.bundle.status', params, 'edgeOut');
+    const result = unwrapRpcResult(res, 'edge.bundle.status');
+    setOut(result, 'edgeOut');
+  } catch (e) { setOut({ error: String(e) }, 'edgeOut'); }
 }
 
 function cdcHydrateDefaultsFromContext() {
@@ -5950,6 +6134,10 @@ wire('btnAutoRefreshStats', toggleAutoRefresh);
 wire('btnEngineLoad', engineLoadConfig);
 wire('btnEngineSave', engineSaveConfig);
 wire('btnEngineReset', engineResetDefaults);
+wire('btnCompactionStatus', compactionStatus);
+wire('btnCompactionSavePolicy', compactionSavePolicy);
+wire('btnCompactionPause', compactionPause);
+wire('btnCompactionResume', compactionResume);
 
 // Easy viewer
 wire('themeToggle', toggleDarkMode);
@@ -6148,6 +6336,9 @@ wire('btnReplayDownload', replayDownloadBundle);
 wire('btnReplayUseLastBundle', replayUseLastBundle);
 wire('btnReplayImport', replayImportBundle);
 wire('btnReplayRunIntegrity', replayRunIntegrity);
+wire('btnEdgeRequest', edgeRequestBundle);
+wire('btnEdgeApply', edgeApplyBundle);
+wire('btnEdgeStatus', edgeStatus);
 const replayWorkspaceSelect = $('replayWorkspaceSelect');
 if (replayWorkspaceSelect) replayWorkspaceSelect.addEventListener('change', () => {
   STATE.replaySelectedWorkspaceId = replayWorkspaceSelect.value;
@@ -6163,6 +6354,10 @@ if (replayBundleJson) replayBundleJson.addEventListener('change', () => {
     STATE.replayLastBundle = parseJsonInput(replayBundleJson.value, 'Replay bundle');
     renderReplayPanel();
   } catch (_) {}
+});
+const edgeBundleJson = $('edgeBundleJson');
+if (edgeBundleJson) edgeBundleJson.addEventListener('change', () => {
+  try { STATE.edgeLastBundle = parseJsonInput(edgeBundleJson.value, 'Edge bundle'); } catch (_) {}
 });
 
 // Forensics

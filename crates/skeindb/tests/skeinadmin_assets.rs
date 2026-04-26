@@ -340,3 +340,102 @@ fn skeinadmin_panels_have_uniform_section_band_heroes() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_wires_research_runtime_surfaces() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "Learned ValueID Index (R01)",
+        "statLookupTotal",
+        "statLearnedBuilt",
+        "statLearnedSegments",
+        "Compaction Scheduler (R20)",
+        "btnCompactionStatus",
+        "btnCompactionSavePolicy",
+        "btnCompactionPause",
+        "btnCompactionResume",
+        "Edge Bundles (R14)",
+        "btnEdgeRequest",
+        "btnEdgeApply",
+        "btnEdgeStatus",
+        "edgeBundleJson",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin research html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "storage.learned_index",
+        "statLookupTotal",
+        "statLearnedBuilt",
+        "async function compactionStatus()",
+        "async function compactionSavePolicy()",
+        "maintenance.compaction.status",
+        "maintenance.compaction.set_policy",
+        "maintenance.compaction.pause",
+        "maintenance.compaction.resume",
+        "async function edgeRequestBundle()",
+        "async function edgeApplyBundle()",
+        "async function edgeStatus()",
+        "edge.bundle.request",
+        "edge.bundle.apply",
+        "edge.bundle.status",
+        "wire('btnCompactionStatus', compactionStatus);",
+        "wire('btnEdgeRequest', edgeRequestBundle);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin research js should contain {marker}"
+        );
+    }
+}
+
+#[test]
+fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for id in [
+        "R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11", "R12", "R13",
+        "R14", "R15", "R16", "R17", "R18", "R19", "R20",
+    ] {
+        assert!(
+            js.contains(&format!("id: '{id}'")),
+            "missing research track {id}"
+        );
+    }
+
+    for marker in [
+        "panel: 'overview'",
+        "panel: 'engine'",
+        "panel: 'cluster'",
+        "panel: 'workspace'",
+        "panel: 'replay'",
+        "panel: 'privacy'",
+        "panel: 'forensics'",
+        "panel: 'views'",
+        "panel: 'merge'",
+        "panel: 'wasm'",
+        "panel: 'advisor'",
+        "panel: 'migration'",
+        "panel: 'nl'",
+        "stats.snapshot",
+        "query.patch",
+        "maintenance.replay.export",
+        "maintenance.compaction.status",
+    ] {
+        assert!(
+            js.contains(marker),
+            "research entry-point mapping should contain {marker}"
+        );
+    }
+}

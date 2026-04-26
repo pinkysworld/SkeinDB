@@ -26319,6 +26319,11 @@ fn system_capabilities(state: &AppState) -> Value {
         "forensic": true,
         "merge": true,
         "views": true,
+        "learned_indexes": true,
+        "value_lookup_histograms": true,
+        "edge_bundles": true,
+        "compaction_scheduler": true,
+        "performance_replay": true,
         "wire": {"skeinpack_v1": true},
         "transport": transport_capabilities(state),
         "methods": methods
@@ -27200,11 +27205,12 @@ async fn stats_snapshot(state: &AppState) -> Value {
 
     let uptime_s = state.started.elapsed().as_secs();
     let now_ms = now_unix_ms_u64();
-    let (storage, value_lookup) = {
+    let (storage, value_lookup, learned_index) = {
         let eng = state.engine.read().await;
         (
             eng.storage_stats_snapshot(),
             eng.value_lookup_distribution_snapshot(),
+            eng.learned_index_report_snapshot(),
         )
     };
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
@@ -27288,7 +27294,8 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "total_rows": storage.total_rows,
             "total_tables": storage.total_tables,
             "disk_bytes": storage.disk_bytes,
-            "value_lookup": value_lookup
+            "value_lookup": value_lookup,
+            "learned_index": learned_index
         },
         "compaction": compaction,
         "background": {"compaction": compaction_runtime.scheduler_mode, "snapshots": "idle"},
@@ -33520,6 +33527,7 @@ mod tests {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let value_lookup = storage.get("value_lookup").cloned().unwrap_or_default();
+        let learned_index = storage.get("learned_index").cloned().unwrap_or_default();
         let lookup_total = value_lookup
             .get("total_lookups")
             .and_then(|v| v.as_u64())
@@ -33542,6 +33550,32 @@ mod tests {
         assert!(lookup_total > 0);
         assert_eq!(lookup_buckets.len(), 256);
         assert!(!top_buckets.is_empty());
+        assert_eq!(
+            learned_index.get("enabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(learned_index
+            .get("built")
+            .and_then(|v| v.as_bool())
+            .is_some());
+        assert!(
+            learned_index
+                .get("total_keys")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            learned_index
+                .get("fallback_entries")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(learned_index
+            .get("segments")
+            .and_then(|v| v.as_array())
+            .is_some());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
