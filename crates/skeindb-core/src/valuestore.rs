@@ -298,6 +298,34 @@ pub struct ValueIdLookupDistribution {
     pub model_shift_l1: Option<f64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct LearnedIndexReport {
+    pub enabled: bool,
+    pub built: bool,
+    pub total_keys: usize,
+    pub segment_count: usize,
+    pub configured_segment_size: usize,
+    pub max_error: usize,
+    pub avg_error: f64,
+    pub max_search_window: usize,
+    pub approx_model_bytes: usize,
+    pub fallback_entries: usize,
+    pub approx_fallback_bytes: usize,
+    pub segments: Vec<LearnedSegmentReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LearnedSegmentReport {
+    pub start_position: usize,
+    pub end_position: usize,
+    pub start_key_prefix_hex: String,
+    pub end_key_prefix_hex: String,
+    pub slope: f64,
+    pub intercept: f64,
+    pub max_error: usize,
+    pub search_window: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValueIdHistogram {
     buckets: [u64; 256],
@@ -557,6 +585,37 @@ impl ValueStore {
                 .model_hist
                 .as_ref()
                 .map(|model_hist| self.lookup_hist.l1_distance(model_hist)),
+        }
+    }
+
+    pub fn learned_index_report(&self, segment_limit: usize) -> LearnedIndexReport {
+        let configured_segment_size = self.config.segment_size.max(16);
+        let fallback_entries = self.index.len();
+        let approx_fallback_bytes =
+            fallback_entries * (std::mem::size_of::<ValueId>() + std::mem::size_of::<usize>());
+
+        match &self.learned {
+            Some(model) => model.report(
+                self.config.enable_learned_index,
+                configured_segment_size,
+                fallback_entries,
+                approx_fallback_bytes,
+                segment_limit,
+            ),
+            None => LearnedIndexReport {
+                enabled: self.config.enable_learned_index,
+                built: false,
+                total_keys: self.entries.len(),
+                segment_count: 0,
+                configured_segment_size,
+                max_error: 0,
+                avg_error: 0.0,
+                max_search_window: 0,
+                approx_model_bytes: 0,
+                fallback_entries,
+                approx_fallback_bytes,
+                segments: Vec::new(),
+            },
         }
     }
 
@@ -1386,11 +1445,66 @@ impl LearnedIndex {
     fn approx_bytes(&self) -> usize {
         self.segments.len() * std::mem::size_of::<LearnedSegment>()
     }
+
+    fn report(
+        &self,
+        enabled: bool,
+        configured_segment_size: usize,
+        fallback_entries: usize,
+        approx_fallback_bytes: usize,
+        segment_limit: usize,
+    ) -> LearnedIndexReport {
+        let segment_count = self.segments.len();
+        let max_error = self
+            .segments
+            .iter()
+            .map(|segment| segment.max_error)
+            .max()
+            .unwrap_or(0);
+        let avg_error = if segment_count == 0 {
+            0.0
+        } else {
+            self.segments
+                .iter()
+                .map(|segment| segment.max_error as f64)
+                .sum::<f64>()
+                / segment_count as f64
+        };
+        let max_search_window = search_window_for_error(max_error);
+        let take_segments = if segment_limit == 0 {
+            segment_count
+        } else {
+            segment_count.min(segment_limit)
+        };
+
+        LearnedIndexReport {
+            enabled,
+            built: true,
+            total_keys: self.total_keys,
+            segment_count,
+            configured_segment_size,
+            max_error,
+            avg_error,
+            max_search_window,
+            approx_model_bytes: self.approx_bytes(),
+            fallback_entries,
+            approx_fallback_bytes,
+            segments: self
+                .segments
+                .iter()
+                .take(take_segments)
+                .map(LearnedSegment::report)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct LearnedSegment {
+    start_key: u64,
     end_key: u64,
+    start_position: usize,
+    end_position: usize,
     slope: f64,
     intercept: f64,
     max_error: usize,
@@ -1419,7 +1533,10 @@ impl LearnedSegment {
         }
 
         Self {
+            start_key,
             end_key,
+            start_position: start,
+            end_position: end,
             slope,
             intercept,
             max_error,
@@ -1433,6 +1550,26 @@ impl LearnedSegment {
         }
         pred.round().max(0.0) as usize
     }
+
+    fn report(&self) -> LearnedSegmentReport {
+        LearnedSegmentReport {
+            start_position: self.start_position,
+            end_position: self.end_position,
+            start_key_prefix_hex: format!("{:016x}", self.start_key),
+            end_key_prefix_hex: format!("{:016x}", self.end_key),
+            slope: self.slope,
+            intercept: self.intercept,
+            max_error: self.max_error,
+            search_window: search_window_for_error(self.max_error),
+        }
+    }
+}
+
+fn search_window_for_error(max_error: usize) -> usize {
+    max_error
+        .saturating_add(1)
+        .saturating_mul(2)
+        .saturating_add(1)
 }
 
 fn id_to_u128(id: &ValueId) -> u128 {

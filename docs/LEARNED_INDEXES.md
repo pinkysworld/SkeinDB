@@ -12,8 +12,11 @@ predictions miss, providing graceful degradation under distribution shifts.
 
 - `ValueStore` (crates/skeindb-core): stores value bytes by ValueID and tracks
   lookup histograms.
-- `LearnedIndex`: offline-built segments (slope/intercept + max error).
+- `LearnedIndex`: offline-built segments (slope/intercept + max error) with
+  inspectable segment metadata via `ValueStore::learned_index_report()`.
 - `ValueIdHistogram`: lookup distribution tracking by prefix bucket.
+- Fallback index: the ordinary ValueID hash map remains live and sized in the
+  learned-index report so missed predictions degrade to exact lookup.
 
 ## Refresh policy
 
@@ -26,6 +29,8 @@ The model rebuilds when:
 
 The ValueStore exposes:
 - lookup counts, learned hit rate, average probes
+- learned-index model reports with segment count, bounded search window,
+  coefficient samples, and fallback entry/byte estimates
 - exportable lookup histogram buckets (byte-prefix), top hot buckets, and model
   distribution shift via `ValueStore::lookup_distribution()`
 - probe-count quantiles via the benchmark helper

@@ -3,7 +3,7 @@
 Last updated: 2026-04-26
 Honest claims: SkeinDB does **not** provide and does **not** claim "100% MySQL compatibility." Coverage is measured against the regression corpus at `tests/compat/corpus.sql` (1658 lines / ~700+ statements) which is exercised on every commit by [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs). The surface that *is* supported is enumerated in [docs/MYSQL_COMPAT.md](./MYSQL_COMPAT.md). Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.
 
-2026-04-26 (research T230): R01 learned-index instrumentation now exports ValueID lookup distributions instead of only keeping internal counters. `ValueStore::lookup_distribution()` returns a 256-bucket prefix histogram, non-empty bucket count, top hot buckets, and model-vs-current L1 shift when a learned-index baseline exists. `stats.snapshot.storage.value_lookup` exposes the same histogram for admin/runtime tooling. Focused coverage: `crates/skeindb-core/tests/valuestore.rs::lookup_distribution_exports_histogram_and_top_buckets` and `crates/skeindb/src/server.rs::stats_snapshot_reports_dedup_metrics`.
+2026-04-26 (research T230/T231): R01 learned-index instrumentation now exports ValueID lookup distributions instead of only keeping internal counters. `ValueStore::lookup_distribution()` returns a 256-bucket prefix histogram, non-empty bucket count, top hot buckets, and model-vs-current L1 shift when a learned-index baseline exists. `stats.snapshot.storage.value_lookup` exposes the same histogram for admin/runtime tooling. T231 adds `ValueStore::learned_index_report()` for the offline-built piecewise model: segment count, bounded search window, sampled segment coefficients, model bytes, fallback entries, and fallback byte estimates. Focused coverage: `crates/skeindb-core/tests/valuestore.rs::lookup_distribution_exports_histogram_and_top_buckets`, `crates/skeindb-core/tests/valuestore.rs::learned_index_report_describes_offline_model_and_fallback`, and `crates/skeindb/src/server.rs::stats_snapshot_reports_dedup_metrics`.
 
 2026-04-25 (v0.3.5 dashboard wiring): `stats.snapshot` now surfaces the previously-stub fields the dashboard was rendering as "--". `EngineStorageStats` is extended with `total_rows`, `total_tables`, `disk_bytes` (computed by walking the data directory), `mvcc_versions` (sum of per-row version counters), and `delta_chains` (live `ValueStore::stats().delta_values_written`). New top-level JSON sections `mvcc.{versions, delta_chains}` and `cache.{hit_pct, size_bytes, hits, misses}` (the latter sourced from `Counters.plan_cache_hits/misses`) are emitted by `stats_snapshot`. A real `etag_hits` counter on `Counters` increments at both `If-None-Match` paths in `GET /api/v1/q/{query_id}` so `query.etag_hits` reflects 304 responses instead of always being 0. `sessions.active` and `connections` now report `open_txns` instead of hardcoded zero. Dashboard cards Total Rows / Total Tables / Disk / MVCC Versions / Delta Chains / Cache Hit % / ETag Hits all show real data.
 
@@ -26,7 +26,7 @@ Interpretation:
 ## 1) Backlog checklist snapshot
 
 - `docs/PROJECT_BACKLOG.md`: **93 done / 47 open** (140 top-level roadmap tasks; all Phase 3 items are complete; PostgreSQL compat phase is active with T400/T403/T410/T418 complete and the remaining PG tasks still open)
-- `docs/RESEARCH_BACKLOG.md`: **1 done / 108 open** (109 total)
+- `docs/RESEARCH_BACKLOG.md`: **2 done / 107 open** (109 total)
 
 Why `RESEARCH_BACKLOG` mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
@@ -66,7 +66,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 
 | Track | Runtime status | Primary runtime surface |
 |---|---|---|
-| R01 Learned indexes | Prototype implemented | ValueStore learned index scaffolding plus exported lookup-distribution histograms (`ValueStore::lookup_distribution`, `stats.snapshot.storage.value_lookup`) with focused tests in `skeindb-core/valuestore` and `server::stats_snapshot_reports_dedup_metrics`. |
+| R01 Learned indexes | Prototype implemented | ValueStore learned index scaffolding plus exported lookup-distribution histograms and offline model reports (`ValueStore::lookup_distribution`, `ValueStore::learned_index_report`, `stats.snapshot.storage.value_lookup`) with focused tests in `skeindb-core/valuestore` and `server::stats_snapshot_reports_dedup_metrics`. |
 | R02 Adaptive row/column | Hardened | Snapshot surfaces and hybrid execution scaffolds; integration test creates table, inserts rows, triggers `system.snapshot`, verifies data readable after (`cluster_rpc.rs::r02_adaptive_storage_format_selection`). |
 | R03 Delta topology | Hardened | Delta-chain policy/skip/compaction paths + `topology_analysis()` with depth stats (avg/max/p50/p99), fanout, hot-chain detection, savings ratio. |
 | R04 Differential privacy | Hardened | `dp.*` endpoints + budget/audit; crypto-quality hash-based PRNG (`DpRng`); Rényi DP composition tracking (`rdp_alphas`, `query_count`); `rdp_gaussian_cost()`, `rdp_laplace_cost()`, `rdp_to_eps_delta()`. |

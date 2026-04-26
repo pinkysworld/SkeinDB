@@ -32,6 +32,12 @@ fn make_bytes(seed: &mut u64, len: usize) -> Vec<u8> {
     out
 }
 
+fn value_id_from_u64(value: u64) -> ValueId {
+    let mut id = [0u8; 16];
+    id[0..8].copy_from_slice(&value.to_be_bytes());
+    id
+}
+
 #[test]
 fn learned_index_lookup_hits() {
     let config = ValueStoreConfig {
@@ -65,6 +71,46 @@ fn learned_index_lookup_hits() {
 
     let stats = store.stats();
     assert!(stats.learned_hits > 0);
+}
+
+#[test]
+fn learned_index_report_describes_offline_model_and_fallback() {
+    let config = ValueStoreConfig {
+        enable_learned_index: true,
+        segment_size: 16,
+        refresh_policy: ModelRefreshPolicy {
+            min_samples: 16,
+            max_inserts: 10_000,
+            max_shift_score: 0.5,
+        },
+        delta_policy: DeltaPolicy::default(),
+    };
+    let mut store = ValueStore::new(config);
+
+    for i in 0..64u64 {
+        let id = value_id_from_u64(i);
+        store.put_with_id(ValueKind::Cell, id, format!("value-{i}").into_bytes());
+    }
+
+    store.refresh_learned_index();
+    let report = store.learned_index_report(2);
+
+    assert!(report.enabled);
+    assert!(report.built);
+    assert_eq!(report.total_keys, 64);
+    assert_eq!(report.segment_count, 4);
+    assert_eq!(report.configured_segment_size, 16);
+    assert_eq!(report.max_error, 0);
+    assert_eq!(report.max_search_window, 3);
+    assert!(report.approx_model_bytes > 0);
+    assert_eq!(report.fallback_entries, 64);
+    assert!(report.approx_fallback_bytes > 0);
+    assert_eq!(report.segments.len(), 2);
+    assert_eq!(report.segments[0].start_position, 0);
+    assert_eq!(report.segments[0].end_position, 15);
+    assert_eq!(report.segments[0].start_key_prefix_hex, "0000000000000000");
+    assert_eq!(report.segments[0].end_key_prefix_hex, "000000000000000f");
+    assert_eq!(report.segments[0].search_window, 3);
 }
 
 #[test]

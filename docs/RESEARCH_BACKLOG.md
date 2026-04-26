@@ -28,6 +28,7 @@ Runtime status and checklist status intentionally differ:
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
+- 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -61,7 +62,7 @@ Source of truth matrix:
 
 ### Phase 24 — Learned indexes for ValueID lookup (R01)
 - [x] T230: Instrument ValueID lookup distribution + export histograms
-- [ ] T231: Prototype learned model index (offline build) with fallback structure
+- [x] T231: Prototype learned model index (offline build) with fallback structure
 - [ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)
 - [ ] T233: Compaction-time model refresh policy + correctness tests
 - [ ] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead
