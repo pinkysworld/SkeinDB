@@ -1,0 +1,12 @@
+{
+  "name": "skeindb-admin-playwright",
+  "private": true,
+  "version": "0.0.1",
+  "description": "End-to-end Playwright suite for SkeinAdmin against a live skeindb backend.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1"
+  }
+}
