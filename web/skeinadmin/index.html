@@ -331,6 +331,45 @@
       .settings-key-list{display:grid;gap:6px;max-height:240px;overflow:auto}
       .settings-key-btn{text-align:left;background:#fff}
       .feature-card textarea{min-height:84px}
+      .hero-card{position:relative;overflow:hidden;padding:20px;background:linear-gradient(135deg,#17324a 0%,#255d87 56%,#cc8a2f 128%);color:#f7fbff;border:none}
+      .hero-card::before{content:'';position:absolute;inset:-12% auto auto -8%;width:260px;height:260px;background:radial-gradient(circle,rgba(255,255,255,.18) 0%,rgba(255,255,255,0) 70%);pointer-events:none}
+      .hero-card::after{content:'';position:absolute;inset:auto -4% -44% auto;width:320px;height:320px;background:radial-gradient(circle,rgba(255,233,194,.26) 0%,rgba(255,233,194,0) 68%);pointer-events:none}
+      .hero-grid{position:relative;z-index:1;display:grid;gap:16px;grid-template-columns:minmax(0,1.45fr) minmax(260px,.95fr)}
+      .hero-kicker{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:rgba(247,251,255,.76);margin-bottom:8px}
+      .hero-heading{margin:0;font-size:28px;line-height:1.05;letter-spacing:.02em}
+      .hero-lede{margin:12px 0 0;font-size:13px;line-height:1.62;max-width:62ch;color:rgba(247,251,255,.88)}
+      .hero-chip-row{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 16px}
+      .hero-chip{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+      .hero-actions{display:flex;flex-wrap:wrap;gap:8px}
+      .hero-actions button{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.18);color:#fff}
+      .hero-actions button.primary{background:#fff;border-color:#fff;color:#17324a}
+      .hero-actions button.ghost{border-style:solid}
+      .hero-note{padding:12px;border-radius:14px;background:rgba(9,18,30,.2);border:1px solid rgba(255,255,255,.12);font-size:12px;line-height:1.55}
+      .hero-note strong{display:block;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(247,251,255,.74);margin-bottom:6px}
+      .hero-stat-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+      .hero-stat{padding:12px;border-radius:14px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.14)}
+      .hero-stat-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:rgba(247,251,255,.74)}
+      .hero-stat-value{margin-top:4px;font-size:18px;font-weight:600;color:#fff}
+      .section-band{padding:16px 18px;background:linear-gradient(180deg,rgba(255,255,255,.98) 0%,rgba(245,248,252,.96) 100%);border:1px solid rgba(43,108,176,.14)}
+      html.dark .section-band{background:linear-gradient(180deg,rgba(33,40,51,.98) 0%,rgba(26,32,41,.96) 100%);border-color:rgba(91,155,213,.18)}
+      .section-band-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+      .section-kicker{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:6px}
+      .section-band h2{margin:0;font-size:20px;letter-spacing:.01em;color:var(--ink);text-transform:none}
+      .section-body{margin:6px 0 0;font-size:12px;line-height:1.55;color:var(--muted);max-width:68ch}
+      .section-links{display:flex;flex-wrap:wrap;gap:8px}
+      .glance-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+      .glance-card{padding:12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.78)}
+      html.dark .glance-card{background:rgba(18,23,30,.45);border-color:rgba(255,255,255,.06)}
+      .glance-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+      .glance-value{margin-top:6px;font-size:14px;font-weight:600;color:var(--ink)}
+      .glance-detail{margin-top:4px;font-size:11px;line-height:1.45;color:var(--muted)}
+      .card-summary{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px}
+      .card-header-row{display:flex;justify-content:space-between;gap:8px;align-items:baseline;margin-bottom:8px}
+      .card-header-row h2{margin:0}
+      .card-header-row .card-summary{margin:0;max-width:34ch;text-align:right}
+      html.dark .hero-actions button{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.14)}
+      html.dark .hero-actions button.primary{background:#fff;color:#17324a}
+      @media(max-width:980px){.hero-grid{grid-template-columns:1fr}.hero-heading{font-size:24px}.section-band-head{flex-direction:column}.card-header-row{flex-direction:column;align-items:flex-start}.card-header-row .card-summary{text-align:left;max-width:none}}
     </style>
   </head>
   <body data-app="skeinadmin" data-mode="admin">
@@ -428,7 +467,29 @@
 
         <!-- OVERVIEW --><section class="panel active" data-panel="overview">
           <div class="panel-grid">
-            <div class="card wide"><h2>Getting Started</h2><ol class="steps"><li>Enter Base URL + token, then click Connect.</li><li>Create a database and table using the guided builders.</li><li>Use Browse &amp; Edit for row operations and Cluster Manager for topology.</li></ol><div class="callout">Every management path is available in two layers: guided forms for day-to-day workflows and advanced JSON/RPC controls for full fidelity.<br/><br/>Keyboard shortcuts: <kbd>⌘K</kbd> Command palette &nbsp; <kbd>⌘↵</kbd> Run SQL &nbsp; <kbd>Esc</kbd> Close dialogs</div><div class="actions"><button id="btnQuickCreateDb" class="sm">New Database</button><button id="btnQuickCreateTable" class="sm">New Table</button><button id="btnQuickInsertRow" class="sm">Insert Row</button><button id="btnQuickBrowseData" class="sm">Browse Table</button><button id="btnQuickCluster" class="sm">Open Cluster</button></div></div>
+            <div class="card full hero-card">
+              <div class="hero-grid">
+                <div>
+                  <div class="hero-kicker">SkeinDB Control Plane</div>
+                  <h2 class="hero-heading">Operator Command Center</h2>
+                  <p class="hero-lede">Run daily SkeinDB workflows from one place, then drop to SkeinQL or raw RPC only when you need full fidelity. This console keeps prepared queries, transaction handles, CDC feeds, and replay workspaces visible across panels so operators do not lose session context while moving around.</p>
+                  <div class="hero-chip-row"><span class="hero-chip">Guided workflows</span><span class="hero-chip">Full RPC coverage</span><span class="hero-chip">Prepared + CDC handoff</span><span class="hero-chip">Single browser session state</span></div>
+                  <div class="hero-actions"><button id="btnQuickCreateDb" class="primary sm">New Database</button><button id="btnQuickCreateTable" class="sm">New Table</button><button id="btnQuickInsertRow" class="sm">Insert Row</button><button id="btnQuickBrowseData" class="sm">Browse Table</button><button id="btnQuickCluster" class="sm">Open Cluster</button><button class="ghost sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="cdc">Open CDC</button><button class="ghost sm" data-panel="replay">Open Replay</button></div>
+                  <div class="hero-note" style="margin-top:12px"><strong>Operator flow</strong>Connect first, pick a database and table on the left, then use Workspace for query execution, Schema for structure and indexes, CDC for invalidation feeds, and Replay for historical verification. Keyboard shortcuts remain available: <kbd>⌘K</kbd> command palette, <kbd>⌘↵</kbd> run SQL, <kbd>Esc</kbd> close dialogs.</div>
+                </div>
+                <div>
+                  <div class="hero-stat-grid">
+                    <div class="hero-stat"><div class="hero-stat-label">Connection</div><div class="hero-stat-value" id="overviewHeroConnection">Offline</div></div>
+                    <div class="hero-stat"><div class="hero-stat-label">Loaded Methods</div><div class="hero-stat-value" id="overviewHeroMethods">--</div></div>
+                    <div class="hero-stat"><div class="hero-stat-label">Research Hardened</div><div class="hero-stat-value" id="overviewHeroResearch">--</div></div>
+                    <div class="hero-stat"><div class="hero-stat-label">Mode</div><div class="hero-stat-value" id="overviewHeroMode">Admin</div></div>
+                  </div>
+                  <div id="overviewSelectionSummary" class="hero-note" style="margin-top:10px"><strong>Selection</strong>No database selected yet. Use the left tree or Schema panel to establish the active working set.</div>
+                  <div id="overviewSessionSummary" class="hero-note" style="margin-top:10px"><strong>Session State</strong>No prepared queries, transactions, CDC subscriptions, or replay workspaces are active in this browser session yet.</div>
+                  <div id="overviewCoverageSummary" class="hero-note" style="margin-top:10px"><strong>Coverage</strong>Every management path is available in two layers: guided forms for day-to-day workflows and advanced JSON/RPC controls for full fidelity.</div>
+                </div>
+              </div>
+            </div>
 
             <!-- Server Info -->
             <div class="card"><h2>&#x1F4E1; Server Info</h2>
@@ -514,24 +575,24 @@
             <div class="card"><h2>&#x1F464; Profiles</h2><div class="field"><label>Name</label><input id="profileName" placeholder="local-dev" /></div><div class="actions"><button id="btnSaveProfile" class="secondary sm">Save</button><button id="btnDeleteProfile" class="ghost sm">Delete</button></div><div class="field"><label>Profiles</label><select id="profileSelect"></select></div></div>
 
             <!-- Feature Center -->
-            <div class="card wide"><h2>&#x1F3AF; Feature Center</h2><div class="feature-grid" id="featureCenterGrid"></div></div>
+            <div class="card wide"><div class="card-header-row"><h2>&#x1F3AF; Feature Center</h2><div class="card-summary">Jump straight to the operator surfaces that matter most without hunting through the full navigation tree.</div></div><div class="feature-grid" id="featureCenterGrid"></div></div>
 
             <!-- Top Tables -->
-            <div class="card"><h2>&#x1F4CA; Top Tables</h2>
+            <div class="card"><div class="card-header-row"><h2>&#x1F4CA; Top Tables</h2><div id="topTablesSummary" class="card-summary">Load table sizes to spot hot datasets and oversized schemas.</div></div>
               <div class="hint" style="margin-bottom:6px">Tables ranked by row count.</div>
               <div class="table-wrap" style="max-height:200px"><table id="topTablesGrid"></table></div>
               <div class="actions" style="margin-top:6px"><button id="btnRefreshTopTables" class="ghost sm">&#x21bb; Refresh</button></div>
             </div>
 
             <!-- Slow Query Log -->
-            <div class="card"><h2>&#x1F422; Slow Query Log</h2>
+            <div class="card"><div class="card-header-row"><h2>&#x1F422; Slow Query Log</h2><div id="slowQuerySummary" class="card-summary">Inspect recent latency outliers and jump to remediation paths in Workspace or Advisor.</div></div>
               <div class="hint" style="margin-bottom:6px">Recent queries exceeding latency threshold.</div>
               <div class="table-wrap" style="max-height:200px"><table id="slowQueryGrid"></table></div>
               <div class="actions" style="margin-top:6px"><button id="btnRefreshSlowQueries" class="ghost sm">&#x21bb; Refresh</button></div>
             </div>
 
             <!-- Active Sessions -->
-            <div class="card"><h2>&#x1F465; Active Sessions</h2>
+            <div class="card"><div class="card-header-row"><h2>&#x1F465; Active Sessions</h2><div id="activeSessionsSummary" class="card-summary">Load live workload to inspect concurrency, transaction pressure, and current response times.</div></div>
               <div class="hint" style="margin-bottom:6px">Current sessions and live workload.</div>
               <div class="stat-grid" id="activeSessionsStats">
                 <div class="stat"><div class="stat-label">Sessions</div><div class="stat-value" id="statActiveSessions">--</div></div>
@@ -542,10 +603,10 @@
             </div>
 
             <!-- Index Health -->
-            <div class="card"><h2>&#x1F9E0; Index Health</h2>
-              <div class="hint" style="margin-bottom:6px">Index recommendations from the advisor.</div>
+            <div class="card"><div class="card-header-row"><h2>&#x1F9E0; Index Health</h2><div id="indexHealthSummary" class="card-summary">Refresh advisor history to see whether recommendations were applied or intentionally dismissed.</div></div>
+              <div class="hint" style="margin-bottom:6px">Advisor history and indexing actions.</div>
               <div class="stat-grid" id="indexHealthStats">
-                <div class="stat"><div class="stat-label">Recommendations</div><div class="stat-value" id="statIndexRecs">--</div></div>
+                <div class="stat"><div class="stat-label">Advisor Events</div><div class="stat-value" id="statIndexRecs">--</div></div>
                 <div class="stat"><div class="stat-label">Applied</div><div class="stat-value" id="statIndexApplied">--</div></div>
                 <div class="stat"><div class="stat-label">Dismissed</div><div class="stat-value" id="statIndexDismissed">--</div></div>
               </div>
@@ -553,7 +614,7 @@
             </div>
 
             <!-- Compact Research Status -->
-            <div class="card wide"><h2>&#x1F52C; Research Track Status</h2>
+            <div class="card wide"><div class="card-header-row"><h2>&#x1F52C; Research Track Status</h2><div id="researchStatusSummary" class="card-summary">Compact view of all 20 research tracks with direct links into the panels that expose them.</div></div>
               <div class="hint" style="margin-bottom:6px">Compact view of all 20 research tracks.</div>
               <div class="feature-grid" id="researchStatusGrid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))"></div>
             </div>
@@ -809,6 +870,13 @@
 
         <!-- WORKSPACE --><section class="panel" data-panel="workspace">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Execution Flow</div><h2>Workspace Mission Control</h2><p class="section-body">Switch between SQL compatibility checks, SkeinQL execution, prepared-query reuse, and explicit transaction handles without losing the session state that ties them together.</p></div>
+                <div class="section-links"><button class="sm" data-panel="rpc">Open RPC Explorer</button><button class="ghost sm" data-panel="cdc">Wire CDC Feeds</button><button class="ghost sm" data-panel="schema">Inspect Schema</button></div>
+              </div>
+              <div id="workspaceSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Selection</div><div class="glance-value">No active table</div><div class="glance-detail">Pick a database and table from the left tree to seed SQL, SkeinQL, and CDC helpers.</div></div></div>
+            </div>
             <div class="card wide"><h2>SQL Workspace</h2>
               <div class="field"><label>SQL</label><textarea id="sqlText" rows="4" placeholder="SELECT * FROM demo.users LIMIT 10;"></textarea></div>
               <div class="actions"><button id="btnSqlTplSelect" class="sm">SELECT *</button><button id="btnSqlTplShowDb" class="sm">SHOW DB</button><button id="btnSqlTplShowTables" class="sm">SHOW TABLES</button><button id="btnSqlTplUseDb" class="sm">USE DB</button><button id="btnSqlTplInsert" class="sm">INSERT</button><button id="btnSqlTplCreateDb" class="sm">CREATE DB</button><button id="btnSqlTplCreateTable" class="sm">CREATE TABLE</button></div>
@@ -825,11 +893,34 @@
               <div class="actions"><button id="btnSkeinRun" class="primary">Run</button></div>
               <pre id="skeinOut">Ready.</pre>
             </div>
+            <div class="card wide"><h2>Prepared Query Studio</h2>
+              <div class="callout">Prepare the current SkeinQL payload once, execute it repeatedly, expose the cacheable GET endpoint, and hand the same query ID off to CDC invalidation flows without leaving the workspace.</div>
+              <div class="row"><div class="field"><label>Prepared Query ID</label><input id="preparedQueryId" placeholder="Generated by query.prepare" /></div><div class="field"><label>Prepared Args (JSON)</label><textarea id="preparedArgs" rows="2" placeholder="[]"></textarea></div></div>
+              <div class="actions"><button id="btnPreparedPrepare" class="primary sm">Prepare Current Query</button><button id="btnPreparedExecute" class="sm">Execute Prepared</button><button id="btnPreparedCopyHttp" class="ghost sm">Copy GET URL</button><button id="btnPreparedUseForCdc" class="sm">Use for CDC</button></div>
+              <div id="preparedSummary" class="hint" style="margin-top:8px">Prepare a SkeinQL query to unlock cacheable GET and query-scoped CDC workflows.</div>
+              <div id="preparedQueryList" class="settings-key-list" style="margin-top:8px">No prepared queries in this browser session yet.</div>
+              <div class="table-wrap" style="margin-top:8px"><table id="preparedResultGrid"></table></div>
+              <pre id="preparedOut">Ready.</pre>
+            </div>
+            <div class="card wide"><h2>Transaction Session Control</h2>
+              <div class="callout">Manage explicit transaction handles exposed by <code>tx.begin</code>, <code>tx.commit</code>, and <code>tx.rollback</code>. The active <code>tx_id</code> stays visible in this browser session so you can reuse it in advanced workflows.</div>
+              <div class="row"><div class="field"><label>Read only</label><select id="txReadOnly"><option value="false">false</option><option value="true">true</option></select></div><div class="field"><label>Active TX ID</label><input id="txId" placeholder="tx_..." /></div></div>
+              <div class="actions"><button id="btnTxBegin" class="primary sm">Begin</button><button id="btnTxCommit" class="sm">Commit</button><button id="btnTxRollback" class="ghost sm">Rollback</button></div>
+              <div id="txSummary" class="hint" style="margin-top:8px">No active transaction handle in this browser session.</div>
+              <pre id="txOut">Ready.</pre>
+            </div>
           </div>
         </section>
 
         <!-- SCHEMA --><section class="panel" data-panel="schema">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Design &amp; Introspection</div><h2>Schema Command Deck</h2><p class="section-body">Move from guided table design to live table description and index management without switching tools. The active tree selection continues to seed database, table, and index actions.</p></div>
+                <div class="section-links"><button class="sm" data-panel="data">Open Data Editor</button><button class="ghost sm" data-panel="views">Open Views</button><button class="ghost sm" data-panel="advisor">Open Advisor</button></div>
+              </div>
+              <div id="schemaSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Selection</div><div class="glance-value">No active schema target</div><div class="glance-detail">Choose a table or describe one to unlock structure and index summaries.</div></div></div>
+            </div>
             <div class="card"><h2>Browser</h2>
               <div class="actions"><button id="btnSchemaListDb" class="primary sm">List DB</button><button id="btnSchemaListTables" class="sm">List Tables</button><button id="btnSchemaDropDb" class="danger sm">Drop DB</button><button id="btnSchemaDropTable" class="danger sm">Drop Table</button></div>
               <div class="row"><div class="field"><label>Databases</label><div class="list" id="dbList">--</div></div><div class="field"><label>Tables</label><div class="list" id="tableList">--</div></div></div>
@@ -849,12 +940,27 @@
               <div class="actions"><button id="btnSchemaCreateDb" class="sm">Create DB</button><button id="btnSchemaDescribe" class="sm">Describe</button><button id="btnSchemaCreateTable" class="primary sm">Create Table</button><button id="btnSchemaPropose" class="secondary sm">Propose Change</button><button id="btnSchemaMergeStatus" class="sm">Merge Status</button><button id="btnSchemaApplyMerge" class="sm">Apply Merge</button></div>
               <pre id="schemaOut">Waiting.</pre>
             </div>
+            <div class="card wide"><h2>Index Manager</h2>
+              <div class="callout">Inspect, create, and drop secondary indexes from guided fields. The current runtime exposes index state through <code>schema.describe_table</code>, and create/drop operations are executed as supported SQL DDL so the console stays aligned with live parser behavior.</div>
+              <div class="row"><div class="field"><label>Index name</label><input id="schemaIndexName" placeholder="idx_users_email" /></div><div class="field"><label>Columns (comma)</label><input id="schemaIndexColumns" placeholder="email, created_at" /></div><div class="field"><label>Unique</label><select id="schemaIndexUnique"><option value="false">false</option><option value="true">true</option></select></div></div>
+              <div class="actions"><button id="btnSchemaLoadIndexes" class="sm">Load Indexes</button><button id="btnSchemaCreateIndex" class="primary sm">Create Index</button><button id="btnSchemaDropIndex" class="danger sm">Drop Index</button><button id="btnSchemaUseSelection" class="ghost sm">Use Selected Table</button></div>
+              <div id="schemaIndexSummary" class="hint" style="margin-top:8px">Describe a table to inspect its secondary indexes and unique constraints.</div>
+              <div class="table-wrap" style="margin-top:8px"><table id="schemaIndexTable"></table></div>
+              <pre id="schemaIndexOut">Ready.</pre>
+            </div>
             <div class="card wide"><h2>Structure</h2><div class="breadcrumb" id="structureBreadcrumb">No table selected.</div><div class="table-wrap"><table id="structureTable"></table></div><pre id="structureOut">Select a table.</pre></div>
           </div>
         </section>
 
         <!-- DATA --><section class="panel" data-panel="data">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Rows &amp; Editing</div><h2>Data Workbench</h2><p class="section-body">Insert, update, lookup, delete and browse rows without context switching. The guided editor handles routine work; the JSON panel gives full RPC fidelity for power moves.</p></div>
+                <div class="section-links"><button class="sm" data-panel="schema">Open Schema</button><button class="ghost sm" data-panel="workspace">Open SQL</button><button class="ghost sm" data-panel="easy">Easy Viewer</button></div>
+              </div>
+              <div id="dataSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Selection</div><div class="glance-value">No active table</div><div class="glance-detail">Pick a table from the tree to seed the guided editor and browse view.</div></div></div>
+            </div>
             <div class="card wide"><h2>Guided Row Editor</h2>
               <details class="help" open><summary>Quick workflow</summary><div class="help-body"><div>Use this form for day-to-day inserts and PK lookups without writing JSON manually.</div><div>Start with <strong>Load Table Columns</strong> after selecting database and table.</div></div></details>
               <div class="row"><div class="field"><label>Database</label><input id="dataFormDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="dataFormTable" placeholder="users" /></div></div>
@@ -882,21 +988,44 @@
         </section>
 
         <!-- CLUSTER --><section class="panel" data-panel="cluster">
-          <div class="panel-grid"><div class="card wide"><h2>Cluster & Transport</h2>
-            <div class="actions"><button id="btnClusterStatus" class="primary sm">Status</button><button id="btnClusterNodes" class="sm">Nodes</button><button id="btnClusterTransport" class="sm">Transport</button></div>
-            <div class="row"><div class="field"><label>TTL (ms)</label><input id="clusterJoinTtl" type="number" value="600000" /></div><div class="field"><label>Role</label><select id="clusterJoinRole"><option value="replica">replica</option><option value="primary">primary</option></select></div></div>
-            <div class="actions"><button id="btnClusterCreateToken" class="secondary sm">Create Token</button></div>
-            <div class="row"><div class="field"><label>Token</label><input id="clusterJoinToken" /></div><div class="field"><label>Node ID</label><input id="clusterNodeId" /></div><div class="field"><label>Node URL</label><input id="clusterNodeUrl" placeholder="http://127.0.0.1:8081" /></div></div>
-            <div class="actions"><button id="btnClusterJoinNode" class="sm">Join</button><button id="btnClusterLeaveNode" class="ghost sm">Leave</button><button id="btnClusterRemoveNode" class="sm">Remove</button><button id="btnClusterPromote" class="sm">Promote</button></div>
-            <div class="row"><div class="field"><label>Shard ID</label><input id="clusterShardId" /></div><div class="field"><label>DB</label><input id="clusterShardDb" /></div><div class="field"><label>Table</label><input id="clusterShardTable" /></div></div>
-            <div class="row"><div class="field"><label>Primary</label><input id="clusterShardPrimary" /></div><div class="field"><label>Replicas</label><input id="clusterShardReplicas" placeholder='["a"]' /></div><div class="field"><label>Move to</label><input id="clusterMoveTarget" /></div></div>
-            <div class="actions"><button id="btnClusterShardCreate" class="sm">Create Shard</button><button id="btnClusterShardMove" class="sm">Move</button><button id="btnClusterShardRebalance" class="sm">Rebalance</button></div>
-            <pre id="clusterOut">Waiting.</pre>
-          </div></div>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Topology &amp; Transport</div><h2>Cluster Operations</h2><p class="section-body">Inspect cluster status, mint join tokens, manage replica membership, and rebalance shards from a single panel. Each subsection walks the operator from observe → enroll → place → move.</p></div>
+                <div class="section-links"><button class="sm" data-panel="telemetry">Open Telemetry</button><button class="ghost sm" data-panel="settings">Open Settings</button><button class="ghost sm" data-panel="security">Open Security</button></div>
+              </div>
+              <div id="clusterSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Status</div><div class="glance-value">Not loaded</div><div class="glance-detail">Click Status to refresh node, shard, and transport summaries.</div></div></div>
+            </div>
+            <div class="card wide"><h2>Observe</h2>
+              <p class="card-summary">Snapshot live cluster, node membership, and transport state.</p>
+              <div class="actions"><button id="btnClusterStatus" class="primary sm">Status</button><button id="btnClusterNodes" class="sm">Nodes</button><button id="btnClusterTransport" class="sm">Transport</button></div>
+            </div>
+            <div class="card wide"><h2>Enroll Nodes</h2>
+              <p class="card-summary">Mint a join token and register a peer with role + URL.</p>
+              <div class="row"><div class="field"><label>TTL (ms)</label><input id="clusterJoinTtl" type="number" value="600000" /></div><div class="field"><label>Role</label><select id="clusterJoinRole"><option value="replica">replica</option><option value="primary">primary</option></select></div></div>
+              <div class="actions"><button id="btnClusterCreateToken" class="secondary sm">Create Token</button></div>
+              <div class="row"><div class="field"><label>Token</label><input id="clusterJoinToken" /></div><div class="field"><label>Node ID</label><input id="clusterNodeId" /></div><div class="field"><label>Node URL</label><input id="clusterNodeUrl" placeholder="http://127.0.0.1:8081" /></div></div>
+              <div class="actions"><button id="btnClusterJoinNode" class="primary sm">Join</button><button id="btnClusterLeaveNode" class="ghost sm">Leave</button><button id="btnClusterRemoveNode" class="danger sm">Remove</button><button id="btnClusterPromote" class="sm">Promote</button></div>
+            </div>
+            <div class="card wide"><h2>Shard Placement</h2>
+              <p class="card-summary">Create, move, and rebalance shards across the cluster.</p>
+              <div class="row"><div class="field"><label>Shard ID</label><input id="clusterShardId" /></div><div class="field"><label>DB</label><input id="clusterShardDb" /></div><div class="field"><label>Table</label><input id="clusterShardTable" /></div></div>
+              <div class="row"><div class="field"><label>Primary</label><input id="clusterShardPrimary" /></div><div class="field"><label>Replicas</label><input id="clusterShardReplicas" placeholder='["a"]' /></div><div class="field"><label>Move to</label><input id="clusterMoveTarget" /></div></div>
+              <div class="actions"><button id="btnClusterShardCreate" class="primary sm">Create Shard</button><button id="btnClusterShardMove" class="sm">Move</button><button id="btnClusterShardRebalance" class="secondary sm">Rebalance</button></div>
+              <pre id="clusterOut">Waiting.</pre>
+            </div>
+          </div>
         </section>
 
         <!-- SETTINGS --><section class="panel" data-panel="settings">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Runtime &amp; Capabilities</div><h2>Settings &amp; Feature Flags</h2><p class="section-body">Read or write any persisted setting, configure all 20 research tracks from one place, and inspect the live runtime surface so you can confirm a flag actually took effect.</p></div>
+                <div class="section-links"><button class="sm" data-panel="engine">Open Engine</button><button class="ghost sm" data-panel="telemetry">Open Telemetry</button><button class="ghost sm" data-panel="research">Open Research</button></div>
+              </div>
+              <div id="settingsSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Active Key</div><div class="glance-value">No key inspected</div><div class="glance-detail">Use Get/Set or pick a preset to snapshot the current value.</div></div></div>
+            </div>
             <div class="card wide"><h2>Settings</h2>
               <div class="row"><div class="field"><label>Key</label><input id="settingsKey" placeholder="cluster.state.v1" /></div><div class="field"><label>Value (JSON)</label><input id="settingsValue" placeholder='{"enabled":true}' /></div></div>
               <div class="actions"><button id="btnSettingsGet" class="primary sm">Get</button><button id="btnSettingsSet" class="sm">Set</button><button id="btnSettingsClusterPreset" class="secondary sm">Cluster Preset</button><button id="btnSettingsListAll" class="sm">List All</button></div>
@@ -913,6 +1042,13 @@
 
         <!-- ENGINE CONFIG --><section class="panel" data-panel="engine">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Storage Engine</div><h2>Engine Configuration</h2><p class="section-body">Toggle storage, MVCC, compaction, cache, audit, and replication features. Each section is a self-contained group; changes are persisted via <code>settings.set</code> and effects are noted per option.</p></div>
+                <div class="section-links"><button class="sm" data-panel="settings">Open Settings</button><button class="ghost sm" data-panel="telemetry">Open Telemetry</button><button class="ghost sm" data-panel="replay">Open Replay</button></div>
+              </div>
+              <div id="engineSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Status</div><div class="glance-value">Not loaded</div><div class="glance-detail">Load Current Config to populate engine toggles from the live runtime.</div></div></div>
+            </div>
             <div class="card wide"><h2>&#x2699; Engine Configuration</h2>
               <div class="callout">Toggle engine features on/off. Changes are applied via <code>settings.set</code> and take effect immediately or after restart (noted per setting).</div>
               <div class="actions" style="margin-bottom:12px">
@@ -973,7 +1109,14 @@
         </section>
 
         <!-- USERS --><section class="panel" data-panel="users">
-          <div class="panel-grid"><div class="card wide"><h2>Users &amp; Grants</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Identity &amp; Access</div><h2>Users &amp; Grants</h2><p class="section-body">Create roles, manage credentials, and grant or revoke database-level privileges. Sensitive actions are gated behind explicit confirmation flows.</p></div>
+                <div class="section-links"><button class="sm" data-panel="security">Open Security</button><button class="ghost sm" data-panel="encryption">Open Encryption</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Users &amp; Grants</h2>
             <div class="callout">User management via settings. Create roles, grant DB-level access.</div>
             <div class="row"><div class="field"><label>Username</label><input id="userName" /></div><div class="field"><label>Password</label><input id="userPass" type="password" /></div><div class="field"><label>Role</label><select id="userRole"><option value="admin">admin</option><option value="read_write">read_write</option><option value="read_only">read_only</option></select></div></div>
             <div class="actions"><button id="btnUserCreate" class="primary sm">Create</button><button id="btnUserList" class="sm">List</button><button id="btnUserDrop" class="danger sm">Drop</button><button id="btnUserGrant" class="secondary sm">Grant</button><button id="btnUserRevoke" class="ghost sm">Revoke</button></div>
@@ -984,6 +1127,12 @@
 
         <!-- TELEMETRY --><section class="panel" data-panel="telemetry">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Observability</div><h2>Telemetry &amp; Workload Insights</h2><p class="section-body">Compatibility coverage, migration hints, plan-cache health, and live query pressure live next to each other so you can correlate workload patterns with runtime tuning.</p></div>
+                <div class="section-links"><button class="sm" data-panel="engine">Open Engine</button><button class="ghost sm" data-panel="settings">Open Settings</button><button class="ghost sm" data-panel="advisor">Open Advisor</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>Compatibility &amp; Feature Telemetry</h2>
               <div class="actions"><button id="btnTelemetryCompatSummary" class="primary sm">Compat Summary</button><button id="btnTelemetryFeatureFlags" class="sm">Feature Flags</button><button id="btnTelemetryMigrationHints" class="sm">Migration Hints</button><button id="btnTelemetryWorkloadFeatures" class="sm">Workload Features</button></div>
               <pre id="telemetryOut">Load telemetry to inspect compatibility usage.</pre>
@@ -997,6 +1146,12 @@
 
         <!-- SECURITY --><section class="panel" data-panel="security">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Tokens &amp; Audit</div><h2>Security Center</h2><p class="section-body">Issue API tokens with scoped roles and TTLs, then track which fingerprints generate the most pressure so you can prioritize parameterization or hardening.</p></div>
+                <div class="section-links"><button class="sm" data-panel="users">Open Users</button><button class="ghost sm" data-panel="forensics">Open Forensics</button><button class="ghost sm" data-panel="encryption">Open Encryption</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>API Tokens</h2>
               <div class="callout">Create and manage API tokens for programmatic access. Tokens can have roles (admin, read_write, read_only) and optional expiration.</div>
               <div class="row">
@@ -1018,6 +1173,12 @@
 
         <!-- ENCRYPTION (T193) --><section class="panel" data-panel="encryption">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Keys &amp; Modes</div><h2>Encryption Control</h2><p class="section-body">Inspect per-database mode, register and rotate master keys, and promote a new active key. Master key bytes never persist to disk — re-register after each restart.</p></div>
+                <div class="section-links"><button class="sm" data-panel="security">Open Security</button><button class="ghost sm" data-panel="settings">Open Settings</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>Database Encryption</h2>
               <div class="callout">Inspect per-database encryption mode (<code>ENC_OFF</code>, <code>ENC_RANDOM</code>, <code>ENC_MLE_DB</code>) and active key. Master key bytes are <strong>never persisted to disk</strong> — operators must re-register keys after restart with <code>settings.encryption.register_key</code>.</div>
               <div class="actions"><button id="btnEncStatus" class="primary sm">Refresh Status</button></div>
@@ -1054,7 +1215,14 @@
         </section>
 
         <!-- IMPORT/EXPORT --><section class="panel" data-panel="import">
-          <div class="panel-grid"><div class="card wide"><h2>Import / Export</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Bulk Movement</div><h2>Import / Export</h2><p class="section-body">Move rows, schemas, or whole databases between SkeinDB instances using JSON, CSV, or SQL. Useful for snapshots, fixtures, and one-off migrations.</p></div>
+                <div class="section-links"><button class="sm" data-panel="replay">Open Replay</button><button class="ghost sm" data-panel="data">Open Data</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Import / Export</h2>
             <div class="row"><div class="field"><label>Database</label><input id="importDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="importTable" /></div><div class="field"><label>Format</label><select id="importFormat"><option value="json">JSON</option><option value="csv">CSV</option><option value="sql">SQL</option></select></div></div>
             <div class="actions"><button id="btnExportData" class="primary sm">Export Data</button><button id="btnExportSchema" class="sm">Export Schema</button><button id="btnExportAll" class="secondary sm">Export DB</button></div>
             <div class="field"><label>Import Data</label><textarea id="importData" rows="5" placeholder='[{"id":1,"name":"Alice"}]'></textarea></div>
@@ -1065,12 +1233,26 @@
 
         <!-- CDC --><section class="panel" data-panel="cdc">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Live Feeds</div><h2>CDC Control Surface</h2><p class="section-body">Operate table subscriptions and prepared-query invalidation feeds side by side, then watch lag and recent events without leaving the panel.</p></div>
+                <div class="section-links"><button class="sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="replay">Open Replay</button><button class="ghost sm" data-panel="telemetry">Open Telemetry</button></div>
+              </div>
+              <div id="cdcSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Subscriptions</div><div class="glance-value">No feeds yet</div><div class="glance-detail">Create a table feed or reuse the latest prepared query to start a query-scoped invalidation stream.</div></div></div>
+            </div>
             <div class="card wide"><h2>CDC Subscriptions</h2>
-              <div class="callout">Create table subscriptions with <code>cdc.subscribe_table</code>, then poll, ACK, and close the current browser session's handles. Durable cursor listing and query subscriptions remain future work, so the lag view below reflects subscriptions created from this page.</div>
+              <div class="callout">Create table subscriptions with <code>cdc.subscribe_table</code>, then poll, ACK, and close the current browser session's handles. Query-scoped invalidation subscriptions are available below via <code>cdc.subscribe_query</code>, so the lag view reflects both table and prepared-query feeds created from this page.</div>
               <div class="row"><div class="field"><label>Database</label><input id="cdcDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="cdcTable" placeholder="events" /></div><div class="field"><label>Poll Limit</label><input id="cdcLimit" type="number" value="200" min="1" /></div></div>
               <div class="actions"><button id="btnCdcSubscribe" class="primary sm">Subscribe Table</button><button id="btnCdcPoll" class="sm">Poll</button><button id="btnCdcAck" class="secondary sm">Ack</button><button id="btnCdcClose" class="ghost sm">Close</button></div>
               <div class="row"><div class="field"><label>Subscription</label><select id="cdcSubId"><option value="">No subscriptions</option></select></div><div class="field"><label>From Offset</label><input id="cdcFromOffset" type="number" value="0" min="0" /></div><div class="field"><label>Ack Offset</label><input id="cdcAckOffset" type="number" value="0" min="0" /></div></div>
               <pre id="cdcOut">Ready.</pre>
+            </div>
+            <div class="card"><h2>Query Subscriptions</h2>
+              <div class="callout">Attach CDC invalidation to a prepared query. Prepare the query in the Workspace, bring the <code>query_id</code> here, and keep the same args alongside the subscription.</div>
+              <div class="field"><label>Prepared Query ID</label><input id="cdcQueryId" placeholder="query_..." /></div>
+              <div class="field"><label>Args (JSON)</label><textarea id="cdcQueryArgs" rows="2" placeholder="[]"></textarea></div>
+              <div class="actions"><button id="btnCdcUsePrepared" class="ghost sm">Use Latest Prepared Query</button><button id="btnCdcSubscribeQuery" class="primary sm">Subscribe Query</button></div>
+              <pre id="cdcQueryOut">Ready.</pre>
             </div>
             <div class="card"><h2>Lag Overview</h2>
               <div id="cdcLagSummary" class="hint">No CDC subscriptions in this browser session yet.</div>
@@ -1085,6 +1267,13 @@
 
         <!-- TIME TRAVEL / REPLAY --><section class="panel" data-panel="replay">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">History &amp; Audit</div><h2>Time Travel &amp; Replay</h2><p class="section-body">Run AS OF queries against historical MVCC snapshots, manage retention and GC, and export tamper-evident replay bundles you can verify on a separate workspace.</p></div>
+                <div class="section-links"><button class="sm" data-panel="forensics">Open Forensics</button><button class="ghost sm" data-panel="cdc">Open CDC</button><button class="ghost sm" data-panel="workspace">Open Workspace</button></div>
+              </div>
+              <div id="replaySummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Workspaces</div><div class="glance-value">No imports</div><div class="glance-detail">Export a bundle and import it as a hidden replay workspace to verify chain integrity.</div></div></div>
+            </div>
             <div class="card wide"><h2>Point-in-Time Query Runner</h2>
               <div class="callout">Run <code>query.select</code> against a historical MVCC snapshot. Enter an ISO-8601 timestamp or epoch milliseconds in <code>as_of</code>, seed a query from the selected table, and inspect the returned rows directly in the grid below.</div>
               <div class="row"><div class="field"><label>Database</label><input id="ttDb" placeholder="app" /></div><div class="field"><label>Table</label><input id="ttTable" placeholder="events" /></div><div class="field"><label>AS OF</label><input id="ttAsOf" placeholder="2026-01-01T00:00:00Z or 1767225600000" /></div><div class="field"><label>Limit</label><input id="ttLimit" type="number" value="50" min="1" /></div></div>
@@ -1129,11 +1318,25 @@
         </section>
 
         <!-- RESEARCH --><section class="panel" data-panel="research">
-          <div class="panel-grid"><div class="card full"><h2>Research Agenda (R01-R20)</h2><div class="callout">All 20 research tracks have prototype implementations. Each track has a dedicated panel or is reachable via RPC Explorer.</div><div id="researchDashboard" class="research-grid"></div></div></div>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R01 – R20</div><h2>Research Agenda Dashboard</h2><p class="section-body">Every active research track is reachable from this console — either via a dedicated panel or a one-click RPC example. The dashboard below tracks coverage, status, and entry points in one grid.</p></div>
+                <div class="section-links"><button class="sm" data-panel="settings">Open Research Config</button><button class="ghost sm" data-panel="rpc">Open RPC Explorer</button></div>
+              </div>
+            </div>
+            <div class="card full"><h2>Research Agenda (R01-R20)</h2><div class="callout">All 20 research tracks have prototype implementations. Each track opens either a dedicated panel or a one-click RPC example so the full SkeinDB surface stays reachable from this console.</div><div id="researchDashboard" class="research-grid"></div></div></div>
         </section>
 
         <!-- VECTORS --><section class="panel" data-panel="vectors">
-          <div class="panel-grid"><div class="card wide"><h2>Vector Search (R10)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R10</div><h2>Vector Search</h2><p class="section-body">Run k-NN queries with optional prefilters, insert embeddings, and inspect index health. Pair with prepared queries to drive cacheable nearest-neighbor reads.</p></div>
+                <div class="section-links"><button class="sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="data">Open Data</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Vector Search (R10)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="vecDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="vecTable" placeholder="items" /></div><div class="field"><label>Column</label><input id="vecCol" placeholder="embedding" /></div></div>
             <div class="field"><label>Query (comma floats)</label><input id="vecQuery" placeholder="0.1, 0.2, 0.3" /></div>
             <div class="row"><div class="field"><label>k</label><input id="vecK" type="number" value="5" /></div><div class="field"><label>Prefilter</label><input id="vecPrefilter" /></div></div>
@@ -1144,6 +1347,12 @@
 
         <!-- PRIVACY --><section class="panel" data-panel="privacy">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R04 &amp; R05</div><h2>Privacy Controls</h2><p class="section-body">Differential privacy budgets and oblivious execution policies sit side-by-side so you can shape both the noise and the access pattern leakage profile of your aggregates.</p></div>
+                <div class="section-links"><button class="sm" data-panel="forensics">Open Forensics</button><button class="ghost sm" data-panel="settings">Open Settings</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>Differential Privacy (R04)</h2>
               <div class="row"><div class="field"><label>DB</label><input id="dpDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="dpTable" placeholder="events" /></div></div>
               <div class="row"><div class="field"><label>Op</label><select id="dpOp"><option value="count">count</option><option value="sum">sum</option><option value="avg">avg</option></select></div><div class="field"><label>Column</label><input id="dpCol" placeholder="id" /></div><div class="field"><label>Epsilon</label><input id="dpEpsilon" type="number" step="0.1" value="1.0" /></div></div>
@@ -1161,6 +1370,12 @@
 
         <!-- FORENSICS --><section class="panel" data-panel="forensics">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R06</div><h2>Forensic Audit Chain</h2><p class="section-body">Verify the tamper-evident WAL hash chain, query and slice forensic events, and export proofs you can re-validate in any workspace. Status and verification land here together so you never lose the trail.</p></div>
+                <div class="section-links"><button class="sm" data-panel="replay">Open Replay</button><button class="ghost sm" data-panel="security">Open Security</button><button class="ghost sm" data-panel="privacy">Open Privacy</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>Audit Chain Health</h2>
               <div class="callout">Inspect the current forensic chain via <code>maintenance.audit_status</code> and run full integrity verification via <code>maintenance.audit_verify</code>. Successful verification persists <code>last_verified_ms</code> so the next reopen shows the latest verified timestamp.</div>
               <div class="actions"><button id="btnForAuditStatus" class="sm">Audit Status</button><button id="btnForAuditVerify" class="primary sm">Verify Chain</button></div>
@@ -1178,7 +1393,14 @@
         </section>
 
         <!-- VIEWS --><section class="panel" data-panel="views">
-          <div class="panel-grid"><div class="card wide"><h2>Incremental Views (R08)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R08</div><h2>Incremental Views</h2><p class="section-body">Define materialized views, refresh them incrementally, inspect column-usage dependencies, and tear them down. Status and dependency reports stream into the same surface.</p></div>
+                <div class="section-links"><button class="sm" data-panel="schema">Open Schema</button><button class="ghost sm" data-panel="workspace">Open Workspace</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Incremental Views (R08)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="viewDb" placeholder="demo" /></div><div class="field"><label>View name</label><input id="viewName" /></div></div>
             <div class="field"><label>Query JSON</label><textarea id="viewQuery" rows="3"></textarea></div>
             <div class="actions"><button id="btnViewCreate" class="primary sm">Create</button><button id="btnViewRefresh" class="sm">Refresh</button><button id="btnViewStatus" class="sm">Status</button><button id="btnViewDrop" class="danger sm">Drop</button><button id="btnViewExplainDeps" class="sm">Deps</button></div>
@@ -1188,7 +1410,14 @@
         </section>
 
         <!-- MERGE --><section class="panel" data-panel="merge">
-          <div class="panel-grid"><div class="card wide"><h2>Merge &amp; CRDT (R07)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R07</div><h2>Merge &amp; CRDT Policies</h2><p class="section-body">Apply, register, and simulate merge policies for offline-first workloads. Wasm-backed merges live below the built-in strategies for fully custom resolution rules.</p></div>
+                <div class="section-links"><button class="sm" data-panel="wasm">Open Wasm Ops</button><button class="ghost sm" data-panel="data">Open Data</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Merge &amp; CRDT (R07)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="mergeDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="mergeTable" /></div></div>
             <div class="field"><label>PK</label><input id="mergePk" placeholder='[{"t":"i64","v":1}]' /></div>
             <div class="field"><label>Incoming</label><textarea id="mergeIncoming" rows="2"></textarea></div>
@@ -1202,7 +1431,14 @@
         </section>
 
         <!-- WASM --><section class="panel" data-panel="wasm">
-          <div class="panel-grid"><div class="card wide"><h2>Wasm Query Operators (R19)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R19</div><h2>Wasm Query Operators</h2><p class="section-body">Compile sandboxed Wasm operators and run them against typed row batches with safe cancellation. Pair with the Merge panel to drive Wasm-backed conflict resolution.</p></div>
+                <div class="section-links"><button class="sm" data-panel="merge">Open Merge</button><button class="ghost sm" data-panel="workspace">Open Workspace</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Wasm Query Operators (R19)</h2>
             <div class="field"><label>Wasm B64</label><textarea id="wasmB64" rows="2" placeholder="AA=="></textarea></div>
             <div class="field"><label>Schema columns</label><textarea id="wasmSchema" rows="2" placeholder='[{"name":"x","type":"i64"}]'></textarea></div>
             <div class="field"><label>Input rows</label><textarea id="wasmInput" rows="2" placeholder='[[{"t":"i64","v":1}]]'></textarea></div>
@@ -1212,7 +1448,14 @@
         </section>
 
         <!-- ADVISOR --><section class="panel" data-panel="advisor">
-          <div class="panel-grid"><div class="card wide"><h2>Index Advisor (R16)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R16</div><h2>Index Advisor</h2><p class="section-body">Synthesize ranked index suggestions, review observed-vs-expected reports, then apply or dismiss with audit history retained for the current browser session.</p></div>
+                <div class="section-links"><button class="sm" data-panel="schema">Open Schema</button><button class="ghost sm" data-panel="telemetry">Open Telemetry</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Index Advisor (R16)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="advDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="advTable" /></div></div>
             <div class="row"><div class="field"><label>Selected suggestion</label><input id="advSelection" placeholder="Run Synthesize and pick a suggestion" readonly /></div><div class="field"><label>Note</label><input id="advNote" placeholder="optional note for history" /></div></div>
             <div class="actions"><button id="btnAdvSynthesize" class="primary sm">Synthesize</button><button id="btnAdvHistory" class="sm">History</button><button id="btnAdvApply" class="secondary sm">Apply</button><button id="btnAdvDismiss" class="sm">Dismiss</button></div>
@@ -1222,7 +1465,14 @@
         </section>
 
         <!-- MIGRATION --><section class="panel" data-panel="migration">
-          <div class="panel-grid"><div class="card wide"><h2>Migration (R17)</h2>
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R17</div><h2>Migration &amp; Compatibility</h2><p class="section-body">Preview SQL rewrites, generate intent reports, and export migration bundles in multiple formats so dialect drift is caught before it reaches production.</p></div>
+                <div class="section-links"><button class="sm" data-panel="telemetry">Open Telemetry</button><button class="ghost sm" data-panel="workspace">Open Workspace</button></div>
+              </div>
+            </div>
+            <div class="card wide"><h2>Migration (R17)</h2>
             <div class="row"><div class="field"><label>Samples</label><textarea id="migSamples" rows="3" placeholder="[]"></textarea></div><div class="field"><label>Limit</label><input id="migLimit" type="number" value="10" /></div><div class="field"><label>Window ms</label><input id="migWindow" type="number" placeholder="60000" /></div></div>
             <div class="actions"><button id="btnMigrationPreview" class="primary sm">Rewrite Preview</button><button id="btnMigrationIntent" class="secondary sm">Intent Report</button><button id="btnMigrationDownloadJson" class="sm">JSON</button><button id="btnMigrationDownloadMd" class="sm">MD</button><button id="btnMigrationDownloadHtml" class="sm">HTML</button><button id="btnMigrationCopyMd" class="sm">Copy MD</button></div>
             <div id="migrationReport" class="list">No rewrites.</div>
@@ -1232,6 +1482,12 @@
 
         <!-- NL --><section class="panel" data-panel="nl">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">R11 &amp; R12</div><h2>Natural Language Lab</h2><p class="section-body">Translate prompts to SkeinQL, explain and execute generated plans with read-only safety, and inspect autoparameterization so the lab stays grounded in the runtime semantics.</p></div>
+                <div class="section-links"><button class="sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="advisor">Open Advisor</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>NL to SkeinQL (R12)</h2>
               <div class="row"><div class="field"><label>DB</label><input id="nlDb" value="app" /></div><div class="field"><label>Tables</label><input id="nlTables" placeholder="users, orders" /></div><div class="field"><label>Max tables</label><input id="nlMaxTables" type="number" value="16" /></div></div>
               <div class="field"><label>Request</label><textarea id="nlRequest" rows="2" placeholder="list users who signed up this week"></textarea></div>
@@ -1255,6 +1511,12 @@
 
         <!-- RPC --><section class="panel" data-panel="rpc">
           <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Raw API</div><h2>RPC Explorer</h2><p class="section-body">Browse every advertised method, load a curated template, edit the JSON params inline, and dispatch the RPC. The full method surface lives one click away from any other panel.</p></div>
+                <div class="section-links"><button class="sm" data-panel="workspace">Open Workspace</button><button class="ghost sm" data-panel="settings">Open Settings</button><button class="ghost sm" data-panel="research">Open Research</button></div>
+              </div>
+            </div>
             <div class="card wide"><h2>RPC Explorer</h2>
               <div class="row"><div class="field"><label>Method</label><select id="rpcMethod"></select></div><div class="field"><label>Template</label><select id="rpcTemplate"></select></div><div class="field"><label>Search</label><input id="methodSearch" placeholder="filter" /></div></div>
               <div class="actions"><button id="btnRpcLoadTemplate" class="secondary sm">Load Template</button><button id="btnRpcSend" class="primary sm">Send RPC</button></div>

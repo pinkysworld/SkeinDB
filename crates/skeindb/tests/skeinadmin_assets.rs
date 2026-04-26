@@ -267,3 +267,76 @@ fn skeinadmin_views_panel_exposes_dependency_usage_summary() {
         );
     }
 }
+
+#[test]
+fn skeinadmin_dashboard_exposes_command_center_and_summary_bands() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+
+    for marker in [
+        "Operator Command Center",
+        "Workspace Mission Control",
+        "CDC Control Surface",
+        "btnQuickCreateDb",
+        "btnQuickCreateTable",
+        "btnQuickInsertRow",
+        "btnQuickBrowseData",
+        "btnQuickCluster",
+        "workspaceSummaryBar",
+        "cdcSummaryBar",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin dashboard polish missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn skeinadmin_panels_have_uniform_section_band_heroes() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+
+    // Every major operator panel must lead with a section-band hero so the
+    // console keeps a uniform dashboard-quality look.
+    for hero_title in [
+        "Workspace Mission Control",
+        "Schema Command Deck",
+        "Data Workbench",
+        "Cluster Operations",
+        "Settings &amp; Feature Flags",
+        "Engine Configuration",
+        "Telemetry &amp; Workload Insights",
+        "Security Center",
+        "Encryption Control",
+        "CDC Control Surface",
+        "Time Travel &amp; Replay",
+        "Research Agenda Dashboard",
+        "Vector Search",
+        "Privacy Controls",
+        "Forensic Audit Chain",
+        "Incremental Views",
+        "Merge &amp; CRDT Policies",
+        "Wasm Query Operators",
+        "Index Advisor",
+        "Migration &amp; Compatibility",
+        "Natural Language Lab",
+        "RPC Explorer",
+    ] {
+        assert!(
+            html.contains(hero_title),
+            "skeinadmin panel hero missing: {hero_title}"
+        );
+    }
+
+    // The cluster panel must group its previously-flat actions into observe /
+    // enroll / shard-placement subsections so it stops feeling like a flat list.
+    for marker in [">Observe<", ">Enroll Nodes<", ">Shard Placement<"] {
+        assert!(
+            html.contains(marker),
+            "cluster panel should expose grouped action sections, missing: {marker}"
+        );
+    }
+}

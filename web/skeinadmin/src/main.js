@@ -38,6 +38,12 @@ const STATE = {
   easyDesignDraft: null,
   easySortColumn: '',
   easySortDir: 'asc',
+  preparedQueries: [],
+  txCurrentId: '',
+  txReadOnly: false,
+  schemaLastIndexCount: null,
+  schemaLastIndexDb: '',
+  schemaLastIndexTable: '',
   qbConditions: [],
   advisorSuggestions: [],
   advisorHistory: [],
@@ -57,13 +63,13 @@ const STATE = {
 const PANEL_META = {
   overview:   { title: 'Admin Overview',      subtitle: 'Single-binary admin console with all 20 research features.' },
   easy:       { title: 'Easy Viewer',         subtitle: 'Click-first controls with inline grid editing and guided forms.' },
-  workspace:  { title: 'SQL Workspace',        subtitle: 'Run SQL for compatibility or SkeinQL for full control.' },
-  schema:     { title: 'Structure Manager',    subtitle: 'Create databases, design tables, and review schema.' },
+  workspace:  { title: 'SQL Workspace',        subtitle: 'Run SQL, prepare SkeinQL queries, and manage transaction handles.' },
+  schema:     { title: 'Structure Manager',    subtitle: 'Create databases, design tables, and manage secondary indexes.' },
   data:       { title: 'Browse & Edit',        subtitle: 'Browse rows, insert data, and run table edits.' },
   cluster:    { title: 'Cluster Manager',      subtitle: 'Plan topology, inspect transport, and manage layouts.' },
   settings:   { title: 'Settings Manager',     subtitle: 'Read and update server settings and feature config.' },
   telemetry:  { title: 'Telemetry Center',     subtitle: 'Inspect compatibility, feature usage, plan cache, and query pressure.' },
-  cdc:        { title: 'CDC Manager',          subtitle: 'Subscribe to table changefeeds, poll events, ACK offsets, and inspect lag.' },
+  cdc:        { title: 'CDC Manager',          subtitle: 'Subscribe to tables or prepared queries, poll events, ACK offsets, and inspect lag.' },
   replay:     { title: 'Time Travel & Replay', subtitle: 'Run point-in-time queries, manage history retention, and verify replay bundles.' },
   security:   { title: 'Security Center',      subtitle: 'Manage tokens, review grants, and control sensitive operations.' },
   engine:     { title: 'Engine Config',        subtitle: 'Toggle storage, MVCC, compaction, cache, and security features.' },
@@ -115,11 +121,15 @@ const FEATURE_CENTER = [
   { title: 'Easy Viewer', desc: 'Click-first controls for daily operations.', panel: 'easy' },
   { title: 'SQL Compat', desc: 'MySQL-compatible SQL layer with window functions.', panel: 'workspace' },
   { title: 'SkeinQL', desc: 'Native structured query API.', panel: 'workspace' },
+  { title: 'Prepared Queries', desc: 'Prepare once, execute repeatedly, and expose GET + CDC hooks.', panel: 'workspace' },
+  { title: 'Transactions', desc: 'Open, commit, and roll back explicit tx handles.', panel: 'workspace' },
   { title: 'Schema Mgmt', desc: 'Create/alter DB and tables.', panel: 'schema' },
+  { title: 'Secondary Indexes', desc: 'Inspect and manage index DDL from guided fields.', panel: 'schema' },
   { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
   { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
   { title: 'CDC', desc: 'Table subscriptions, polling, ACKs, and lag view.', panel: 'cdc' },
+  { title: 'CDC Query Feeds', desc: 'Subscribe prepared queries to invalidation streams.', panel: 'cdc' },
   { title: 'Time Travel & Replay', desc: 'As-of queries, retention controls, and replay integrity checks.', panel: 'replay' },
   { title: 'Security', desc: 'API tokens, grants, and sensitive controls.', panel: 'security' },
   { title: 'Vectors', desc: 'kNN embedding search.', panel: 'vectors' },
@@ -173,6 +183,11 @@ const RPC_TEMPLATES = [
   { label: 'query.select', method: 'query.select', params: { query:{schema:'demo',table:'users',select:[{col:'id'},{col:'name'}]}, result_format:'rows_json' } },
   { label: 'query.select (as_of)', method: 'query.select', params: { query:{schema:'demo',table:'users',select:[{col:'id'},{col:'name'}]}, as_of:{t:'datetime',iso:'2026-01-01T00:00:00Z'}, result_format:'rows_json' } },
   { label: 'query.patch', method: 'query.patch', params: { query:{schema:'demo',table:'users',select:[{col:'id'}]}, base_etag:'', include_full:true, result_format:'rows_json' } },
+  { label: 'query.prepare', method: 'query.prepare', params: { query:{body:{select:{from:[{db:'demo',table:'users'}],projection:[{expr:{col:'id'}},{expr:{col:'name'}}]}}} } },
+  { label: 'query.execute_prepared', method: 'query.execute_prepared', params: { query_id:'query_demo', args:[], result_format:'rows_json' } },
+  { label: 'tx.begin', method: 'tx.begin', params: { read_only:false } },
+  { label: 'tx.commit', method: 'tx.commit', params: { tx_id:'tx_demo' } },
+  { label: 'tx.rollback', method: 'tx.rollback', params: { tx_id:'tx_demo' } },
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
   { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregate:{op:'count',col:'id'}, epsilon:1.0 } },
   { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { db:'demo', table:'events' } },
@@ -190,6 +205,7 @@ const RPC_TEMPLATES = [
   { label: 'advisor.history', method: 'advisor.history', params: { table:{db:'demo',table:'users'}, limit:10 } },
   { label: 'ai.autoparam.analyze', method: 'ai.autoparam.analyze', params: { sql:'SELECT * FROM users WHERE id = 42' } },
   { label: 'cdc.subscribe_table', method: 'cdc.subscribe_table', params: { db:'demo', table:'users' } },
+  { label: 'cdc.subscribe_query', method: 'cdc.subscribe_query', params: { query_id:'query_demo', args:[] } },
   { label: 'cdc.poll', method: 'cdc.poll', params: { sub_id:'sub_1', from_offset:0, limit:200 } },
   { label: 'cdc.ack', method: 'cdc.ack', params: { sub_id:'sub_1', offset:42 } },
   { label: 'cdc.close', method: 'cdc.close', params: { sub_id:'sub_1' } },
@@ -297,6 +313,7 @@ function setConnStatus(kind, message, detail) {
   });
   const s = $('connSummary');
   if (s) s.textContent = detail || message || 'Disconnected';
+  refreshDashboardSummaries();
 }
 
 function setSelectedDb(db) {
@@ -306,6 +323,7 @@ function setSelectedDb(db) {
   });
   const easyDb = $('easyCreateDb');
   if (easyDb && !easyDb.value.trim()) easyDb.value = STATE.selectedDb;
+  updateContext();
 }
 
 function setSelectedTable(table) {
@@ -315,6 +333,7 @@ function setSelectedTable(table) {
   });
   const easyTable = $('easyCreateTableName');
   if (easyTable && !easyTable.value.trim()) easyTable.value = STATE.selectedTable;
+  updateContext();
 }
 
 function resolveDefaultDb() {
@@ -335,6 +354,177 @@ function updateContext() {
   const tbl = $('contextTable'); if (tbl) tbl.textContent = STATE.selectedTable || '--';
   const h = $('contextHint');
   if (h) h.textContent = !STATE.selectedDb ? 'Select a database from the left tree.' : !STATE.selectedTable ? 'Select a table to browse.' : 'Ready.';
+  refreshDashboardSummaries();
+}
+
+function renderGlanceCard(label, value, detail) {
+  return '<div class="glance-card"><div class="glance-label">' + escapeHtml(label)
+    + '</div><div class="glance-value">' + escapeHtml(value)
+    + '</div><div class="glance-detail">' + escapeHtml(detail) + '</div></div>';
+}
+
+function currentSelectionLabel() {
+  if (STATE.selectedDb && STATE.selectedTable) return STATE.selectedDb + '.' + STATE.selectedTable;
+  if (STATE.selectedDb) return STATE.selectedDb + '.*';
+  return 'No active selection';
+}
+
+function cdcSubscriptionStats() {
+  const subs = Array.isArray(STATE.cdcSubscriptions) ? STATE.cdcSubscriptions : [];
+  const stats = { total: subs.length, tableCount: 0, queryCount: 0, selected: null };
+  subs.forEach((sub) => {
+    if (sub.kind === 'query') stats.queryCount += 1;
+    else stats.tableCount += 1;
+  });
+  stats.selected = cdcFindSubscription(STATE.cdcSelectedSubId);
+  return stats;
+}
+
+function renderOverviewHero() {
+  const connection = $('overviewHeroConnection');
+  const methods = $('overviewHeroMethods');
+  const research = $('overviewHeroResearch');
+  const mode = $('overviewHeroMode');
+  const selectionSummary = $('overviewSelectionSummary');
+  const sessionSummary = $('overviewSessionSummary');
+  const coverageSummary = $('overviewCoverageSummary');
+  const methodCount = Array.isArray(STATE.methods) ? STATE.methods.length : 0;
+  const hardenedCount = RESEARCH_TRACKS.filter((track) => track.status === 'hardened').length;
+  const prepared = Array.isArray(STATE.preparedQueries) ? STATE.preparedQueries : [];
+  const latestPrepared = latestPreparedQuery();
+  const txId = (($('txId')?.value || STATE.txCurrentId || '').trim());
+  const replayCount = Array.isArray(STATE.replayImports) ? STATE.replayImports.length : 0;
+  const cdcStats = cdcSubscriptionStats();
+  if (connection) connection.textContent = STATE.connected ? 'Online' : 'Offline';
+  if (methods) methods.textContent = methodCount ? String(methodCount) : '--';
+  if (research) research.textContent = hardenedCount + '/' + String(RESEARCH_TRACKS.length);
+  if (mode) mode.textContent = STATE.isConsole ? 'Console' : 'Admin';
+  if (selectionSummary) {
+    const copy = !STATE.selectedDb
+      ? 'No database selected yet. Use the left tree or Schema panel to establish the active working set.'
+      : !STATE.selectedTable
+        ? 'Database ' + STATE.selectedDb + ' is active. Select a table to unlock seeded browse, index, CDC, and replay workflows.'
+        : 'Active selection is ' + STATE.selectedDb + '.' + STATE.selectedTable + '. Workspace, Schema, CDC, and Replay panels will seed from it.';
+    selectionSummary.innerHTML = '<strong>Selection</strong>' + escapeHtml(copy);
+  }
+  if (sessionSummary) {
+    const txCopy = txId ? txId + (STATE.txReadOnly ? ' (read only)' : ' (read/write)') : 'No active tx_id';
+    sessionSummary.innerHTML = '<strong>Session State</strong>Prepared queries: ' + escapeHtml(String(prepared.length))
+      + ' | Active transaction: ' + escapeHtml(txCopy)
+      + '<br>CDC subscriptions: ' + escapeHtml(String(cdcStats.total) + ' total (' + cdcStats.tableCount + ' table / ' + cdcStats.queryCount + ' query)')
+      + ' | Replay workspaces: ' + escapeHtml(String(replayCount));
+  }
+  if (coverageSummary) {
+    const coverageCopy = methodCount
+      ? ('Loaded methods: ' + methodCount + ' | Latest prepared query: ' + (latestPrepared?.query_id || 'none yet'))
+      : 'Connect to load the live method surface and enable direct jump links into supported RPC examples.';
+    coverageSummary.innerHTML = '<strong>Coverage</strong>' + escapeHtml(coverageCopy)
+      + '<br>' + escapeHtml(hardenedCount + ' hardened research tracks and ' + (RESEARCH_TRACKS.length - hardenedCount) + ' prototype tracks are mapped into this console.');
+  }
+}
+
+function renderWorkspaceGlance() {
+  const host = $('workspaceSummaryBar');
+  if (!host) return;
+  const latestPrepared = latestPreparedQuery();
+  const preparedCount = Array.isArray(STATE.preparedQueries) ? STATE.preparedQueries.length : 0;
+  const txId = (($('txId')?.value || STATE.txCurrentId || '').trim());
+  host.innerHTML = [
+    renderGlanceCard(
+      'Selection',
+      currentSelectionLabel(),
+      STATE.selectedTable
+        ? 'SQL templates, SkeinQL helpers, CDC, and replay tools can seed from the active table.'
+        : 'Pick a table from the left tree to prefill the SQL and SkeinQL surfaces.'
+    ),
+    renderGlanceCard(
+      'Prepared Studio',
+      latestPrepared ? latestPrepared.query_id : 'No prepared query',
+      preparedCount + ' query id(s) cached in this browser session.'
+    ),
+    renderGlanceCard(
+      'Transactions',
+      txId || 'Idle',
+      txId ? ('Mode: ' + (STATE.txReadOnly ? 'read only' : 'read/write')) : 'Begin a transaction when you need a stable tx_id across multiple steps.'
+    ),
+    renderGlanceCard(
+      'Next Move',
+      latestPrepared ? 'CDC or GET handoff ready' : 'Prepare the current query',
+      latestPrepared
+        ? 'Use the CDC handoff or copy the GET URL for zero-argument prepared queries.'
+        : 'Preparing once unlocks reusable execution, GET, and query-scoped CDC flows.'
+    )
+  ].join('');
+}
+
+function renderSchemaGlance() {
+  const host = $('schemaSummaryBar');
+  if (!host) return;
+  const describedTarget = STATE.schemaLastIndexDb && STATE.schemaLastIndexTable
+    ? (STATE.schemaLastIndexDb + '.' + STATE.schemaLastIndexTable)
+    : 'No described table';
+  const indexCount = STATE.schemaLastIndexCount;
+  host.innerHTML = [
+    renderGlanceCard(
+      'Selection',
+      currentSelectionLabel(),
+      STATE.selectedTable
+        ? 'Use the selected table to drive describe, structure, and index flows.'
+        : 'Choose a table from the tree to seed schema actions and the index manager.'
+    ),
+    renderGlanceCard(
+      'Last Index Snapshot',
+      describedTarget,
+      indexCount === null ? 'Describe a table or load indexes to capture the current secondary-index picture.' : String(indexCount) + ' secondary index(es) loaded.'
+    ),
+    renderGlanceCard(
+      'Working Style',
+      'Guided + JSON',
+      'Start with the builder for common paths, then drop into JSON only when you need full RPC fidelity.'
+    ),
+    renderGlanceCard(
+      'Best Next Step',
+      STATE.selectedTable ? 'Inspect indexes or describe' : 'Select a target table',
+      STATE.selectedTable ? 'Use Describe or Load Indexes to turn the current tree selection into a live schema snapshot.' : 'Once a table is active, structure, index, and view workflows will prefill automatically.'
+    )
+  ].join('');
+}
+
+function renderCdcGlance() {
+  const host = $('cdcSummaryBar');
+  if (!host) return;
+  const stats = cdcSubscriptionStats();
+  const selected = stats.selected ? cdcSubscriptionLabel(stats.selected) : 'No active subscription';
+  const latestPrepared = latestPreparedQuery();
+  host.innerHTML = [
+    renderGlanceCard(
+      'Subscriptions',
+      stats.total ? String(stats.total) + ' active' : 'No feeds yet',
+      stats.total ? (stats.tableCount + ' table feed(s) and ' + stats.queryCount + ' query feed(s) tracked in this browser session.') : 'Start with a table feed or reuse the latest prepared query for invalidation-based CDC.'
+    ),
+    renderGlanceCard(
+      'Selected Feed',
+      selected,
+      stats.selected ? ('ACK and poll actions operate on ' + selected + '.') : 'Choose a subscription after creating one to inspect lag and recent events.'
+    ),
+    renderGlanceCard(
+      'Prepared Handoff',
+      latestPrepared ? latestPrepared.query_id : 'None prepared',
+      latestPrepared ? 'The latest prepared query can be promoted into a query-scoped CDC feed with one click.' : 'Prepare a query in Workspace first if you want invalidation tied to query semantics.'
+    ),
+    renderGlanceCard(
+      'Selection Seed',
+      currentSelectionLabel(),
+      STATE.selectedTable ? 'The current table selection can seed table subscriptions immediately.' : 'Pick a table from the tree to prefill database and table subscription targets.'
+    )
+  ].join('');
+}
+
+function refreshDashboardSummaries() {
+  renderOverviewHero();
+  renderWorkspaceGlance();
+  renderSchemaGlance();
+  renderCdcGlance();
 }
 
 function persistInputs() {
@@ -405,6 +595,13 @@ function parseJsonInput(raw, label) {
 function parseJsonArrayInput(id, label) {
   const raw = $(id) ? $(id).value.trim() : ''; if (!raw) return undefined;
   const p = parseJsonInput(raw, label); if (!Array.isArray(p)) throw new Error(label + ' must be array'); return p;
+}
+
+function parseLitArgsInput(raw, label) {
+  const parsed = parseJsonInput(raw || '', label);
+  if (parsed === null) return [];
+  if (!Array.isArray(parsed)) throw new Error(label + ' must be an array');
+  return parsed;
 }
 
 function parseOptionalU64Input(id, label) {
@@ -628,6 +825,28 @@ function extractSqlTable(result) {
     const f = result.result[0]; if (f && typeof f === 'object' && !Array.isArray(f)) { const cols = Object.keys(f); return { columns: cols, rows: result.result.map(o => cols.map(k => o[k])) }; }
   }
   return null;
+}
+
+function renderQueryResultTable(targetId, result) {
+  const data = result && result.data;
+  if (!data || !Array.isArray(data.columns) || !Array.isArray(data.rows)) {
+    renderTable(targetId, [], []);
+    return;
+  }
+  renderTable(targetId, data.columns.map(normalizeSqlColumnName), data.rows);
+}
+
+function findRpcTemplate(method) {
+  return RPC_TEMPLATES.find((tpl) => tpl.method === method) || null;
+}
+
+function openRpcMethod(method, fallbackParams) {
+  if ($('rpcMethod')) $('rpcMethod').value = method;
+  const templateIndex = RPC_TEMPLATES.findIndex((tpl) => tpl.method === method);
+  if ($('rpcTemplate')) $('rpcTemplate').value = templateIndex >= 0 ? String(templateIndex) : '';
+  const params = templateIndex >= 0 ? RPC_TEMPLATES[templateIndex].params : (fallbackParams || {});
+  if ($('rpcParams')) $('rpcParams').value = JSON.stringify(params, null, 2);
+  setActivePanel('rpc', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1156,9 @@ function disconnect() {
   setConnStatus('warn', 'Disconnected', 'Disconnected.');
   showToast('Disconnected', 'info');
   STATE.methods = []; STATE.dbTree = {};
+  STATE.schemaLastIndexCount = null;
+  STATE.schemaLastIndexDb = '';
+  STATE.schemaLastIndexTable = '';
   STATE.replayHistoryStatus = null;
   STATE.replayLastBundle = null;
   STATE.replayImports = [];
@@ -1277,6 +1499,7 @@ async function schemaDescribe() {
       setSelectedDb(db);
       setSelectedTable(table);
       renderStructure(result);
+      renderSchemaIndexes(result);
       setOut(result, 'structureOut');
       const pk = new Set(Array.isArray(result.primary_key) ? result.primary_key : []);
       schemaBuilderSetRows((result.columns || []).map((col) => ({
@@ -1352,6 +1575,103 @@ async function schemaApplyMerge() {
     const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim(); if (!db || !table) throw new Error('DB+table required');
     await call('schema.apply_merge', { db, table }, 'schemaOut');
   } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
+}
+
+function readSchemaIndexContext() {
+  const db = validateEasyIdentifier($('schemaDb')?.value.trim(), 'Database');
+  const table = validateEasyIdentifier($('schemaTable')?.value.trim(), 'Table');
+  return { db, table };
+}
+
+function parseIdentifierList(raw, label) {
+  const parts = String(raw || '').split(',').map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) throw new Error(label + ' required');
+  return parts.map((part) => validateEasyIdentifier(part, label));
+}
+
+function renderSchemaIndexes(result) {
+  const indexes = Array.isArray(result?.indexes) ? result.indexes : [];
+  const db = result?.db || $('schemaDb')?.value.trim() || '--';
+  const table = result?.table || $('schemaTable')?.value.trim() || '--';
+  STATE.schemaLastIndexCount = indexes.length;
+  STATE.schemaLastIndexDb = db;
+  STATE.schemaLastIndexTable = table;
+  const summary = $('schemaIndexSummary');
+  if (summary) {
+    summary.innerHTML = '<strong>' + escapeHtml(db + '.' + table) + '</strong> has '
+      + escapeHtml(String(indexes.length)) + ' secondary index(es).';
+  }
+  if (!indexes.length) {
+    renderTable('schemaIndexTable', ['Name', 'Columns', 'Unique'], [['--', 'No secondary indexes defined', '--']]);
+    refreshDashboardSummaries();
+    return;
+  }
+  renderTable('schemaIndexTable', ['Name', 'Columns', 'Unique'], indexes.map((idx) => [
+    idx.name || '',
+    Array.isArray(idx.columns) ? idx.columns.join(', ') : '',
+    idx.unique ? 'YES' : 'NO',
+  ]));
+  refreshDashboardSummaries();
+}
+
+async function schemaLoadIndexes() {
+  try {
+    const ctx = readSchemaIndexContext();
+    const res = await call('schema.describe_table', ctx, 'schemaIndexOut');
+    const result = unwrapRpcResult(res, 'schema.describe_table');
+    renderSchemaIndexes(result);
+    setOut(result, 'schemaIndexOut');
+  } catch (e) {
+    renderTable('schemaIndexTable', [], []);
+    setOut({ error: String(e) }, 'schemaIndexOut');
+  }
+}
+
+async function schemaCreateIndex() {
+  try {
+    const ctx = readSchemaIndexContext();
+    const indexName = validateEasyIdentifier($('schemaIndexName')?.value.trim(), 'Index name');
+    const columns = parseIdentifierList($('schemaIndexColumns')?.value.trim(), 'Columns');
+    const unique = $('schemaIndexUnique')?.value === 'true';
+    const sql = 'CREATE ' + (unique ? 'UNIQUE ' : '') + 'INDEX ' + indexName + ' ON ' + ctx.db + '.' + ctx.table + ' (' + columns.join(', ') + ');';
+    const res = await call('sql.exec', { sql, default_db: ctx.db }, 'schemaIndexOut');
+    const result = unwrapRpcResult(res, 'sql.exec');
+    setOut({ sql, result }, 'schemaIndexOut');
+    await schemaLoadIndexes();
+    showToast('Index ' + indexName + ' created on ' + ctx.db + '.' + ctx.table + '.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaIndexOut');
+  }
+}
+
+async function schemaDropIndex() {
+  try {
+    const ctx = readSchemaIndexContext();
+    const indexName = validateEasyIdentifier($('schemaIndexName')?.value.trim(), 'Index name');
+    const ok = await skeinModal('⚠️', 'Drop Index', 'Drop index <b>' + escapeHtml(indexName) + '</b> from <b>' + escapeHtml(ctx.db + '.' + ctx.table) + '</b>?', [
+      { label: 'Cancel', value: false },
+      { label: 'Drop', value: true, cls: 'primary' },
+    ]);
+    if (!ok) return;
+    const sql = 'DROP INDEX ' + indexName + ' ON ' + ctx.db + '.' + ctx.table + ';';
+    const res = await call('sql.exec', { sql, default_db: ctx.db }, 'schemaIndexOut');
+    const result = unwrapRpcResult(res, 'sql.exec');
+    setOut({ sql, result }, 'schemaIndexOut');
+    await schemaLoadIndexes();
+    showToast('Index ' + indexName + ' dropped.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaIndexOut');
+  }
+}
+
+function schemaUseSelectedTable() {
+  if (!STATE.selectedDb || !STATE.selectedTable) {
+    setOut({ error: 'Select a table from the tree first.' }, 'schemaIndexOut');
+    return;
+  }
+  if ($('schemaDb')) $('schemaDb').value = STATE.selectedDb;
+  if ($('schemaTable')) $('schemaTable').value = STATE.selectedTable;
+  schemaLoadIndexes();
 }
 
 // ---------------------------------------------------------------------------
@@ -3231,7 +3551,7 @@ async function runSql(explain) {
 async function runSkeinQuery() {
   try {
     const method = $('skeinMethod').value, format = $('skeinFormat').value;
-    const args = parseJsonInput($('skeinArgs').value,'Args') || [];
+    const args = parseLitArgsInput($('skeinArgs').value, 'Args');
     const qid = $('skeinQueryId').value.trim();
     const baseEtag = $('skeinBaseEtag').value.trim();
     const incFull = $('skeinIncludeFull').value === 'true';
@@ -3240,8 +3560,219 @@ async function runSkeinQuery() {
     else if (method === 'query.prepare') { const q = parseJsonInput($('skeinQuery').value,'Query'); if (!q) throw new Error('Query required'); params.query = q; }
     else { const q = parseJsonInput($('skeinQuery').value,'Query'); if (!q) throw new Error('Query required'); params.query = q; if (args.length) params.args = args; if (format) params.result_format = format; if (method === 'query.patch') { if (baseEtag) params.base_etag = baseEtag; params.include_full = incFull; } }
     const res = await call(method, params, 'skeinOut');
-    if (method === 'query.prepare' && res && res.json && res.json.ok && res.json.result && $('skeinQueryId')) $('skeinQueryId').value = res.json.result.query_id || '';
+    if (method === 'query.prepare' && res && res.json && res.json.ok && res.json.result) {
+      const queryId = res.json.result.query_id || '';
+      const argsJson = ($('skeinArgs')?.value || '').trim() || '[]';
+      setPreparedQueryFields(queryId, argsJson, true);
+      rememberPreparedQuery({
+        query_id: queryId,
+        canonical: res.json.result.canonical || '',
+        args_json: argsJson,
+        created_at_ms: Date.now(),
+      });
+      renderPreparedWorkspace();
+    }
+    if (method === 'query.execute_prepared') {
+      const argsJson = ($('skeinArgs')?.value || '').trim() || '[]';
+      setPreparedQueryFields(qid, argsJson, false);
+      renderPreparedWorkspace();
+    }
   } catch (e) { setOut({error:String(e)},'skeinOut'); }
+}
+
+function preparedEndpointUrl(queryId) {
+  return getBaseUrl().replace(/\/$/, '') + '/api/v1/q/' + encodeURIComponent(queryId);
+}
+
+function setPreparedQueryFields(queryId, argsJson, overwriteArgs) {
+  if (queryId) {
+    if ($('skeinQueryId')) $('skeinQueryId').value = queryId;
+    if ($('preparedQueryId')) $('preparedQueryId').value = queryId;
+    if ($('cdcQueryId') && !$('cdcQueryId').value.trim()) $('cdcQueryId').value = queryId;
+  }
+  if (overwriteArgs && $('preparedArgs')) $('preparedArgs').value = argsJson || '[]';
+}
+
+function latestPreparedQuery() {
+  return Array.isArray(STATE.preparedQueries) && STATE.preparedQueries.length ? STATE.preparedQueries[0] : null;
+}
+
+function rememberPreparedQuery(entry) {
+  if (!entry || !entry.query_id) return;
+  STATE.preparedQueries = (STATE.preparedQueries || []).filter((item) => item.query_id !== entry.query_id);
+  STATE.preparedQueries.unshift(entry);
+  if (STATE.preparedQueries.length > 10) STATE.preparedQueries = STATE.preparedQueries.slice(0, 10);
+  renderPreparedWorkspace();
+}
+
+function renderPreparedWorkspace() {
+  const summary = $('preparedSummary');
+  const host = $('preparedQueryList');
+  const latest = latestPreparedQuery();
+  if (summary) {
+    if (!latest) {
+      summary.innerHTML = 'Prepare a SkeinQL query to unlock cacheable GET and query-scoped CDC workflows.';
+    } else {
+      const argsRaw = ($('preparedArgs')?.value || latest.args_json || '').trim() || '[]';
+      const getHint = argsRaw === '[]'
+        ? 'GET endpoint ready: ' + preparedEndpointUrl(latest.query_id)
+        : 'GET endpoint is only valid for zero-arg prepared queries; use RPC for parameterized execution.';
+      summary.innerHTML = '<strong>Active query</strong>: ' + escapeHtml(latest.query_id)
+        + ' | <strong>Prepared</strong>: ' + escapeHtml(formatUiTimestamp(Number(latest.created_at_ms) || 0))
+        + '<br>' + escapeHtml(getHint);
+    }
+  }
+  if (host) {
+    host.textContent = '';
+    if (!STATE.preparedQueries.length) {
+      host.textContent = 'No prepared queries in this browser session yet.';
+    } else {
+      STATE.preparedQueries.forEach((entry) => {
+        const btn = document.createElement('button');
+        btn.className = 'settings-key-btn sm';
+        btn.textContent = entry.query_id;
+        btn.addEventListener('click', () => {
+          setPreparedQueryFields(entry.query_id, entry.args_json || '[]', true);
+          renderPreparedWorkspace();
+        });
+        host.appendChild(btn);
+      });
+    }
+  }
+  refreshDashboardSummaries();
+}
+
+async function preparedPrepareCurrentQuery() {
+  try {
+    const query = parseJsonInput($('skeinQuery')?.value || '', 'Query');
+    if (!query) throw new Error('Query required');
+    const argsJson = ($('skeinArgs')?.value || '').trim() || '[]';
+    const res = await call('query.prepare', { query }, 'preparedOut');
+    const result = unwrapRpcResult(res, 'query.prepare');
+    setPreparedQueryFields(result.query_id || '', argsJson, true);
+    rememberPreparedQuery({
+      query_id: result.query_id || '',
+      canonical: result.canonical || '',
+      args_json: argsJson,
+      created_at_ms: Date.now(),
+    });
+    setOut(result, 'preparedOut');
+    showToast('Prepared query ' + (result.query_id || 'created') + '.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'preparedOut');
+  }
+}
+
+async function preparedExecuteCurrentQuery() {
+  try {
+    const queryId = ($('preparedQueryId')?.value || $('skeinQueryId')?.value || '').trim();
+    if (!queryId) throw new Error('Prepared query id required');
+    const argsRaw = ($('preparedArgs')?.value || '').trim() || '[]';
+    const args = parseLitArgsInput(argsRaw, 'Prepared args');
+    const format = $('skeinFormat')?.value || 'rows_json';
+    const res = await call('query.execute_prepared', cleanParams({ query_id: queryId, args, result_format: format }), 'preparedOut');
+    const result = unwrapRpcResult(res, 'query.execute_prepared');
+    renderQueryResultTable('preparedResultGrid', result);
+    setPreparedQueryFields(queryId, argsRaw, false);
+    rememberPreparedQuery({
+      query_id: queryId,
+      canonical: latestPreparedQuery()?.canonical || '',
+      args_json: argsRaw,
+      created_at_ms: latestPreparedQuery()?.created_at_ms || Date.now(),
+    });
+    setOut(result, 'preparedOut');
+    showToast('Prepared query executed.', 'success');
+  } catch (e) {
+    renderTable('preparedResultGrid', [], []);
+    setOut({ error: String(e) }, 'preparedOut');
+  }
+}
+
+async function preparedCopyGetUrl() {
+  try {
+    const queryId = ($('preparedQueryId')?.value || $('skeinQueryId')?.value || '').trim();
+    if (!queryId) throw new Error('Prepared query id required');
+    const args = parseLitArgsInput(($('preparedArgs')?.value || '').trim() || '[]', 'Prepared args');
+    if (args.length) throw new Error('GET endpoint does not support args; clear Prepared Args or use RPC execution');
+    await navigator.clipboard.writeText(preparedEndpointUrl(queryId));
+    showToast('Prepared query GET URL copied.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'preparedOut');
+  }
+}
+
+function preparedUseForCdc() {
+  const latest = latestPreparedQuery();
+  const queryId = ($('preparedQueryId')?.value || $('skeinQueryId')?.value || latest?.query_id || '').trim();
+  const argsJson = ($('preparedArgs')?.value || latest?.args_json || '').trim() || '[]';
+  if (!queryId) {
+    setOut({ error: 'Prepare or select a query first.' }, 'preparedOut');
+    return;
+  }
+  if ($('cdcQueryId')) $('cdcQueryId').value = queryId;
+  if ($('cdcQueryArgs')) $('cdcQueryArgs').value = argsJson;
+  setActivePanel('cdc', true);
+  showToast('Prepared query sent to CDC query subscriptions.', 'info');
+}
+
+function renderTxState() {
+  const input = $('txId');
+  const summary = $('txSummary');
+  if (input && STATE.txCurrentId && !input.value.trim()) input.value = STATE.txCurrentId;
+  if (summary) {
+    if (!STATE.txCurrentId) summary.innerHTML = 'No active transaction handle in this browser session.';
+    else summary.innerHTML = '<strong>Active TX</strong>: ' + escapeHtml(STATE.txCurrentId)
+      + ' | <strong>Read only</strong>: ' + escapeHtml(String(!!STATE.txReadOnly));
+  }
+  refreshDashboardSummaries();
+}
+
+async function txBegin() {
+  try {
+    const readOnly = $('txReadOnly')?.value === 'true';
+    const res = await call('tx.begin', { read_only: readOnly }, 'txOut');
+    const result = unwrapRpcResult(res, 'tx.begin');
+    STATE.txCurrentId = result.tx_id || '';
+    STATE.txReadOnly = readOnly;
+    if ($('txId')) $('txId').value = STATE.txCurrentId;
+    renderTxState();
+    setOut(result, 'txOut');
+    showToast('Transaction ' + STATE.txCurrentId + ' started.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'txOut');
+  }
+}
+
+async function txCommit() {
+  try {
+    const txId = ($('txId')?.value || STATE.txCurrentId || '').trim();
+    if (!txId) throw new Error('tx_id required');
+    const res = await call('tx.commit', { tx_id: txId }, 'txOut');
+    const result = unwrapRpcResult(res, 'tx.commit');
+    STATE.txCurrentId = '';
+    if ($('txId')) $('txId').value = '';
+    renderTxState();
+    setOut(result, 'txOut');
+    showToast('Transaction committed.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'txOut');
+  }
+}
+
+async function txRollback() {
+  try {
+    const txId = ($('txId')?.value || STATE.txCurrentId || '').trim();
+    if (!txId) throw new Error('tx_id required');
+    const res = await call('tx.rollback', { tx_id: txId }, 'txOut');
+    const result = unwrapRpcResult(res, 'tx.rollback');
+    STATE.txCurrentId = '';
+    if ($('txId')) $('txId').value = '';
+    renderTxState();
+    setOut(result, 'txOut');
+    showToast('Transaction rolled back.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'txOut');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3611,7 +4142,7 @@ function renderResearchDashboard() {
     }
     track.methods.forEach(m => {
       const btn = document.createElement('button'); btn.className = 'sm ghost'; btn.textContent = m;
-      btn.addEventListener('click', () => { if ($('rpcMethod')) $('rpcMethod').value = m; if ($('rpcParams')) $('rpcParams').value = '{}'; setActivePanel('rpc', true); });
+      btn.addEventListener('click', () => openRpcMethod(m));
       acts.appendChild(btn);
     });
     card.appendChild(acts); grid.appendChild(card);
@@ -3645,11 +4176,7 @@ function renderSettingsCapabilities(payload) {
     const btn = document.createElement('button');
     btn.className = 'settings-key-btn sm';
     btn.textContent = method;
-    btn.addEventListener('click', () => {
-      if ($('rpcMethod')) $('rpcMethod').value = method;
-      if ($('rpcParams')) $('rpcParams').value = '{}';
-      setActivePanel('rpc', true);
-    });
+    btn.addEventListener('click', () => openRpcMethod(method));
     grid.appendChild(btn);
   });
 }
@@ -3674,6 +4201,7 @@ async function silentRpc(method, params) {
 
 async function refreshTopTables() {
   const grid = $('topTablesGrid'); if (!grid) return;
+  const summary = $('topTablesSummary');
   try {
     const res = await silentRpc('sql.exec', {
       sql: 'SELECT table_schema, table_name, table_rows, data_length FROM information_schema.tables ORDER BY table_rows DESC LIMIT 10'
@@ -3681,6 +4209,7 @@ async function refreshTopTables() {
     const result = res?.json?.result;
     const data = result?.result?.data;
     if (!data || !Array.isArray(data.rows) || !data.rows.length) {
+      if (summary) summary.textContent = 'No tables discovered yet. Create one from Schema or Easy Viewer to populate this ranking.';
       renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], [['No tables found', '\u2014', '\u2014']]);
       return;
     }
@@ -3695,18 +4224,22 @@ async function refreshTopTables() {
         dl == null ? '\u2014' : formatBytes(Number(dl))
       ];
     });
+    if (summary) summary.textContent = rows.length + ' table(s) ranked by row count. Largest observed dataset: ' + rows[0][0] + ' with ' + rows[0][1] + ' row(s).';
     renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], rows);
   } catch (e) {
+    if (summary) summary.textContent = 'Top-table ranking is unavailable right now. Check connectivity or information_schema support.';
     renderTable('topTablesGrid', ['Table', 'Rows', 'Data'], [['Error: ' + (e.message || e), '\u2014', '\u2014']]);
   }
 }
 
 async function refreshSlowQueries() {
   const grid = $('slowQueryGrid'); if (!grid) return;
+  const summary = $('slowQuerySummary');
   try {
     const res = await silentRpc('stats.slow_queries', { limit: 10, min_ms: 0 });
     const queries = res?.json?.result?.queries || [];
     if (!queries.length) {
+      if (summary) summary.textContent = 'No slow queries recorded in the current telemetry window.';
       renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], [['No slow queries recorded', '\u2014', '\u2014']]);
       return;
     }
@@ -3715,14 +4248,18 @@ async function refreshSlowQueries() {
       q.fingerprint || '\u2014',
       typeof q.duration_ms === 'number' ? q.duration_ms.toFixed(1) : '\u2014'
     ]);
+    const hottest = queries[0];
+    if (summary) summary.textContent = queries.length + ' query sample(s) loaded. Slowest seen: ' + (hottest?.method || 'query') + ' at ' + (typeof hottest?.duration_ms === 'number' ? hottest.duration_ms.toFixed(1) + ' ms' : '--') + '.';
     renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], rows);
   } catch (e) {
+    if (summary) summary.textContent = 'Slow-query telemetry is unavailable right now.';
     renderTable('slowQueryGrid', ['Method', 'Query', 'Time (ms)'], [['Error: ' + (e.message || e), '\u2014', '\u2014']]);
   }
 }
 
 async function refreshActiveSessions() {
   const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  const summary = $('activeSessionsSummary');
   try {
     const res = await silentRpc('stats.snapshot', {});
     const snap = res?.json?.result;
@@ -3730,6 +4267,7 @@ async function refreshActiveSessions() {
       el('statActiveSessions', '--');
       el('statIdleSessions', '--');
       el('statLongestQuery', '--');
+      if (summary) summary.textContent = 'Live workload is unavailable until stats can be loaded.';
       return;
     }
     const active = snap.sessions?.active ?? snap.connections ?? 0;
@@ -3738,34 +4276,46 @@ async function refreshActiveSessions() {
     el('statActiveSessions', String(active));
     el('statIdleSessions', String(openTxns));
     el('statLongestQuery', typeof avg === 'number' ? avg.toFixed(1) + 'ms' : '--');
+    if (summary) summary.textContent = String(active) + ' live session(s), ' + String(openTxns) + ' open transaction(s), average latency ' + (typeof avg === 'number' ? avg.toFixed(1) + ' ms' : '--') + '.';
   } catch (e) {
     el('statActiveSessions', '--');
     el('statIdleSessions', '--');
     el('statLongestQuery', '--');
+    if (summary) summary.textContent = 'Live workload could not be refreshed.';
   }
 }
 
 async function refreshIndexHealth() {
   const el = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+  const summary = $('indexHealthSummary');
   try {
     const res = await silentRpc('advisor.history', {});
     const result = res?.json?.result;
-    const recs = Array.isArray(result?.recommendations) ? result.recommendations : [];
-    const applied = recs.filter(r => r.status === 'applied').length;
-    const dismissed = recs.filter(r => r.status === 'dismissed').length;
-    el('statIndexRecs', String(recs.length));
+    const entries = Array.isArray(result?.entries)
+      ? result.entries
+      : Array.isArray(result?.recommendations)
+        ? result.recommendations
+        : [];
+    const applied = entries.filter((entry) => entry.action === 'apply' || entry.status === 'applied' || entry.result_status === 'applied').length;
+    const dismissed = entries.filter((entry) => entry.action === 'dismiss' || entry.status === 'dismissed' || entry.result_status === 'dismissed').length;
+    el('statIndexRecs', String(entries.length));
     el('statIndexApplied', String(applied));
     el('statIndexDismissed', String(dismissed));
+    if (summary) summary.textContent = entries.length ? (entries.length + ' advisor event(s) loaded. ' + applied + ' applied and ' + dismissed + ' dismissed.') : 'No advisor history entries recorded yet. Run the Index Advisor to create evidence for this card.';
   } catch (e) {
     el('statIndexRecs', '0');
     el('statIndexApplied', '0');
     el('statIndexDismissed', '0');
+    if (summary) summary.textContent = 'Advisor history is unavailable right now.';
   }
 }
 
 function renderResearchStatusGrid() {
   const grid = $('researchStatusGrid'); if (!grid) return;
+  const summary = $('researchStatusSummary');
   grid.textContent = '';
+  const hardenedCount = RESEARCH_TRACKS.filter((track) => track.status === 'hardened').length;
+  if (summary) summary.textContent = hardenedCount + ' hardened track(s) and ' + (RESEARCH_TRACKS.length - hardenedCount) + ' prototype track(s). Click a card to jump directly when a panel exists.';
   RESEARCH_TRACKS.forEach(track => {
     const card = document.createElement('div');
     card.className = 'feature-card';
@@ -4044,6 +4594,7 @@ function renderReplayPanel() {
   renderReplayBundleSummary(STATE.replayLastBundle);
   renderReplayWorkspaceOptions();
   renderReplayIntegrity(STATE.replayLastRun);
+  refreshDashboardSummaries();
 }
 
 async function timeTravelSeedQuery() {
@@ -4279,6 +4830,14 @@ function cdcHydrateDefaultsFromContext() {
   if (tableInput && !tableInput.value.trim() && STATE.selectedTable) tableInput.value = STATE.selectedTable;
 }
 
+function cdcSubscriptionLabel(sub) {
+  if (!sub) return '--';
+  if (sub.kind === 'query') return 'query ' + (sub.query_id || sub.sub_id);
+  if (sub.target_label) return sub.target_label;
+  if (sub.db && sub.table) return sub.db + '.' + sub.table;
+  return sub.sub_id || '--';
+}
+
 function cdcFindSubscription(subId) {
   return (STATE.cdcSubscriptions || []).find((sub) => sub.sub_id === subId) || null;
 }
@@ -4301,7 +4860,7 @@ function renderCdcLagSummary(subs, selected) {
   }
   const totalLag = subs.reduce((sum, sub) => sum + cdcLagForSub(sub), 0);
   const maxLag = subs.reduce((value, sub) => Math.max(value, cdcLagForSub(sub)), 0);
-  const selectedLabel = selected ? (selected.db + '.' + selected.table + ' (' + selected.sub_id + ')') : 'none';
+  const selectedLabel = selected ? (cdcSubscriptionLabel(selected) + ' (' + selected.sub_id + ')') : 'none';
   el.innerHTML = '<strong>Subscriptions</strong>: ' + escapeHtml(String(subs.length))
     + ' | <strong>Total lag</strong>: ' + escapeHtml(String(totalLag)) + ' event(s)'
     + ' | <strong>Max lag</strong>: ' + escapeHtml(String(maxLag))
@@ -4316,7 +4875,7 @@ function renderCdcSubscriptionTable(subs) {
     return;
   }
   const maxLag = Math.max(1, ...subs.map((sub) => cdcLagForSub(sub)));
-  let h = '<table class="data-table"><thead><tr><th>Subscription</th><th>Table</th><th>Start</th><th>Acked</th><th>Next</th><th>Lag</th><th>Last Poll</th></tr></thead><tbody>';
+  let h = '<table class="data-table"><thead><tr><th>Subscription</th><th>Kind</th><th>Target</th><th>Start</th><th>Acked</th><th>Next</th><th>Lag</th><th>Last Poll</th></tr></thead><tbody>';
   subs.forEach((sub) => {
     const lag = cdcLagForSub(sub);
     const barWidth = lag <= 0 ? 0 : Math.max(8, Math.round((lag / maxLag) * 100));
@@ -4325,7 +4884,8 @@ function renderCdcSubscriptionTable(subs) {
       : '<div class="lag-bar"><div class="lag-bar-fill" style="width:' + barWidth + '%"></div></div>';
     h += '<tr' + (sub.sub_id === STATE.cdcSelectedSubId ? ' class="row-selected"' : '') + '>'
       + '<td><strong>' + escapeHtml(sub.sub_id) + '</strong></td>'
-      + '<td>' + escapeHtml(sub.db + '.' + sub.table) + '</td>'
+      + '<td>' + escapeHtml(sub.kind || 'table') + '</td>'
+      + '<td>' + escapeHtml(cdcSubscriptionLabel(sub)) + '</td>'
       + '<td>' + escapeHtml(String(Number(sub.offset) || 0)) + '</td>'
       + '<td>' + escapeHtml(String(Number(sub.acked_offset) || 0)) + '</td>'
       + '<td>' + escapeHtml(String(Number(sub.next_offset) || 0)) + '</td>'
@@ -4369,7 +4929,7 @@ function renderCdcPanel() {
   const select = $('cdcSubId');
   if (select) {
     select.innerHTML = subs.length
-      ? subs.map((sub) => '<option value="' + escapeHtml(sub.sub_id) + '">' + escapeHtml(sub.sub_id + ' · ' + sub.db + '.' + sub.table) + '</option>').join('')
+      ? subs.map((sub) => '<option value="' + escapeHtml(sub.sub_id) + '">' + escapeHtml(sub.sub_id + ' · ' + cdcSubscriptionLabel(sub)) + '</option>').join('')
       : '<option value="">No subscriptions</option>';
     select.disabled = !subs.length;
     select.value = STATE.cdcSelectedSubId || '';
@@ -4377,17 +4937,26 @@ function renderCdcPanel() {
   const selected = cdcFindSubscription(STATE.cdcSelectedSubId);
   const dbInput = $('cdcDb');
   const tableInput = $('cdcTable');
+  const queryIdInput = $('cdcQueryId');
+  const queryArgsInput = $('cdcQueryArgs');
   const fromInput = $('cdcFromOffset');
   const ackInput = $('cdcAckOffset');
   if (selected) {
-    if (dbInput && document.activeElement !== dbInput) dbInput.value = selected.db;
-    if (tableInput && document.activeElement !== tableInput) tableInput.value = selected.table;
+    if (selected.kind === 'table') {
+      if (dbInput && document.activeElement !== dbInput) dbInput.value = selected.db;
+      if (tableInput && document.activeElement !== tableInput) tableInput.value = selected.table;
+    }
+    if (selected.kind === 'query') {
+      if (queryIdInput && document.activeElement !== queryIdInput) queryIdInput.value = selected.query_id || '';
+      if (queryArgsInput && document.activeElement !== queryArgsInput) queryArgsInput.value = selected.args_json || '[]';
+    }
     if (fromInput && document.activeElement !== fromInput) fromInput.value = String(Number(selected.next_offset) || Number(selected.offset) || 0);
     if (ackInput && document.activeElement !== ackInput) ackInput.value = String(Math.max(Number(selected.next_offset) || 0, Number(selected.acked_offset) || 0));
   }
   renderCdcLagSummary(subs, selected);
   renderCdcSubscriptionTable(subs);
   renderCdcEvents(selected);
+  refreshDashboardSummaries();
 }
 
 async function cdcSubscribe() {
@@ -4402,8 +4971,10 @@ async function cdcSubscribe() {
     STATE.cdcSubscriptions = (STATE.cdcSubscriptions || []).filter((sub) => sub.sub_id !== result.sub_id);
     STATE.cdcSubscriptions.unshift({
       sub_id: result.sub_id,
+      kind: 'table',
       db,
       table,
+      target_label: db + '.' + table,
       offset,
       acked_offset: offset,
       next_offset: offset,
@@ -4418,6 +4989,53 @@ async function cdcSubscribe() {
   } catch (e) {
     setOut({ error: String(e) }, 'cdcOut');
   }
+}
+
+async function cdcSubscribeQuery() {
+  try {
+    const latest = latestPreparedQuery();
+    const queryId = (($('cdcQueryId')?.value || latest?.query_id || '').trim());
+    if (!queryId) throw new Error('Prepared query id required');
+    const argsRaw = ($('cdcQueryArgs')?.value || latest?.args_json || '').trim() || '[]';
+    const args = parseLitArgsInput(argsRaw, 'CDC query args');
+    const res = await call('cdc.subscribe_query', cleanParams({ query_id: queryId, args }), 'cdcQueryOut');
+    const result = unwrapRpcResult(res, 'cdc.subscribe_query');
+    const offset = Number(result.offset) || 0;
+    STATE.cdcSubscriptions = (STATE.cdcSubscriptions || []).filter((sub) => sub.sub_id !== result.sub_id);
+    STATE.cdcSubscriptions.unshift({
+      sub_id: result.sub_id,
+      kind: 'query',
+      query_id: queryId,
+      args_json: argsRaw,
+      target_label: 'query ' + queryId,
+      offset,
+      acked_offset: offset,
+      next_offset: offset,
+      created_at_ms: Date.now(),
+      last_polled_at_ms: 0,
+      last_events: [],
+    });
+    STATE.cdcSelectedSubId = result.sub_id;
+    setOut({ subscription: { sub_id: result.sub_id, query_id: queryId, offset } }, 'cdcQueryOut');
+    renderCdcPanel();
+    showToast('CDC query subscription created for ' + queryId + '.', 'success');
+  } catch (e) {
+    setOut({ error: String(e) }, 'cdcQueryOut');
+  }
+}
+
+function cdcUseLatestPrepared() {
+  const latest = latestPreparedQuery();
+  const queryId = ($('preparedQueryId')?.value || $('skeinQueryId')?.value || latest?.query_id || '').trim();
+  const argsJson = ($('preparedArgs')?.value || latest?.args_json || '').trim() || '[]';
+  if (!queryId) {
+    setOut({ error: 'Prepare a query in the workspace first.' }, 'cdcQueryOut');
+    return;
+  }
+  if ($('cdcQueryId')) $('cdcQueryId').value = queryId;
+  if ($('cdcQueryArgs')) $('cdcQueryArgs').value = argsJson;
+  setOut({ prepared_query: queryId, args: argsJson }, 'cdcQueryOut');
+  showToast('Loaded latest prepared query into CDC form.', 'info');
 }
 
 async function cdcPoll() {
@@ -4435,7 +5053,7 @@ async function cdcPoll() {
     selected.last_events = Array.isArray(result.events) ? result.events : [];
     selected.last_polled_at_ms = Date.now();
     selected.next_offset = Number(result.next_offset) || fromOffset;
-    setOut({ subscription: { sub_id: selected.sub_id, db: selected.db, table: selected.table }, poll: result }, 'cdcOut');
+    setOut({ subscription: { sub_id: selected.sub_id, kind: selected.kind || 'table', target: cdcSubscriptionLabel(selected) }, poll: result }, 'cdcOut');
     renderCdcPanel();
     showToast('CDC poll returned ' + String(selected.last_events.length) + ' event(s).', selected.last_events.length ? 'success' : 'info');
   } catch (e) {
@@ -4452,7 +5070,7 @@ async function cdcAck() {
     const res = await call('cdc.ack', { sub_id: selected.sub_id, offset }, 'cdcOut');
     const result = unwrapRpcResult(res, 'cdc.ack');
     selected.acked_offset = Number(result.acked_offset) || selected.acked_offset;
-    setOut({ subscription: { sub_id: selected.sub_id, db: selected.db, table: selected.table }, ack: result }, 'cdcOut');
+    setOut({ subscription: { sub_id: selected.sub_id, kind: selected.kind || 'table', target: cdcSubscriptionLabel(selected) }, ack: result }, 'cdcOut');
     renderCdcPanel();
     showToast('CDC subscription acked through offset ' + String(selected.acked_offset) + '.', 'success');
   } catch (e) {
@@ -4464,7 +5082,7 @@ async function cdcClose() {
   try {
     const selected = cdcFindSubscription(STATE.cdcSelectedSubId || $('cdcSubId')?.value || '');
     if (!selected) throw new Error('Select a subscription first');
-    const ok = await skeinModal('🛰️', 'Close CDC Subscription', 'Close <b>' + escapeHtml(selected.sub_id) + '</b> for <b>' + escapeHtml(selected.db + '.' + selected.table) + '</b>?', [
+    const ok = await skeinModal('🛰️', 'Close CDC Subscription', 'Close <b>' + escapeHtml(selected.sub_id) + '</b> for <b>' + escapeHtml(cdcSubscriptionLabel(selected)) + '</b>?', [
       { label: 'Cancel', value: false },
       { label: 'Close', value: true, cls: 'primary' },
     ]);
@@ -5006,7 +5624,7 @@ function renderMethodList(methods, filter) {
   if (!filtered.length) { t.textContent = 'No methods match.'; return; }
   filtered.forEach(m => {
     const btn = document.createElement('button'); btn.textContent = m;
-    btn.addEventListener('click', () => { if ($('rpcMethod')) $('rpcMethod').value = m; setActivePanel('rpc', true); });
+    btn.addEventListener('click', () => openRpcMethod(m));
     t.appendChild(btn);
   });
 }
@@ -5038,6 +5656,10 @@ function setActivePanel(panel, updateHash) {
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   updateHeader(panel); updateContext();
+  if (panel === 'workspace') {
+    renderPreparedWorkspace();
+    renderTxState();
+  }
   if (panel === 'cdc') renderCdcPanel();
   if (panel === 'replay') renderReplayPanel();
   if (panel === 'overview') {
@@ -5404,6 +6026,13 @@ wire('btnSqlTplInsert', () => setSqlText("INSERT INTO demo.users (id, name) VALU
 wire('btnSqlTplCreateDb', () => setSqlText('CREATE DATABASE demo;'));
 wire('btnSqlTplCreateTable', () => setSqlText("CREATE TABLE demo.users (id BIGINT PRIMARY KEY, name VARCHAR(255));"));
 wire('btnSkeinRun', runSkeinQuery);
+wire('btnPreparedPrepare', preparedPrepareCurrentQuery);
+wire('btnPreparedExecute', preparedExecuteCurrentQuery);
+wire('btnPreparedCopyHttp', preparedCopyGetUrl);
+wire('btnPreparedUseForCdc', preparedUseForCdc);
+wire('btnTxBegin', txBegin);
+wire('btnTxCommit', txCommit);
+wire('btnTxRollback', txRollback);
 
 // Schema
 wire('btnSchemaListDb', schemaListDatabases);
@@ -5422,6 +6051,10 @@ wire('btnSchemaBuilderLoad', schemaBuilderLoadCurrent);
 wire('btnSchemaBuilderSync', () => schemaBuilderSyncToJson(true));
 wire('btnSchemaBuilderCreateDb', schemaBuilderCreateDb);
 wire('btnSchemaBuilderCreateTable', schemaBuilderCreateTable);
+wire('btnSchemaLoadIndexes', schemaLoadIndexes);
+wire('btnSchemaCreateIndex', schemaCreateIndex);
+wire('btnSchemaDropIndex', schemaDropIndex);
+wire('btnSchemaUseSelection', schemaUseSelectedTable);
 
 // Data
 wire('btnDataFormLoad', dataFormLoadColumns);
@@ -5498,6 +6131,8 @@ wire('btnCdcSubscribe', cdcSubscribe);
 wire('btnCdcPoll', cdcPoll);
 wire('btnCdcAck', cdcAck);
 wire('btnCdcClose', cdcClose);
+wire('btnCdcUsePrepared', cdcUseLatestPrepared);
+wire('btnCdcSubscribeQuery', cdcSubscribeQuery);
 const cdcSubIdSelect = $('cdcSubId');
 if (cdcSubIdSelect) cdcSubIdSelect.addEventListener('change', () => { STATE.cdcSelectedSubId = cdcSubIdSelect.value; renderCdcPanel(); });
 
@@ -5674,6 +6309,8 @@ renderResearchDashboard();
 renderFeatureCenterGrid();
 renderResearchStatusGrid();
 renderResearchSettings();
+renderPreparedWorkspace();
+renderTxState();
 schemaBuilderSeedDefaults();
 easySetBuilderRows(defaultEasyBuilderRows());
 easyRefreshTargetsFromTree();
