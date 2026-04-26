@@ -7032,8 +7032,17 @@ impl Engine {
             .views
             .remove(&key)
             .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
+        let original_view = view.clone();
 
-        let mode = params.mode.as_deref().unwrap_or("auto").to_lowercase();
+        let mode = params
+            .mode
+            .as_deref()
+            .unwrap_or("auto")
+            .to_ascii_lowercase();
+        match mode.as_str() {
+            "auto" | "full" | "incremental" => {}
+            _ => anyhow::bail!("invalid_request: mode must be one of auto, full, incremental"),
+        }
 
         let refresh = (|| -> anyhow::Result<(u64, String)> {
             let info = view_query_info(&view.query)?;
@@ -7067,7 +7076,7 @@ impl Engine {
         let (rows, used_mode) = match refresh {
             Ok(v) => v,
             Err(err) => {
-                self.views.insert(key, view);
+                self.views.insert(key, original_view);
                 return Err(err);
             }
         };
@@ -35401,6 +35410,499 @@ mod tests {
             mode: Some("auto".to_string()),
         })?;
         assert_eq!(refresh.mode, "full");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_refresh_rejects_invalid_mode() -> anyhow::Result<()> {
+        let dir = temp_dir("view_refresh_invalid_mode");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("score", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                }],
+                Some(Expr::Op {
+                    op: "gt".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "score".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::U64 { v: 1 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                }),
+            ),
+            if_not_exists: None,
+        })?;
+
+        let err = engine
+            .view_refresh(ViewRefreshParams {
+                view: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "top_users".to_string(),
+                    r#as: None,
+                },
+                mode: Some("sideways".to_string()),
+            })
+            .expect_err("invalid mode should fail");
+        assert!(err
+            .to_string()
+            .contains("invalid_request: mode must be one of auto, full, incremental"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_refresh_rolls_back_on_incremental_error() -> anyhow::Result<()> {
+        let dir = temp_dir("view_refresh_rollback");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 20 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Col {
+                    col: "city".to_string(),
+                    table: None,
+                },
+            ],
+            Some(Expr::Op {
+                op: "gt".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "score".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 10 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            }),
+        );
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query,
+            if_not_exists: None,
+        })?;
+
+        let mut set = RowObject::new();
+        set.insert("score".to_string(), Lit::U64 { v: 15 });
+        let predicate = eq_expr(
+            Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            Expr::Lit {
+                lit: Lit::U64 { v: 1 },
+            },
+        );
+        engine.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        let view_key = TableKey {
+            db: "app".to_string(),
+            table: "top_users".to_string(),
+        };
+        let expected_view = engine
+            .views
+            .get(&view_key)
+            .cloned()
+            .expect("view should exist before failed refresh");
+
+        engine.change_seq += 1;
+        engine.changes.push(ChangeEvent {
+            seq: engine.change_seq,
+            db: "app".to_string(),
+            table: "users".to_string(),
+            op: "unsupported".to_string(),
+            pk: Some(vec![Lit::U64 { v: 1 }]),
+            query_id: None,
+            etag: None,
+            commit_ts_ms: now_millis(),
+            lsn: Some(engine.change_seq),
+        });
+
+        let err = engine
+            .view_refresh(ViewRefreshParams {
+                view: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "top_users".to_string(),
+                    r#as: None,
+                },
+                mode: Some("incremental".to_string()),
+            })
+            .expect_err("synthetic bad change should fail incremental refresh");
+        assert!(err
+            .to_string()
+            .contains("invalid_request: unsupported change op"));
+
+        let view = engine
+            .views
+            .get(&view_key)
+            .expect("view should be restored");
+        assert_eq!(
+            view.rows
+                .iter()
+                .map(|row| (row.pk.clone(), row.values.clone()))
+                .collect::<Vec<_>>(),
+            expected_view
+                .rows
+                .iter()
+                .map(|row| (row.pk.clone(), row.values.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(view.stale, expected_view.stale);
+        assert_eq!(view.last_change_seq, expected_view.last_change_seq);
+        assert_eq!(view.last_refresh_mode, expected_view.last_refresh_mode);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn view_grouped_incremental_refresh_survives_restart() -> anyhow::Result<()> {
+        let dir = temp_dir("view_grouped_restart_refresh");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 5 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Oslo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 7 }),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 3 }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: "Tokyo".to_string(),
+                        },
+                    ),
+                    ("score", Lit::U64 { v: 10 }),
+                ]),
+            ],
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            query: Query {
+                with: Vec::new(),
+                body: Box::new(QueryBody::Select {
+                    select: Box::new(SelectBody {
+                        distinct: None,
+                        projection: vec![
+                            SelectItem {
+                                expr: Expr::Col {
+                                    col: "city".to_string(),
+                                    table: None,
+                                },
+                                r#as: Some("city".to_string()),
+                            },
+                            SelectItem {
+                                expr: Expr::Func {
+                                    name: "count".to_string(),
+                                    args: Vec::new(),
+                                    distinct: None,
+                                },
+                                r#as: Some("cnt".to_string()),
+                            },
+                            SelectItem {
+                                expr: Expr::Func {
+                                    name: "sum".to_string(),
+                                    args: vec![Expr::Col {
+                                        col: "score".to_string(),
+                                        table: None,
+                                    }],
+                                    distinct: None,
+                                },
+                                r#as: Some("total".to_string()),
+                            },
+                        ],
+                        from: Some(vec![TableRef::Base(BaseTableRef {
+                            db: "app".to_string(),
+                            table: "users".to_string(),
+                            r#as: None,
+                        })]),
+                        r#where: None,
+                        group_by: Some(vec![Expr::Col {
+                            col: "city".to_string(),
+                            table: None,
+                        }]),
+                        having: None,
+                    }),
+                }),
+                order_by: Vec::new(),
+                limit: None,
+                lock: None,
+            },
+            if_not_exists: None,
+        })?;
+
+        drop(engine);
+        let mut reopened = Engine::open(&dir)?;
+        let view_key = TableKey {
+            db: "app".to_string(),
+            table: "city_scores".to_string(),
+        };
+        assert_eq!(
+            reopened
+                .views
+                .get(&view_key)
+                .map(|view| view.source_rows.len()),
+            Some(3)
+        );
+
+        let mut set = RowObject::new();
+        set.insert(
+            "city".to_string(),
+            Lit::Str {
+                v: "Oslo".to_string(),
+            },
+        );
+        set.insert("score".to_string(), Lit::U64 { v: 11 });
+        let predicate = Expr::Op {
+            op: "eq".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            })),
+            b: Some(Box::new(Expr::Lit {
+                lit: Lit::U64 { v: 3 },
+            })),
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        reopened.data_update(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            &predicate,
+            &set,
+            None,
+            None,
+            &[],
+        )?;
+
+        let refresh = reopened.view_refresh(ViewRefreshParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "city_scores".to_string(),
+                r#as: None,
+            },
+            mode: Some("incremental".to_string()),
+        })?;
+        assert_eq!(refresh.mode, "incremental");
+
+        let view = reopened
+            .views
+            .get(&view_key)
+            .expect("grouped view should exist after refresh");
+        let mut grouped = BTreeMap::new();
+        for row in view.rows.iter() {
+            let city = match &row.values[0] {
+                Lit::Str { v } => v.clone(),
+                other => panic!("expected city string, got {other:?}"),
+            };
+            let count = match &row.values[1] {
+                Lit::U64 { v } => *v,
+                other => panic!("expected count u64, got {other:?}"),
+            };
+            let total = match &row.values[2] {
+                Lit::F64 { v } => *v,
+                Lit::U64 { v } => *v as f64,
+                Lit::I64 { v } => *v as f64,
+                other => panic!("expected numeric total, got {other:?}"),
+            };
+            grouped.insert(city, (count, total));
+        }
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped.get("Oslo"), Some(&(3, 23.0)));
+        assert_eq!(view.source_rows.len(), 3);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
