@@ -29,7 +29,7 @@ use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 use skeindb_core::decode_varu;
-use skeindb_core::valuestore::{ValueId, ValueStore, ValueStoreConfig};
+use skeindb_core::valuestore::{ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig};
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
     AdvisorHistoryEntry, AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams,
@@ -1500,6 +1500,13 @@ impl Engine {
             mvcc_versions,
             delta_chains,
         }
+    }
+
+    pub fn value_lookup_distribution_snapshot(&self) -> ValueIdLookupDistribution {
+        self.value_store
+            .lock()
+            .map(|store| store.lookup_distribution(8))
+            .unwrap_or_default()
     }
 
     pub fn list_databases(&self) -> Vec<String> {

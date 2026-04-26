@@ -1,7 +1,7 @@
 # Learned Indexes for ValueID Lookup (Prototype)
 
 Status: Experimental
-Last updated: 2026-01-18
+Last updated: 2026-04-26
 
 This prototype adds an in-memory ValueStore with a hybrid learned index for
 ValueID lookups. The learned index is a piecewise-linear model over sorted
@@ -26,8 +26,12 @@ The model rebuilds when:
 
 The ValueStore exposes:
 - lookup counts, learned hit rate, average probes
-- lookup histogram buckets (byte-prefix)
+- exportable lookup histogram buckets (byte-prefix), top hot buckets, and model
+  distribution shift via `ValueStore::lookup_distribution()`
 - probe-count quantiles via the benchmark helper
+
+`stats.snapshot` also exports the same runtime histogram under
+`storage.value_lookup` for admin dashboards and external benchmark harnesses.
 
 ## Notes
 

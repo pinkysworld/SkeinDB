@@ -68,6 +68,33 @@ fn learned_index_lookup_hits() {
 }
 
 #[test]
+fn lookup_distribution_exports_histogram_and_top_buckets() {
+    let mut store = ValueStore::new(ValueStoreConfig::default());
+    let hot_id: ValueId = [0x2a; 16];
+    let cold_id: ValueId = [0x7f; 16];
+
+    store.put_with_id(ValueKind::Cell, hot_id, b"hot".to_vec());
+    store.put_with_id(ValueKind::Cell, cold_id, b"cold".to_vec());
+
+    for _ in 0..3 {
+        assert!(store.get(&hot_id).is_some());
+    }
+    assert!(store.get(&cold_id).is_some());
+
+    let report = store.lookup_distribution(2);
+    assert_eq!(report.total_lookups, 4);
+    assert_eq!(report.non_empty_buckets, 2);
+    assert_eq!(report.buckets.len(), 256);
+    assert_eq!(report.buckets[0x2a], 3);
+    assert_eq!(report.buckets[0x7f], 1);
+    assert_eq!(report.top_buckets.len(), 2);
+    assert_eq!(report.top_buckets[0].prefix, 0x2a);
+    assert_eq!(report.top_buckets[0].prefix_hex, "2a");
+    assert_eq!(report.top_buckets[0].count, 3);
+    assert!(report.top_buckets[0].share > report.top_buckets[1].share);
+}
+
+#[test]
 fn put_with_id_stores_custom_id() {
     let mut store = ValueStore::new(ValueStoreConfig::default());
     let id = [7u8; 16];

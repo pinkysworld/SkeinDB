@@ -27,6 +27,7 @@ Runtime status and checklist status intentionally differ:
   - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
+- 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -59,7 +60,7 @@ Source of truth matrix:
 ## Task definitions (new additions)
 
 ### Phase 24 — Learned indexes for ValueID lookup (R01)
-- [ ] T230: Instrument ValueID lookup distribution + export histograms
+- [x] T230: Instrument ValueID lookup distribution + export histograms
 - [ ] T231: Prototype learned model index (offline build) with fallback structure
 - [ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)
 - [ ] T233: Compaction-time model refresh policy + correctness tests

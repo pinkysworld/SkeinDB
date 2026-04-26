@@ -27200,9 +27200,12 @@ async fn stats_snapshot(state: &AppState) -> Value {
 
     let uptime_s = state.started.elapsed().as_secs();
     let now_ms = now_unix_ms_u64();
-    let storage = {
+    let (storage, value_lookup) = {
         let eng = state.engine.read().await;
-        eng.storage_stats_snapshot()
+        (
+            eng.storage_stats_snapshot(),
+            eng.value_lookup_distribution_snapshot(),
+        )
     };
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
     let compaction = compaction_runtime_json(&compaction_runtime);
@@ -27284,7 +27287,8 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "interned_values": storage.interned_values,
             "total_rows": storage.total_rows,
             "total_tables": storage.total_tables,
-            "disk_bytes": storage.disk_bytes
+            "disk_bytes": storage.disk_bytes,
+            "value_lookup": value_lookup
         },
         "compaction": compaction,
         "background": {"compaction": compaction_runtime.scheduler_mode, "snapshots": "idle"},
@@ -33476,6 +33480,17 @@ mod tests {
         )?;
         let state = build_state(dir.clone(), engine);
 
+        let data_get = call_rpc(
+            &state,
+            "data.get",
+            json!({
+                "table": {"db":"app", "table":"events"},
+                "pk": [{"t":"u64", "v":1}]
+            }),
+        )
+        .await;
+        assert!(data_get.ok);
+
         let stats = call_rpc(&state, "stats.snapshot", json!({})).await;
         assert!(stats.ok);
         let storage = stats
@@ -33504,11 +33519,29 @@ mod tests {
             .get("interned_values")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let value_lookup = storage.get("value_lookup").cloned().unwrap_or_default();
+        let lookup_total = value_lookup
+            .get("total_lookups")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let lookup_buckets = value_lookup
+            .get("buckets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let top_buckets = value_lookup
+            .get("top_buckets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         assert!(logical > unique);
         assert!(duplicate > 0);
         assert!(ratio > 1.0);
         assert!(interned > 0);
+        assert!(lookup_total > 0);
+        assert_eq!(lookup_buckets.len(), 256);
+        assert!(!top_buckets.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

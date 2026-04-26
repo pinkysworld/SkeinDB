@@ -281,6 +281,23 @@ pub struct LookupBenchmark {
     pub learned_hit_rate: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ValueIdHistogramBucket {
+    pub prefix: u8,
+    pub prefix_hex: String,
+    pub count: u64,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ValueIdLookupDistribution {
+    pub total_lookups: u64,
+    pub non_empty_buckets: usize,
+    pub buckets: Vec<u64>,
+    pub top_buckets: Vec<ValueIdHistogramBucket>,
+    pub model_shift_l1: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValueIdHistogram {
     buckets: [u64; 256],
@@ -309,6 +326,48 @@ impl ValueIdHistogram {
 
     pub fn bucket(&self, idx: usize) -> u64 {
         self.buckets[idx]
+    }
+
+    pub fn counts(&self) -> Vec<u64> {
+        self.buckets.to_vec()
+    }
+
+    pub fn non_empty_buckets(&self) -> usize {
+        self.buckets.iter().filter(|count| **count > 0).count()
+    }
+
+    pub fn top_buckets(&self, limit: usize) -> Vec<ValueIdHistogramBucket> {
+        let mut buckets = self
+            .buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(prefix, count)| {
+                if *count == 0 {
+                    return None;
+                }
+                let share = if self.total == 0 {
+                    0.0
+                } else {
+                    *count as f64 / self.total as f64
+                };
+                Some(ValueIdHistogramBucket {
+                    prefix: prefix as u8,
+                    prefix_hex: format!("{prefix:02x}"),
+                    count: *count,
+                    share,
+                })
+            })
+            .collect::<Vec<_>>();
+        buckets.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.prefix.cmp(&right.prefix))
+        });
+        if limit > 0 && buckets.len() > limit {
+            buckets.truncate(limit);
+        }
+        buckets
     }
 
     pub fn l1_distance(&self, other: &Self) -> f64 {
@@ -486,6 +545,19 @@ impl ValueStore {
 
     pub fn lookup_histogram(&self) -> &ValueIdHistogram {
         &self.lookup_hist
+    }
+
+    pub fn lookup_distribution(&self, top_bucket_limit: usize) -> ValueIdLookupDistribution {
+        ValueIdLookupDistribution {
+            total_lookups: self.lookup_hist.total(),
+            non_empty_buckets: self.lookup_hist.non_empty_buckets(),
+            buckets: self.lookup_hist.counts(),
+            top_buckets: self.lookup_hist.top_buckets(top_bucket_limit),
+            model_shift_l1: self
+                .model_hist
+                .as_ref()
+                .map(|model_hist| self.lookup_hist.l1_distance(model_hist)),
+        }
     }
 
     pub fn put(&mut self, kind: ValueKind, bytes: Vec<u8>) -> ValueId {
