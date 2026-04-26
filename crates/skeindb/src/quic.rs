@@ -1,8 +1,8 @@
-use std::{fs::File, io::BufReader, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Context};
 use quinn::{Endpoint, ServerConfig};
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use skeindb_skeinql::RpcRequest;
@@ -26,6 +26,10 @@ struct QuicEnvelope {
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
+fn ensure_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[derive(Debug, Clone)]
 pub struct QuicServeOpts {
     pub bind: String,
@@ -35,6 +39,7 @@ pub struct QuicServeOpts {
 }
 
 pub async fn serve_quic(state: AppState, opts: QuicServeOpts) -> anyhow::Result<()> {
+    ensure_rustls_provider();
     let addr: SocketAddr = format!("{}:{}", opts.bind, opts.port).parse()?;
     let (certs, key) = load_cert_chain(&opts.cert_path, &opts.key_path)?;
 
@@ -101,7 +106,7 @@ async fn handle_stream(
             let resp_bytes =
                 serde_json::to_vec(&resp).with_context(|| "failed to encode QUIC RPC response")?;
             write_frame(&mut send, &resp_bytes).await?;
-            send.finish().await?;
+            send.finish()?;
             return Ok(());
         }
     }
@@ -116,7 +121,7 @@ async fn handle_stream(
         write_frame(&mut send, &resp_bytes).await?;
     }
 
-    send.finish().await?;
+    send.finish()?;
     Ok(())
 }
 
@@ -146,37 +151,19 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> anyh
 fn load_cert_chain(
     cert_path: &PathBuf,
     key_path: &PathBuf,
-) -> anyhow::Result<(Vec<Certificate>, PrivateKey)> {
-    let mut cert_reader = BufReader::new(
-        File::open(cert_path)
-            .with_context(|| format!("open QUIC cert: {}", cert_path.display()))?,
-    );
-    let certs = rustls_pemfile::certs(&mut cert_reader)
-        .context("read QUIC certs")?
-        .into_iter()
-        .map(Certificate)
-        .collect::<Vec<_>>();
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let certs = CertificateDer::pem_file_iter(cert_path)
+        .with_context(|| format!("open QUIC cert: {}", cert_path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read QUIC certs")?;
     if certs.is_empty() {
         return Err(anyhow!("no certificates found in {}", cert_path.display()));
     }
 
-    let mut key_reader = BufReader::new(
-        File::open(key_path).with_context(|| format!("open QUIC key: {}", key_path.display()))?,
-    );
-    let mut keys =
-        rustls_pemfile::pkcs8_private_keys(&mut key_reader).context("read QUIC private key")?;
-    if keys.is_empty() {
-        let mut key_reader = BufReader::new(
-            File::open(key_path)
-                .with_context(|| format!("open QUIC key: {}", key_path.display()))?,
-        );
-        keys = rustls_pemfile::rsa_private_keys(&mut key_reader).context("read QUIC RSA key")?;
-    }
-    let key = keys
-        .pop()
-        .ok_or_else(|| anyhow!("no private key found in {}", key_path.display()))?;
+    let key = PrivateKeyDer::from_pem_file(key_path)
+        .with_context(|| format!("open/read QUIC key: {}", key_path.display()))?;
 
-    Ok((certs, PrivateKey(key)))
+    Ok((certs, key))
 }
 
 #[cfg(test)]

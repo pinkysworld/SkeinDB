@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"
-wasmtime = "20"
+wasmtime = { version = "42.0.2", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [dev-dependencies]
 wat = "1"

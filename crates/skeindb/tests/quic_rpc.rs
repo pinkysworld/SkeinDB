@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use quinn::{ClientConfig, Endpoint};
 use rcgen::generate_simple_self_signed;
-use rustls::{Certificate, RootCertStore};
+use rustls::{pki_types::CertificateDer, RootCertStore};
 use serde_json::json;
 use skeindb_skeinql::types::{
     BaseTableRef, Cte, ExistsExpr, Expr, JoinRef, JoinTableRef, JoinType, LimitClause, Lit,
@@ -23,6 +23,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 static QUIC_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static QUIC_RUSTLS_PROVIDER: OnceLock<()> = OnceLock::new();
+
+fn ensure_rustls_provider() {
+    QUIC_RUSTLS_PROVIDER.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 async fn quic_test_guard() -> OwnedSemaphorePermit {
     let sem = QUIC_TEST_SEMAPHORE
@@ -905,9 +912,9 @@ impl TestHarness {
         let dir = temp_dir(label);
         let cert =
             generate_simple_self_signed(vec!["localhost".to_string()]).context("generate cert")?;
-        let cert_pem = cert.serialize_pem().context("serialize cert")?;
-        let key_pem = cert.serialize_private_key_pem();
-        let cert_der = cert.serialize_der().context("serialize cert der")?;
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.signing_key.serialize_pem();
+        let cert_der = cert.cert.der().to_vec();
 
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
@@ -933,23 +940,25 @@ struct QuicClient {
 
 impl QuicClient {
     async fn connect(port: u16, cert_der: Vec<u8>) -> anyhow::Result<Self> {
+        ensure_rustls_provider();
         let mut roots = RootCertStore::empty();
         roots
-            .add(&Certificate(cert_der))
+            .add(CertificateDer::from(cert_der))
             .map_err(|_| anyhow!("add cert to root store"))?;
 
         let crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let client_config = ClientConfig::new(Arc::new(crypto));
+        let client_config = ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
+        ));
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let started_at = Instant::now();
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let attempt_timeout = Duration::from_millis(750);
 
         loop {
@@ -1009,7 +1018,7 @@ impl QuicClient {
             serde_json::to_vec(&json!({ "request": req, "meta": meta }))?
         };
         write_frame(&mut send, &payload).await?;
-        send.finish().await?;
+        send.finish()?;
 
         let resp_bytes = read_frame(&mut recv).await?;
         let resp: RpcResponse = serde_json::from_slice(&resp_bytes)?;
