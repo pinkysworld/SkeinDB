@@ -268,13 +268,13 @@ Security note:
 - Rewrite previews: before/after SkeinQL migration hints
 - Exportable rewrite reports (JSON/Markdown/HTML) + copy-to-clipboard
 
-### 4.16 NL Query (Experimental)
+### 4.16 NL Query (Hardened Research Baseline)
 (See `docs/research_agenda/R12_*`)
 - Natural language prompt workspace
 - `ai.nl.translate` preview + query JSON editor
 - `ai.nl.explain` summary + preview rows + approval token
 - `ai.nl.execute` gated execution using approval token
-- Suggested SkeinQL-native rewrites (cursor API, CDC subscribe, etc.)
+- Re-explain/edit loop before execution, backed by approval-token recomputation
 
 ### 4.17 Embeddings
 (See `docs/research_agenda/R10_*`)

@@ -325,4 +325,63 @@ mod tests {
         assert_eq!(report.execution_matches, 1);
         Ok(())
     }
+
+    #[test]
+    fn eval_examples_uses_rule_translation_for_execution_match() -> anyhow::Result<()> {
+        let examples = vec![NlEvalExample {
+            db: "app".to_string(),
+            request: "show all users".to_string(),
+            expected_query: serde_json::json!({
+                "body": {
+                    "select": {
+                        "projection": [{"expr":{"col":"id"}}],
+                        "from": [{"db":"app","table":"users"}]
+                    }
+                }
+            }),
+            prediction_query: None,
+            args: None,
+            fixtures: Some(NlEvalFixtures {
+                tables: vec![NlEvalTable {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    columns: vec![SchemaColumnInfo {
+                        name: "id".to_string(),
+                        r#type: skeindb_skeinql::types::TypeDesc {
+                            kind: "u64".to_string(),
+                            max: None,
+                            precision: None,
+                            scale: None,
+                            charset: None,
+                            collation: None,
+                            unsigned: None,
+                        },
+                        nullable: false,
+                        auto_increment: false,
+                    }],
+                    primary_key: vec!["id".to_string()],
+                }],
+                rows: vec![NlEvalRowInsert {
+                    table: BaseTableRef {
+                        db: "app".to_string(),
+                        table: "users".to_string(),
+                        r#as: None,
+                    },
+                    rows: vec![{
+                        let mut row = RowObject::new();
+                        row.insert("id".to_string(), Lit::U64 { v: 1 });
+                        row
+                    }],
+                }],
+            }),
+        }];
+
+        let report = eval_examples(&examples, true, None)?;
+        assert_eq!(report.total, 1);
+        assert_eq!(report.parsed_predicted, 1);
+        assert_eq!(report.exact_match, 1);
+        assert_eq!(report.execution_matches, 1);
+        assert_eq!(report.missing_prediction, 0);
+        Ok(())
+    }
 }

@@ -63,6 +63,7 @@ Related: R11, R12
 - `ai.nl.translate` — prompt packaging + optional rule-based translation (read-only by default)
 - `ai.nl.explain` — explanation + preview rows for verification
 - `ai.nl.execute` — execution gated by approval token
+- `skeindb nl-eval` — JSONL evaluation harness with exact and execution-match metrics
 
 ## 9. causal.* — Causal consistency via ETag chains
 Related: R13

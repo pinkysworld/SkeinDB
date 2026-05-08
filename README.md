@@ -49,7 +49,7 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 ## What's Still Partial
 
 - PostgreSQL support is real but still partial: COPY protocol, portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open. See [docs/PG_COMPAT.md](docs/PG_COMPAT.md).
-- Seventeen research tracks (`R01`–`R20`) are hardened with evidence-backed tests, while `R12`, `R18`, and `R19` remain prototype-level. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
+- Eighteen research tracks (`R01`–`R20`) are hardened with evidence-backed tests, while `R18` and `R19` remain prototype-level. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
 - Clustering, CDC, snapshots, Wasm operators, and advisor flows are wired end-to-end, but some areas still need hardening and broader lifecycle support.
 - SkeinDB does **not** claim 100% MySQL or PostgreSQL parity.
 

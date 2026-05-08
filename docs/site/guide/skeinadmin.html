@@ -381,13 +381,13 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
 - Intent inference: detect patterns like pagination, polling, soft deletes
 - Rewrite previews: before/after SkeinQL migration hints
 - Exportable rewrite reports (JSON/Markdown/HTML) + copy-to-clipboard</p>
-<h3 id="416-nl-query-experimental">4.16 NL Query (Experimental)<a class="headerlink" href="#416-nl-query-experimental" title="Permanent link">¶</a></h3>
+<h3 id="416-nl-query-hardened-research-baseline">4.16 NL Query (Hardened Research Baseline)<a class="headerlink" href="#416-nl-query-hardened-research-baseline" title="Permanent link">¶</a></h3>
 <p>(See <code>docs/research_agenda/R12_*</code>)
 - Natural language prompt workspace
 - <code>ai.nl.translate</code> preview + query JSON editor
 - <code>ai.nl.explain</code> summary + preview rows + approval token
 - <code>ai.nl.execute</code> gated execution using approval token
-- Suggested SkeinQL-native rewrites (cursor API, CDC subscribe, etc.)</p>
+- Re-explain/edit loop before execution, backed by approval-token recomputation</p>
 <h3 id="417-embeddings">4.17 Embeddings<a class="headerlink" href="#417-embeddings" title="Permanent link">¶</a></h3>
 <p>(See <code>docs/research_agenda/R10_*</code>)
 - Ingest embedding vectors
@@ -489,7 +489,7 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
 <li><a href="#413-views-incremental-maintenance">4.13 Views (Incremental Maintenance)</a></li>
 <li><a href="#414-forensics-verifiable-wal-queries">4.14 Forensics (Verifiable WAL Queries)</a></li>
 <li><a href="#415-migration-assistant-mysql-skeinql">4.15 Migration Assistant (MySQL → SkeinQL)</a></li>
-<li><a href="#416-nl-query-experimental">4.16 NL Query (Experimental)</a></li>
+<li><a href="#416-nl-query-hardened-research-baseline">4.16 NL Query (Hardened Research Baseline)</a></li>
 <li><a href="#417-embeddings">4.17 Embeddings</a></li>
 <li><a href="#416-natural-language-queries">4.16 Natural Language Queries</a></li>
 </ul>

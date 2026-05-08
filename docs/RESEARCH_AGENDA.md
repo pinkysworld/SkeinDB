@@ -48,7 +48,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R09 | Implemented | QUIC-native SkeinQL transport + `tests/quic_rpc.rs` |
 | R10 | Implemented (prototype) | Vector ingest/search/index status (`vector.*`) + ANN tests |
 | R11 | Implemented (prototype) | Autoparameterization analysis/classification (`ai.autoparam.*`) |
-| R12 | Implemented (prototype) | Natural language translate/explain/execute flow (`ai.nl.*`) |
+| R12 | Hardened | Natural language translate/explain/execute flow with approval-gated verification and NL eval harness (`ai.nl.*`, `skeindb nl-eval`) |
 | R13 | Implemented (prototype) | ETag validators + min-causality controls (`query.select` + `If-None-Match`) |
 | R14 | Implemented (prototype) | Replay bundle/time-travel export surfaces (`docs/TIME_TRAVEL_REPLAY.md`) |
 | R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, merge/apply APIs) |

@@ -28830,6 +28830,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_nl_translate_explain_execute_rpc_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_nl_rpc_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 7 }),
+                (
+                    "status",
+                    Lit::Str {
+                        v: "active".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let translate = call_rpc(
+            &state,
+            "ai.nl.translate",
+            json!({
+                "db": "app",
+                "request": "list users",
+                "tables": ["users"],
+                "read_only": true,
+                "include_schema": true
+            }),
+        )
+        .await;
+        assert!(translate.ok);
+        let query = translate.result.clone().unwrap_or_default()["query"].clone();
+        assert!(query.is_object());
+
+        let explain = call_rpc(
+            &state,
+            "ai.nl.explain",
+            json!({
+                "query": query,
+                "preview_limit": 1,
+                "preview_format": "objects_json"
+            }),
+        )
+        .await;
+        assert!(explain.ok);
+        let approval = explain.result.clone().unwrap_or_default()["approval_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!approval.is_empty());
+        assert!(explain.result.clone().unwrap_or_default()["preview"].is_array());
+
+        let execute = call_rpc(
+            &state,
+            "ai.nl.execute",
+            json!({
+                "query": translate.result.unwrap_or_default()["query"].clone(),
+                "approval_token": approval,
+                "result_format": "objects_json",
+                "want_etag": true
+            }),
+        )
+        .await;
+        assert!(execute.ok);
+        let result = execute.result.unwrap_or_default();
+        assert!(result["etag"].as_str().is_some());
+        let rows = result["data"].as_array().cloned().unwrap_or_default();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["status"]["v"].as_str(), Some("active"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn oblivious_policy_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("oblivious_rpc");
         let mut engine = Engine::open(&dir)?;

@@ -10,7 +10,7 @@ Notes:
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- **17 tracks are now hardened** with real algorithms and dedicated tests:
+- **18 tracks are now hardened** with real algorithms and dedicated tests:
   - **R01** — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - **R02** — Adaptive row/column storage (snapshot + readback integration test)
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
@@ -22,6 +22,7 @@ Runtime status and checklist status intentionally differ:
   - **R09** — QUIC-native protocol (multi-stream RPCs + rebind verification test)
   - **R10** — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
   - **R11** — LLM-assisted autoparameterization (classify + analyze integration test)
+  - **R12** — Natural language to SkeinQL (prompt packaging, dependency explanation, preview rows, approval-gated execution, evaluation harness)
   - **R13** — Causal vector-clock ETags (V2 clocks, dependency tracking, stale detection)
   - **R14** — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
   - **R15** — Conflict-free schema evolution (propose/merge/apply integration test)
@@ -29,13 +30,14 @@ Runtime status and checklist status intentionally differ:
   - **R17** — Query intent migration (pattern library, sequence intent detection, rewrite previews, JSON/Markdown report export)
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R17 to hardened (in addition to the previous batches); 3 tracks remain at prototype level.
+- This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
 - 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, `topology_analysis()`, `delta_benchmark()`, and focused ValueStore tests.
 - 2026-05-08: T204-T207 are closed with `energy_aware` compaction policy support, CPU/IO energy estimates, persisted external power/price/carbon signals, SkeinAdmin controls, and deterministic energy-vs-p99 evaluation output.
 - 2026-05-08: T114-T118 are closed with intent-pattern detection for pagination/polling/soft deletes/hierarchies/EXISTS/defaults, sequence-level polling correlation, SkeinQL-native rewrite snippets, SkeinAdmin migration assistant wiring, and the `migration.report_export` JSON/Markdown exporter.
+- 2026-05-08: T310-T316 are closed with `ai.nl.translate` prompt packages and rule translation, dependency-backed `ai.nl.explain` summaries plus preview rows, approval-token-gated `ai.nl.execute`, the `skeindb nl-eval` execution-match harness, SkeinAdmin NL Lab wiring, and focused engine/RPC/eval tests.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -140,13 +142,13 @@ Source of truth matrix:
 - [ ] T307: SkeinAdmin “Embeddings” page (index status + query playground)
 
 ### Phase 32 — Natural language to SkeinQL with verification (R12)
-- [ ] T310: NL→SkeinQL prompt+schema packaging format (offline first)
-- [ ] T311: Query explanation generator from dependency sets + planner info
-- [ ] T312: Verification UI flow: explanation + sample rows + approval gate
-- [ ] T313: Safety policy: forbid writes unless explicit confirmation token
-- [ ] T314: Evaluation harness: adapted text-to-SQL benchmarks (execution match)
-- [ ] T315: Iterative refinement protocol (user feedback loop)
-- [ ] T316: SkeinAdmin “NL Query” page (experimental)
+- [x] T310: NL→SkeinQL prompt+schema packaging format (offline first). Evidence: `AiNlPromptPackage`, `build_nl_prompt`, `ai.nl.translate`, and `ai_nl_translate_packages_schema` / `ai_nl_translate_explain_execute_roundtrip`.
+- [x] T311: Query explanation generator from dependency sets + planner info. Evidence: `ai.nl.explain`, `dependencies_for_query`, `ai_nl_preview`, and explanation fields for tables/projection/filters/order/limit/deps.
+- [x] T312: Verification UI flow: explanation + sample rows + approval gate. Evidence: SkeinAdmin NL Lab query JSON / preview / approval-token controls plus `ai_nl_translate_explain_execute_rpc_roundtrip`.
+- [x] T313: Safety policy: forbid writes unless explicit confirmation token. Evidence: the SkeinQL `Query` shape is read-query-only for this surface, `ai.nl.explain` only accepts SELECT, `ai.nl.execute` recomputes the approval token from query+args+deps, and tampered-query execution is rejected in `ai_nl_translate_explain_execute_roundtrip`.
+- [x] T314: Evaluation harness: adapted text-to-SQL benchmarks (execution match). Evidence: `skeindb nl-eval`, `NlEvalReport.execution_matches`, `eval_examples_exact_and_exec_match`, and `eval_examples_uses_rule_translation_for_execution_match`.
+- [x] T315: Iterative refinement protocol (user feedback loop). Evidence: prompt packages include stable `fingerprint`, editable generated query JSON, explicit args, preview re-explain, and reapproval before execution in SkeinAdmin.
+- [x] T316: SkeinAdmin “NL Query” page (experimental). Evidence: NL Lab (R11-R12) panel wires `ai.nl.translate`, `ai.nl.explain`, and `ai.nl.execute` with approval-token-gated execution.
 
 ### Phase 33 — Conflict-free schema evolution (R15)
 - [ ] T320: Schema version tagging in MVCC row versions

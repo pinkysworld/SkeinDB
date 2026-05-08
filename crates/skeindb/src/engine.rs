@@ -28769,6 +28769,136 @@ mod tests {
     }
 
     #[test]
+    fn ai_nl_translate_explain_execute_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_nl_roundtrip");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "status",
+                        Lit::Str {
+                            v: "active".to_string(),
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "status",
+                        Lit::Str {
+                            v: "paused".to_string(),
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+
+        let translated = engine.ai_nl_translate(AiNlTranslateParams {
+            db: "app".to_string(),
+            request: "show all users".to_string(),
+            tables: Some(vec!["users".to_string()]),
+            read_only: Some(true),
+            include_schema: Some(true),
+            max_tables: Some(4),
+        })?;
+        assert_eq!(translated.package.version, "nl_prompt_v1");
+        assert!(translated
+            .package
+            .prompt
+            .contains("Only generate read-only SELECT queries"));
+        assert_eq!(translated.package.tables.len(), 1);
+        let query = translated
+            .query
+            .expect("rule translator should produce query");
+
+        let explained = engine.ai_nl_explain(AiNlExplainParams {
+            query: query.clone(),
+            args: None,
+            preview_limit: Some(1),
+            preview_format: Some(ResultFormat::ObjectsJson),
+        })?;
+        assert_eq!(explained.tables, vec!["app.users".to_string()]);
+        assert_eq!(
+            explained.projection,
+            vec!["id".to_string(), "status".to_string()]
+        );
+        assert!(explained.deps["tables"]
+            .as_array()
+            .is_some_and(|deps| !deps.is_empty()));
+        assert!(explained.preview.is_some());
+        assert!(!explained.approval_token.is_empty());
+
+        let executed = engine.ai_nl_execute(AiNlExecuteParams {
+            query: query.clone(),
+            args: None,
+            approval_token: explained.approval_token.clone(),
+            result_format: Some(ResultFormat::ObjectsJson),
+            want_etag: Some(true),
+            if_none_match: None,
+            min_causality: None,
+        })?;
+        assert!(executed.etag.is_some());
+        let rows = executed
+            .data
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"]["v"].as_u64(), Some(1));
+
+        let mut tampered = query;
+        tampered.limit = Some(LimitClause {
+            limit: Some(1),
+            offset: None,
+        });
+        let err = engine
+            .ai_nl_execute(AiNlExecuteParams {
+                query: tampered,
+                args: None,
+                approval_token: explained.approval_token,
+                result_format: Some(ResultFormat::ObjectsJson),
+                want_etag: None,
+                if_none_match: None,
+                min_causality: None,
+            })
+            .expect_err("changed query must require a new approval token");
+        assert!(err.to_string().contains("approval_token mismatch"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn min_causality_rejects_future_version() -> anyhow::Result<()> {
         let dir = temp_dir("min_causality_rejects");
         let mut engine = Engine::open(&dir)?;
