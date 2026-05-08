@@ -8,7 +8,7 @@
   <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta property="og:title" content="SkeinDB — Single-Binary Database">
-  <meta property="og:description" content="Cell-interned MVCC · 126 RPC methods · 20 research tracks (14 hardened) · MySQL corpus-backed + partial PostgreSQL · One binary">
+  <meta property="og:description" content="Cell-interned MVCC · 126 RPC methods · 20 research tracks (15 hardened) · MySQL corpus-backed + partial PostgreSQL · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -407,7 +407,7 @@
   </h1>
   <p>
     SkeinDB is a single-binary database combining cell-interned MVCC storage,
-    MySQL corpus-backed compatibility, partial PostgreSQL support, 20 opt-in research features (14 hardened), and a full web admin —
+    MySQL corpus-backed compatibility, partial PostgreSQL support, 20 opt-in research features (15 hardened), and a full web admin —
     all in one Rust executable.
   </p>
   <div class="hero-actions">
@@ -476,7 +476,7 @@
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: startup/auth handshake, managed DB-user password auth, SSL rejection, simple queries, common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code>, and simple-query failed-transaction <code>ReadyForQuery(E)</code> handling backed by the shared engine.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables, and common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code> backed by the shared engine.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
@@ -488,13 +488,13 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
-      <p>25 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, and dedicated panels for all 20 research features.</p>
+      <p>26 interactive panels compiled into the binary. Schema browsing, data manipulation, cluster control, dedicated telemetry/security centers, dialect-aware SQL workspaces, and dedicated panels for all 20 research features.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🔬</div>
-      <h3>20 Research Tracks (14 Hardened)</h3>
-      <p>From differential privacy and HNSW vector search to Merkle forensic proofs and causal ETags — 14 tracks are hardened with real algorithms and integration tests; all 20 have RPC stubs, admin panels, and test coverage.</p>
+      <h3>20 Research Tracks (15 Hardened)</h3>
+      <p>From learned ValueID indexes and differential privacy to Merkle forensic proofs and causal ETags — 15 tracks are hardened with real algorithms and integration tests; all 20 have RPC stubs, admin panels, and test coverage.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Prototype</span>

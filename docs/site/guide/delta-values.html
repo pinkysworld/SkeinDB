@@ -123,11 +123,12 @@
     </div>
     <article class="doc-article">
       <h1 id="delta-chained-mvcc-values-design">Delta-chained MVCC Values (Design)<a class="headerlink" href="#delta-chained-mvcc-values-design" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-17</p>
+<p>Status: Hardened research baseline
+Last updated: 2026-05-08</p>
 <p>Goal:
 Reduce write amplification when large values (TEXT/JSON/BLOB) change slightly across MVCC versions.</p>
 <p>SkeinDB already supports value interning (content-addressed ValueStore). Delta values extend this by allowing a ValueStore entry to be stored as a patch against a base value, rather than as a full copy.</p>
+<p>Current implementation note: R03 is now hardened with periodic full snapshots (<code>DeltaPolicy.snapshot_interval</code>), geometric skip patches, compaction-time delta rewrites / skip rebuilds, <code>DeltaCompactionReport</code> including energy estimates, <code>ValueStore::delta_benchmark()</code> p50/p99/p99.9 reconstruction-step reporting, and <code>ValueStore::topology_analysis()</code> depth/fanout/savings reports.</p>
 <p>This feature is intended to be optional and policy-controlled.</p>
 <hr />
 <h2 id="1-high-level-idea">1) High-level idea<a class="headerlink" href="#1-high-level-idea" title="Permanent link">¶</a></h2>
@@ -231,7 +232,7 @@ See: <code>docs/research_agenda/R03_delta-chain-topology-optimization.md</code>.
 <p>Compaction interaction:
 - Compaction can opportunistically restructure delta topology, amortizing reorganization costs.
 - Policy may be <strong>per-key</strong> based on observed access patterns (latest-only vs frequent time-travel reads).</p>
-<p>Prototype status (scaffold):
+<p>Shipped research baseline:
 - ValueStore supports delta patches using COPY/ADD encoding (prefix/suffix diff).
 - Delta policy knobs live in <code>ValueStoreConfig.delta_policy</code> (min_bytes, max_chain, snapshot_interval, min_savings_ratio, max_skip).
 - Skip patches are stored at geometric distances (2, 4, 8, ...) when enabled.

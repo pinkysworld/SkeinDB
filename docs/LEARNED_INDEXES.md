@@ -1,9 +1,9 @@
 # Learned Indexes for ValueID Lookup (Prototype)
 
-Status: Experimental
-Last updated: 2026-04-26
+Status: Hardened research baseline
+Last updated: 2026-05-08
 
-This prototype adds an in-memory ValueStore with a hybrid learned index for
+This research baseline adds an in-memory ValueStore with a hybrid learned index for
 ValueID lookups. The learned index is a piecewise-linear model over sorted
 ValueIDs with a bounded search window. Lookups fall back to a hash map when
 predictions miss, providing graceful degradation under distribution shifts.
@@ -40,5 +40,5 @@ The ValueStore exposes:
 
 ## Notes
 
-This is a research scaffold meant to back R01 (learned indexes). It does not
-change on-disk formats and can be extended to persistent models later.
+This is the hardened R01 baseline. It does not change on-disk formats and can
+be extended to persistent models later.

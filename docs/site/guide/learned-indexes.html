@@ -123,9 +123,9 @@
     </div>
     <article class="doc-article">
       <h1 id="learned-indexes-for-valueid-lookup-prototype">Learned Indexes for ValueID Lookup (Prototype)<a class="headerlink" href="#learned-indexes-for-valueid-lookup-prototype" title="Permanent link">¶</a></h1>
-<p>Status: Experimental
-Last updated: 2026-04-26</p>
-<p>This prototype adds an in-memory ValueStore with a hybrid learned index for
+<p>Status: Hardened research baseline
+Last updated: 2026-05-08</p>
+<p>This research baseline adds an in-memory ValueStore with a hybrid learned index for
 ValueID lookups. The learned index is a piecewise-linear model over sorted
 ValueIDs with a bounded search window. Lookups fall back to a hash map when
 predictions miss, providing graceful degradation under distribution shifts.</p>
@@ -155,8 +155,8 @@ predictions miss, providing graceful degradation under distribution shifts.</p>
 <p><code>stats.snapshot</code> also exports the same runtime histogram under
 <code>storage.value_lookup</code> for admin dashboards and external benchmark harnesses.</p>
 <h2 id="notes">Notes<a class="headerlink" href="#notes" title="Permanent link">¶</a></h2>
-<p>This is a research scaffold meant to back R01 (learned indexes). It does not
-change on-disk formats and can be extended to persistent models later.</p>
+<p>This is the hardened R01 baseline. It does not change on-disk formats and can
+be extended to persistent models later.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/LEARNED_INDEXES.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

@@ -6,11 +6,12 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
-## Reality sync (2026-03-30)
+## Reality sync (2026-05-08)
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- **14 tracks are now hardened** with real algorithms and dedicated tests:
+- **15 tracks are now hardened** with real algorithms and dedicated tests:
+  - **R01** — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - **R02** — Adaptive row/column storage (snapshot + readback integration test)
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
   - **R04** — Differential privacy (Laplace noise, RDP composition, budget tracking)
@@ -26,9 +27,11 @@ Runtime status and checklist status intentionally differ:
   - **R15** — Conflict-free schema evolution (propose/merge/apply integration test)
   - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
+- This sync promotes R01 to hardened (in addition to the previous batch); 5 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
+- 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
+- 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, `topology_analysis()`, `delta_benchmark()`, and focused ValueStore tests.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -63,10 +66,10 @@ Source of truth matrix:
 ### Phase 24 — Learned indexes for ValueID lookup (R01)
 - [x] T230: Instrument ValueID lookup distribution + export histograms
 - [x] T231: Prototype learned model index (offline build) with fallback structure
-- [ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)
-- [ ] T233: Compaction-time model refresh policy + correctness tests
-- [ ] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead
-- [ ] T235: Distribution shift tests + graceful degradation
+- [x] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag). Evidence: `ValueStoreConfig.enable_learned_index`, `ValueStore::get_with_trace`, and `learned_index_lookup_hits` / `learned_index_falls_back_for_new_keys`.
+- [x] T233: Compaction-time model refresh policy + correctness tests. Evidence: `ModelRefreshPolicy`, `ValueStore::should_refresh`, `maybe_refresh`, `refresh_learned_index`, insert-triggered refresh checks, and `distribution_shift_triggers_refresh`.
+- [x] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead. Evidence: `ValueStore::benchmark()` and `benchmark_reports_quantiles`.
+- [x] T235: Distribution shift tests + graceful degradation. Evidence: `ValueIdLookupDistribution::model_shift_l1`, `learned_index_falls_back_for_new_keys`, and `distribution_shift_triggers_refresh`.
 
 ### Phase 25 — Differential privacy aggregates (R04)
 - [ ] T240: Add SkeinQL aggregate nodes (COUNT/SUM/AVG) with explicit DP parameters (experimental)
@@ -161,10 +164,10 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T067: Cache interaction tests (If-None-Match with causal validators)
 
 ### Extend Phase 7 — Delta topology optimization (R03)
-- [ ] T073: Implement periodic full snapshots for deltas (K-depth policy)
-- [ ] T074: Skip-pointer (skip-list) delta chain encoding
-- [ ] T075: Compaction-time topology restructuring policy
-- [ ] T076: Bench: reconstruction latency vs write amplification
+- [x] T073: Implement periodic full snapshots for deltas (K-depth policy). Evidence: `DeltaPolicy.snapshot_interval`, `ValueStore::put_with_delta`, and `delta_snapshot_interval_enforces_raw`.
+- [x] T074: Skip-pointer (skip-list) delta chain encoding. Evidence: `SkipPatch`, geometric `build_skip_patches`, `materialize_with_trace`, and `skip_patches_reduce_steps`.
+- [x] T075: Compaction-time topology restructuring policy. Evidence: `ValueStore::compact_deltas`, `DeltaCompactionReport`, and `delta_compaction_rewrites_deep_chains`.
+- [x] T076: Bench: reconstruction latency vs write amplification. Evidence: `ValueStore::delta_benchmark()` p50/p99/p99.9 steps, topology byte/savings metrics, and `topology_analysis()` depth/fanout reports.
 
 ### Extend Phase 8 — Wasm query operators (R19)
 - [ ] T084: Wasm operator ABI (columnar batches) + data interchange format

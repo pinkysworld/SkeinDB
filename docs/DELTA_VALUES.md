@@ -1,12 +1,14 @@
 # Delta-chained MVCC Values (Design)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Hardened research baseline
+Last updated: 2026-05-08
 
 Goal:
 Reduce write amplification when large values (TEXT/JSON/BLOB) change slightly across MVCC versions.
 
 SkeinDB already supports value interning (content-addressed ValueStore). Delta values extend this by allowing a ValueStore entry to be stored as a patch against a base value, rather than as a full copy.
+
+Current implementation note: R03 is now hardened with periodic full snapshots (`DeltaPolicy.snapshot_interval`), geometric skip patches, compaction-time delta rewrites / skip rebuilds, `DeltaCompactionReport` including energy estimates, `ValueStore::delta_benchmark()` p50/p99/p99.9 reconstruction-step reporting, and `ValueStore::topology_analysis()` depth/fanout/savings reports.
 
 This feature is intended to be optional and policy-controlled.
 
@@ -158,7 +160,7 @@ Compaction interaction:
 - Compaction can opportunistically restructure delta topology, amortizing reorganization costs.
 - Policy may be **per-key** based on observed access patterns (latest-only vs frequent time-travel reads).
 
-Prototype status (scaffold):
+Shipped research baseline:
 - ValueStore supports delta patches using COPY/ADD encoding (prefix/suffix diff).
 - Delta policy knobs live in `ValueStoreConfig.delta_policy` (min_bytes, max_chain, snapshot_interval, min_savings_ratio, max_skip).
 - Skip patches are stored at geometric distances (2, 4, 8, ...) when enabled.

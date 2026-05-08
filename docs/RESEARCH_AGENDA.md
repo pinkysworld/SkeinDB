@@ -31,15 +31,15 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
-## Implementation status snapshot (2026-02-21)
+## Implementation status snapshot (2026-05-08)
 
 All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
 
 | ID | Status | Primary implementation surface |
 |---|---|---|
-| R01 | Implemented (prototype) | Learned index scaffolding + tests (`docs/LEARNED_INDEXES.md`, `crates/skeindb-core/tests/valuestore.rs`) |
+| R01 | Hardened | Learned index hybrid read path, refresh policy, benchmark quantiles, distribution-shift tests (`docs/LEARNED_INDEXES.md`, `crates/skeindb-core/tests/valuestore.rs`) |
 | R02 | Implemented (prototype) | Hybrid row+column snapshot surfaces (`docs/COLUMN_SNAPSHOTS.md`, engine snapshot paths) |
-| R03 | Implemented (prototype) | Delta-chained values + compaction (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
+| R03 | Hardened | Delta-chained values, periodic snapshots, skip patches, compaction restructuring, topology reports, and delta benchmarks (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
 | R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
 | R05 | Implemented (prototype) | Oblivious execution policy/explain (`oblivious.*`) + server tests |
 | R06 | Implemented (prototype) | Forensic WAL query/verify/export (`forensic.*`) + tamper checks |

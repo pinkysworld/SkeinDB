@@ -127,10 +127,11 @@
 <p>Notes:
 - These items are <strong>research-oriented</strong>: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be <strong>optional</strong> and do not block core MySQL compatibility.</p>
-<h2 id="reality-sync-2026-03-30">Reality sync (2026-03-30)<a class="headerlink" href="#reality-sync-2026-03-30" title="Permanent link">¶</a></h2>
+<h2 id="reality-sync-2026-05-08">Reality sync (2026-05-08)<a class="headerlink" href="#reality-sync-2026-05-08" title="Permanent link">¶</a></h2>
 <p>Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- <strong>14 tracks are now hardened</strong> with real algorithms and dedicated tests:
+- <strong>15 tracks are now hardened</strong> with real algorithms and dedicated tests:
+  - <strong>R01</strong> — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - <strong>R02</strong> — Adaptive row/column storage (snapshot + readback integration test)
   - <strong>R03</strong> — Delta topology analysis (hot-chain detection, topology reports)
   - <strong>R04</strong> — Differential privacy (Laplace noise, RDP composition, budget tracking)
@@ -146,9 +147,11 @@
   - <strong>R15</strong> — Conflict-free schema evolution (propose/merge/apply integration test)
   - <strong>R16</strong> — Auto index synthesis (workload-driven advisor.recommend integration test)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
+- This sync promotes R01 to hardened (in addition to the previous batch); 5 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
-- 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.</p>
+- 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
+- 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
+- 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, <code>topology_analysis()</code>, <code>delta_benchmark()</code>, and focused ValueStore tests.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -310,10 +313,10 @@
 <ul>
 <li>[x] T230: Instrument ValueID lookup distribution + export histograms</li>
 <li>[x] T231: Prototype learned model index (offline build) with fallback structure</li>
-<li>[ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)</li>
-<li>[ ] T233: Compaction-time model refresh policy + correctness tests</li>
-<li>[ ] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead</li>
-<li>[ ] T235: Distribution shift tests + graceful degradation</li>
+<li>[x] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag). Evidence: <code>ValueStoreConfig.enable_learned_index</code>, <code>ValueStore::get_with_trace</code>, and <code>learned_index_lookup_hits</code> / <code>learned_index_falls_back_for_new_keys</code>.</li>
+<li>[x] T233: Compaction-time model refresh policy + correctness tests. Evidence: <code>ModelRefreshPolicy</code>, <code>ValueStore::should_refresh</code>, <code>maybe_refresh</code>, <code>refresh_learned_index</code>, insert-triggered refresh checks, and <code>distribution_shift_triggers_refresh</code>.</li>
+<li>[x] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead. Evidence: <code>ValueStore::benchmark()</code> and <code>benchmark_reports_quantiles</code>.</li>
+<li>[x] T235: Distribution shift tests + graceful degradation. Evidence: <code>ValueIdLookupDistribution::model_shift_l1</code>, <code>learned_index_falls_back_for_new_keys</code>, and <code>distribution_shift_triggers_refresh</code>.</li>
 </ul>
 <h3 id="phase-25-differential-privacy-aggregates-r04">Phase 25 — Differential privacy aggregates (R04)<a class="headerlink" href="#phase-25-differential-privacy-aggregates-r04" title="Permanent link">¶</a></h3>
 <ul>
@@ -417,10 +420,10 @@
 </ul>
 <h3 id="extend-phase-7-delta-topology-optimization-r03">Extend Phase 7 — Delta topology optimization (R03)<a class="headerlink" href="#extend-phase-7-delta-topology-optimization-r03" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T073: Implement periodic full snapshots for deltas (K-depth policy)</li>
-<li>[ ] T074: Skip-pointer (skip-list) delta chain encoding</li>
-<li>[ ] T075: Compaction-time topology restructuring policy</li>
-<li>[ ] T076: Bench: reconstruction latency vs write amplification</li>
+<li>[x] T073: Implement periodic full snapshots for deltas (K-depth policy). Evidence: <code>DeltaPolicy.snapshot_interval</code>, <code>ValueStore::put_with_delta</code>, and <code>delta_snapshot_interval_enforces_raw</code>.</li>
+<li>[x] T074: Skip-pointer (skip-list) delta chain encoding. Evidence: <code>SkipPatch</code>, geometric <code>build_skip_patches</code>, <code>materialize_with_trace</code>, and <code>skip_patches_reduce_steps</code>.</li>
+<li>[x] T075: Compaction-time topology restructuring policy. Evidence: <code>ValueStore::compact_deltas</code>, <code>DeltaCompactionReport</code>, and <code>delta_compaction_rewrites_deep_chains</code>.</li>
+<li>[x] T076: Bench: reconstruction latency vs write amplification. Evidence: <code>ValueStore::delta_benchmark()</code> p50/p99/p99.9 steps, topology byte/savings metrics, and <code>topology_analysis()</code> depth/fanout reports.</li>
 </ul>
 <h3 id="extend-phase-8-wasm-query-operators-r19">Extend Phase 8 — Wasm query operators (R19)<a class="headerlink" href="#extend-phase-8-wasm-query-operators-r19" title="Permanent link">¶</a></h3>
 <ul>
@@ -491,7 +494,7 @@
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#reality-sync-2026-03-30">Reality sync (2026-03-30)</a></li>
+<li><a href="#reality-sync-2026-05-08">Reality sync (2026-05-08)</a></li>
 <li><a href="#mapping-table-proposal-repo">Mapping table (proposal → repo)</a></li>
 <li><a href="#task-definitions-new-additions">Task definitions (new additions)</a><ul>
 <li><a href="#phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)</a></li>
