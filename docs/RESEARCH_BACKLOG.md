@@ -10,7 +10,7 @@ Notes:
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- **15 tracks are now hardened** with real algorithms and dedicated tests:
+- **16 tracks are now hardened** with real algorithms and dedicated tests:
   - **R01** — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - **R02** — Adaptive row/column storage (snapshot + readback integration test)
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
@@ -26,12 +26,14 @@ Runtime status and checklist status intentionally differ:
   - **R14** — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
   - **R15** — Conflict-free schema evolution (propose/merge/apply integration test)
   - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
+  - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R01 to hardened (in addition to the previous batch); 5 tracks remain at prototype level.
+- This sync promotes R01 and R20 to hardened (in addition to the previous batch); 4 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
 - 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, `topology_analysis()`, `delta_benchmark()`, and focused ValueStore tests.
+- 2026-05-08: T204-T207 are closed with `energy_aware` compaction policy support, CPU/IO energy estimates, persisted external power/price/carbon signals, SkeinAdmin controls, and deterministic energy-vs-p99 evaluation output.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -203,10 +205,10 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T189: Regression CI harness: compare latency distributions across commits
 
 ### Extend Phase 21 — Energy-aware compaction (R20)
-- [ ] T204: Energy model instrumentation (CPU + IO estimate; optional external signals)
-- [ ] T205: Constrained scheduler (energy minimization subject to latency/space bounds)
-- [ ] T206: External signal integration (battery/plugged, time-of-use pricing hooks)
-- [ ] T207: Evaluation harness: energy vs p99 latency tradeoffs
+- [x] T204: Energy model instrumentation (CPU + IO estimate; optional external signals). Evidence: `CompactionEnergyConfig`, `CompactionEnergyRuntime`, `estimate_compaction_energy`, and `stats.snapshot.compaction.scheduler.energy`.
+- [x] T205: Constrained scheduler (energy minimization subject to latency/space bounds). Evidence: `CompactionPolicyKind::EnergyAware`, slack/constraint scoring in `collect_compaction_runtime`, and safe-mode override preserving hard L0 limits.
+- [x] T206: External signal integration (battery/plugged, time-of-use pricing hooks). Evidence: `maintenance.compaction.set_policy` accepts `external_signals`, persists `compaction.energy.*`, and SkeinAdmin exposes power/price/carbon controls.
+- [x] T207: Evaluation harness: energy vs p99 latency tradeoffs. Evidence: `eval/compaction_scheduler_dashboard.py` compares `energy_aware` with fixed/workload policies and emits energy score plus p99 latency summaries.
 
 ### Extend Phase 22 — LLM-assisted semantic autoparameterization (R11)
 - [ ] T215: Label schema for “semantic constants” vs parameterizable literals

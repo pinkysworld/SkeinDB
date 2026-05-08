@@ -1,7 +1,7 @@
 # Workload-guided compaction scheduling
 
-Status: Draft + live telemetry + runtime policy controls + evaluation harness
-Last updated: 2026-04-16
+Status: Hardened research baseline
+Last updated: 2026-05-08
 
 SkeinDB uses an LSM-like structure for sorted runs and background compaction.
 Compaction is necessary to bound read amplification and reclaim space, but can also cause
@@ -50,6 +50,8 @@ Current baseline:
 - L0 pressure is derived from live `.rseg` files under `tables/<db>/*.rseg`, and recent workload signals are derived from the existing bounded RPC/query telemetry ring buffer.
 - `stats.snapshot.compaction.scheduler` now reports the live policy, configured/effective budgets, active peak window, queued task summary, and priority/admission state derived from the same runtime telemetry.
 - `maintenance.compaction.status`, `maintenance.compaction.set_policy`, and `maintenance.compaction.pause` / `resume` persist policy state in `settings.json`, expose live scheduler decisions, and enforce safe-mode write backpressure for write-classified SkeinQL/HTTP mutations when hard L0 bounds are exceeded.
+- R20 energy-aware scheduling is implemented as `policy: "energy_aware"`. Runtime status includes CPU/IO joule estimates, external signal multipliers, constraint score, and deferral ratio under `compaction.scheduler.energy`.
+- `maintenance.compaction.set_policy` accepts `energy` coefficients and `external_signals` (`power_source`, `battery_pct`, `price_multiplier`, `carbon_multiplier`) so test harnesses, operators, or embedded integrations can feed battery/power, pricing, or carbon signals without platform-specific APIs.
 
 ## 4. Compaction task model
 
@@ -127,8 +129,8 @@ Compare:
 Prototype harness:
 - `python3 eval/compaction_scheduler_dashboard.py --scenario mixed --seconds 1800 --outdir eval/figures/compaction_scheduler`
 - emits `compaction_scheduler_summary.json`, `compaction_scheduler_timeline.csv`, and a self-contained `compaction_scheduler_dashboard.html`
-- compares `fixed_leveling`, `fixed_tiering`, and `workload_guided` policies over the same deterministic workload timeline
-- surfaces stall rate, total stall time, peak/p95-of-p99 read and write latency, backlog pressure, and average compaction budget
+- compares `fixed_leveling`, `fixed_tiering`, `workload_guided`, and `energy_aware` policies over the same deterministic workload timeline
+- surfaces stall rate, total stall time, peak/p95-of-p99 read and write latency, backlog pressure, average compaction budget, external energy signal multiplier, and total/average energy score
 
 The harness remains synthetic rather than tied directly to a background compactor. That keeps the evaluation slice reproducible while the runtime policy layer uses the same pressure/workload inputs to drive budget selection, peak-window scaling, and safe-mode admission control.
 
@@ -142,12 +144,11 @@ The harness remains synthetic rather than tied directly to a background compacto
 
 ## Research extension: Energy-aware compaction scheduling
 
-This spec focuses on workload-guided scheduling to reduce stalls and tail latency.
-The research agenda proposes an additional objective: **energy minimization** (or carbon/cost minimization) under performance constraints.
+This spec now includes the R20 baseline for **energy minimization** (or carbon/cost minimization) under performance constraints.
 See: `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`.
 
-Adaptation points:
-- Add an energy cost model for compaction work (CPU + IO estimation; optional external signals).
-- Prototype instrumentation: delta compaction reports `energy` (cpu_units, io_bytes_read, io_bytes_written, energy_score) to seed scheduling heuristics.
-- Treat policy as constrained optimization: minimize energy subject to read amplification, write amplification, and backlog bounds.
-- Accept external signals where available (battery vs plugged, time-of-use price windows, carbon intensity), but keep the baseline functional without them.
+Shipped R20 baseline:
+- Energy cost model for compaction work with CPU + IO estimation and optional external signals.
+- `energy_aware` policy minimizes estimated energy when latency/space constraints have slack, while safe mode overrides deferral when hard L0 bounds are exceeded.
+- External signals are accepted via persisted settings (`battery` / `plugged`, price, and carbon multipliers) without requiring host-specific power APIs.
+- The evaluation harness reports energy score side by side with p99 latency and stall metrics for repeatable research comparisons.

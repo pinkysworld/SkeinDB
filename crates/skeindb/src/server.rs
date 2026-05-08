@@ -548,6 +548,8 @@ const DEFAULT_COMPACTION_PEAK_WINDOW_IO_MULTIPLIER: f64 = 0.65;
 const DEFAULT_COMPACTION_PEAK_WINDOW_CPU_MULTIPLIER: f64 = 0.7;
 const DEFAULT_COMPACTION_SAFE_MODE_IO_MULTIPLIER: f64 = 1.75;
 const DEFAULT_COMPACTION_SAFE_MODE_CPU_PCT: f64 = 70.0;
+const DEFAULT_COMPACTION_ENERGY_IO_JOULES_PER_MIB: f64 = 0.08;
+const DEFAULT_COMPACTION_ENERGY_CPU_JOULES_PER_PCT_S: f64 = 0.035;
 const COMPACTION_SAMPLE_INTERVAL_MS: u64 = 1000;
 
 #[derive(Default)]
@@ -15918,7 +15920,7 @@ pub(crate) async fn handle_rpc(
                         let parsed = CompactionPolicyKind::parse(policy).ok_or_else(|| {
                             RpcError::new(
                                 "invalid_request",
-                                "policy must be one of fixed_leveling, fixed_tiering, workload_guided",
+                                "policy must be one of fixed_leveling, fixed_tiering, workload_guided, energy_aware",
                             )
                         })?;
                         patch.insert(
@@ -16045,6 +16047,141 @@ pub(crate) async fn handle_rpc(
                             })?;
                             patch.insert(
                                 "compaction.budget.safe_mode_cpu_pct".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                    }
+
+                    if let Some(energy) = obj.get("energy") {
+                        let energy = energy.as_object().ok_or_else(|| {
+                            RpcError::new("invalid_request", "energy must be an object")
+                        })?;
+                        if let Some(value) = energy.get("io_joules_per_mib") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.io_joules_per_mib must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.io_joules_per_mib".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = energy.get("cpu_joules_per_pct_s") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.cpu_joules_per_pct_s must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.cpu_joules_per_pct_s".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = energy.get("price_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.price_multiplier must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.price_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = energy.get("carbon_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.carbon_multiplier must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.carbon_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = energy.get("power_source") {
+                            let value = value.as_str().and_then(normalize_power_source).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.power_source must be battery, plugged, or unknown",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.power_source".to_string(),
+                                Value::String(value.to_string()),
+                            );
+                        }
+                        if let Some(value) = energy.get("battery_pct") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v >= 0.0 && *v <= 100.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "energy.battery_pct must be a number between 0 and 100",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.battery_pct".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                    }
+
+                    if let Some(signals) = obj.get("external_signals") {
+                        let signals = signals.as_object().ok_or_else(|| {
+                            RpcError::new(
+                                "invalid_request",
+                                "external_signals must be an object",
+                            )
+                        })?;
+                        if let Some(value) = signals.get("power_source") {
+                            let value = value.as_str().and_then(normalize_power_source).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "external_signals.power_source must be battery, plugged, or unknown",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.power_source".to_string(),
+                                Value::String(value.to_string()),
+                            );
+                        }
+                        if let Some(value) = signals.get("battery_pct") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v >= 0.0 && *v <= 100.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "external_signals.battery_pct must be a number between 0 and 100",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.battery_pct".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = signals.get("price_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "external_signals.price_multiplier must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.price_multiplier".to_string(),
+                                serde_json::json!(value),
+                            );
+                        }
+                        if let Some(value) = signals.get("carbon_multiplier") {
+                            let value = value.as_f64().filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+                                RpcError::new(
+                                    "invalid_request",
+                                    "external_signals.carbon_multiplier must be a positive number",
+                                )
+                            })?;
+                            patch.insert(
+                                "compaction.energy.carbon_multiplier".to_string(),
                                 serde_json::json!(value),
                             );
                         }
@@ -26407,6 +26544,7 @@ enum CompactionPolicyKind {
     FixedLeveling,
     FixedTiering,
     WorkloadGuided,
+    EnergyAware,
 }
 
 impl CompactionPolicyKind {
@@ -26415,6 +26553,7 @@ impl CompactionPolicyKind {
             Self::FixedLeveling => "fixed_leveling",
             Self::FixedTiering => "fixed_tiering",
             Self::WorkloadGuided => "workload_guided",
+            Self::EnergyAware => "energy_aware",
         }
     }
 
@@ -26423,9 +26562,30 @@ impl CompactionPolicyKind {
             "fixed_leveling" => Some(Self::FixedLeveling),
             "fixed_tiering" => Some(Self::FixedTiering),
             "workload_guided" => Some(Self::WorkloadGuided),
+            "energy_aware" => Some(Self::EnergyAware),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CompactionEnergyConfig {
+    io_joules_per_mib: f64,
+    cpu_joules_per_pct_s: f64,
+    power_source: String,
+    battery_pct: Option<f64>,
+    price_multiplier: f64,
+    carbon_multiplier: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CompactionEnergyRuntime {
+    io_joules_per_s: f64,
+    cpu_joules_per_s: f64,
+    estimated_joules_per_s: f64,
+    signal_multiplier: f64,
+    defer_ratio: f64,
+    constraint_score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -26451,6 +26611,7 @@ struct CompactionSchedulerConfig {
     safe_mode_io_multiplier: f64,
     safe_mode_cpu_pct: f64,
     peak_windows: Vec<CompactionPeakWindow>,
+    energy: CompactionEnergyConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -26489,6 +26650,7 @@ struct CompactionRuntimeSnapshot {
     priority_read_pressure: f64,
     priority_health: f64,
     priority_score: f64,
+    energy: CompactionEnergyRuntime,
 }
 
 fn setting_bool(
@@ -26530,6 +26692,72 @@ fn setting_f64(
         .or_else(|| fallback.and_then(|alt| settings.get(alt).and_then(|v| v.as_f64())))
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(default)
+}
+
+fn setting_string(
+    settings: &serde_json::Map<String, Value>,
+    key: &str,
+    fallback: Option<&str>,
+    default: &str,
+) -> String {
+    settings
+        .get(key)
+        .and_then(|v| v.as_str())
+        .or_else(|| fallback.and_then(|alt| settings.get(alt).and_then(|v| v.as_str())))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn normalize_power_source(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "battery" | "battery_power" | "discharging" => Some("battery"),
+        "plugged" | "ac" | "mains" | "charging" => Some("plugged"),
+        "unknown" | "auto" => Some("unknown"),
+        _ => None,
+    }
+}
+
+fn compaction_power_multiplier(power_source: &str, battery_pct: Option<f64>) -> f64 {
+    match power_source {
+        "battery" => match battery_pct {
+            Some(pct) if pct < 20.0 => 1.55,
+            Some(pct) if pct < 50.0 => 1.35,
+            _ => 1.2,
+        },
+        "plugged" => 0.9,
+        _ => 1.0,
+    }
+}
+
+fn compaction_energy_signal_multiplier(config: &CompactionEnergyConfig) -> f64 {
+    (config.price_multiplier
+        * config.carbon_multiplier
+        * compaction_power_multiplier(&config.power_source, config.battery_pct))
+    .clamp(0.1, 10.0)
+}
+
+fn estimate_compaction_energy(
+    config: &CompactionEnergyConfig,
+    io_bytes_per_s: u64,
+    cpu_pct: f64,
+    defer_ratio: f64,
+    constraint_score: f64,
+) -> CompactionEnergyRuntime {
+    let io_mib_per_s = io_bytes_per_s as f64 / (1024.0 * 1024.0);
+    let io_joules_per_s = io_mib_per_s * config.io_joules_per_mib;
+    let cpu_joules_per_s = cpu_pct * config.cpu_joules_per_pct_s;
+    let signal_multiplier = compaction_energy_signal_multiplier(config);
+    CompactionEnergyRuntime {
+        io_joules_per_s: round_metric(io_joules_per_s),
+        cpu_joules_per_s: round_metric(cpu_joules_per_s),
+        estimated_joules_per_s: round_metric(
+            (io_joules_per_s + cpu_joules_per_s) * signal_multiplier,
+        ),
+        signal_multiplier: round_metric(signal_multiplier),
+        defer_ratio: round_metric(defer_ratio),
+        constraint_score: round_metric(constraint_score * 100.0),
+    }
 }
 
 fn parse_clock_hhmm(raw: &str) -> Option<u16> {
@@ -26663,6 +26891,21 @@ fn compaction_scheduler_config(
         })
         .unwrap_or_default();
 
+    let power_source = setting_string(
+        settings,
+        "compaction.energy.power_source",
+        Some("energy.power_source"),
+        "unknown",
+    );
+    let power_source = normalize_power_source(&power_source)
+        .unwrap_or("unknown")
+        .to_string();
+    let battery_pct = settings
+        .get("compaction.energy.battery_pct")
+        .or_else(|| settings.get("energy.battery_pct"))
+        .and_then(|v| v.as_f64())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0);
+
     let policy = settings
         .get("compaction.policy")
         .and_then(|v| v.as_str())
@@ -26719,6 +26962,34 @@ fn compaction_scheduler_config(
         )
         .min(100.0),
         peak_windows,
+        energy: CompactionEnergyConfig {
+            io_joules_per_mib: setting_f64(
+                settings,
+                "compaction.energy.io_joules_per_mib",
+                Some("energy.io_joules_per_mib"),
+                DEFAULT_COMPACTION_ENERGY_IO_JOULES_PER_MIB,
+            ),
+            cpu_joules_per_pct_s: setting_f64(
+                settings,
+                "compaction.energy.cpu_joules_per_pct_s",
+                Some("energy.cpu_joules_per_pct_s"),
+                DEFAULT_COMPACTION_ENERGY_CPU_JOULES_PER_PCT_S,
+            ),
+            power_source,
+            battery_pct,
+            price_multiplier: setting_f64(
+                settings,
+                "compaction.energy.price_multiplier",
+                Some("energy.price_multiplier"),
+                1.0,
+            ),
+            carbon_multiplier: setting_f64(
+                settings,
+                "compaction.energy.carbon_multiplier",
+                Some("energy.carbon_multiplier"),
+                1.0,
+            ),
+        },
     }
 }
 
@@ -26950,7 +27221,7 @@ fn collect_compaction_runtime(
                 (0.55, 0.5)
             }
         }
-        CompactionPolicyKind::WorkloadGuided => {
+        CompactionPolicyKind::WorkloadGuided | CompactionPolicyKind::EnergyAware => {
             let io = (0.5 + stall_risk * 0.45 + space_pressure * 0.25 + write_io_pressure * 0.25)
                 .clamp(0.4, 1.4);
             let cpu = (0.45
@@ -26973,6 +27244,27 @@ fn collect_compaction_runtime(
         }
     }
 
+    let energy_signal_multiplier = compaction_energy_signal_multiplier(&config.energy);
+    let energy_constraint_score = stall_risk
+        .max((space_pressure / 1.5).clamp(0.0, 1.0))
+        .max((read_pressure / 1.5).clamp(0.0, 1.0));
+    let mut energy_defer_ratio: f64 = 0.0;
+    if config.policy == CompactionPolicyKind::EnergyAware && !hard_pressure {
+        let slack = (1.0 - energy_constraint_score).clamp(0.0, 1.0);
+        let high_energy_signal = (energy_signal_multiplier - 1.0).clamp(0.0, 1.0);
+        energy_defer_ratio = (slack * high_energy_signal * 0.5).clamp(0.0, 0.5);
+        if energy_defer_ratio > 0.0 {
+            let scale = 1.0 - energy_defer_ratio;
+            target_io_bytes_per_s = ((target_io_bytes_per_s as f64 * scale).round() as u64).max(1);
+            target_cpu_pct = (target_cpu_pct * scale).clamp(0.0, 100.0);
+        } else if energy_signal_multiplier < 0.9 && (soft_pressure || l0.files > 0) {
+            let boost = ((0.9 - energy_signal_multiplier) * 0.35).clamp(0.0, 0.2);
+            target_io_bytes_per_s =
+                ((target_io_bytes_per_s as f64 * (1.0 + boost)).round() as u64).max(1);
+            target_cpu_pct = (target_cpu_pct * (1.0 + boost)).clamp(0.0, 100.0);
+        }
+    }
+
     let (effective_io_bytes_per_s, effective_cpu_pct) = if !config.enabled {
         (0, 0.0)
     } else if hard_pressure {
@@ -26990,6 +27282,14 @@ fn collect_compaction_runtime(
     } else {
         (target_io_bytes_per_s.max(1), target_cpu_pct)
     };
+
+    let energy = estimate_compaction_energy(
+        &config.energy,
+        effective_io_bytes_per_s,
+        effective_cpu_pct,
+        energy_defer_ratio,
+        energy_constraint_score,
+    );
 
     let scheduler_mode = if !config.enabled {
         "disabled"
@@ -27071,6 +27371,7 @@ fn collect_compaction_runtime(
         priority_read_pressure: round_metric(read_pressure.min(1.5) * 100.0),
         priority_health: round_metric(health * 100.0),
         priority_score,
+        energy,
     }
 }
 
@@ -27176,6 +27477,24 @@ fn compaction_runtime_json(snapshot: &CompactionRuntimeSnapshot) -> Value {
                 "read_pressure": snapshot.priority_read_pressure,
                 "health": snapshot.priority_health,
                 "score": snapshot.priority_score
+            },
+            "energy": {
+                "estimated_joules_per_s": snapshot.energy.estimated_joules_per_s,
+                "io_joules_per_s": snapshot.energy.io_joules_per_s,
+                "cpu_joules_per_s": snapshot.energy.cpu_joules_per_s,
+                "signal_multiplier": snapshot.energy.signal_multiplier,
+                "defer_ratio": snapshot.energy.defer_ratio,
+                "constraint_score": snapshot.energy.constraint_score,
+                "coefficients": {
+                    "io_joules_per_mib": round_metric(snapshot.config.energy.io_joules_per_mib),
+                    "cpu_joules_per_pct_s": round_metric(snapshot.config.energy.cpu_joules_per_pct_s)
+                },
+                "external_signals": {
+                    "power_source": snapshot.config.energy.power_source.as_str(),
+                    "battery_pct": snapshot.config.energy.battery_pct,
+                    "price_multiplier": round_metric(snapshot.config.energy.price_multiplier),
+                    "carbon_multiplier": round_metric(snapshot.config.energy.carbon_multiplier)
+                }
             }
         }
     })
@@ -36610,6 +36929,88 @@ mod tests {
                 .as_array()
                 .map(|value| value.len()),
             Some(1)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maintenance_compaction_energy_policy_uses_external_signals() -> anyhow::Result<()> {
+        let dir = temp_dir("compaction_energy_policy");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let segment_dir = dir.join("tables").join("app");
+        std::fs::create_dir_all(&segment_dir)?;
+        std::fs::write(segment_dir.join("users.rseg"), vec![5u8; 256])?;
+
+        let resp = call_rpc(
+            &state,
+            "maintenance.compaction.set_policy",
+            json!({
+                "policy": "energy_aware",
+                "enabled": true,
+                "max_l0_files": 16,
+                "max_l0_bytes": 4096,
+                "budget": {
+                    "max_io_bytes_per_s": 1048576,
+                    "max_cpu_pct": 20.0
+                },
+                "energy": {
+                    "io_joules_per_mib": 0.5,
+                    "cpu_joules_per_pct_s": 0.1
+                },
+                "external_signals": {
+                    "power_source": "battery",
+                    "battery_pct": 15.0,
+                    "price_multiplier": 1.4,
+                    "carbon_multiplier": 1.25
+                }
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["scheduler"]["policy"].as_str(), Some("energy_aware"));
+        assert_eq!(
+            result["scheduler"]["energy"]["external_signals"]["power_source"].as_str(),
+            Some("battery")
+        );
+        assert!(
+            result["scheduler"]["energy"]["signal_multiplier"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 1.0
+        );
+        assert!(
+            result["scheduler"]["energy"]["defer_ratio"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            result["scheduler"]["energy"]["estimated_joules_per_s"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
+        assert!(
+            result["scheduler"]["budget"]["effective"]["io_bytes_per_s"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+                < result["scheduler"]["budget"]["configured"]["io_bytes_per_s"]
+                    .as_u64()
+                    .unwrap_or(0)
+        );
+
+        let status = call_rpc(&state, "maintenance.compaction.status", json!({})).await;
+        assert!(status.ok);
+        let status = status.result.expect("missing status");
+        assert_eq!(status["scheduler"]["policy"].as_str(), Some("energy_aware"));
+        assert_eq!(
+            status["scheduler"]["energy"]["external_signals"]["battery_pct"].as_f64(),
+            Some(15.0)
         );
 
         std::fs::remove_dir_all(&dir).ok();

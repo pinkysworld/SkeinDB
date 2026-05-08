@@ -112,7 +112,7 @@ const RESEARCH_TRACKS = [
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['maintenance.replay.export', 'maintenance.replay.import', 'maintenance.replay.run'], panel: 'replay', status: 'prototype' },
   { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
-  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['maintenance.compaction.status', 'maintenance.compaction.set_policy', 'maintenance.compaction.pause', 'maintenance.compaction.resume'], panel: 'engine', status: 'prototype' }
+  { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['maintenance.compaction.status', 'maintenance.compaction.set_policy', 'maintenance.compaction.pause', 'maintenance.compaction.resume'], panel: 'engine', status: 'hardened' }
 ];
 
 // ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ const RPC_TEMPLATES = [
   { label: 'maintenance.history.set_policy', method: 'maintenance.history.set_policy', params: { enabled: true, window_ms: 604800000 } },
   { label: 'maintenance.history.gc', method: 'maintenance.history.gc', params: { horizon_ms: 1767225600000 } },
   { label: 'maintenance.compaction.status', method: 'maintenance.compaction.status', params: {} },
-  { label: 'maintenance.compaction.set_policy', method: 'maintenance.compaction.set_policy', params: { policy: 'workload_guided', enabled: true, paused: false, max_l0_files: 16, budget: { max_io_bytes_per_s: 33554432, max_cpu_pct: 35 }, peak_windows: ['08:00-18:00'] } },
+  { label: 'maintenance.compaction.set_policy', method: 'maintenance.compaction.set_policy', params: { policy: 'energy_aware', enabled: true, paused: false, max_l0_files: 16, budget: { max_io_bytes_per_s: 33554432, max_cpu_pct: 35 }, external_signals: { power_source: 'plugged', price_multiplier: 0.85, carbon_multiplier: 0.9 }, peak_windows: ['08:00-18:00'] } },
   { label: 'maintenance.compaction.pause', method: 'maintenance.compaction.pause', params: {} },
   { label: 'maintenance.compaction.resume', method: 'maintenance.compaction.resume', params: {} },
   { label: 'maintenance.replay.export', method: 'maintenance.replay.export', params: { db:'demo', bundle_id:'replay_bundle_demo' } },
@@ -4008,6 +4008,7 @@ function renderCompactionSummary(result) {
   const cfg = result.scheduler || result.config || {};
   const workload = result.workload || {};
   const pressure = result.pressure || {};
+  const energy = cfg.energy || {};
   const activeWindow = cfg.peak_window
     ? ((cfg.peak_window.start || '--') + '-' + (cfg.peak_window.end || '--'))
     : 'none';
@@ -4019,7 +4020,10 @@ function renderCompactionSummary(result) {
     + ' | <strong>Active peak window</strong>: ' + escapeHtml(activeWindow)
     + '<br><strong>Workload</strong>: reads ' + escapeHtml(String(workload.point_reads_per_s ?? '--'))
     + '/s, ranges ' + escapeHtml(String(workload.range_reads_per_s ?? '--'))
-    + '/s, writes ' + escapeHtml(String(workload.write_ops_per_s ?? '--')) + '/s';
+    + '/s, writes ' + escapeHtml(String(workload.write_ops_per_s ?? '--')) + '/s'
+    + '<br><strong>Energy</strong>: ' + escapeHtml(String(energy.estimated_joules_per_s ?? '--'))
+    + ' J/s, signal ' + escapeHtml(String(energy.signal_multiplier ?? '--'))
+    + ', defer ' + escapeHtml(String(energy.defer_ratio ?? '--'));
 }
 
 async function compactionStatus() {
@@ -4053,6 +4057,28 @@ function readCompactionPolicyPatch() {
     budget.max_cpu_pct = maxCpu;
   }
   if (Object.keys(budget).length) payload.budget = budget;
+  const signals = {};
+  const powerSource = $('compactionPowerSource')?.value || '';
+  const rawBattery = $('compactionBatteryPct')?.value.trim() || '';
+  const rawPrice = $('compactionPriceMultiplier')?.value.trim() || '';
+  const rawCarbon = $('compactionCarbonMultiplier')?.value.trim() || '';
+  if (powerSource) signals.power_source = powerSource;
+  if (rawBattery) {
+    const batteryPct = Number.parseFloat(rawBattery);
+    if (!Number.isFinite(batteryPct) || batteryPct < 0 || batteryPct > 100) throw new Error('Battery % must be between 0 and 100');
+    signals.battery_pct = batteryPct;
+  }
+  if (rawPrice) {
+    const priceMultiplier = Number.parseFloat(rawPrice);
+    if (!Number.isFinite(priceMultiplier) || priceMultiplier <= 0) throw new Error('Price multiplier must be > 0');
+    signals.price_multiplier = priceMultiplier;
+  }
+  if (rawCarbon) {
+    const carbonMultiplier = Number.parseFloat(rawCarbon);
+    if (!Number.isFinite(carbonMultiplier) || carbonMultiplier <= 0) throw new Error('Carbon multiplier must be > 0');
+    signals.carbon_multiplier = carbonMultiplier;
+  }
+  if (Object.keys(signals).length) payload.external_signals = signals;
   const peakWindows = ($('compactionPeakWindows')?.value || '')
     .split(/\n|,/)
     .map((item) => item.trim())

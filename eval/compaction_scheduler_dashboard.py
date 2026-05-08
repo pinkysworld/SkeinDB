@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Synthetic evaluation harness for the compaction scheduler backlog item.
 
-This script compares three policies over a generated workload timeline and emits:
+This script compares four policies over a generated workload timeline and emits:
 - compaction_scheduler_summary.json
 - compaction_scheduler_timeline.csv
 - compaction_scheduler_dashboard.html
 
 The model is intentionally lightweight and deterministic so it can run in CI
-without external dependencies while still producing reproducible stall-rate and
-p99-latency comparisons for documentation and dashboard review.
+without external dependencies while still producing reproducible stall-rate,
+energy, and p99-latency comparisons for documentation and dashboard review.
 """
 
 from __future__ import annotations
@@ -72,11 +72,12 @@ SCENARIOS = {
 }
 
 
-POLICY_ORDER = ["fixed_leveling", "fixed_tiering", "workload_guided"]
+POLICY_ORDER = ["fixed_leveling", "fixed_tiering", "workload_guided", "energy_aware"]
 POLICY_COLORS = {
     "fixed_leveling": "#b45309",
     "fixed_tiering": "#0f766e",
     "workload_guided": "#1d4ed8",
+    "energy_aware": "#7c3aed",
 }
 
 
@@ -133,11 +134,25 @@ def build_timeline(scenario: Scenario, seconds: int, rng: random.Random) -> list
     return timeline
 
 
-def policy_budget(policy: str, tick: dict, backlog_mib: float) -> tuple[float, float]:
+def external_energy_signal(tick: dict) -> float:
+    phase = tick["phase"]
+    second = tick["second"]
+    price = 1.35 if phase in {"read_peak", "dashboard_peak", "api_peak"} else 1.0
+    if phase in {"recovery", "cooldown"} or phase.endswith("_tail"):
+        price = 0.78
+    carbon = 1.18 if (second // 300) % 2 else 0.88
+    power = 1.25 if phase in {"ingest_burst", "bulk_load"} else 1.0
+    if phase in {"recovery", "cooldown"}:
+        power = 0.9
+    return max(0.1, price * carbon * power)
+
+
+def policy_budget(policy: str, tick: dict, backlog_mib: float) -> tuple[float, float, float]:
     write_mib_s = tick["write_mib_s"]
     read_qps = tick["read_qps"]
     phase = tick["phase"]
     safe_mode = 0.0
+    energy_signal = 1.0
 
     if policy == "fixed_leveling":
         budget = 20.0
@@ -158,6 +173,7 @@ def policy_budget(policy: str, tick: dict, backlog_mib: float) -> tuple[float, f
         if phase.startswith("read"):
             budget *= 0.9
     else:
+        energy_signal = external_energy_signal(tick) if policy == "energy_aware" else 1.0
         backlog_ratio = backlog_mib / 96.0
         read_pressure = max(0.0, (read_qps - 360.0) / 420.0)
         write_pressure = max(0.0, (write_mib_s - 20.0) / 22.0)
@@ -169,8 +185,15 @@ def policy_budget(policy: str, tick: dict, backlog_mib: float) -> tuple[float, f
             safe_mode = 1.0
         if phase == "recovery":
             budget += 6.0
+        if policy == "energy_aware":
+            constraint = min(1.0, max(backlog_mib / 108.0, read_pressure, write_pressure * 0.7))
+            slack = max(0.0, 1.0 - constraint)
+            if energy_signal > 1.0 and not safe_mode:
+                budget *= 1.0 - min(0.45, (energy_signal - 1.0) * 0.28 * slack)
+            elif energy_signal < 0.9 and backlog_mib > 40.0:
+                budget *= 1.0 + min(0.2, (0.9 - energy_signal) * 0.4)
 
-    return max(6.0, budget), safe_mode
+    return max(6.0, budget), safe_mode, energy_signal
 
 
 def simulate_policy(policy: str, timeline: list[dict]) -> dict:
@@ -179,7 +202,7 @@ def simulate_policy(policy: str, timeline: list[dict]) -> dict:
     rows = []
 
     for tick in timeline:
-        budget_mib_s, safe_mode = policy_budget(policy, tick, backlog_mib)
+        budget_mib_s, safe_mode, energy_signal = policy_budget(policy, tick, backlog_mib)
         write_mib_s = tick["write_mib_s"]
         read_qps = tick["read_qps"]
         backlog_inflow = write_mib_s * 0.62
@@ -205,12 +228,22 @@ def simulate_policy(policy: str, timeline: list[dict]) -> dict:
             read_p99_ms -= 0.4
             write_p99_ms += 0.5
             space_amp = min(2.4, 1.18 + pressure * 0.26)
-        else:
+        elif policy == "workload_guided":
             if safe_mode:
                 write_p99_ms += 1.2
             read_p99_ms -= 0.8
             stall_ms *= 0.7
             space_amp = min(2.2, 1.14 + pressure * 0.19)
+        else:
+            if safe_mode:
+                write_p99_ms += 1.4
+            read_p99_ms -= 0.55
+            stall_ms *= 0.76
+            write_p99_ms += max(0.0, energy_signal - 1.0) * 0.55
+            space_amp = min(2.25, 1.15 + pressure * 0.2)
+
+        cpu_pct = min(100.0, 8.0 + budget_mib_s * 0.85 + safe_mode * 10.0)
+        energy_joules_s = (budget_mib_s * 0.08 + cpu_pct * 0.035) * energy_signal
 
         rows.append(
             {
@@ -226,6 +259,8 @@ def simulate_policy(policy: str, timeline: list[dict]) -> dict:
                 "read_p99_ms": round(read_p99_ms, 3),
                 "space_amp": round(space_amp, 3),
                 "safe_mode": int(safe_mode),
+                "energy_signal_multiplier": round(energy_signal, 3),
+                "energy_joules_s": round(energy_joules_s, 3),
             }
         )
 
@@ -263,6 +298,8 @@ def summarize_policy(rows: list[dict]) -> dict:
         "compaction_budget_mib_s_avg": round(
             statistics.fmean(row["compaction_budget_mib_s"] for row in rows), 3
         ),
+        "energy_joules_total": round(sum(row["energy_joules_s"] for row in rows), 3),
+        "energy_joules_s_avg": round(statistics.fmean(row["energy_joules_s"] for row in rows), 3),
     }
 
 
@@ -390,6 +427,7 @@ def svg_bar_chart(rows: list[tuple[str, float]], title: str, y_label: str) -> st
 def render_dashboard(scenario: str, seconds: int, summaries: dict, policy_rows: dict) -> str:
     stall_rows = [(policy, summaries[policy]["stall_rate"] * 100.0) for policy in POLICY_ORDER]
     write_peak_rows = [(policy, summaries[policy]["write_p99_ms_peak"]) for policy in POLICY_ORDER]
+    energy_rows = [(policy, summaries[policy]["energy_joules_total"]) for policy in POLICY_ORDER]
     write_series = [
         (policy, [(row["second"], row["write_p99_ms"]) for row in policy_rows[policy]])
         for policy in POLICY_ORDER
@@ -414,6 +452,7 @@ def render_dashboard(scenario: str, seconds: int, summaries: dict, policy_rows: 
             + f"<p><strong>P99 read peak</strong> {metrics['read_p99_ms_peak']:.1f} ms</p>"
             + f"<p><strong>Peak backlog</strong> {metrics['backlog_mib_peak']:.1f} MiB</p>"
             + f"<p><strong>Avg space amp</strong> {metrics['space_amp_avg']:.2f}x</p>"
+            + f"<p><strong>Total energy score</strong> {metrics['energy_joules_total']:.1f} J</p>"
             + "</div>"
         )
 
@@ -430,6 +469,7 @@ def render_dashboard(scenario: str, seconds: int, summaries: dict, policy_rows: 
             + f"<td>{metrics['read_p99_ms_peak']:.1f}</td>"
             + f"<td>{metrics['backlog_mib_peak']:.1f}</td>"
             + f"<td>{metrics['compaction_budget_mib_s_avg']:.1f}</td>"
+            + f"<td>{metrics['energy_joules_total']:.1f}</td>"
             + "</tr>"
         )
 
@@ -470,16 +510,17 @@ def render_dashboard(scenario: str, seconds: int, summaries: dict, policy_rows: 
 <body>
   <main>
     <h1>Compaction Scheduler Dashboard</h1>
-    <p class=\"lead\">Synthetic evaluation harness for Phase 21 T203. The workload timeline is deterministic and highlights two operator-facing metrics: stall rate and p99 latency under fixed leveling, fixed tiering, and workload-guided scheduling.</p>
+    <p class=\"lead\">Synthetic evaluation harness for Phase 21 T203 plus R20. The workload timeline is deterministic and highlights stall rate, p99 latency, and energy score under fixed leveling, fixed tiering, workload-guided, and energy-aware scheduling.</p>
     <div class=\"meta\">
       <div class=\"chip\"><strong>Scenario</strong> {html.escape(scenario)}</div>
       <div class=\"chip\"><strong>Seconds</strong> {seconds}</div>
-      <div class=\"chip\"><strong>Policies</strong> fixed_leveling, fixed_tiering, workload_guided</div>
+    <div class=\"chip\"><strong>Policies</strong> fixed_leveling, fixed_tiering, workload_guided, energy_aware</div>
     </div>
     <div class=\"cards\">{''.join(cards)}</div>
     <div class=\"chart-grid\">
       <div class=\"chart\">{svg_bar_chart(stall_rows, 'Stall Rate Comparison', 'stall %')}</div>
       <div class=\"chart\">{svg_bar_chart(write_peak_rows, 'P99 Write Latency Peak', 'ms')}</div>
+    <div class=\"chart\">{svg_bar_chart(energy_rows, 'Energy Score Total', 'J')}</div>
     </div>
     <div class=\"charts\">
       <div class=\"chart\">{svg_line_chart(write_series, 'P99 Write Latency Over Time', 'ms')}</div>
@@ -498,6 +539,7 @@ def render_dashboard(scenario: str, seconds: int, summaries: dict, policy_rows: 
           <th>Peak P99 Read</th>
           <th>Peak Backlog</th>
           <th>Avg Budget</th>
+          <th>Energy Score</th>
         </tr>
       </thead>
       <tbody>

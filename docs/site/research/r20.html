@@ -37,14 +37,14 @@
   </a>
   <div class="hero-badge">R20 · Systems Research</div>
   <h1>Energy-Aware Compaction Scheduling</h1>
-  <p class="abstract">SkeinDB's workload-guided compaction considers performance metrics but not energy consumption. For edge/embedded deployments, battery life is critical. For cloud, energy costs and carbon footprint matter. An energy-aware compaction scheduler defers work to periods of low activity, external power availability, or favorable electricity pricing — while maintaining acceptable performance bounds.</p>
+  <p class="abstract">SkeinDB now includes a hardened R20 baseline: an energy-aware compaction policy that combines live L0 pressure, p99 latency constraints, CPU/IO energy estimates, and external power/price/carbon signals while preserving safe-mode bounds.</p>
 </section>
 
 <div class="content">
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Hardened Research Baseline</strong> — Runtime policy, admin controls, and evaluation harness are wired into SkeinDB</span>
   </div>
 
   <div class="novelty-card">

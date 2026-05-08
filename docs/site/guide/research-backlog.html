@@ -130,7 +130,7 @@
 <h2 id="reality-sync-2026-05-08">Reality sync (2026-05-08)<a class="headerlink" href="#reality-sync-2026-05-08" title="Permanent link">¶</a></h2>
 <p>Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- <strong>15 tracks are now hardened</strong> with real algorithms and dedicated tests:
+- <strong>16 tracks are now hardened</strong> with real algorithms and dedicated tests:
   - <strong>R01</strong> — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - <strong>R02</strong> — Adaptive row/column storage (snapshot + readback integration test)
   - <strong>R03</strong> — Delta topology analysis (hot-chain detection, topology reports)
@@ -146,12 +146,14 @@
   - <strong>R14</strong> — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
   - <strong>R15</strong> — Conflict-free schema evolution (propose/merge/apply integration test)
   - <strong>R16</strong> — Auto index synthesis (workload-driven advisor.recommend integration test)
+  - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R01 to hardened (in addition to the previous batch); 5 tracks remain at prototype level.
+- This sync promotes R01 and R20 to hardened (in addition to the previous batch); 4 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
-- 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, <code>topology_analysis()</code>, <code>delta_benchmark()</code>, and focused ValueStore tests.</p>
+- 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, <code>topology_analysis()</code>, <code>delta_benchmark()</code>, and focused ValueStore tests.
+- 2026-05-08: T204-T207 are closed with <code>energy_aware</code> compaction policy support, CPU/IO energy estimates, persisted external power/price/carbon signals, SkeinAdmin controls, and deterministic energy-vs-p99 evaluation output.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -465,10 +467,10 @@
 </ul>
 <h3 id="extend-phase-21-energy-aware-compaction-r20">Extend Phase 21 — Energy-aware compaction (R20)<a class="headerlink" href="#extend-phase-21-energy-aware-compaction-r20" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T204: Energy model instrumentation (CPU + IO estimate; optional external signals)</li>
-<li>[ ] T205: Constrained scheduler (energy minimization subject to latency/space bounds)</li>
-<li>[ ] T206: External signal integration (battery/plugged, time-of-use pricing hooks)</li>
-<li>[ ] T207: Evaluation harness: energy vs p99 latency tradeoffs</li>
+<li>[x] T204: Energy model instrumentation (CPU + IO estimate; optional external signals). Evidence: <code>CompactionEnergyConfig</code>, <code>CompactionEnergyRuntime</code>, <code>estimate_compaction_energy</code>, and <code>stats.snapshot.compaction.scheduler.energy</code>.</li>
+<li>[x] T205: Constrained scheduler (energy minimization subject to latency/space bounds). Evidence: <code>CompactionPolicyKind::EnergyAware</code>, slack/constraint scoring in <code>collect_compaction_runtime</code>, and safe-mode override preserving hard L0 limits.</li>
+<li>[x] T206: External signal integration (battery/plugged, time-of-use pricing hooks). Evidence: <code>maintenance.compaction.set_policy</code> accepts <code>external_signals</code>, persists <code>compaction.energy.*</code>, and SkeinAdmin exposes power/price/carbon controls.</li>
+<li>[x] T207: Evaluation harness: energy vs p99 latency tradeoffs. Evidence: <code>eval/compaction_scheduler_dashboard.py</code> compares <code>energy_aware</code> with fixed/workload policies and emits energy score plus p99 latency summaries.</li>
 </ul>
 <h3 id="extend-phase-22-llm-assisted-semantic-autoparameterization-r11">Extend Phase 22 — LLM-assisted semantic autoparameterization (R11)<a class="headerlink" href="#extend-phase-22-llm-assisted-semantic-autoparameterization-r11" title="Permanent link">¶</a></h3>
 <ul>

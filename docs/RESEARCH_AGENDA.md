@@ -56,7 +56,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R17 | Implemented (prototype) | Compatibility intent inference + rewrite preview (`migration.*`) |
 | R18 | Implemented (prototype) | Reproducible replay/report tooling (`docs/TIME_TRAVEL_REPLAY.md`) |
 | R19 | Implemented (prototype) | Wasm-native plan compile/run + batch ABI (`wasm.plan.*`) |
-| R20 | Implemented (prototype) | Energy-aware compaction policy scaffolds (`docs/COMPACTION_SCHEDULER.md`) |
+| R20 | Hardened | Energy-aware compaction policy, external signals, energy estimates, SkeinAdmin controls, and energy-vs-p99 evaluation harness (`docs/COMPACTION_SCHEDULER.md`, `eval/compaction_scheduler_dashboard.py`) |
 
 ## Priority Matrix (from agenda)
 

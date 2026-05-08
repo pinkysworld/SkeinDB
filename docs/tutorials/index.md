@@ -46,6 +46,6 @@ This site is organised into six sections:
 
 ## Status
 
-The **[True Status Matrix](true-status-matrix.html)** is the single source of truth for what is hardened, what is prototype, and what is planned. 15 of the 20 research tracks are currently marked hardened with evidence and test links.
+The **[True Status Matrix](true-status-matrix.html)** is the single source of truth for what is hardened, what is prototype, and what is planned. 16 of the 20 research tracks are currently marked hardened with evidence and test links.
 
 Looking to edit something? Each page has an "Edit this page on GitHub" link at the bottom.

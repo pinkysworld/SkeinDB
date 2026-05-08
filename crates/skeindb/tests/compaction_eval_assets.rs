@@ -46,9 +46,11 @@ fn compaction_eval_harness_generates_summary_and_dashboard() {
         "fixed_leveling",
         "fixed_tiering",
         "workload_guided",
+        "energy_aware",
         "stall_rate",
         "write_p99_ms_peak",
         "read_p99_ms_peak",
+        "energy_joules_total",
     ] {
         assert!(
             script.contains(marker),
@@ -93,6 +95,8 @@ fn compaction_eval_harness_generates_summary_and_dashboard() {
         "\"write_p99_ms_peak\"",
         "\"read_p99_ms_peak\"",
         "\"workload_guided\"",
+        "\"energy_aware\"",
+        "\"energy_joules_total\"",
     ] {
         assert!(
             summary.contains(marker),
@@ -105,6 +109,7 @@ fn compaction_eval_harness_generates_summary_and_dashboard() {
         "Stall Rate Comparison",
         "P99 Write Latency Over Time",
         "P99 Read Latency Over Time",
+        "Energy Score Total",
     ] {
         assert!(
             dashboard.contains(marker),
