@@ -109,7 +109,7 @@ const RESEARCH_TRACKS = [
   { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'replay', status: 'hardened' },
   { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with propose/merge/apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
   { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
-  { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report'], panel: 'migration', status: 'prototype' },
+  { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report', 'migration.report_export'], panel: 'migration', status: 'hardened' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['maintenance.replay.export', 'maintenance.replay.import', 'maintenance.replay.run'], panel: 'replay', status: 'prototype' },
   { id: 'R19', title: 'Wasm Operators', desc: 'User-defined Wasm query plan operators.', methods: ['wasm.plan.compile', 'wasm.plan.run'], panel: 'wasm', status: 'prototype' },
   { id: 'R20', title: 'Energy-Aware Compaction', desc: 'Carbon-aware scheduling for background compaction.', methods: ['maintenance.compaction.status', 'maintenance.compaction.set_policy', 'maintenance.compaction.pause', 'maintenance.compaction.resume'], panel: 'engine', status: 'hardened' }
@@ -234,6 +234,7 @@ const RPC_TEMPLATES = [
   { label: 'ai.nl.translate', method: 'ai.nl.translate', params: { db:'app', request:'list users who signed up this week' } },
   { label: 'migration.rewrite_preview', method: 'migration.rewrite_preview', params: {} },
   { label: 'migration.intent_report', method: 'migration.intent_report', params: {} },
+  { label: 'migration.report_export', method: 'migration.report_export', params: { title: 'SkeinDB migration report', limit: 10 } },
   { label: 'telemetry.feature_flags', method: 'telemetry.feature_flags', params: {} },
   { label: 'telemetry.compat_summary', method: 'telemetry.compat_summary', params: {} },
   { label: 'telemetry.migration_hints', method: 'telemetry.migration_hints', params: { limit: 10 } },
@@ -5806,6 +5807,18 @@ async function migrationPreview() {
 
 async function migrationIntent() { try { await call('migration.intent_report', migrationParams(), 'migrationOut'); } catch (e) { setOut({error:String(e)},'migrationOut'); } }
 
+async function migrationExport() {
+  try {
+    const params = migrationParams();
+    const res = await call('migration.report_export', cleanParams({...params, title:'SkeinDB migration report'}), 'migrationOut');
+    const result = unwrapRpcResult(res, 'migration.report_export');
+    const rewrites = result?.report_json?.rewrites || [];
+    lastMigrationRewrites = rewrites;
+    lastMigrationGeneratedAt = result?.generated_at_ms ? new Date(result.generated_at_ms).toISOString() : new Date().toISOString();
+    renderMigrationReport(rewrites);
+  } catch (e) { setOut({error:String(e)},'migrationOut'); }
+}
+
 function exportMigrationReport(fmt) {
   if (!lastMigrationRewrites?.length) { setOut({error:'Run preview first'},'migrationOut'); return; }
   const stamp = (lastMigrationGeneratedAt||new Date().toISOString()).replace(/[:.]/g,'-');
@@ -6446,6 +6459,7 @@ wire('btnAutoparamClassify', autoparamClassify);
 // Migration
 wire('btnMigrationPreview', migrationPreview);
 wire('btnMigrationIntent', migrationIntent);
+wire('btnMigrationExport', migrationExport);
 wire('btnMigrationDownloadJson', () => exportMigrationReport('json'));
 wire('btnMigrationDownloadMd', () => exportMigrationReport('md'));
 wire('btnMigrationDownloadHtml', () => exportMigrationReport('html'));

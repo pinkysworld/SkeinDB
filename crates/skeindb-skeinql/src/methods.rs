@@ -1280,6 +1280,29 @@ pub struct MigrationRewritePreviewResult {
     pub rewrites: Vec<MigrationRewritePreview>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationReportExportParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<MigrationIntentSample>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationReportExportResult {
+    pub generated_at_ms: u64,
+    pub title: String,
+    pub report_json: serde_json::Value,
+    pub markdown: String,
+}
+
 // --------------------------------
 // oblivious.* (research / experimental)
 // --------------------------------

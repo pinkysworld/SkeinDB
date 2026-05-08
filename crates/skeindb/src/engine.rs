@@ -54,13 +54,14 @@ use skeindb_skeinql::methods::{
     MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
     MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
     MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
-    MigrationIntentSuggestion, MigrationRewritePreview, MigrationRewritePreviewParams,
-    MigrationRewritePreviewResult, ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy,
-    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams, ReplayBundle,
-    ReplayBundleChangeEvent, ReplayBundleManifest, ReplayBundleRowEntry, ReplayBundleTable,
-    ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
-    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
-    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
+    MigrationIntentSuggestion, MigrationReportExportParams, MigrationReportExportResult,
+    MigrationRewritePreview, MigrationRewritePreviewParams, MigrationRewritePreviewResult,
+    ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams,
+    ObliviousPolicyGetResult, ObliviousPolicySetParams, ReplayBundle, ReplayBundleChangeEvent,
+    ReplayBundleManifest, ReplayBundleRowEntry, ReplayBundleTable, ReplayBundleTableChecksum,
+    ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams, SchemaApplyMergeResult,
+    SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary, SchemaColumnInfo,
+    SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
     SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
     VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
     VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
@@ -3461,6 +3462,56 @@ impl Engine {
         }
 
         Ok(MigrationRewritePreviewResult { rewrites })
+    }
+
+    pub fn migration_report_export(
+        &self,
+        params: MigrationReportExportParams,
+    ) -> anyhow::Result<MigrationReportExportResult> {
+        let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+        let samples = self.resolve_intent_samples(params.samples, params.window_ms);
+        let mut suggestions = detect_migration_intents(&samples);
+        suggestions.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if suggestions.len() > limit {
+            suggestions.truncate(limit);
+        }
+
+        let mut rewrites = suggestions
+            .iter()
+            .map(|suggestion| rewrite_preview_from_suggestion(suggestion, &samples))
+            .collect::<Vec<_>>();
+        rewrites.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let generated_at_ms = now_millis();
+        let title = params
+            .title
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "SkeinDB Migration Intent Report".to_string());
+        let report_json = serde_json::json!({
+            "generated_at_ms": generated_at_ms,
+            "title": &title,
+            "sample_count": samples.len(),
+            "suggestion_count": suggestions.len(),
+            "rewrite_count": rewrites.len(),
+            "suggestions": &suggestions,
+            "rewrites": &rewrites,
+        });
+        let markdown = migration_report_markdown(&title, generated_at_ms, &rewrites);
+
+        Ok(MigrationReportExportResult {
+            generated_at_ms,
+            title,
+            report_json,
+            markdown,
+        })
     }
 
     fn record_intent_sample(&self, query: &Query, args: &[Lit]) {
@@ -24488,6 +24539,49 @@ fn rewrite_snippets_for_intent(
     }
 }
 
+fn migration_report_markdown(
+    title: &str,
+    generated_at_ms: u64,
+    rewrites: &[MigrationRewritePreview],
+) -> String {
+    let mut out = vec![
+        format!("# {}", title),
+        String::new(),
+        format!("Generated at ms: {}", generated_at_ms),
+        String::new(),
+    ];
+    if rewrites.is_empty() {
+        out.push("No migration rewrites were detected.".to_string());
+        return out.join("\n");
+    }
+
+    for (idx, rewrite) in rewrites.iter().enumerate() {
+        out.push(format!("## {}", rewrite.title));
+        out.push(String::new());
+        out.push(format!("- Intent: {}", rewrite.intent));
+        out.push(format!(
+            "- Confidence: {}%",
+            (rewrite.confidence * 100.0).round()
+        ));
+        out.push(format!("- Evidence items: {}", rewrite.evidence.len()));
+        out.push(String::new());
+        out.push("Before:".to_string());
+        out.push("```sql".to_string());
+        out.push(rewrite.before.clone());
+        out.push("```".to_string());
+        out.push(String::new());
+        out.push("After:".to_string());
+        out.push("```text".to_string());
+        out.push(rewrite.after.clone());
+        out.push("```".to_string());
+        if idx + 1 < rewrites.len() {
+            out.push(String::new());
+        }
+    }
+
+    out.join("\n")
+}
+
 fn evidence_table_ref(evidence: &[MigrationIntentEvidence]) -> Option<BaseTableRef> {
     evidence
         .iter()
@@ -28169,6 +28263,58 @@ mod tests {
         assert!(rewrite.before.contains("app.users"));
         assert!(rewrite.before.contains("LIMIT 10 OFFSET 20"));
         assert!(rewrite.after.contains("cursor pagination"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn migration_report_export_contains_json_and_markdown() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_report_export");
+        let engine = Engine::open(&dir)?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        query.limit = Some(LimitClause {
+            limit: Some(25),
+            offset: Some(50),
+        });
+
+        let export = engine.migration_report_export(MigrationReportExportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+            title: Some("App migration report".to_string()),
+        })?;
+
+        assert_eq!(export.title, "App migration report");
+        assert!(export.markdown.contains("# App migration report"));
+        assert!(export.markdown.contains("Offset pagination detected"));
+        assert!(export.markdown.contains("LIMIT 25 OFFSET 50"));
+        assert_eq!(export.report_json["suggestion_count"].as_u64(), Some(1));
+        assert_eq!(export.report_json["rewrite_count"].as_u64(), Some(1));
+        assert_eq!(
+            export.report_json["rewrites"][0]["intent"].as_str(),
+            Some("pagination.offset_limit")
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

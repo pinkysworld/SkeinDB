@@ -123,8 +123,8 @@
     </div>
     <article class="doc-article">
       <h1 id="compatibility-telemetry-and-migration-hints-mysql-skeinql">Compatibility Telemetry and Migration Hints (MySQL -&gt; SkeinQL)<a class="headerlink" href="#compatibility-telemetry-and-migration-hints-mysql-skeinql" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-17</p>
+<p>Status: Hardened research baseline
+Last updated: 2026-05-08</p>
 <p>Goal:
 Help operators and developers understand which MySQL features their applications use, and provide actionable migration hints to SkeinQL.</p>
 <p>This supports a long-term strategy:
@@ -179,7 +179,8 @@ Events are high-level feature flags, not full query text by default.</p>
 - telemetry.compat_top_queries { db?, limit? } (optional)
 - telemetry.migration_hints { db?, feature_ids? }
 - migration.intent_report { samples?, limit?, window_ms? }
-- migration.rewrite_preview { samples?, limit?, window_ms? }</p>
+- migration.rewrite_preview { samples?, limit?, window_ms? }
+- migration.report_export { samples?, limit?, window_ms?, title? }</p>
 <p>Console pages:
 - Compatibility dashboard
 - Migration assistant</p>
@@ -206,6 +207,11 @@ See: <code>docs/research_agenda/R17_query-intent-inference-for-compatibility-mig
 - Emit migration reports with "before" (MySQL) and "after" (SkeinQL) examples.
 - Offer rewrite previews via <code>migration.rewrite_preview</code> for quick adoption.
 - Surface recommendations in SkeinAdmin with exportable HTML/markdown reports.</p>
+<p>Current hardened baseline:
+- <code>migration.intent_report</code> detects pagination, polling, soft-delete filters, hierarchy self-joins, recursive CTEs, EXISTS membership, and COALESCE/default idioms.
+- <code>migration.rewrite_preview</code> emits before/after snippets for the detected intents, including cursor pagination, CDC subscription polling replacement, graph traversal sketches, and membership join rewrites.
+- <code>migration.report_export</code> returns a self-contained JSON report plus Markdown for offline migration review.
+- SkeinAdmin's Migration (R17) panel can preview, render, export, and copy those reports.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/TELEMETRY_AND_MIGRATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

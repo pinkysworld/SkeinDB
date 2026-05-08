@@ -2088,10 +2088,42 @@ Result:
 }
 ```
 
+#### migration.report_export (experimental)
+Generate an offline migration report with both machine-readable JSON and Markdown.
+
+Params:
+
+```json
+{
+  "samples": [
+    { "query": { "...": "..." }, "args": [], "at_ms": 0 }
+  ],
+  "limit": 10,
+  "window_ms": 60000,
+  "title": "SkeinDB migration report"
+}
+```
+
+Result:
+
+```json
+{
+  "generated_at_ms": 0,
+  "title": "SkeinDB migration report",
+  "report_json": {
+    "suggestion_count": 1,
+    "rewrite_count": 1,
+    "suggestions": [],
+    "rewrites": []
+  },
+  "markdown": "# SkeinDB migration report\n..."
+}
+```
+
 Control-plane method families for operations and adoption:
 - telemetry: `telemetry.compat_log`, `telemetry.snapshot`
 - advisor: `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, `advisor.history`, `advisor.migration_hints` (MySQL -> SkeinQL)
-- migration: `migration.intent_report`, `migration.rewrite_preview`
+- migration: `migration.intent_report`, `migration.rewrite_preview`, `migration.report_export`
 - admin: `admin.users.*`, `admin.roles.*`
 - cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.node.leave`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`
 

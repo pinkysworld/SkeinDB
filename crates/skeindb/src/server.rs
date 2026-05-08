@@ -40,10 +40,10 @@ use skeindb_skeinql::{
         ForensicVerifyParams, MaintenanceReplayExportParams, MaintenanceReplayImportParams,
         MaintenanceReplayRunParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
         MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
-        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousExplainParams,
-        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
-        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
-        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        MigrationReportExportParams, MigrationRewritePreviewParams, ObjectsPullParams,
+        ObliviousExplainParams, ObliviousPolicyGetParams, ObliviousPolicySetParams,
+        PlanCacheClearParams, PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams,
+        QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
         SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
         TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
         VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
@@ -15192,6 +15192,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "migration.report_export" => {
+                    let p: MigrationReportExportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.migration_report_export(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
 
                 // --------------------
                 // telemetry.* (Phase 11)
@@ -26204,6 +26211,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "advisor.history"
             | "migration.intent_report"
             | "migration.rewrite_preview"
+            | "migration.report_export"
             | "data.get"
             | "vector.search"
             | "vector.index.status"
@@ -26357,6 +26365,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "advisor.history",
         "migration.intent_report",
         "migration.rewrite_preview",
+        "migration.report_export",
         "telemetry.feature_flags",
         "telemetry.compat_summary",
         "telemetry.migration_hints",
@@ -27833,7 +27842,8 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 126);
+        assert_eq!(methods.len(), 127);
+        assert!(methods.contains(&"migration.report_export"));
     }
 
     #[test]

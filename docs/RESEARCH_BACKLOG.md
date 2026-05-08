@@ -10,7 +10,7 @@ Notes:
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
-- **16 tracks are now hardened** with real algorithms and dedicated tests:
+- **17 tracks are now hardened** with real algorithms and dedicated tests:
   - **R01** — Learned indexes (hybrid learned+fallback read path, refresh policy, benchmark and distribution-shift coverage)
   - **R02** — Adaptive row/column storage (snapshot + readback integration test)
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
@@ -26,14 +26,16 @@ Runtime status and checklist status intentionally differ:
   - **R14** — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
   - **R15** — Conflict-free schema evolution (propose/merge/apply integration test)
   - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
+  - **R17** — Query intent migration (pattern library, sequence intent detection, rewrite previews, JSON/Markdown report export)
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R01 and R20 to hardened (in addition to the previous batch); 4 tracks remain at prototype level.
+- This sync promotes R17 to hardened (in addition to the previous batches); 3 tracks remain at prototype level.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
 - 2026-05-08: T073-T076 are closed with periodic delta snapshots, geometric skip patches, compaction-time delta rewrites / skip rebuilds, `topology_analysis()`, `delta_benchmark()`, and focused ValueStore tests.
 - 2026-05-08: T204-T207 are closed with `energy_aware` compaction policy support, CPU/IO energy estimates, persisted external power/price/carbon signals, SkeinAdmin controls, and deterministic energy-vs-p99 evaluation output.
+- 2026-05-08: T114-T118 are closed with intent-pattern detection for pagination/polling/soft deletes/hierarchies/EXISTS/defaults, sequence-level polling correlation, SkeinQL-native rewrite snippets, SkeinAdmin migration assistant wiring, and the `migration.report_export` JSON/Markdown exporter.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -184,11 +186,11 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T106: Adaptive controller (online materialization decisions)
 
 ### Extend Phase 11 — Intent inference for migration (R17)
-- [ ] T114: Pattern library for common MySQL idioms (pagination, polling, soft deletes)
-- [ ] T115: Sequence-level intent detection (multi-query patterns)
-- [ ] T116: Intent → SkeinQL mapping (cursor API, CDC subscribe, etc.)
-- [ ] T117: SkeinAdmin “Migration assistant” page
-- [ ] T118: Offline report exporter (JSON + markdown)
+- [x] T114: Pattern library for common MySQL idioms (pagination, polling, soft deletes). Evidence: `detect_migration_intents`, `detect_pagination_signal`, `detect_polling_signal`, `detect_soft_delete_signal`, hierarchy/EXISTS/COALESCE detectors, and focused `migration_intent_report_*` tests.
+- [x] T115: Sequence-level intent detection (multi-query patterns). Evidence: `detect_polling_signal`, increasing-value correlation in `polling_values`, persisted `intent_history`, `window_ms` filtering, and `migration_intent_report_detects_polling_and_soft_delete`.
+- [x] T116: Intent → SkeinQL mapping (cursor API, CDC subscribe, etc.). Evidence: `rewrite_preview_from_suggestion`, `rewrite_snippets_for_intent`, `migration.rewrite_preview`, and rewrite tests for pagination, EXISTS, self-join hierarchy, and recursive CTEs.
+- [x] T117: SkeinAdmin “Migration assistant” page. Evidence: the Migration (R17) panel wires `migration.intent_report`, `migration.rewrite_preview`, and `migration.report_export`, renders rewrite cards, and exports migration reports from `web/skeinadmin/src/main.js`.
+- [x] T118: Offline report exporter (JSON + markdown). Evidence: `migration.report_export`, `MigrationReportExportResult.report_json`, Markdown rendering in `migration_report_markdown`, and `migration_report_export_contains_json_and_markdown`.
 
 ### Extend Phase 18 — Index synthesis from dependency analysis (R16)
 - [ ] T175: Dependency capture: predicate columns + range shapes + order-by needs

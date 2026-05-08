@@ -437,6 +437,7 @@ fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
         "query.patch",
         "maintenance.replay.export",
         "maintenance.compaction.status",
+        "migration.report_export",
     ] {
         assert!(
             js.contains(marker),

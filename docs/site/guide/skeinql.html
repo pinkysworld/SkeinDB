@@ -1708,10 +1708,37 @@ engine (<code>"incremental"</code> or <code>"full"</code>).</p>
 <span class="p">}</span>
 </code></pre></div>
 
+<h4 id="migrationreport_export-experimental">migration.report_export (experimental)<a class="headerlink" href="#migrationreport_export-experimental" title="Permanent link">¶</a></h4>
+<p>Generate an offline migration report with both machine-readable JSON and Markdown.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;...&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">&quot;at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;window_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">60000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SkeinDB migration report&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;generated_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;title&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SkeinDB migration report&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;report_json&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;suggestion_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;rewrite_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">    </span><span class="nt">&quot;rewrites&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;markdown&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;# SkeinDB migration report\n...&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
 <p>Control-plane method families for operations and adoption:
 - telemetry: <code>telemetry.compat_log</code>, <code>telemetry.snapshot</code>
 - advisor: <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, <code>advisor.history</code>, <code>advisor.migration_hints</code> (MySQL -&gt; SkeinQL)
-- migration: <code>migration.intent_report</code>, <code>migration.rewrite_preview</code>
+- migration: <code>migration.intent_report</code>, <code>migration.rewrite_preview</code>, <code>migration.report_export</code>
 - admin: <code>admin.users.*</code>, <code>admin.roles.*</code>
 - cluster: <code>cluster.status</code>, <code>cluster.nodes</code>, <code>cluster.join_token.create</code>, <code>cluster.node.join</code>, <code>cluster.node.remove</code>, <code>cluster.node.leave</code>, <code>cluster.replica.promote</code>, <code>cluster.shard.create</code>, <code>cluster.shard.move</code>, <code>cluster.shard.rebalance</code></p>
 <h4 id="clusterstatus-experimental">cluster.status (experimental)<a class="headerlink" href="#clusterstatus-experimental" title="Permanent link">¶</a></h4>

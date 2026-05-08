@@ -24,6 +24,7 @@ What sets SkeinDB apart is what's already working under the hood:
 - **CAS-aware replication.** Replicas pull only the ValueIDs they're missing, with hash-verified `objects.fetch` and live hit-rate / saved-bytes reporting.
 - **Query coalescing** so a thundering-herd of identical reads collapses to a single execution.
 - **Self-tuning index advisor** that synthesizes candidate indexes from observed workload features and applies them with rollback on failure.
+- **Migration intent reports** that detect common MySQL application idioms, preview SkeinQL-native rewrites, and export JSON/Markdown reports for offline review.
 - **Plan cache + SQL autoparameterization** keyed by fingerprint × schema-version × session flags.
 - **A click-first admin console** with a phpMyAdmin-inspired Easy Viewer, a WYSIWYG schema editor that diffs your edits into a previewable `ALTER TABLE` plan, and dedicated panels for CDC, time travel, replay, encryption, and forensics.
 
@@ -48,7 +49,7 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 ## What's Still Partial
 
 - PostgreSQL support is real but still partial: COPY protocol, portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open. See [docs/PG_COMPAT.md](docs/PG_COMPAT.md).
-- Several research tracks (`R01`–`R20`) are implemented as usable prototypes or hardened baselines, but not all are production-grade. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
+- Seventeen research tracks (`R01`–`R20`) are hardened with evidence-backed tests, while `R12`, `R18`, and `R19` remain prototype-level. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
 - Clustering, CDC, snapshots, Wasm operators, and advisor flows are wired end-to-end, but some areas still need hardening and broader lifecycle support.
 - SkeinDB does **not** claim 100% MySQL or PostgreSQL parity.
 

@@ -328,6 +328,7 @@ fn execute_module_entrypoint(
         .collect();
 
     let mut config = Config::new();
+    config.wasm_memory64(false);
     config.wasm_multi_memory(false);
     config.consume_fuel(max_fuel > 0);
     config.epoch_interruption(options.wall_clock_timeout.is_some());

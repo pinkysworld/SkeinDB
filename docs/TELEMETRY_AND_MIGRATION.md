@@ -1,7 +1,7 @@
 # Compatibility Telemetry and Migration Hints (MySQL -> SkeinQL)
 
-Status: Draft
-Last updated: 2026-01-17
+Status: Hardened research baseline
+Last updated: 2026-05-08
 
 Goal:
 Help operators and developers understand which MySQL features their applications use, and provide actionable migration hints to SkeinQL.
@@ -80,6 +80,7 @@ SkeinQL methods:
 - telemetry.migration_hints { db?, feature_ids? }
 - migration.intent_report { samples?, limit?, window_ms? }
 - migration.rewrite_preview { samples?, limit?, window_ms? }
+- migration.report_export { samples?, limit?, window_ms?, title? }
 
 Console pages:
 - Compatibility dashboard
@@ -118,3 +119,9 @@ Adaptation sketch:
 - Emit migration reports with "before" (MySQL) and "after" (SkeinQL) examples.
 - Offer rewrite previews via `migration.rewrite_preview` for quick adoption.
 - Surface recommendations in SkeinAdmin with exportable HTML/markdown reports.
+
+Current hardened baseline:
+- `migration.intent_report` detects pagination, polling, soft-delete filters, hierarchy self-joins, recursive CTEs, EXISTS membership, and COALESCE/default idioms.
+- `migration.rewrite_preview` emits before/after snippets for the detected intents, including cursor pagination, CDC subscription polling replacement, graph traversal sketches, and membership join rewrites.
+- `migration.report_export` returns a self-contained JSON report plus Markdown for offline migration review.
+- SkeinAdmin's Migration (R17) panel can preview, render, export, and copy those reports.
