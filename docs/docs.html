@@ -231,7 +231,7 @@
     <div class="doc-grid">
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank" data-keywords="skeinql reference rpc protocol methods families request response schemas json-rpc batch api">
         <h3>SkeinQL Reference</h3>
-        <p>Complete reference for the native typed RPC protocol: 74 methods across 15 families, request/response schemas, JSON-RPC envelope, and batch requests.</p>
+        <p>Complete reference for the native typed RPC protocol: 126 advertised methods across 15 families, request/response schemas, JSON-RPC envelope, and batch requests.</p>
         <span class="tag" style="background:rgba(168,85,247,.1);color:var(--purple)">Core API</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank" data-keywords="mysql compatibility sql wire protocol statements deviations dialect bridging">
@@ -244,9 +244,9 @@
         <p>How SkeinDB detects and reports unsupported features, compatibility scoring, and the migration advisory system.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Compatibility</span>
       </a>
-      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PG_COMPAT.md" target="_blank" data-keywords="postgresql postgres pg wire protocol v3 startup handshake trust auth cleartext simple query ssl rejection partial baseline psql">
+      <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/PG_COMPAT.md" target="_blank" data-keywords="postgresql postgres pg wire protocol v3 startup handshake trust scram auth simple extended query ssl rejection partial baseline psql">
         <h3>PostgreSQL Compatibility</h3>
-        <p>Current partial PostgreSQL v3 baseline: startup/auth handshake, SSL rejection, simple query protocol, transaction stubs, and extended-protocol scaffolding, with parser/catalog/auth hardening still open.</p>
+        <p>Current partial PostgreSQL v3 baseline: trust/SCRAM auth, SSL rejection, simple and extended query protocol, session state, virtual catalogs, SQLSTATE errors, and corpus-backed PG rewrites, with COPY, portal suspension, and broader driver parity still open.</p>
         <span class="tag" style="background:rgba(245,158,11,.1);color:var(--amber)">Partial</span>
       </a>
       <a class="doc-card" href="https://github.com/pinkysworld/SkeinDB/blob/main/openapi/skeinql.yaml" target="_blank" data-keywords="openapi specification schema swagger api client generator">

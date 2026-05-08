@@ -1,8 +1,8 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-04-17
+Last updated: 2026-05-08
 
-Status: Partial baseline
+Status: Partial advanced baseline
 
 SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
 The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.
@@ -15,7 +15,8 @@ cargo run -- serve --data ./data --http 8080 --mysql 3306 --pg 5432
 
 psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" -c "SELECT 1"
 
-# If SKEINDB_TOKEN is set, use the same value as the password:
+# If SKEINDB_TOKEN is set, the listener uses SCRAM-SHA-256 and
+# the password is the token value:
 PGPASSWORD="$SKEINDB_TOKEN" \
   psql "host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable" \
   -c "SELECT version()"
@@ -31,8 +32,9 @@ Notes:
 - `StartupMessage` and `SSLRequest` parsing
 - startup response batch: `AuthenticationOk` / `ParameterStatus` / `BackendKeyData` / `ReadyForQuery`
 - trust auth when `SKEINDB_TOKEN` is unset
-- cleartext-password auth path when `SKEINDB_TOKEN` is set
+- SCRAM-SHA-256 auth path when `SKEINDB_TOKEN` is set
 - SSL negotiation rejection (`'N'`)
+- PG session settings for common `SET` / `SET ... TO` / `RESET` / `RESET ALL`, with `SHOW` and `current_setting(...)` reading session overrides
 - simple query protocol delegated to the shared SQL execution engine
 - special-case startup/bootstrap query responses for `SELECT version()`, `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
 - empty-query handling
@@ -41,25 +43,27 @@ Notes:
 - `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT` wired to the current undo log
 - PostgreSQL SQLSTATE mapping for common shared-engine failures such as undefined tables, undefined columns, unique violations, syntax errors, and unsupported features
 - `Terminate` handling
-- text-format extended query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, including named prepared statements, named portals, `$1`/`$2` placeholders, statement/portal `Describe`, and sync-based recovery after extended-protocol execution errors
+- extended query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, including named prepared statements, named portals, `$1`/`$2` placeholders, statement/portal `Describe`, text parameters, binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors
 - PG compatibility corpus at `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
 - PG-specific operators: `||` (string concatenation), `~` / `~*` (regex match), `->` / `->>` (JSON access)
 - PG-specific scalar functions: `gen_random_uuid()`, `date_trunc()`, `to_char()`, `pg_typeof()`, `string_to_array()`, `array_length()`, `array_upper()`, `array_lower()`, `clock_timestamp()`, `statement_timestamp()`, `transaction_timestamp()`
 - PG-specific aggregate functions: `string_agg()`, `array_agg()`
-- PG SQL dialect rewriting: `::` type casts, `$$dollar quoting$$`, `"double-quoted"` identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST n ROWS ONLY`, `ARRAY[…]` constructor
+- PG SQL dialect rewriting: `::` type casts, `$$dollar quoting$$`, `"double-quoted"` identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST n ROWS ONLY`, `ARRAY[…]` constructor, and `ON CONFLICT` rewrite support for the current shared-engine DML subset
+- `INSERT` / `UPDATE` / `DELETE ... RETURNING` extraction with supported follow-up reads, and explicit `0A000` errors for `COPY FROM STDIN` / `COPY TO STDOUT`
 - PG DDL compatibility: `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` → auto-increment integer columns, `CREATE SCHEMA` → `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY` (accepted/ignored), `CREATE INDEX IF NOT EXISTS`, `COMMENT ON` (silently accepted)
+- virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
 
 ## Module map
 
 | File | Status | Purpose |
 |------|--------|---------|
 | `pg_wire.rs` | Implemented | PG v3 message framing, startup parsing, backend message encode/write helpers, common PG type OIDs, unit tests |
-| `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, SSL rejection, simple query loop, transaction/savepoint state, SQLSTATE mapping, and text-format extended-query lifecycle handling |
-| `pg_auth.rs` | Planned | SCRAM-SHA-256 and richer auth paths |
-| `pg_session.rs` | Planned | `search_path`, `DateStyle`, `TimeZone`, tx-state tracking, `client_encoding` |
-| `pg_parse.rs` | Implemented | PG SQL dialect rewriting layer (`pg_rewrite_sql`): `::` type casts → `CAST(… AS …)`, `$$dollar quoting$$` → single-quoted, `"double-quoted"` identifiers → backtick-quoted, `IS [NOT] DISTINCT FROM` → `null_safe_eq`, `FETCH FIRST n ROWS ONLY` → `LIMIT n`, `ARRAY[…]` → PG array literal string. `ILIKE` and boolean literals handled natively. `RETURNING` and `ON CONFLICT` deferred to DML extensions. |
-| `pg_types.rs` | Planned | Richer OID mapping plus text/binary format parity |
-| `pg_catalog.rs` | Partial | Virtual `pg_catalog.*` tables currently served through `server.rs` (`pg_database`, `pg_namespace`, `pg_type`, `pg_proc` stub, `pg_settings`, `pg_stat_activity`); dedicated module is still planned |
+| `server.rs` (PG section) | Implemented | PG listener, startup/auth flow, SSL rejection, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch |
+| `pg_auth.rs` | Inline implementation | SCRAM-SHA-256 lives in `pg_wire::scram` plus `server.rs` connection handling rather than a separate module |
+| `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, and `current_setting(...)` use that session map |
+| `pg_parse.rs` | Inline implementation | PG SQL dialect rewriting layer (`pg_rewrite_sql` + helpers in `server.rs`): `::` type casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, `ARRAY[...]`, `ON CONFLICT`, and supported `RETURNING` extraction |
+| `pg_types.rs` | Inline implementation | Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in `pg_wire.rs` plus server-side inference helpers |
+| `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity` |
 | `pg_functions.rs` | Partial | PG-specific scalar/aggregate functions now inline in `engine.rs` and `server.rs`: `||` concat, `~`/`~*` regex, `->` / `->>` JSON access, `gen_random_uuid`, `date_trunc`, `to_char`, `pg_typeof`, `string_to_array`, `array_length`, `array_upper`, `array_lower`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_agg`, `array_agg` |
 
 ## Authentication
@@ -67,9 +71,9 @@ Notes:
 | Method | Status | Notes |
 |--------|--------|-------|
 | trust | Supported | Default when `SKEINDB_TOKEN` is not set |
-| cleartext password | Supported | Uses `SKEINDB_TOKEN` as the password gate |
-| SCRAM-SHA-256 | Planned | Backlog item T401 |
-| md5 | Not planned | Prefer SCRAM once implemented |
+| SCRAM-SHA-256 | Supported | Used when `SKEINDB_TOKEN` is set; the token value is the PostgreSQL password |
+| cleartext password | Legacy helper only | Wire helper exists, but the live listener now prefers SCRAM for token-protected PG sessions |
+| md5 | Not planned | Prefer SCRAM |
 | TLS client certs | Not implemented | SSL negotiation is currently rejected |
 
 ## Protocol surface
@@ -92,18 +96,18 @@ For the current shared-engine subset, `RowDescription` now advertises common inf
 
 ### Extended query protocol
 
-The listener now supports the core text-format extended-query lifecycle:
+The listener now supports the core extended-query lifecycle:
 
 - `Parse` stores named prepared statements and tracks declared parameter OIDs
-- `Bind` stores named portals with text-format bound parameters
+- `Bind` stores named portals with text-format bound parameters and requested result formats
 - `Describe` returns `ParameterDescription` plus statement/portal row metadata
-- `Execute` substitutes `$1`/`$2` placeholders and routes through the shared SQL execution engine
+- `Execute` substitutes `$1`/`$2` placeholders and routes through the shared SQL execution engine; binary result-format requests are encoded for common scalar OIDs
 - `Close`, `Sync`, and `Flush` behave as PG lifecycle messages rather than compatibility stubs
 
 Current limits:
 
-- parameter and result formats are text-only
-- richer PG type OID coverage beyond the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline and binary format parity remain part of the open type/result-encoding work
+- parameter formats are text-only
+- binary result encoding is limited to the current common scalar OID baseline
 - partial portal suspension (`Execute` with incremental row draining) is not implemented yet
 
 ### Transactions
@@ -150,12 +154,9 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 
 ## Not implemented yet
 
-- SCRAM-SHA-256 authentication
-- PostgreSQL session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, `standard_conforming_strings`)
-- PG-specific DML extensions such as `RETURNING`, `ON CONFLICT DO NOTHING/UPDATE`, and `COPY FROM STDIN / TO STDOUT`
-- broader PG bootstrap-query compatibility for tools/frameworks (`pg_catalog.pg_class`, `pg_attribute`, `pg_index`, and `pg_constraint` are now implemented with table/index/column metadata derived from the shared catalog)
+- broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset
 - COPY protocol
-- richer type encoding and binary format support beyond the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` metadata baseline
+- broader type/array/domain encoding beyond the current scalar and array OID baseline
 - partial portal suspension for incremental `Execute` row draining
 - production-grade driver compatibility for Django, Rails, SQLAlchemy, `pgAdmin`, `DBeaver`, `psycopg`, and `node-postgres`
 
@@ -173,7 +174,7 @@ HTTP  (8080) ──┘
 
 Phase 25 in `docs/PROJECT_BACKLOG.md` tracks the remaining PostgreSQL work:
 
-- T400 / T403 / T408 / T410 / T411 / T412 / T413 / T414 / T415 / T418 are complete
-- T401-T407 / T409 / T416-T417 remain open for auth hardening, PG parser work, richer type mapping, broader catalog coverage, and driver compatibility
+- T400-T418 are complete in the core roadmap checklist.
+- Remaining PG work is no longer represented by unchecked Phase 25 boxes; track it as follow-up compatibility hardening: broader dialect coverage, COPY protocol, portal suspension, larger catalog/driver matrices, and framework-specific smoke suites.
 
 Use `docs/TRUE_STATUS_MATRIX.md` when you want the runtime-backed truth snapshot rather than the aspirational roadmap.

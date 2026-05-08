@@ -190,7 +190,7 @@
   </div>
 
   <div class="phase">
-    <div class="phase-head"><h3>Phase 15 — Additional performance improvements</h3><span class="pill pill-active">Active</span></div>
+    <div class="phase-head"><h3>Phase 15 — Additional performance improvements</h3><span class="pill pill-done">Done</span></div>
     <p>T150 through T153 are now in place: interned-column schema flags persist separately from the catalog, single-table scan paths can precompile `eq`/`ne`/`in` predicates into ValueID comparisons, row/snapshot executors only materialize the columns the query still needs, eligible full scans now run through a 1024-row scan->filter->project batch loop, and the core MVCC layer exposes a validated visible-version cache keyed by row id plus snapshot bucket.</p>
     <ul class="tasks">
       <li><span class="tid">T150</span><span class="status s-done">done</span>Schema flag for interned columns + ValueID-first predicate ops</li>

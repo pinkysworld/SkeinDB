@@ -174,8 +174,8 @@
 <ul>
 <li>The listener is a <strong>partial baseline</strong>, not full PostgreSQL compatibility.</li>
 <li>SSL/TLS negotiation is not implemented yet.</li>
-<li>SCRAM auth is not implemented yet.</li>
-<li>Some PostgreSQL-native DML features like <code>COPY</code>, broad <code>ON CONFLICT</code>, and <code>RETURNING</code> are still open work.</li>
+<li>SCRAM-SHA-256 is used when <code>SKEINDB_TOKEN</code> is set; trust auth remains the default when it is unset.</li>
+<li>Some PostgreSQL-native features like <code>COPY</code>, partial portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open work.</li>
 </ul>
 <p>For the current implementation surface and gaps, read <a href="pg-compat.html">PostgreSQL compatibility</a>.</p>
 <h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>

@@ -123,8 +123,8 @@
     </div>
     <article class="doc-article">
       <h1 id="skeindb-compatibility-mysql-postgresql-sql">SkeinDB Compatibility (MySQL / PostgreSQL / SQL)<a class="headerlink" href="#skeindb-compatibility-mysql-postgresql-sql" title="Permanent link">¶</a></h1>
-<p>Status: Draft v0.2
-Last updated: 2026-03-30</p>
+<p>Status: v0.3.6 truth sync
+Last updated: 2026-05-08</p>
 <p>SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
 - Speak PostgreSQL wire protocol (port 5432, partial baseline today) so early PG clients can connect while broader dialect/catalog parity is completed.
@@ -273,7 +273,7 @@ protocol additions (<code>COM_INIT_DB</code>, <code>COM_STATISTICS</code>), and 
 <code>FLUSH</code>/<code>ANALYZE</code>/<code>OPTIMIZE</code>/<code>CHECK</code>/<code>REPAIR TABLE</code>, <code>SET GLOBAL</code>, and <code>KILL</code>.
 Recent additions include derived tables (FROM subqueries), common table expressions (CTEs),
 <code>REGEXP</code>/<code>RLIKE</code>/<code>NOT REGEXP</code> pattern matching, <code>&lt;=&gt;</code> (NULL-safe equality), <code>NATURAL JOIN</code>,
-<code>FULL OUTER JOIN</code>, multi-table <code>DELETE</code>, multi-table <code>UPDATE</code> (stub), 11 JSON functions
+<code>FULL OUTER JOIN</code>, multi-table <code>DELETE</code>, multi-table <code>UPDATE</code> execution, 11 JSON functions
 (<code>JSON_EXTRACT</code>, <code>JSON_UNQUOTE</code>, <code>JSON_OBJECT</code>, <code>JSON_ARRAY</code>, <code>JSON_CONTAINS</code>, <code>JSON_LENGTH</code>,
 <code>JSON_TYPE</code>, <code>JSON_VALID</code>, <code>JSON_SET</code>, <code>JSON_KEYS</code>, <code>JSON_MERGE_PRESERVE</code>), plus additional
 scalar functions (<code>FIELD</code>, <code>ELT</code>, <code>INET_ATON</code>/<code>INET_NTOA</code>, <code>BIN</code>/<code>OCT</code>, <code>CONV</code>, <code>CRC32</code>,
@@ -311,15 +311,16 @@ in ways that do not require new SQL grammar:</p>
 <hr />
 <h2 id="6-postgresql-compatibility-current-partial-baseline">6) PostgreSQL compatibility (current partial baseline)<a class="headerlink" href="#6-postgresql-compatibility-current-partial-baseline" title="Permanent link">¶</a></h2>
 <p>SkeinDB now ships a PostgreSQL v3 wire protocol listener on a separate port (default 5432).
-The implementation is intentionally narrow but test-backed.</p>
+The implementation is still partial but substantially deeper than the first bring-up baseline.</p>
 <h3 id="current-baseline">Current baseline<a class="headerlink" href="#current-baseline" title="Permanent link">¶</a></h3>
 <ul>
 <li><strong>Wire protocol:</strong> PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for <code>ParameterStatus</code>, <code>BackendKeyData</code>, <code>ReadyForQuery</code>, <code>RowDescription</code>, <code>DataRow</code>, <code>CommandComplete</code>, and <code>ErrorResponse</code></li>
-<li><strong>Authentication:</strong> trust mode when <code>SKEINDB_TOKEN</code> is unset; cleartext-password auth path when it is set</li>
+<li><strong>Authentication:</strong> trust mode when <code>SKEINDB_TOKEN</code> is unset; SCRAM-SHA-256 when it is set</li>
 <li><strong>Simple query flow:</strong> shared SQL execution engine behind the PG socket, including <code>SELECT 1</code>-style queries, a <code>SELECT version()</code> compatibility response, and typed <code>RowDescription</code> metadata for the current <code>BOOL</code> / <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> / <code>DATE</code> / <code>TIME</code> / <code>TIMESTAMP</code> / <code>JSONB</code> / <code>BYTEA</code> / <code>UUID</code> baseline when the shared engine exposes those schema or literal types</li>
-<li><strong>Virtual catalogs:</strong> shared-executor <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_type</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
+<li><strong>Virtual catalogs:</strong> shared-executor <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
+<li><strong>PG dialect and DML:</strong> <code>::</code> casts, dollar quoting, double-quoted identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST</code>, array constructors, common <code>ON CONFLICT</code> rewrites, supported <code>RETURNING</code> extraction, and explicit unsupported-feature errors for <code>COPY</code></li>
 <li><strong>Transaction handling:</strong> PostgreSQL-style <code>ReadyForQuery</code> state (<code>I</code> / <code>T</code> / <code>E</code>), failed-transaction-block behavior, and undo-log-backed <code>SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code></li>
-<li><strong>Extended query protocol:</strong> text-format <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, named statements + portals, <code>$1</code> placeholders, sync-based recovery after extended-query errors, and typed <code>RowDescription</code> metadata for the same <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> baseline</li>
+<li><strong>Extended query protocol:</strong> <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, named statements + portals, <code>$1</code> placeholders, sync-based recovery after extended-query errors, typed <code>RowDescription</code> metadata, and binary result encoding for the current common scalar OID baseline</li>
 <li><strong>PG regression corpus:</strong> dedicated <code>tests/compat/pg_corpus.sql</code> executed end-to-end over the live PG listener</li>
 </ul>
 <h3 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">¶</a></h3>
@@ -336,12 +337,11 @@ HTTP  (8080) ──┘
 </ul>
 <h3 id="still-open">Still open<a class="headerlink" href="#still-open" title="Permanent link">¶</a></h3>
 <ul>
-<li>SCRAM-SHA-256 authentication</li>
-<li>PG session state (<code>search_path</code>, <code>DateStyle</code>, <code>TimeZone</code>, <code>client_encoding</code>, richer <code>ReadyForQuery</code> state)</li>
-<li>richer PG type OID coverage beyond the current <code>BOOL</code> / <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> / <code>DATE</code> / <code>TIME</code> / <code>TIMESTAMP</code> / <code>JSONB</code> / <code>BYTEA</code> / <code>UUID</code> baseline, binary format support, and partial portal suspension</li>
-<li>PG SQL dialect extensions such as <code>RETURNING</code>, dollar-quoting, <code>::</code> casts, <code>ILIKE</code>, arrays, and <code>ON CONFLICT</code></li>
-<li>broader <code>pg_catalog</code> virtual tables and driver bootstrap compatibility</li>
-<li>broader driver/framework coverage</li>
+<li>broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset</li>
+<li>COPY protocol</li>
+<li>partial portal suspension for incremental <code>Execute</code> row draining</li>
+<li>broader type/array/domain encoding beyond the current scalar and array OID baseline</li>
+<li>broader driver/framework coverage and framework-specific bootstrap suites</li>
 </ul>
 <p>See <code>docs/PG_COMPAT.md</code> for the tested scope, examples, and backlog map.</p>
       <hr>

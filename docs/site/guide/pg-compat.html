@@ -123,8 +123,8 @@
     </div>
     <article class="doc-article">
       <h1 id="postgresql-compatibility">PostgreSQL Compatibility<a class="headerlink" href="#postgresql-compatibility" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-04-17</p>
-<p>Status: Partial baseline</p>
+<p>Last updated: 2026-05-08</p>
+<p>Status: Partial advanced baseline</p>
 <p>SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
 The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.</p>
 <h2 id="quick-start">Quick start<a class="headerlink" href="#quick-start" title="Permanent link">¶</a></h2>
@@ -133,7 +133,8 @@ cargo<span class="w"> </span>run<span class="w"> </span>--<span class="w"> </spa
 
 psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable&quot;</span><span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT 1&quot;</span>
 
-<span class="c1"># If SKEINDB_TOKEN is set, use the same value as the password:</span>
+<span class="c1"># If SKEINDB_TOKEN is set, the listener uses SCRAM-SHA-256 and</span>
+<span class="c1"># the password is the token value:</span>
 <span class="nv">PGPASSWORD</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$SKEINDB_TOKEN</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user=skein dbname=app sslmode=disable&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-c<span class="w"> </span><span class="s2">&quot;SELECT version()&quot;</span>
@@ -148,8 +149,9 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li><code>StartupMessage</code> and <code>SSLRequest</code> parsing</li>
 <li>startup response batch: <code>AuthenticationOk</code> / <code>ParameterStatus</code> / <code>BackendKeyData</code> / <code>ReadyForQuery</code></li>
 <li>trust auth when <code>SKEINDB_TOKEN</code> is unset</li>
-<li>cleartext-password auth path when <code>SKEINDB_TOKEN</code> is set</li>
+<li>SCRAM-SHA-256 auth path when <code>SKEINDB_TOKEN</code> is set</li>
 <li>SSL negotiation rejection (<code>'N'</code>)</li>
+<li>PG session settings for common <code>SET</code> / <code>SET ... TO</code> / <code>RESET</code> / <code>RESET ALL</code>, with <code>SHOW</code> and <code>current_setting(...)</code> reading session overrides</li>
 <li>simple query protocol delegated to the shared SQL execution engine</li>
 <li>special-case startup/bootstrap query responses for <code>SELECT version()</code>, <code>current_database()</code>, <code>current_schema()</code>, <code>SHOW server_version</code> / <code>server_version_num</code> / <code>standard_conforming_strings</code> / <code>max_identifier_length</code>, <code>SHOW transaction isolation level</code>, and <code>SELECT current_setting(...)</code></li>
 <li>empty-query handling</li>
@@ -158,13 +160,15 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li><code>SAVEPOINT</code>, <code>RELEASE SAVEPOINT</code>, and <code>ROLLBACK TO SAVEPOINT</code> wired to the current undo log</li>
 <li>PostgreSQL SQLSTATE mapping for common shared-engine failures such as undefined tables, undefined columns, unique violations, syntax errors, and unsupported features</li>
 <li><code>Terminate</code> handling</li>
-<li>text-format extended query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, including named prepared statements, named portals, <code>$1</code>/<code>$2</code> placeholders, statement/portal <code>Describe</code>, and sync-based recovery after extended-protocol execution errors</li>
+<li>extended query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, including named prepared statements, named portals, <code>$1</code>/<code>$2</code> placeholders, statement/portal <code>Describe</code>, text parameters, binary result-format encoding for common scalar OIDs, and sync-based recovery after extended-protocol execution errors</li>
 <li>PG compatibility corpus at <code>tests/compat/pg_corpus.sql</code> executed end-to-end over the live PG listener</li>
 <li>PG-specific operators: <code>||</code> (string concatenation), <code>~</code> / <code>~*</code> (regex match), <code>-&gt;</code> / <code>-&gt;&gt;</code> (JSON access)</li>
 <li>PG-specific scalar functions: <code>gen_random_uuid()</code>, <code>date_trunc()</code>, <code>to_char()</code>, <code>pg_typeof()</code>, <code>string_to_array()</code>, <code>array_length()</code>, <code>array_upper()</code>, <code>array_lower()</code>, <code>clock_timestamp()</code>, <code>statement_timestamp()</code>, <code>transaction_timestamp()</code></li>
 <li>PG-specific aggregate functions: <code>string_agg()</code>, <code>array_agg()</code></li>
-<li>PG SQL dialect rewriting: <code>::</code> type casts, <code>$$dollar quoting$$</code>, <code>"double-quoted"</code> identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST n ROWS ONLY</code>, <code>ARRAY[…]</code> constructor</li>
+<li>PG SQL dialect rewriting: <code>::</code> type casts, <code>$$dollar quoting$$</code>, <code>"double-quoted"</code> identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST n ROWS ONLY</code>, <code>ARRAY[…]</code> constructor, and <code>ON CONFLICT</code> rewrite support for the current shared-engine DML subset</li>
+<li><code>INSERT</code> / <code>UPDATE</code> / <code>DELETE ... RETURNING</code> extraction with supported follow-up reads, and explicit <code>0A000</code> errors for <code>COPY FROM STDIN</code> / <code>COPY TO STDOUT</code></li>
 <li>PG DDL compatibility: <code>SERIAL</code>/<code>BIGSERIAL</code>/<code>SMALLSERIAL</code> → auto-increment integer columns, <code>CREATE SCHEMA</code> → <code>CREATE DATABASE</code>, <code>CREATE INDEX CONCURRENTLY</code> (accepted/ignored), <code>CREATE INDEX IF NOT EXISTS</code>, <code>COMMENT ON</code> (silently accepted)</li>
+<li>virtual <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
 </ul>
 <h2 id="module-map">Module map<a class="headerlink" href="#module-map" title="Permanent link">¶</a></h2>
 <table>
@@ -184,32 +188,32 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <tr>
 <td><code>server.rs</code> (PG section)</td>
 <td>Implemented</td>
-<td>PG listener, startup/auth flow, SSL rejection, simple query loop, transaction/savepoint state, SQLSTATE mapping, and text-format extended-query lifecycle handling</td>
+<td>PG listener, startup/auth flow, SSL rejection, simple + extended query loops, transaction/savepoint state, SQLSTATE mapping, PG DML/DDL rewrites, and virtual catalog dispatch</td>
 </tr>
 <tr>
 <td><code>pg_auth.rs</code></td>
-<td>Planned</td>
-<td>SCRAM-SHA-256 and richer auth paths</td>
+<td>Inline implementation</td>
+<td>SCRAM-SHA-256 lives in <code>pg_wire::scram</code> plus <code>server.rs</code> connection handling rather than a separate module</td>
 </tr>
 <tr>
 <td><code>pg_session.rs</code></td>
-<td>Planned</td>
-<td><code>search_path</code>, <code>DateStyle</code>, <code>TimeZone</code>, tx-state tracking, <code>client_encoding</code></td>
+<td>Inline implementation</td>
+<td>Common PG settings live on <code>MySqlSessionState</code>; <code>SET</code>, <code>RESET</code>, <code>SHOW</code>, and <code>current_setting(...)</code> use that session map</td>
 </tr>
 <tr>
 <td><code>pg_parse.rs</code></td>
-<td>Implemented</td>
-<td>PG SQL dialect rewriting layer (<code>pg_rewrite_sql</code>): <code>::</code> type casts → <code>CAST(… AS …)</code>, <code>$$dollar quoting$$</code> → single-quoted, <code>"double-quoted"</code> identifiers → backtick-quoted, <code>IS [NOT] DISTINCT FROM</code> → <code>null_safe_eq</code>, <code>FETCH FIRST n ROWS ONLY</code> → <code>LIMIT n</code>, <code>ARRAY[…]</code> → PG array literal string. <code>ILIKE</code> and boolean literals handled natively. <code>RETURNING</code> and <code>ON CONFLICT</code> deferred to DML extensions.</td>
+<td>Inline implementation</td>
+<td>PG SQL dialect rewriting layer (<code>pg_rewrite_sql</code> + helpers in <code>server.rs</code>): <code>::</code> type casts, dollar quoting, double-quoted identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST</code>, <code>ARRAY[...]</code>, <code>ON CONFLICT</code>, and supported <code>RETURNING</code> extraction</td>
 </tr>
 <tr>
 <td><code>pg_types.rs</code></td>
-<td>Planned</td>
-<td>Richer OID mapping plus text/binary format parity</td>
+<td>Inline implementation</td>
+<td>Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in <code>pg_wire.rs</code> plus server-side inference helpers</td>
 </tr>
 <tr>
 <td><code>pg_catalog.rs</code></td>
-<td>Partial</td>
-<td>Virtual <code>pg_catalog.*</code> tables currently served through <code>server.rs</code> (<code>pg_database</code>, <code>pg_namespace</code>, <code>pg_type</code>, <code>pg_proc</code> stub, <code>pg_settings</code>, <code>pg_stat_activity</code>); dedicated module is still planned</td>
+<td>Inline implementation</td>
+<td>Virtual <code>pg_catalog.*</code> tables are served through the shared executor for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></td>
 </tr>
 <tr>
 <td><code>pg_functions.rs</code></td>
@@ -234,19 +238,19 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <td>Default when <code>SKEINDB_TOKEN</code> is not set</td>
 </tr>
 <tr>
-<td>cleartext password</td>
+<td>SCRAM-SHA-256</td>
 <td>Supported</td>
-<td>Uses <code>SKEINDB_TOKEN</code> as the password gate</td>
+<td>Used when <code>SKEINDB_TOKEN</code> is set; the token value is the PostgreSQL password</td>
 </tr>
 <tr>
-<td>SCRAM-SHA-256</td>
-<td>Planned</td>
-<td>Backlog item T401</td>
+<td>cleartext password</td>
+<td>Legacy helper only</td>
+<td>Wire helper exists, but the live listener now prefers SCRAM for token-protected PG sessions</td>
 </tr>
 <tr>
 <td>md5</td>
 <td>Not planned</td>
-<td>Prefer SCRAM once implemented</td>
+<td>Prefer SCRAM</td>
 </tr>
 <tr>
 <td>TLS client certs</td>
@@ -269,18 +273,18 @@ For the common shared SQL subset, responses are encoded as:</p>
 <p><code>bytes</code> cells continue to flow through the shared engine as base64 in the internal JSON result surface, but the PG listener now normalizes them to PostgreSQL <code>bytea</code> text format (<code>\\x...</code>) on the wire.</p>
 <p><code>SELECT version()</code> plus the common startup/bootstrap probes above are handled explicitly so PG clients can complete early compatibility checks before falling through to the shared engine.</p>
 <h3 id="extended-query-protocol">Extended query protocol<a class="headerlink" href="#extended-query-protocol" title="Permanent link">¶</a></h3>
-<p>The listener now supports the core text-format extended-query lifecycle:</p>
+<p>The listener now supports the core extended-query lifecycle:</p>
 <ul>
 <li><code>Parse</code> stores named prepared statements and tracks declared parameter OIDs</li>
-<li><code>Bind</code> stores named portals with text-format bound parameters</li>
+<li><code>Bind</code> stores named portals with text-format bound parameters and requested result formats</li>
 <li><code>Describe</code> returns <code>ParameterDescription</code> plus statement/portal row metadata</li>
-<li><code>Execute</code> substitutes <code>$1</code>/<code>$2</code> placeholders and routes through the shared SQL execution engine</li>
+<li><code>Execute</code> substitutes <code>$1</code>/<code>$2</code> placeholders and routes through the shared SQL execution engine; binary result-format requests are encoded for common scalar OIDs</li>
 <li><code>Close</code>, <code>Sync</code>, and <code>Flush</code> behave as PG lifecycle messages rather than compatibility stubs</li>
 </ul>
 <p>Current limits:</p>
 <ul>
-<li>parameter and result formats are text-only</li>
-<li>richer PG type OID coverage beyond the current <code>BOOL</code> / <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> / <code>DATE</code> / <code>TIME</code> / <code>TIMESTAMP</code> / <code>JSONB</code> / <code>BYTEA</code> / <code>UUID</code> baseline and binary format parity remain part of the open type/result-encoding work</li>
+<li>parameter formats are text-only</li>
+<li>binary result encoding is limited to the current common scalar OID baseline</li>
 <li>partial portal suspension (<code>Execute</code> with incremental row draining) is not implemented yet</li>
 </ul>
 <h3 id="transactions">Transactions<a class="headerlink" href="#transactions" title="Permanent link">¶</a></h3>
@@ -323,12 +327,9 @@ For the common shared SQL subset, responses are encoded as:</p>
 </ul>
 <h2 id="not-implemented-yet">Not implemented yet<a class="headerlink" href="#not-implemented-yet" title="Permanent link">¶</a></h2>
 <ul>
-<li>SCRAM-SHA-256 authentication</li>
-<li>PostgreSQL session state (<code>search_path</code>, <code>DateStyle</code>, <code>TimeZone</code>, <code>client_encoding</code>, <code>standard_conforming_strings</code>)</li>
-<li>PG-specific DML extensions such as <code>RETURNING</code>, <code>ON CONFLICT DO NOTHING/UPDATE</code>, and <code>COPY FROM STDIN / TO STDOUT</code></li>
-<li>broader PG bootstrap-query compatibility for tools/frameworks (<code>pg_catalog.pg_class</code>, <code>pg_attribute</code>, <code>pg_index</code>, and <code>pg_constraint</code> are now implemented with table/index/column metadata derived from the shared catalog)</li>
+<li>broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset</li>
 <li>COPY protocol</li>
-<li>richer type encoding and binary format support beyond the current <code>BOOL</code> / <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> / <code>DATE</code> / <code>TIME</code> / <code>TIMESTAMP</code> / <code>JSONB</code> / <code>BYTEA</code> / <code>UUID</code> metadata baseline</li>
+<li>broader type/array/domain encoding beyond the current scalar and array OID baseline</li>
 <li>partial portal suspension for incremental <code>Execute</code> row draining</li>
 <li>production-grade driver compatibility for Django, Rails, SQLAlchemy, <code>pgAdmin</code>, <code>DBeaver</code>, <code>psycopg</code>, and <code>node-postgres</code></li>
 </ul>
@@ -342,8 +343,8 @@ HTTP  (8080) ──┘
 <h2 id="backlog-map">Backlog map<a class="headerlink" href="#backlog-map" title="Permanent link">¶</a></h2>
 <p>Phase 25 in <code>docs/PROJECT_BACKLOG.md</code> tracks the remaining PostgreSQL work:</p>
 <ul>
-<li>T400 / T403 / T408 / T410 / T411 / T412 / T413 / T414 / T415 / T418 are complete</li>
-<li>T401-T407 / T409 / T416-T417 remain open for auth hardening, PG parser work, richer type mapping, broader catalog coverage, and driver compatibility</li>
+<li>T400-T418 are complete in the core roadmap checklist.</li>
+<li>Remaining PG work is no longer represented by unchecked Phase 25 boxes; track it as follow-up compatibility hardening: broader dialect coverage, COPY protocol, portal suspension, larger catalog/driver matrices, and framework-specific smoke suites.</li>
 </ul>
 <p>Use <code>docs/TRUE_STATUS_MATRIX.md</code> when you want the runtime-backed truth snapshot rather than the aspirational roadmap.</p>
       <hr>

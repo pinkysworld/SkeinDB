@@ -191,19 +191,19 @@ Current coverage:
 - <code>COM_QUERY</code> SQL translation subset (<code>SELECT/SHOW/USE/CREATE DATABASE/CREATE TABLE/DROP TABLE/INSERT/UPDATE/DELETE</code>)
 - <code>COM_STMT_PREPARE</code> / <code>COM_STMT_EXECUTE</code> / <code>COM_STMT_CLOSE</code> (prepared statements)
 - 678 semicolon-terminated compatibility SQL statements in <code>tests/compat/corpus.sql</code></p>
-<p><code>COM_QUERY</code> and broader SQL compatibility are still tracked in the project backlog.</p>
+<p>Additional SQL compatibility remains corpus-driven and is tracked in the compatibility docs.</p>
 <hr />
 <h2 id="postgresql-listener-partial-baseline">PostgreSQL listener (partial baseline)<a class="headerlink" href="#postgresql-listener-partial-baseline" title="Permanent link">¶</a></h2>
 <p>When <code>--pg</code> is non-zero, SkeinDB starts a PostgreSQL v3 wire protocol listener.
 Current coverage:
 - StartupMessage + SSLRequest parsing
 - trust authentication when <code>SKEINDB_TOKEN</code> is unset
-- cleartext-password authentication when <code>SKEINDB_TOKEN</code> is set
+- SCRAM-SHA-256 authentication when <code>SKEINDB_TOKEN</code> is set
 - SSL negotiation rejection (<code>'N'</code>)
 - startup <code>ParameterStatus</code> / <code>BackendKeyData</code> / <code>ReadyForQuery</code> sequence
 - simple query protocol delegated to the shared SQL engine
-- <code>BEGIN</code> / <code>COMMIT</code> / <code>ROLLBACK</code> compatibility stubs
-- extended-query protocol acknowledgements as stubs only</p>
+- transaction/savepoint state with PostgreSQL-style <code>ReadyForQuery</code> statuses
+- extended-query protocol for <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code></p>
 <p>Configuration in <code>skeindb-config.json</code>:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;pg_port&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5432</span>

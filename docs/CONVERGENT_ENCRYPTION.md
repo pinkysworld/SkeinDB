@@ -1,7 +1,7 @@
 # Dedup-preserving encryption (message-locked / convergent mode)
 
-Status: Partial (T190 implemented; T191-T193 open)
-Last updated: 2026-04-23
+Status: Shipped baseline (T190-T193 implemented; background re-encryption orchestration and durable key catalog persistence remain follow-ups)
+Last updated: 2026-05-08
 
 SkeinDB's storage design uses content addressing and optional deduplication in the ValueStore.
 Traditional randomized encryption breaks deduplication because identical plaintexts produce different ciphertexts.
@@ -21,10 +21,12 @@ feature MUST be opt-in and MUST offer safer scope defaults.
 
 Current implementation note:
 
-- T190 is now implemented in `skeindb-core::encryption` as a standalone database-scoped key manager plus AEAD wrapper layer.
+- T190 is implemented in `skeindb-core::encryption` as a standalone database-scoped key manager plus AEAD wrapper layer.
 - `ENC_RANDOM` uses AES-256-GCM-SIV with a randomized 96-bit nonce under a mode-specific key derived from the active database master secret.
-- `ENC_MLE_DB` derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts. The returned `EncryptionEnvelope` carries the derivation salt so later storage integration can decrypt the object without redesigning the wrapper contract.
-- ValueStore metadata, encrypted on-disk entries, and `ValueID = hash(stored_bytes)` integration are still pending in T191, so this phase does not yet change any on-disk format.
+- `ENC_MLE_DB` derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts.
+- T191 adds `EncryptedValueStore`, which stores self-describing encryption envelopes as ordinary `ValueKind::Cell` blobs and computes `ValueID` over the stored bytes without changing the `.vseg` format.
+- T192 adds key rotation plans and per-envelope / per-value re-encryption helpers with progress counters.
+- T193 exposes `settings.encryption.*` JSON-RPC methods plus the SkeinAdmin Encryption panel. Master key bytes are accepted as base64 but never persisted; operators re-register keys after restart.
 
 ## 2. Threat model (explicit)
 
@@ -58,7 +60,7 @@ SkeinDB supports the following encryption modes:
 - Deterministic AEAD is used.
 - A per-database (or per-tenant) master secret prevents cross-tenant confirmation attacks.
 - Identical plaintexts within the same database produce identical ciphertexts, enabling dedup.
-- Current T190 wrapper: derive a content key from `(database master secret, SHA-256(plaintext))` via HKDF, derive a separate 96-bit AEAD nonce from the same `(master_key, plaintext_digest)` via a distinct HKDF info label, then encrypt with AES-256-GCM-SIV. Both derivations are deterministic, so identical plaintexts within a database still produce identical ciphertexts; no fixed or zero nonce is reused. The wrapper returns the derivation salt in the envelope so decryption remains possible before T191 finalizes persistent metadata.
+- Current wrapper: derive a content key from `(database master secret, SHA-256(plaintext))` via HKDF, derive a separate 96-bit AEAD nonce from the same `(master_key, plaintext_digest)` via a distinct HKDF info label, then encrypt with AES-256-GCM-SIV. Both derivations are deterministic, so identical plaintexts within a database still produce identical ciphertexts; no fixed or zero nonce is reused. The wrapper stores the derivation salt in the envelope so decryption remains possible after persistence.
 
 ### 3.4 ENC_MLE_OPRF (server-aided, optional)
 
@@ -125,12 +127,14 @@ Key storage options (deployment-dependent):
 - environment variable for development
 - external KMS (future)
 
-Current T190 surface:
+Current surface:
 
 - `DatabaseKeyManager::register_database_key(db_id, key_id, master_key)` registers a 32-byte database master secret.
 - `DatabaseKeyManager::set_active_database_key(db_id, key_id)` switches the active key for future encryptions.
 - `DatabaseKeyManager::set_database_mode(db_id, mode)` enables `ENC_OFF`, `ENC_RANDOM`, or `ENC_MLE_DB` per database profile.
-- `DatabaseKeyManager::encrypt(...)` and `DatabaseKeyManager::decrypt(...)` operate over `EncryptionContext` + `EncryptionEnvelope` wrappers only; they do not yet mutate ValueStore persistence.
+- `DatabaseKeyManager::encrypt(...)` and `DatabaseKeyManager::decrypt(...)` operate over `EncryptionContext` + `EncryptionEnvelope` wrappers.
+- `EncryptedValueStore::put_encrypted(...)`, `get_decrypted(...)`, `read_envelope(...)`, and `reencrypt_value(...)` integrate those envelopes with ValueStore persistence.
+- `settings.encryption.status`, `set_mode`, `register_key`, `set_active_key`, and `rotate_key` expose the operator surface over JSON-RPC.
 
 ## 6. API surface
 
@@ -167,11 +171,14 @@ Functional tests:
 - ValueID equality for identical values in ENC_MLE_DB
 - key rotation correctness (mixed keys)
 
-Shipped T190 coverage:
+Shipped coverage:
 
 - `crates/skeindb-core/tests/encryption.rs::enc_random_roundtrip_uses_randomized_nonces`
 - `crates/skeindb-core/tests/encryption.rs::enc_mle_db_roundtrip_is_deterministic_within_database_scope`
 - `crates/skeindb-core/tests/encryption.rs::enc_mle_db_binds_context_and_database_key_scope`
+- `crates/skeindb-core/tests/encryption.rs::encrypted_value_store_roundtrip_under_three_modes`
+- `crates/skeindb-core/tests/encryption.rs::encrypted_value_store_reencrypt_value_writes_new_envelope`
+- `crates/skeindb/tests/skeinadmin_assets.rs::skeinadmin_encryption_panel_exposes_key_management_controls`
 
 Evaluation metrics:
 - dedup ratio with/without encryption

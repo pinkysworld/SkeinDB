@@ -92,7 +92,7 @@ Current coverage:
 - `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` / `COM_STMT_CLOSE` (prepared statements)
 - 678 semicolon-terminated compatibility SQL statements in `tests/compat/corpus.sql`
 
-`COM_QUERY` and broader SQL compatibility are still tracked in the project backlog.
+Additional SQL compatibility remains corpus-driven and is tracked in the compatibility docs.
 
 ---
 
@@ -102,12 +102,12 @@ When `--pg` is non-zero, SkeinDB starts a PostgreSQL v3 wire protocol listener.
 Current coverage:
 - StartupMessage + SSLRequest parsing
 - trust authentication when `SKEINDB_TOKEN` is unset
-- cleartext-password authentication when `SKEINDB_TOKEN` is set
+- SCRAM-SHA-256 authentication when `SKEINDB_TOKEN` is set
 - SSL negotiation rejection (`'N'`)
 - startup `ParameterStatus` / `BackendKeyData` / `ReadyForQuery` sequence
 - simple query protocol delegated to the shared SQL engine
-- `BEGIN` / `COMMIT` / `ROLLBACK` compatibility stubs
-- extended-query protocol acknowledgements as stubs only
+- transaction/savepoint state with PostgreSQL-style `ReadyForQuery` statuses
+- extended-query protocol for `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`
 
 Configuration in `skeindb-config.json`:
 ```json

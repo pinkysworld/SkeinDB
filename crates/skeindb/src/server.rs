@@ -13412,7 +13412,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
         tracing::info!("PostgreSQL listener disabled (--pg 0)");
     } else {
         tracing::info!(
-            "PostgreSQL v3 listener enabled (simple query protocol + trust/cleartext auth)"
+            "PostgreSQL v3 listener enabled (simple + extended query protocol, trust/SCRAM auth)"
         );
     }
 
@@ -26173,8 +26173,8 @@ fn tx_finish(state: &AppState, params: TxFinishParams, mode: &str) -> Result<Val
     }))
 }
 
-fn system_capabilities(state: &AppState) -> Value {
-    let methods = vec![
+fn skeinql_capability_methods() -> Vec<&'static str> {
+    vec![
         "system.ping",
         "system.version",
         "system.shutdown",
@@ -26245,7 +26245,6 @@ fn system_capabilities(state: &AppState) -> Value {
         "query.select",
         "query.patch",
         "query.subscribe",
-        "cdc.subscribe_query",
         "dp.aggregate",
         "dp.budget.set",
         "dp.budget.get",
@@ -26302,7 +26301,11 @@ fn system_capabilities(state: &AppState) -> Value {
         "admin.user.drop",
         "admin.user.grant",
         "admin.user.revoke",
-    ];
+    ]
+}
+
+fn system_capabilities(state: &AppState) -> Value {
+    let methods = skeinql_capability_methods();
     serde_json::json!({
         "mysql_compat": false,
         "skeinql": true,
@@ -27502,7 +27505,17 @@ mod tests {
         BaseTableRef, Expr, Query, QueryBody, SelectBody, SelectItem, TableRef,
     };
     use skeindb_skeinql::{RpcId, RpcRequest, RpcResponse};
+    use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn system_capabilities_method_list_is_unique() {
+        let methods = skeinql_capability_methods();
+        let unique: BTreeSet<_> = methods.iter().copied().collect();
+
+        assert_eq!(methods.len(), unique.len());
+        assert_eq!(methods.len(), 126);
+    }
 
     #[test]
     fn embedded_admin_assets_present() {

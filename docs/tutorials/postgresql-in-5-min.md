@@ -71,8 +71,8 @@ The current baseline also supports text-format extended query flow, regex operat
 
 - The listener is a **partial baseline**, not full PostgreSQL compatibility.
 - SSL/TLS negotiation is not implemented yet.
-- SCRAM auth is not implemented yet.
-- Some PostgreSQL-native DML features like `COPY`, broad `ON CONFLICT`, and `RETURNING` are still open work.
+- SCRAM-SHA-256 is used when `SKEINDB_TOKEN` is set; trust auth remains the default when it is unset.
+- Some PostgreSQL-native features like `COPY`, partial portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open work.
 
 For the current implementation surface and gaps, read [PostgreSQL compatibility](pg-compat.html).
 

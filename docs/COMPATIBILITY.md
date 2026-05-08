@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: Draft v0.2
-Last updated: 2026-03-30
+Status: v0.3.6 truth sync
+Last updated: 2026-05-08
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
@@ -151,7 +151,7 @@ protocol additions (`COM_INIT_DB`, `COM_STATISTICS`), and no-op stubs for `CREAT
 `FLUSH`/`ANALYZE`/`OPTIMIZE`/`CHECK`/`REPAIR TABLE`, `SET GLOBAL`, and `KILL`.
 Recent additions include derived tables (FROM subqueries), common table expressions (CTEs),
 `REGEXP`/`RLIKE`/`NOT REGEXP` pattern matching, `<=>` (NULL-safe equality), `NATURAL JOIN`,
-`FULL OUTER JOIN`, multi-table `DELETE`, multi-table `UPDATE` (stub), 11 JSON functions
+`FULL OUTER JOIN`, multi-table `DELETE`, multi-table `UPDATE` execution, 11 JSON functions
 (`JSON_EXTRACT`, `JSON_UNQUOTE`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_CONTAINS`, `JSON_LENGTH`,
 `JSON_TYPE`, `JSON_VALID`, `JSON_SET`, `JSON_KEYS`, `JSON_MERGE_PRESERVE`), plus additional
 scalar functions (`FIELD`, `ELT`, `INET_ATON`/`INET_NTOA`, `BIN`/`OCT`, `CONV`, `CRC32`,
@@ -196,15 +196,16 @@ Notes:
 ## 6) PostgreSQL compatibility (current partial baseline)
 
 SkeinDB now ships a PostgreSQL v3 wire protocol listener on a separate port (default 5432).
-The implementation is intentionally narrow but test-backed.
+The implementation is still partial but substantially deeper than the first bring-up baseline.
 
 ### Current baseline
 - **Wire protocol:** PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `RowDescription`, `DataRow`, `CommandComplete`, and `ErrorResponse`
-- **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; cleartext-password auth path when it is set
+- **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; SCRAM-SHA-256 when it is set
 - **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries, a `SELECT version()` compatibility response, and typed `RowDescription` metadata for the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline when the shared engine exposes those schema or literal types
-- **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_type`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- **PG dialect and DML:** `::` casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, array constructors, common `ON CONFLICT` rewrites, supported `RETURNING` extraction, and explicit unsupported-feature errors for `COPY`
 - **Transaction handling:** PostgreSQL-style `ReadyForQuery` state (`I` / `T` / `E`), failed-transaction-block behavior, and undo-log-backed `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
-- **Extended query protocol:** text-format `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, named statements + portals, `$1` placeholders, sync-based recovery after extended-query errors, and typed `RowDescription` metadata for the same `INT8` / `FLOAT8` / `TEXT` baseline
+- **Extended query protocol:** `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, named statements + portals, `$1` placeholders, sync-based recovery after extended-query errors, typed `RowDescription` metadata, and binary result encoding for the current common scalar OID baseline
 - **PG regression corpus:** dedicated `tests/compat/pg_corpus.sql` executed end-to-end over the live PG listener
 
 ### Architecture
@@ -221,11 +222,10 @@ HTTP  (8080) ──┘
 - `pg_port` in `skeindb-config.json`
 
 ### Still open
-- SCRAM-SHA-256 authentication
-- PG session state (`search_path`, `DateStyle`, `TimeZone`, `client_encoding`, richer `ReadyForQuery` state)
-- richer PG type OID coverage beyond the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline, binary format support, and partial portal suspension
-- PG SQL dialect extensions such as `RETURNING`, dollar-quoting, `::` casts, `ILIKE`, arrays, and `ON CONFLICT`
-- broader `pg_catalog` virtual tables and driver bootstrap compatibility
-- broader driver/framework coverage
+- broad PostgreSQL dialect parity beyond the current rewrite layer and corpus-backed subset
+- COPY protocol
+- partial portal suspension for incremental `Execute` row draining
+- broader type/array/domain encoding beyond the current scalar and array OID baseline
+- broader driver/framework coverage and framework-specific bootstrap suites
 
 See `docs/PG_COMPAT.md` for the tested scope, examples, and backlog map.

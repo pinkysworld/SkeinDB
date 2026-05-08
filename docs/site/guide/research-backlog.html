@@ -146,7 +146,9 @@
   - <strong>R15</strong> — Conflict-free schema evolution (propose/merge/apply integration test)
   - <strong>R16</strong> — Auto index synthesis (workload-driven advisor.recommend integration test)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
-- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.</p>
+- This sync promotes R11/R14/R15 to hardened (in addition to previous batch); 6 tracks remain at prototype level.
+- 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
+- 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -306,8 +308,8 @@
 <h2 id="task-definitions-new-additions">Task definitions (new additions)<a class="headerlink" href="#task-definitions-new-additions" title="Permanent link">¶</a></h2>
 <h3 id="phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)<a class="headerlink" href="#phase-24-learned-indexes-for-valueid-lookup-r01" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T230: Instrument ValueID lookup distribution + export histograms</li>
-<li>[ ] T231: Prototype learned model index (offline build) with fallback structure</li>
+<li>[x] T230: Instrument ValueID lookup distribution + export histograms</li>
+<li>[x] T231: Prototype learned model index (offline build) with fallback structure</li>
 <li>[ ] T232: Integrate hybrid learned+fallback lookup into ValueStore read path (feature flag)</li>
 <li>[ ] T233: Compaction-time model refresh policy + correctness tests</li>
 <li>[ ] T234: Benchmark harness: lookup p50/p99/p99.9 + memory overhead</li>

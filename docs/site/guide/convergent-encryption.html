@@ -123,8 +123,8 @@
     </div>
     <article class="doc-article">
       <h1 id="dedup-preserving-encryption-message-locked-convergent-mode">Dedup-preserving encryption (message-locked / convergent mode)<a class="headerlink" href="#dedup-preserving-encryption-message-locked-convergent-mode" title="Permanent link">¶</a></h1>
-<p>Status: Partial (T190 implemented; T191-T193 open)
-Last updated: 2026-04-23</p>
+<p>Status: Shipped baseline (T190-T193 implemented; background re-encryption orchestration and durable key catalog persistence remain follow-ups)
+Last updated: 2026-05-08</p>
 <p>SkeinDB's storage design uses content addressing and optional deduplication in the ValueStore.
 Traditional randomized encryption breaks deduplication because identical plaintexts produce different ciphertexts.</p>
 <p>This document specifies an <strong>optional</strong> encryption mode that preserves deduplication by using
@@ -140,10 +140,12 @@ in some cases, permit brute-force confirmation attacks on low-entropy values). T
 feature MUST be opt-in and MUST offer safer scope defaults.</p>
 <p>Current implementation note:</p>
 <ul>
-<li>T190 is now implemented in <code>skeindb-core::encryption</code> as a standalone database-scoped key manager plus AEAD wrapper layer.</li>
+<li>T190 is implemented in <code>skeindb-core::encryption</code> as a standalone database-scoped key manager plus AEAD wrapper layer.</li>
 <li><code>ENC_RANDOM</code> uses AES-256-GCM-SIV with a randomized 96-bit nonce under a mode-specific key derived from the active database master secret.</li>
-<li><code>ENC_MLE_DB</code> derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts. The returned <code>EncryptionEnvelope</code> carries the derivation salt so later storage integration can decrypt the object without redesigning the wrapper contract.</li>
-<li>ValueStore metadata, encrypted on-disk entries, and <code>ValueID = hash(stored_bytes)</code> integration are still pending in T191, so this phase does not yet change any on-disk format.</li>
+<li><code>ENC_MLE_DB</code> derives a deterministic content key from the active database master secret plus a SHA-256 digest of the plaintext, plus a separately HKDF-derived 96-bit nonce bound to the same (master_key, plaintext_digest) scope. Both the content key and the nonce are deterministic but content-dependent, so identical plaintexts within a database still converge to identical ciphertexts (preserving dedup) while no fixed or zero nonce is reused across plaintexts.</li>
+<li>T191 adds <code>EncryptedValueStore</code>, which stores self-describing encryption envelopes as ordinary <code>ValueKind::Cell</code> blobs and computes <code>ValueID</code> over the stored bytes without changing the <code>.vseg</code> format.</li>
+<li>T192 adds key rotation plans and per-envelope / per-value re-encryption helpers with progress counters.</li>
+<li>T193 exposes <code>settings.encryption.*</code> JSON-RPC methods plus the SkeinAdmin Encryption panel. Master key bytes are accepted as base64 but never persisted; operators re-register keys after restart.</li>
 </ul>
 <h2 id="2-threat-model-explicit">2. Threat model (explicit)<a class="headerlink" href="#2-threat-model-explicit" title="Permanent link">¶</a></h2>
 <p>This feature is designed primarily for:</p>
@@ -173,7 +175,7 @@ appropriate mode.</p>
 <li>Deterministic AEAD is used.</li>
 <li>A per-database (or per-tenant) master secret prevents cross-tenant confirmation attacks.</li>
 <li>Identical plaintexts within the same database produce identical ciphertexts, enabling dedup.</li>
-<li>Current T190 wrapper: derive a content key from <code>(database master secret, SHA-256(plaintext))</code> via HKDF, derive a separate 96-bit AEAD nonce from the same <code>(master_key, plaintext_digest)</code> via a distinct HKDF info label, then encrypt with AES-256-GCM-SIV. Both derivations are deterministic, so identical plaintexts within a database still produce identical ciphertexts; no fixed or zero nonce is reused. The wrapper returns the derivation salt in the envelope so decryption remains possible before T191 finalizes persistent metadata.</li>
+<li>Current wrapper: derive a content key from <code>(database master secret, SHA-256(plaintext))</code> via HKDF, derive a separate 96-bit AEAD nonce from the same <code>(master_key, plaintext_digest)</code> via a distinct HKDF info label, then encrypt with AES-256-GCM-SIV. Both derivations are deterministic, so identical plaintexts within a database still produce identical ciphertexts; no fixed or zero nonce is reused. The wrapper stores the derivation salt in the envelope so decryption remains possible after persistence.</li>
 </ul>
 <h3 id="34-enc_mle_oprf-server-aided-optional">3.4 ENC_MLE_OPRF (server-aided, optional)<a class="headerlink" href="#34-enc_mle_oprf-server-aided-optional" title="Permanent link">¶</a></h3>
 <ul>
@@ -233,12 +235,14 @@ equal ciphertext and thus equal ValueIDs.</p>
 - OS keychain / DPAPI / Keychain / libsecret
 - environment variable for development
 - external KMS (future)</p>
-<p>Current T190 surface:</p>
+<p>Current surface:</p>
 <ul>
 <li><code>DatabaseKeyManager::register_database_key(db_id, key_id, master_key)</code> registers a 32-byte database master secret.</li>
 <li><code>DatabaseKeyManager::set_active_database_key(db_id, key_id)</code> switches the active key for future encryptions.</li>
 <li><code>DatabaseKeyManager::set_database_mode(db_id, mode)</code> enables <code>ENC_OFF</code>, <code>ENC_RANDOM</code>, or <code>ENC_MLE_DB</code> per database profile.</li>
-<li><code>DatabaseKeyManager::encrypt(...)</code> and <code>DatabaseKeyManager::decrypt(...)</code> operate over <code>EncryptionContext</code> + <code>EncryptionEnvelope</code> wrappers only; they do not yet mutate ValueStore persistence.</li>
+<li><code>DatabaseKeyManager::encrypt(...)</code> and <code>DatabaseKeyManager::decrypt(...)</code> operate over <code>EncryptionContext</code> + <code>EncryptionEnvelope</code> wrappers.</li>
+<li><code>EncryptedValueStore::put_encrypted(...)</code>, <code>get_decrypted(...)</code>, <code>read_envelope(...)</code>, and <code>reencrypt_value(...)</code> integrate those envelopes with ValueStore persistence.</li>
+<li><code>settings.encryption.status</code>, <code>set_mode</code>, <code>register_key</code>, <code>set_active_key</code>, and <code>rotate_key</code> expose the operator surface over JSON-RPC.</li>
 </ul>
 <h2 id="6-api-surface">6. API surface<a class="headerlink" href="#6-api-surface" title="Permanent link">¶</a></h2>
 <h3 id="61-settings">6.1 Settings<a class="headerlink" href="#61-settings" title="Permanent link">¶</a></h3>
@@ -269,11 +273,14 @@ equal ciphertext and thus equal ValueIDs.</p>
 - encrypt/decrypt round trip for each mode
 - ValueID equality for identical values in ENC_MLE_DB
 - key rotation correctness (mixed keys)</p>
-<p>Shipped T190 coverage:</p>
+<p>Shipped coverage:</p>
 <ul>
 <li><code>crates/skeindb-core/tests/encryption.rs::enc_random_roundtrip_uses_randomized_nonces</code></li>
 <li><code>crates/skeindb-core/tests/encryption.rs::enc_mle_db_roundtrip_is_deterministic_within_database_scope</code></li>
 <li><code>crates/skeindb-core/tests/encryption.rs::enc_mle_db_binds_context_and_database_key_scope</code></li>
+<li><code>crates/skeindb-core/tests/encryption.rs::encrypted_value_store_roundtrip_under_three_modes</code></li>
+<li><code>crates/skeindb-core/tests/encryption.rs::encrypted_value_store_reencrypt_value_writes_new_envelope</code></li>
+<li><code>crates/skeindb/tests/skeinadmin_assets.rs::skeinadmin_encryption_panel_exposes_key_management_controls</code></li>
 </ul>
 <p>Evaluation metrics:
 - dedup ratio with/without encryption

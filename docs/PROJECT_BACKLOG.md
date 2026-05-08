@@ -3,11 +3,13 @@
 This backlog is designed for small PR-sized tasks.
 Each task should include tests.
 
-## Reality sync (2026-03-30)
+## Reality sync (2026-05-08)
 
 This file now reflects a stricter distinction:
 - `[x]` = implemented and exercised in runtime/tests.
 - `[ ]` = still open (including prototype/partial work that still needs hardening).
+
+As of this sync, all 140 top-level core roadmap checkboxes in this file are closed. Remaining product gaps are tracked as partial-phase notes in `docs/TRUE_STATUS_MATRIX.md`, future compatibility work, and the separate research backlog.
 
 For the full implemented-vs-partial matrix (core + research), see:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -188,10 +190,10 @@ Phase 0 verification checklist:
 ---
 
 ## Phase 25 — PostgreSQL wire protocol compatibility
-- [x] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/cleartext auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.
+- [x] T400: PG v3 wire protocol primitives (`pg_wire.rs`) — message framing, encode/decode for StartupMessage, RowDescription, DataRow, CommandComplete, ErrorResponse, ParameterStatus, BackendKeyData, Terminate. Includes PG connection handler with simple query protocol, trust/SCRAM auth, SSL rejection, and delegation to the shared SQL execution engine. 20 unit tests + 6 integration tests.
 - [x] T401: SCRAM-SHA-256 authentication — RFC 5802/7677 SASL exchange with trust mode fallback. Implements full SCRAM-SHA-256 state machine in `pg_wire::scram` module: HMAC-SHA-256, PBKDF2-HMAC-SHA256 (4096 iterations), ScramCredentials (stored_key + server_key derivation), ScramServer (client-first → server-first → client-final → server-final with proof verification). Wire helpers: `write_auth_sasl`, `write_auth_sasl_continue`, `write_auth_sasl_final`, `parse_sasl_initial_response`, `parse_sasl_response`. PG connection handler upgraded from cleartext to SCRAM-SHA-256 when `SKEINDB_TOKEN` is set; trust mode when unset. Deterministic salt derivation via `pg_scram_salt_for_token`. 12 new unit tests (HMAC known vector, PBKDF2, credential derivation, full exchange success/failure, GS2 header rejection, nonce missing, SASL message parsing).
 - [x] T402: PG session state — `pg_settings` HashMap on `MySqlSessionState` initialized with 13 PG defaults; `SET key = value` / `SET key TO value` parsing (with LOCAL/SESSION prefix support); `RESET key` / `RESET ALL`; `pg_bootstrap_setting_value` reads session overrides first; `ParameterStatus` sent to client on SET/RESET; `SHOW` and `current_setting()` now reflect session values. 9 unit tests.
-- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/cleartext auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables)
+- [x] T403: PG connection handler + listener (in `server.rs`) — SSL negotiation (reject with 'N'), startup message parsing, trust/SCRAM auth, ParameterStatus batch, BackendKeyData, ReadyForQuery, simple query command loop on port 5432 (configurable via `--pg` flag, default 5432, 0 disables)
 - [x] T404: PG SQL dialect parser (`pg_rewrite_sql`) — double-quoted identifiers → backtick-quoted, $$dollar quoting$$ → single-quoted, :: type casts → CAST(… AS …), IS [NOT] DISTINCT FROM → null_safe_eq, FETCH FIRST n ROWS ONLY → LIMIT n, ARRAY[…] → PG array literal string. ILIKE and boolean literals were already implemented. RETURNING deferred to T405 (DML).
 - [x] T405: PG DML extensions — `ON CONFLICT DO NOTHING` → `INSERT IGNORE INTO`, `ON CONFLICT (...) DO UPDATE SET ... EXCLUDED.col` → `ON DUPLICATE KEY UPDATE ... VALUES(col)` via `pg_rewrite_on_conflict` post-pass; `INSERT/UPDATE/DELETE ... RETURNING col1, col2, *` extracted and stripped at `pg_dispatch_sql` level with follow-up SELECT using PK lookup for INSERT RETURNING; `COPY FROM STDIN` / `COPY TO STDOUT` returns proper `0A000` (feature not supported) error. 14 unit tests.
 - [x] T406: PG DDL — SERIAL/BIGSERIAL/SMALLSERIAL → auto_increment + i64 type, CREATE SCHEMA → CREATE DATABASE alias (with IF NOT EXISTS), CREATE INDEX CONCURRENTLY (accepted/ignored), CREATE INDEX IF NOT EXISTS, COMMENT ON (silently accepted). 9 unit tests.
