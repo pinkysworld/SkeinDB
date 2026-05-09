@@ -130,9 +130,9 @@ Example (rewrite_preview):
 ## 14. replay.* (extensions) — Performance replay
 Related: R18
 
-- `replay.bundle.export_perf` — export bundle with performance state
-- `replay.bundle.import_perf` — restore performance state
-- `replay.run_perf` — deterministic runner
+- `maintenance.replay.export` — exports data bundles with optional `performance` profile metadata (`lsm_state`, `cache_warm`, and `timing`).
+- `maintenance.replay.import` — validates both correctness checksums and performance-profile checksums when present.
+- `maintenance.replay.run` — returns `performance_report` variance deltas for performance-annotated bundles.
 
 ## 15. wasm.* (extensions) — Wasm-native operators
 Related: R19

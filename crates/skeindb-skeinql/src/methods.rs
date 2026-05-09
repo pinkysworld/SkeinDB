@@ -1614,6 +1614,101 @@ pub struct ReplayBundleTable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceTableState {
+    pub table: BaseTableRef,
+    pub row_count: u64,
+    pub live_row_count: u64,
+    pub tombstone_count: u64,
+    pub mvcc_versions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceLsmState {
+    pub storage_mode: String,
+    pub disk_bytes: u64,
+    pub wal_bytes: u64,
+    pub total_tables: u64,
+    pub total_rows: u64,
+    pub mvcc_versions: u64,
+    pub delta_chains: u64,
+    pub tables: Vec<ReplayBundlePerformanceTableState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceHotTable {
+    pub table: BaseTableRef,
+    pub change_count: u64,
+    pub row_count: u64,
+    pub live_row_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceCacheWarmHints {
+    pub cached_select_entries: u64,
+    pub cached_patch_entries: u64,
+    pub hot_tables: Vec<ReplayBundlePerformanceHotTable>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceTimingProfile {
+    pub change_count: u64,
+    pub span_ms: u64,
+    pub inter_event_delta_count: u64,
+    pub p50_inter_event_ms: u64,
+    pub p95_inter_event_ms: u64,
+    pub p99_inter_event_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceProfile {
+    pub format: String,
+    pub captured_at_ms: u64,
+    pub lsm_state: ReplayBundlePerformanceLsmState,
+    pub cache_warm: ReplayBundlePerformanceCacheWarmHints,
+    pub timing: ReplayBundlePerformanceTimingProfile,
+    pub checksum: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceStorageVariance {
+    pub disk_bytes_delta: i64,
+    pub wal_bytes_delta: i64,
+    pub total_tables_delta: i64,
+    pub total_rows_delta: i64,
+    pub mvcc_versions_delta: i64,
+    pub delta_chains_delta: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceCacheVariance {
+    pub cached_select_entries_delta: i64,
+    pub cached_patch_entries_delta: i64,
+    pub hot_table_match_count: u64,
+    pub missing_hot_table_count: u64,
+    pub extra_hot_table_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceTimingVariance {
+    pub change_count_delta: i64,
+    pub span_ms_delta: i64,
+    pub p50_inter_event_ms_delta: i64,
+    pub p95_inter_event_ms_delta: i64,
+    pub p99_inter_event_ms_delta: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBundlePerformanceRunReport {
+    pub format: String,
+    pub baseline_checksum: String,
+    pub observed_checksum: String,
+    pub checksum_match: bool,
+    pub storage: ReplayBundlePerformanceStorageVariance,
+    pub cache_warm: ReplayBundlePerformanceCacheVariance,
+    pub timing: ReplayBundlePerformanceTimingVariance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayBundleManifest {
     pub format_version: u32,
     pub bundle_id: String,
@@ -1648,6 +1743,9 @@ pub struct ReplayBundle {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<ReplayBundleChangeEvent>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance: Option<ReplayBundlePerformanceProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1707,6 +1805,9 @@ pub struct MaintenanceReplayRunResult {
     pub replayed_tables: u64,
     pub replayed_rows: u64,
     pub replayed_changes: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_report: Option<ReplayBundlePerformanceRunReport>,
 }
 
 // --------------------------------

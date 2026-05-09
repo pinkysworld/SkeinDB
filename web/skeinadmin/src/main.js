@@ -4711,13 +4711,20 @@ function renderReplayIntegrity(result) {
   }
 
   if (summary) {
+    const perf = result.performance_report;
+    const perfLine = perf
+      ? '<br><strong>Perf replay</strong>: checksum ' + escapeHtml(perf.checksum_match ? 'matched' : 'differs')
+        + ' | rows Δ ' + escapeHtml(String(perf.storage?.total_rows_delta ?? '--'))
+        + ' | p95 Δ ' + escapeHtml(String(perf.timing?.p95_inter_event_ms_delta ?? '--')) + ' ms'
+      : '';
     summary.innerHTML = '<strong>Workspace</strong>: ' + escapeHtml(result.workspace_id || '--')
       + ' | <strong>Bundle</strong>: ' + escapeHtml(result.bundle_id || '--')
       + ' | <strong>Status</strong>: ' + escapeHtml(result.ok ? 'PASS' : 'FAIL')
       + '<br><strong>Expected checksum</strong>: ' + escapeHtml(result.expected_checksum || '--')
       + '<br><strong>Observed checksum</strong>: ' + escapeHtml(result.observed_checksum || '--')
       + ' | <strong>Replayed rows</strong>: ' + escapeHtml(String(Number(result.replayed_rows) || 0))
-      + ' | <strong>Replayed changes</strong>: ' + escapeHtml(String(Number(result.replayed_changes) || 0));
+      + ' | <strong>Replayed changes</strong>: ' + escapeHtml(String(Number(result.replayed_changes) || 0))
+      + perfLine;
   }
 
   const rows = Array.isArray(result.table_checksums)

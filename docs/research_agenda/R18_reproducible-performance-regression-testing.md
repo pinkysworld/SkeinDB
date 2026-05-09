@@ -45,3 +45,9 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
+
+Current adaptation:
+
+- Replay bundles now carry optional `skein.replay.performance.v1` metadata with storage/LSM counters, cache warm hints, and timing summaries.
+- `maintenance.replay.run` emits a variance report for annotated bundles.
+- Full timing injection, cache reconstruction, and CI latency-distribution comparison remain open research tasks.

@@ -5108,6 +5108,18 @@ async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> 
     assert_eq!(bundle["manifest"]["bundle_id"].as_str(), Some("rpc_bundle"));
     assert_eq!(bundle["manifest"]["table_count"].as_u64(), Some(1));
     assert_eq!(bundle["manifest"]["change_count"].as_u64(), Some(4));
+    assert_eq!(
+        bundle["performance"]["format"].as_str(),
+        Some("skein.replay.performance.v1")
+    );
+    assert_eq!(
+        bundle["performance"]["timing"]["change_count"].as_u64(),
+        Some(4)
+    );
+    assert_eq!(
+        bundle["performance"]["lsm_state"]["total_tables"].as_u64(),
+        Some(1)
+    );
 
     let resp = client
         .post(format!("{base}/api/v1/rpc"))
@@ -5145,6 +5157,18 @@ async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> 
     );
     assert_eq!(run_result["replayed_tables"].as_u64(), Some(1));
     assert_eq!(run_result["replayed_changes"].as_u64(), Some(4));
+    assert_eq!(
+        run_result["performance_report"]["format"].as_str(),
+        Some("skein.replay.performance_report.v1")
+    );
+    assert_eq!(
+        run_result["performance_report"]["timing"]["change_count_delta"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(
+        run_result["performance_report"]["storage"]["total_rows_delta"].as_i64(),
+        Some(0)
+    );
 
     Ok(())
 }

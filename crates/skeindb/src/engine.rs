@@ -58,10 +58,15 @@ use skeindb_skeinql::methods::{
     MigrationRewritePreview, MigrationRewritePreviewParams, MigrationRewritePreviewResult,
     ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams,
     ObliviousPolicyGetResult, ObliviousPolicySetParams, ReplayBundle, ReplayBundleChangeEvent,
-    ReplayBundleManifest, ReplayBundleRowEntry, ReplayBundleTable, ReplayBundleTableChecksum,
-    ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams, SchemaApplyMergeResult,
-    SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary, SchemaColumnInfo,
-    SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
+    ReplayBundleManifest, ReplayBundlePerformanceCacheVariance,
+    ReplayBundlePerformanceCacheWarmHints, ReplayBundlePerformanceHotTable,
+    ReplayBundlePerformanceLsmState, ReplayBundlePerformanceProfile,
+    ReplayBundlePerformanceRunReport, ReplayBundlePerformanceStorageVariance,
+    ReplayBundlePerformanceTableState, ReplayBundlePerformanceTimingProfile,
+    ReplayBundlePerformanceTimingVariance, ReplayBundleRowEntry, ReplayBundleTable,
+    ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
+    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
+    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
     SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
     VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
     VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
@@ -568,6 +573,7 @@ const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
 const CHANGE_LOG_FORMAT_VERSION: u32 = 1;
 const REPLAY_BUNDLE_FORMAT_VERSION: u32 = 1;
+const REPLAY_PERFORMANCE_FORMAT_V1: &str = "skein.replay.performance.v1";
 const REPLAY_WORKSPACES_DIR: &str = ".replay_workspaces";
 
 const DP_BUDGET_FORMAT_VERSION: u32 = 2;
@@ -6113,6 +6119,7 @@ impl Engine {
         let end_lsn = changes
             .last()
             .and_then(|event| event.lsn.or(Some(event.seq)));
+        let performance = Some(replay_bundle_performance_profile(self, &tables, &changes)?);
 
         let bundle = ReplayBundle {
             manifest: ReplayBundleManifest {
@@ -6135,6 +6142,7 @@ impl Engine {
             },
             tables,
             changes,
+            performance,
         };
 
         replay_bundle_verify(&bundle)?;
@@ -6244,6 +6252,20 @@ impl Engine {
             .iter()
             .map(|entry| entry.row_count)
             .sum::<u64>();
+        let performance_report = match bundle.performance.as_ref() {
+            Some(baseline) => {
+                let observed_profile = replay_bundle_performance_profile(
+                    &replay,
+                    &observed_tables,
+                    &observed_changes,
+                )?;
+                Some(replay_bundle_performance_report(
+                    baseline,
+                    &observed_profile,
+                ))
+            }
+            None => None,
+        };
 
         Ok(MaintenanceReplayRunResult {
             ok,
@@ -6256,6 +6278,7 @@ impl Engine {
             replayed_tables: bundle.tables.len() as u64,
             replayed_rows,
             replayed_changes: observed_changes.len() as u64,
+            performance_report,
         })
     }
 
@@ -19391,6 +19414,242 @@ fn replay_bundle_checksum(
     Ok(fingerprint_json(&checksum_value))
 }
 
+fn replay_bundle_performance_profile(
+    engine: &Engine,
+    tables: &[ReplayBundleTable],
+    changes: &[ReplayBundleChangeEvent],
+) -> anyhow::Result<ReplayBundlePerformanceProfile> {
+    let storage = engine.storage_stats_snapshot();
+    let mut table_states = tables
+        .iter()
+        .map(|table| ReplayBundlePerformanceTableState {
+            table: table.table.clone(),
+            row_count: table.rows.len() as u64,
+            live_row_count: table.rows.iter().filter(|row| !row.deleted).count() as u64,
+            tombstone_count: table.rows.iter().filter(|row| row.deleted).count() as u64,
+            mvcc_versions: table.rows.iter().map(|row| row.version.max(1)).sum::<u64>(),
+        })
+        .collect::<Vec<_>>();
+    table_states.sort_by(|left, right| {
+        left.table
+            .db
+            .cmp(&right.table.db)
+            .then_with(|| left.table.table.cmp(&right.table.table))
+    });
+
+    let cached_select_entries = engine
+        .cached_select
+        .lock()
+        .map(|cache| cache.len() as u64)
+        .unwrap_or(0);
+    let cached_patch_entries = engine
+        .cached_patch
+        .lock()
+        .map(|cache| cache.len() as u64)
+        .unwrap_or(0);
+
+    let mut change_counts = BTreeMap::<(String, String), u64>::new();
+    for event in changes.iter() {
+        *change_counts
+            .entry((event.db.clone(), event.table.clone()))
+            .or_insert(0) += 1;
+    }
+    let mut hot_tables = table_states
+        .iter()
+        .map(|table_state| ReplayBundlePerformanceHotTable {
+            table: table_state.table.clone(),
+            change_count: change_counts
+                .get(&(
+                    table_state.table.db.clone(),
+                    table_state.table.table.clone(),
+                ))
+                .copied()
+                .unwrap_or(0),
+            row_count: table_state.row_count,
+            live_row_count: table_state.live_row_count,
+        })
+        .filter(|hot_table| hot_table.change_count > 0 || hot_table.row_count > 0)
+        .collect::<Vec<_>>();
+    hot_tables.sort_by(|left, right| {
+        right
+            .change_count
+            .cmp(&left.change_count)
+            .then_with(|| right.row_count.cmp(&left.row_count))
+            .then_with(|| left.table.db.cmp(&right.table.db))
+            .then_with(|| left.table.table.cmp(&right.table.table))
+    });
+    hot_tables.truncate(16);
+
+    let mut profile = ReplayBundlePerformanceProfile {
+        format: REPLAY_PERFORMANCE_FORMAT_V1.to_string(),
+        captured_at_ms: now_millis(),
+        lsm_state: ReplayBundlePerformanceLsmState {
+            storage_mode: engine.storage_mode.as_str().to_string(),
+            disk_bytes: storage.disk_bytes,
+            wal_bytes: storage.wal_bytes,
+            total_tables: storage.total_tables,
+            total_rows: storage.total_rows,
+            mvcc_versions: storage.mvcc_versions,
+            delta_chains: storage.delta_chains,
+            tables: table_states,
+        },
+        cache_warm: ReplayBundlePerformanceCacheWarmHints {
+            cached_select_entries,
+            cached_patch_entries,
+            hot_tables,
+        },
+        timing: replay_bundle_timing_profile(changes),
+        checksum: String::new(),
+    };
+    profile.checksum = replay_bundle_performance_checksum(&profile)?;
+    Ok(profile)
+}
+
+fn replay_bundle_timing_profile(
+    changes: &[ReplayBundleChangeEvent],
+) -> ReplayBundlePerformanceTimingProfile {
+    let commit_times = changes
+        .iter()
+        .map(|event| event.commit_ts_ms)
+        .filter(|commit_ts_ms| *commit_ts_ms > 0)
+        .collect::<Vec<_>>();
+    let span_ms = match (commit_times.iter().min(), commit_times.iter().max()) {
+        (Some(first), Some(last)) => last.saturating_sub(*first),
+        _ => 0,
+    };
+    let deltas = commit_times
+        .windows(2)
+        .map(|window| window[1].saturating_sub(window[0]))
+        .collect::<Vec<_>>();
+
+    ReplayBundlePerformanceTimingProfile {
+        change_count: changes.len() as u64,
+        span_ms,
+        inter_event_delta_count: deltas.len() as u64,
+        p50_inter_event_ms: replay_percentile(&deltas, 50),
+        p95_inter_event_ms: replay_percentile(&deltas, 95),
+        p99_inter_event_ms: replay_percentile(&deltas, 99),
+    }
+}
+
+fn replay_percentile(values: &[u64], percentile: u64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let last_index = sorted.len() - 1;
+    let percentile = percentile.min(100) as usize;
+    let index = (last_index * percentile).div_ceil(100);
+    sorted[index]
+}
+
+fn replay_bundle_performance_checksum(
+    profile: &ReplayBundlePerformanceProfile,
+) -> anyhow::Result<String> {
+    let checksum_value = canonicalize_json_value(&serde_json::json!({
+        "format": &profile.format,
+        "lsm_state": &profile.lsm_state,
+        "cache_warm": &profile.cache_warm,
+        "timing": &profile.timing,
+    }));
+    Ok(fingerprint_json(&checksum_value))
+}
+
+fn replay_bundle_performance_report(
+    baseline: &ReplayBundlePerformanceProfile,
+    observed: &ReplayBundlePerformanceProfile,
+) -> ReplayBundlePerformanceRunReport {
+    let baseline_hot_tables = replay_hot_table_set(&baseline.cache_warm.hot_tables);
+    let observed_hot_tables = replay_hot_table_set(&observed.cache_warm.hot_tables);
+    let hot_table_match_count = baseline_hot_tables
+        .intersection(&observed_hot_tables)
+        .count() as u64;
+    let missing_hot_table_count =
+        baseline_hot_tables.difference(&observed_hot_tables).count() as u64;
+    let extra_hot_table_count = observed_hot_tables.difference(&baseline_hot_tables).count() as u64;
+
+    ReplayBundlePerformanceRunReport {
+        format: "skein.replay.performance_report.v1".to_string(),
+        baseline_checksum: baseline.checksum.clone(),
+        observed_checksum: observed.checksum.clone(),
+        checksum_match: baseline.checksum == observed.checksum,
+        storage: ReplayBundlePerformanceStorageVariance {
+            disk_bytes_delta: signed_u64_delta(
+                observed.lsm_state.disk_bytes,
+                baseline.lsm_state.disk_bytes,
+            ),
+            wal_bytes_delta: signed_u64_delta(
+                observed.lsm_state.wal_bytes,
+                baseline.lsm_state.wal_bytes,
+            ),
+            total_tables_delta: signed_u64_delta(
+                observed.lsm_state.total_tables,
+                baseline.lsm_state.total_tables,
+            ),
+            total_rows_delta: signed_u64_delta(
+                observed.lsm_state.total_rows,
+                baseline.lsm_state.total_rows,
+            ),
+            mvcc_versions_delta: signed_u64_delta(
+                observed.lsm_state.mvcc_versions,
+                baseline.lsm_state.mvcc_versions,
+            ),
+            delta_chains_delta: signed_u64_delta(
+                observed.lsm_state.delta_chains,
+                baseline.lsm_state.delta_chains,
+            ),
+        },
+        cache_warm: ReplayBundlePerformanceCacheVariance {
+            cached_select_entries_delta: signed_u64_delta(
+                observed.cache_warm.cached_select_entries,
+                baseline.cache_warm.cached_select_entries,
+            ),
+            cached_patch_entries_delta: signed_u64_delta(
+                observed.cache_warm.cached_patch_entries,
+                baseline.cache_warm.cached_patch_entries,
+            ),
+            hot_table_match_count,
+            missing_hot_table_count,
+            extra_hot_table_count,
+        },
+        timing: ReplayBundlePerformanceTimingVariance {
+            change_count_delta: signed_u64_delta(
+                observed.timing.change_count,
+                baseline.timing.change_count,
+            ),
+            span_ms_delta: signed_u64_delta(observed.timing.span_ms, baseline.timing.span_ms),
+            p50_inter_event_ms_delta: signed_u64_delta(
+                observed.timing.p50_inter_event_ms,
+                baseline.timing.p50_inter_event_ms,
+            ),
+            p95_inter_event_ms_delta: signed_u64_delta(
+                observed.timing.p95_inter_event_ms,
+                baseline.timing.p95_inter_event_ms,
+            ),
+            p99_inter_event_ms_delta: signed_u64_delta(
+                observed.timing.p99_inter_event_ms,
+                baseline.timing.p99_inter_event_ms,
+            ),
+        },
+    }
+}
+
+fn replay_hot_table_set(tables: &[ReplayBundlePerformanceHotTable]) -> HashSet<String> {
+    tables
+        .iter()
+        .map(|hot_table| format!("{}.{}", hot_table.table.db, hot_table.table.table))
+        .collect()
+}
+
+fn signed_u64_delta(observed: u64, baseline: u64) -> i64 {
+    if observed >= baseline {
+        observed.saturating_sub(baseline).min(i64::MAX as u64) as i64
+    } else {
+        -(baseline.saturating_sub(observed).min(i64::MAX as u64) as i64)
+    }
+}
+
 fn replay_bundle_verify(bundle: &ReplayBundle) -> anyhow::Result<()> {
     if bundle.manifest.format_version != REPLAY_BUNDLE_FORMAT_VERSION {
         anyhow::bail!(
@@ -19454,6 +19713,19 @@ fn replay_bundle_verify(bundle: &ReplayBundle) -> anyhow::Result<()> {
     )?;
     if checksum != bundle.manifest.checksum {
         anyhow::bail!("invalid_replay_bundle: checksum mismatch");
+    }
+
+    if let Some(performance) = bundle.performance.as_ref() {
+        if performance.format != REPLAY_PERFORMANCE_FORMAT_V1 {
+            anyhow::bail!(
+                "invalid_replay_bundle: unsupported performance format {}",
+                performance.format
+            );
+        }
+        let performance_checksum = replay_bundle_performance_checksum(performance)?;
+        if performance_checksum != performance.checksum {
+            anyhow::bail!("invalid_replay_bundle: performance checksum mismatch");
+        }
     }
 
     Ok(())
@@ -38313,6 +38585,17 @@ mod tests {
         })?;
         assert_eq!(exported.bundle.manifest.table_count, 1);
         assert_eq!(exported.bundle.manifest.change_count, 4);
+        let performance = exported
+            .bundle
+            .performance
+            .as_ref()
+            .expect("performance profile should be captured");
+        assert_eq!(performance.format, REPLAY_PERFORMANCE_FORMAT_V1);
+        assert_eq!(performance.lsm_state.total_tables, 1);
+        assert_eq!(performance.lsm_state.total_rows, 1);
+        assert_eq!(performance.timing.change_count, 4);
+        assert!(!performance.checksum.is_empty());
+        assert_eq!(performance.cache_warm.hot_tables.len(), 1);
 
         let imported = engine.maintenance_replay_import(MaintenanceReplayImportParams {
             bundle: exported.bundle.clone(),
@@ -38327,6 +38610,13 @@ mod tests {
         assert_eq!(replayed.expected_checksum, replayed.observed_checksum);
         assert_eq!(replayed.replayed_tables, 1);
         assert_eq!(replayed.replayed_changes, 4);
+        let performance_report = replayed
+            .performance_report
+            .as_ref()
+            .expect("performance replay report should be returned");
+        assert_eq!(performance_report.timing.change_count_delta, 0);
+        assert_eq!(performance_report.storage.total_rows_delta, 0);
+        assert_eq!(performance_report.cache_warm.hot_table_match_count, 1);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

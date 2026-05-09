@@ -324,6 +324,18 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 - Extend the bundle format with optional sections: <code>lsm_state</code>, <code>cache_warm</code>, and <code>timing</code>.
 - Provide a deterministic replay runner that replays operations while injecting timing.
 - Provide a variance report (how close replayed p95/p99 are to the captured baseline).</p>
+<p>Current R18 implementation:</p>
+<ul>
+<li><code>maintenance.replay.export</code> includes an optional <code>performance</code> profile in each bundle.</li>
+<li>The profile uses format <code>skein.replay.performance.v1</code> and captures <code>lsm_state</code> (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), <code>cache_warm</code> (select/patch cache entry counts plus hot-table hints), and <code>timing</code> (change count, commit-span, and p50/p95/p99 inter-event deltas).</li>
+<li>The performance profile has its own checksum and is validated by <code>maintenance.replay.import</code> and <code>maintenance.replay.run</code> without changing the correctness checksum for older data-only bundles.</li>
+<li><code>maintenance.replay.run</code> returns <code>performance_report</code> when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.</li>
+</ul>
+<p>Remaining R18 work:</p>
+<ul>
+<li>Timing injection and cache/LSM reconstruction fidelity are still open.</li>
+<li>CI regression gates that compare latency distributions across commits are still open.</li>
+</ul>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/TIME_TRAVEL_REPLAY.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

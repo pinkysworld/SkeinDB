@@ -205,3 +205,15 @@ Adaptation sketch:
 - Extend the bundle format with optional sections: `lsm_state`, `cache_warm`, and `timing`.
 - Provide a deterministic replay runner that replays operations while injecting timing.
 - Provide a variance report (how close replayed p95/p99 are to the captured baseline).
+
+Current R18 implementation:
+
+- `maintenance.replay.export` includes an optional `performance` profile in each bundle.
+- The profile uses format `skein.replay.performance.v1` and captures `lsm_state` (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), `cache_warm` (select/patch cache entry counts plus hot-table hints), and `timing` (change count, commit-span, and p50/p95/p99 inter-event deltas).
+- The performance profile has its own checksum and is validated by `maintenance.replay.import` and `maintenance.replay.run` without changing the correctness checksum for older data-only bundles.
+- `maintenance.replay.run` returns `performance_report` when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.
+
+Remaining R18 work:
+
+- Timing injection and cache/LSM reconstruction fidelity are still open.
+- CI regression gates that compare latency distributions across commits are still open.

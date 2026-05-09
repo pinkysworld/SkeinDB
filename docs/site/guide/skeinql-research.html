@@ -250,9 +250,9 @@
 <h2 id="14-replay-extensions-performance-replay">14. replay.* (extensions) — Performance replay<a class="headerlink" href="#14-replay-extensions-performance-replay" title="Permanent link">¶</a></h2>
 <p>Related: R18</p>
 <ul>
-<li><code>replay.bundle.export_perf</code> — export bundle with performance state</li>
-<li><code>replay.bundle.import_perf</code> — restore performance state</li>
-<li><code>replay.run_perf</code> — deterministic runner</li>
+<li><code>maintenance.replay.export</code> — exports data bundles with optional <code>performance</code> profile metadata (<code>lsm_state</code>, <code>cache_warm</code>, and <code>timing</code>).</li>
+<li><code>maintenance.replay.import</code> — validates both correctness checksums and performance-profile checksums when present.</li>
+<li><code>maintenance.replay.run</code> — returns <code>performance_report</code> variance deltas for performance-annotated bundles.</li>
 </ul>
 <h2 id="15-wasm-extensions-wasm-native-operators">15. wasm.* (extensions) — Wasm-native operators<a class="headerlink" href="#15-wasm-extensions-wasm-native-operators" title="Permanent link">¶</a></h2>
 <p>Related: R19</p>

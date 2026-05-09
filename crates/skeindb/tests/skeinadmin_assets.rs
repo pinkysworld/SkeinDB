@@ -399,6 +399,8 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         "edge.bundle.status",
         "wire('btnCompactionStatus', compactionStatus);",
         "wire('btnEdgeRequest', edgeRequestBundle);",
+        "performance_report",
+        "Perf replay",
         "async function wasmInspect()",
         "async function wasmEdgePackage()",
         "wasm.plan.inspect",
