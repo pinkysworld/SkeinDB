@@ -4897,7 +4897,12 @@ async function replayExportBundle() {
     const fromLsn = parseOptionalU64Input('replayFromLsn', 'From LSN');
     const toLsn = parseOptionalU64Input('replayToLsn', 'To LSN');
     const bundleId = ($('replayBundleId')?.value || '').trim() || undefined;
-    const res = await call('maintenance.replay.export', cleanParams({ db, from_lsn: fromLsn, to_lsn: toLsn, bundle_id: bundleId }), 'replayOut');
+    const redactionMode = $('replayRedactionMode')?.value || 'none';
+    const redactionSalt = ($('replayRedactionSalt')?.value || '').trim() || undefined;
+    const redaction = redactionMode === 'none' && !redactionSalt
+      ? undefined
+      : cleanParams({ mode: redactionMode, salt: redactionSalt });
+    const res = await call('maintenance.replay.export', cleanParams({ db, from_lsn: fromLsn, to_lsn: toLsn, bundle_id: bundleId, redaction }), 'replayOut');
     const result = unwrapRpcResult(res, 'maintenance.replay.export');
     replayLoadBundleIntoEditor(result.bundle);
     setOut(result, 'replayOut');

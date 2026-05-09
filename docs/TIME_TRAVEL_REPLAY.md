@@ -128,11 +128,11 @@ The included change metadata preserves execution context for debugging and futur
 
 ### 2.4 Redaction modes (optional)
 
-- `full`: include all referenced values (default).
-- `schema_only`: include schema + statement shapes without payload values.
-- `selective`: include only values for listed tables/keys.
+- `none`: include the captured table rows and change-event primary keys (default).
+- `hash_pk`: replace table primary-key column values and change-event `pk` vectors with deterministic 32-hex hashes derived from the full primary-key tuple plus the optional salt.
+- `drop_pk`: replace table primary-key column values with deterministic synthetic IDs and omit primary-key vectors from change-event metadata.
 
-Redaction must be used carefully because it can change query plans and outcomes.
+Replay redaction is primary-key focused. Non-key payload columns remain in the bundle so integrity replay can still materialize table rows, and redaction must be used carefully because it can change query plans and outcomes.
 
 ## 3. APIs
 
@@ -140,13 +140,13 @@ Redaction must be used carefully because it can change query plans and outcomes.
 
 - `query.select`: add optional `as_of` ISO timestamp.
 - `tx.begin`: add optional `as_of` timestamp; default `read_only=true` for historical snapshots.
-- `maintenance.replay.export`: creates a replay bundle from all tables or a selected database, with optional `from_lsn` / `to_lsn` filtering for included change-event metadata.
+- `maintenance.replay.export`: creates a replay bundle from all tables or a selected database, with optional `from_lsn` / `to_lsn` filtering for included change-event metadata and optional `redaction: {mode, salt}` primary-key redaction.
 - `maintenance.replay.import`: imports a bundle into a hidden replay workspace identified by `workspace_id`.
 - `maintenance.replay.run`: reopens a replay workspace and reports checksum verification results (`expected_checksum`, `observed_checksum`, table checksums, and replayed table/row/change counts).
 
 ### 3.2 CLI additions
 
-- `skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --out file.sreplay`
+- `skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --redaction hash_pk --redaction-salt optional --out file.sreplay`
 - `skeindb replay verify --bundle file.sreplay`
 - `skeindb replay run --bundle file.sreplay`
 
@@ -212,6 +212,13 @@ Current R18 implementation:
 - The profile uses format `skein.replay.performance.v1` and captures `lsm_state` (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), `cache_warm` (select/patch cache entry counts plus hot-table hints), and `timing` (change count, commit-span, and p50/p95/p99 inter-event deltas).
 - The performance profile has its own checksum and is validated by `maintenance.replay.import` and `maintenance.replay.run` without changing the correctness checksum for older data-only bundles.
 - `maintenance.replay.run` returns `performance_report` when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.
+
+Current R14/T185 redaction implementation:
+
+- `maintenance.replay.export` accepts optional `redaction` with `none`, `hash_pk`, or `drop_pk` modes.
+- Redacted bundles carry a `redaction` metadata section while older unredacted bundles remain valid because the field is optional.
+- Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.
+- SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes `--redaction` plus `--redaction-salt`.
 
 Remaining R18 work:
 

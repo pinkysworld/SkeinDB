@@ -1745,6 +1745,9 @@ pub struct ReplayBundle {
     pub changes: Vec<ReplayBundleChangeEvent>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<EdgeBundleRedaction>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performance: Option<ReplayBundlePerformanceProfile>,
 }
 
@@ -1761,6 +1764,9 @@ pub struct MaintenanceReplayExportParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redaction: Option<EdgeBundleRedaction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -200,6 +200,7 @@
 <h2 id="10-edge-replay-bundles-as-edge-replication-primitive">10. edge.* — Replay bundles as edge replication primitive<a class="headerlink" href="#10-edge-replay-bundles-as-edge-replication-primitive" title="Permanent link">¶</a></h2>
 <p>Related: R14</p>
 <ul>
+<li><code>maintenance.replay.export</code> — export snapshot replay bundles with optional primary-key redaction (<code>none</code>, <code>hash_pk</code>, <code>drop_pk</code>) before checksums/performance metadata are computed</li>
 <li><code>edge.bundle.request</code> — request bounded WAL slice / replay bundle</li>
 <li>windows: table + seq bounds + max events</li>
 <li>redaction: <code>none</code> | <code>hash_pk</code> | <code>drop_pk</code></li>

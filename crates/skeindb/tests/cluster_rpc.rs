@@ -5170,6 +5170,69 @@ async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> 
         Some(0)
     );
 
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t185",
+            "method": "maintenance.replay.export",
+            "params": {
+                "db": "test",
+                "bundle_id": "rpc_bundle_redacted",
+                "redaction": { "mode": "hash_pk", "salt": "t185" }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let redacted_bundle = body
+        .get("result")
+        .and_then(|result| result.get("bundle"))
+        .cloned()
+        .expect("redacted export should return bundle");
+    assert_eq!(
+        redacted_bundle["redaction"]["mode"].as_str(),
+        Some("hash_pk")
+    );
+    assert_eq!(
+        redacted_bundle["changes"][0]["pk"][0]["t"].as_str(),
+        Some("str")
+    );
+    assert_eq!(
+        redacted_bundle["tables"][0]["rows"][0]["row"]["id"]["t"].as_str(),
+        Some("str")
+    );
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t185",
+            "method": "maintenance.replay.import",
+            "params": {
+                "bundle": redacted_bundle,
+                "workspace_id": "rpc_redacted_roundtrip"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t185",
+            "method": "maintenance.replay.run",
+            "params": { "workspace_id": "rpc_redacted_roundtrip" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let redacted_run = body
+        .get("result")
+        .expect("redacted run should return result");
+    assert_eq!(redacted_run["ok"].as_bool(), Some(true));
+
     Ok(())
 }
 

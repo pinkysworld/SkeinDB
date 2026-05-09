@@ -78,6 +78,7 @@ Related: R13
 ## 10. edge.* — Replay bundles as edge replication primitive
 Related: R14
 
+- `maintenance.replay.export` — export snapshot replay bundles with optional primary-key redaction (`none`, `hash_pk`, `drop_pk`) before checksums/performance metadata are computed
 - `edge.bundle.request` — request bounded WAL slice / replay bundle
   - windows: table + seq bounds + max events
   - redaction: `none` | `hash_pk` | `drop_pk`

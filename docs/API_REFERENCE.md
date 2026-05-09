@@ -80,7 +80,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `ai.*` | autoparam classification/analysis, NL translate/explain/execute | Experimental | Verification-gated natural-language workflows. |
 | `advisor.*` | synthesize, apply, dismiss, history | Experimental | Dependency-driven index suggestions and lifecycle. |
 | `migration.*` | intent report, rewrite preview, report export | Experimental | Migration intent detection and reporting. |
-| `maintenance.*` | audit, compaction, history GC, replay export/import/run | Core + experimental | Operational maintenance and replay bundles. |
+| `maintenance.*` | audit, compaction, history GC, replay export/import/run | Core + experimental | Operational maintenance and replay bundles; replay export supports optional primary-key redaction. |
 | `edge.*` | bundle request/apply/status | Experimental | Bounded replay bundles for edge replication. |
 | `wasm.plan.*` | compile, inspect, edge_package, run | Prototype | Host-interpreted Wasm query-operator artifact ABI plus edge packaging helper. |
 | `security.token.*` | create, list, revoke | Core | Bearer-token management. |

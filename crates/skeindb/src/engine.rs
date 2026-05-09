@@ -6021,6 +6021,7 @@ impl Engine {
                 anyhow::bail!("not_found: unknown database '{db}'");
             }
         }
+        let redaction = normalize_edge_redaction(params.redaction)?;
 
         let mut keys = self
             .tables
@@ -6051,7 +6052,8 @@ impl Engine {
             let tdata = self.tables.get(key).ok_or_else(|| {
                 anyhow::anyhow!("not_found: missing table data for {}.{}", key.db, key.table)
             })?;
-            let table = replay_bundle_table_from_engine(key, schema, tdata);
+            let mut table = replay_bundle_table_from_engine(key, schema, tdata);
+            redact_replay_table(&mut table, &redaction);
             let checksum = replay_bundle_table_checksum(&table)?;
             row_count = row_count.saturating_add(checksum.row_count);
             live_row_count = live_row_count.saturating_add(checksum.live_row_count);
@@ -6079,7 +6081,7 @@ impl Engine {
                 db: event.db.clone(),
                 table: event.table.clone(),
                 op: event.op.clone(),
-                pk: event.pk.clone(),
+                pk: redact_replay_pk(&event.pk, &redaction),
                 commit_ts_ms: event.commit_ts_ms,
                 lsn: event.lsn,
             })
@@ -6142,6 +6144,7 @@ impl Engine {
             },
             tables,
             changes,
+            redaction: replay_redaction_metadata(&redaction),
             performance,
         };
 
@@ -19385,6 +19388,65 @@ fn replay_bundle_table_from_engine(
     }
 }
 
+fn replay_redaction_metadata(redaction: &EdgeBundleRedaction) -> Option<EdgeBundleRedaction> {
+    if redaction.mode == "none" && redaction.salt.is_none() {
+        None
+    } else {
+        Some(redaction.clone())
+    }
+}
+
+fn redact_replay_table(table: &mut ReplayBundleTable, redaction: &EdgeBundleRedaction) {
+    match redaction.mode.as_str() {
+        "hash_pk" => {
+            if table.schema.primary_key.is_empty() {
+                return;
+            }
+            for row in table.rows.iter_mut() {
+                let pk = table
+                    .schema
+                    .primary_key
+                    .iter()
+                    .filter_map(|column| row.row.get(column).cloned())
+                    .collect::<Vec<_>>();
+                if pk.len() != table.schema.primary_key.len() {
+                    continue;
+                }
+                let pk_hash = hash_edge_pk(&pk, redaction.salt.as_deref());
+                for column in table.schema.primary_key.iter() {
+                    row.row
+                        .insert(column.clone(), Lit::Str { v: pk_hash.clone() });
+                }
+            }
+        }
+        "drop_pk" => {
+            for (idx, row) in table.rows.iter_mut().enumerate() {
+                let synthetic = Lit::Str {
+                    v: format!("redacted_pk_{idx}"),
+                };
+                for column in table.schema.primary_key.iter() {
+                    if row.row.contains_key(column) {
+                        row.row.insert(column.clone(), synthetic.clone());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_replay_pk(pk: &Option<Vec<Lit>>, redaction: &EdgeBundleRedaction) -> Option<Vec<Lit>> {
+    match redaction.mode.as_str() {
+        "hash_pk" => pk.as_ref().map(|vals| {
+            vec![Lit::Str {
+                v: hash_edge_pk(vals, redaction.salt.as_deref()),
+            }]
+        }),
+        "drop_pk" => None,
+        _ => pk.clone(),
+    }
+}
+
 fn replay_bundle_table_checksum(
     table: &ReplayBundleTable,
 ) -> anyhow::Result<ReplayBundleTableChecksum> {
@@ -19713,6 +19775,10 @@ fn replay_bundle_verify(bundle: &ReplayBundle) -> anyhow::Result<()> {
     )?;
     if checksum != bundle.manifest.checksum {
         anyhow::bail!("invalid_replay_bundle: checksum mismatch");
+    }
+
+    if let Some(redaction) = bundle.redaction.as_ref() {
+        normalize_edge_redaction(Some(redaction.clone()))?;
     }
 
     if let Some(performance) = bundle.performance.as_ref() {
@@ -38582,6 +38648,7 @@ mod tests {
             from_lsn: None,
             to_lsn: None,
             bundle_id: Some("roundtrip_bundle".to_string()),
+            redaction: None,
         })?;
         assert_eq!(exported.bundle.manifest.table_count, 1);
         assert_eq!(exported.bundle.manifest.change_count, 4);
@@ -38617,6 +38684,122 @@ mod tests {
         assert_eq!(performance_report.timing.change_count_delta, 0);
         assert_eq!(performance_report.storage.total_rows_delta, 0);
         assert_eq!(performance_report.cache_warm.hot_table_match_count, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn replay_bundle_redaction_hashes_primary_keys() -> anyhow::Result<()> {
+        let dir = temp_dir("replay_bundle_redaction");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 42 }),
+                (
+                    "email",
+                    Lit::Str {
+                        v: "user@example.test".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let exported = engine.maintenance_replay_export(MaintenanceReplayExportParams {
+            db: Some("app".to_string()),
+            from_lsn: None,
+            to_lsn: None,
+            bundle_id: Some("redacted_bundle".to_string()),
+            redaction: Some(EdgeBundleRedaction {
+                mode: "hash_pk".to_string(),
+                salt: Some("unit".to_string()),
+            }),
+        })?;
+
+        let redaction = exported
+            .bundle
+            .redaction
+            .as_ref()
+            .expect("redaction metadata");
+        assert_eq!(redaction.mode, "hash_pk");
+        let row_id = exported.bundle.tables[0].rows[0]
+            .row
+            .get("id")
+            .expect("redacted id");
+        assert!(matches!(row_id, Lit::Str { v } if v.len() == 32));
+        assert_ne!(row_id, &Lit::U64 { v: 42 });
+        let change_pk = exported.bundle.changes[0]
+            .pk
+            .as_ref()
+            .expect("redacted change pk");
+        assert!(matches!(&change_pk[0], Lit::Str { v } if v.len() == 32));
+
+        engine.maintenance_replay_import(MaintenanceReplayImportParams {
+            bundle: exported.bundle,
+            workspace_id: Some("redacted".to_string()),
+        })?;
+        let replayed = engine.maintenance_replay_run(MaintenanceReplayRunParams {
+            workspace_id: "redacted".to_string(),
+        })?;
+        assert!(replayed.ok);
+
+        let dropped = engine.maintenance_replay_export(MaintenanceReplayExportParams {
+            db: Some("app".to_string()),
+            from_lsn: None,
+            to_lsn: None,
+            bundle_id: Some("drop_pk_bundle".to_string()),
+            redaction: Some(EdgeBundleRedaction {
+                mode: "drop_pk".to_string(),
+                salt: None,
+            }),
+        })?;
+        let dropped_row_id = dropped.bundle.tables[0].rows[0]
+            .row
+            .get("id")
+            .expect("synthetic id");
+        assert_eq!(
+            dropped_row_id,
+            &Lit::Str {
+                v: "redacted_pk_0".to_string(),
+            }
+        );
+        assert!(dropped.bundle.changes[0].pk.is_none());
+        engine.maintenance_replay_import(MaintenanceReplayImportParams {
+            bundle: dropped.bundle,
+            workspace_id: Some("drop_pk".to_string()),
+        })?;
+        let dropped_replay = engine.maintenance_replay_run(MaintenanceReplayRunParams {
+            workspace_id: "drop_pk".to_string(),
+        })?;
+        assert!(dropped_replay.ok);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

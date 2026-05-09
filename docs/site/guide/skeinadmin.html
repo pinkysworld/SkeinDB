@@ -321,7 +321,7 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
 <li>Point-in-time query runner built on <code>query.select as_of</code>, with ISO/epoch timestamp entry, seeded query JSON from the selected table, and inline result-grid rendering.</li>
 <li>History retention dashboard built on <code>maintenance.history.status</code>, showing per-table live/tombstone/purgeable counts plus the effective retention policy.</li>
 <li>History retention policy save + GC controls via <code>maintenance.history.set_policy</code> and <code>maintenance.history.gc</code>.</li>
-<li>Replay bundle export/download/import/integrity flows built on <code>maintenance.replay.export</code>, <code>maintenance.replay.import</code>, and <code>maintenance.replay.run</code>, including session-local replay workspace tracking and checksum summaries.</li>
+<li>Replay bundle export/download/import/integrity flows built on <code>maintenance.replay.export</code>, <code>maintenance.replay.import</code>, and <code>maintenance.replay.run</code>, including primary-key redaction controls, session-local replay workspace tracking, and checksum summaries.</li>
 <li>Edge bundle request/apply/status workflows built on <code>edge.bundle.request</code>, <code>edge.bundle.apply</code>, and <code>edge.bundle.status</code>, including redaction mode, sequence windows, and query route checks.</li>
 </ul>
 <h3 id="49-server-load-statistics">4.9 Server Load &amp; Statistics<a class="headerlink" href="#49-server-load-statistics" title="Permanent link">¶</a></h3>

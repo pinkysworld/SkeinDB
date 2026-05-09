@@ -1632,7 +1632,10 @@ engine (<code>"incremental"</code> or <code>"full"</code>).</p>
 - <code>maintenance.compaction.status</code>: return live compaction pressure plus scheduler policy/budget/admission state.
 - <code>maintenance.compaction.set_policy</code>: persist <code>compaction.*</code> settings including <code>policy</code>, <code>enabled</code>, <code>paused</code>, <code>max_l0_files</code>, <code>max_l0_bytes</code>, <code>budget</code>, and <code>peak_windows</code>.
 - <code>maintenance.compaction.pause</code>
-- <code>maintenance.compaction.resume</code></p>
+- <code>maintenance.compaction.resume</code>
+- <code>maintenance.replay.export</code>: export snapshot-based replay bundles. Params include optional <code>db</code>, <code>from_lsn</code>, <code>to_lsn</code>, <code>bundle_id</code>, and <code>redaction: {"mode":"none"|"hash_pk"|"drop_pk", "salt":"optional"}</code>.
+- <code>maintenance.replay.import</code>: validate and materialize a replay bundle into a hidden replay workspace.
+- <code>maintenance.replay.run</code>: reopen a replay workspace and compare canonical checksums; returns <code>performance_report</code> for performance-annotated bundles.</p>
 <h3 id="1020-telemetry-advisor-admin-cluster">10.20 telemetry.<em> / advisor.</em> / admin.<em> / cluster.</em><a class="headerlink" href="#1020-telemetry-advisor-admin-cluster" title="Permanent link">¶</a></h3>
 <h4 id="advisorindex_synthesize-experimental">advisor.index_synthesize (experimental)<a class="headerlink" href="#advisorindex_synthesize-experimental" title="Permanent link">¶</a></h4>
 <p>Propose index candidates from observed dependency telemetry (R16).</p>

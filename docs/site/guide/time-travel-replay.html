@@ -258,23 +258,23 @@ surface's <code>oldest_tombstone_commit_ts_ms</code> to confirm the steady state
 <p>The included change metadata preserves execution context for debugging and future evolution, but the current implementation does not attempt to re-execute mutations from WAL records. Replay bundles are therefore intended for deterministic validation/debugging, not live replication.</p>
 <h3 id="24-redaction-modes-optional">2.4 Redaction modes (optional)<a class="headerlink" href="#24-redaction-modes-optional" title="Permanent link">¶</a></h3>
 <ul>
-<li><code>full</code>: include all referenced values (default).</li>
-<li><code>schema_only</code>: include schema + statement shapes without payload values.</li>
-<li><code>selective</code>: include only values for listed tables/keys.</li>
+<li><code>none</code>: include the captured table rows and change-event primary keys (default).</li>
+<li><code>hash_pk</code>: replace table primary-key column values and change-event <code>pk</code> vectors with deterministic 32-hex hashes derived from the full primary-key tuple plus the optional salt.</li>
+<li><code>drop_pk</code>: replace table primary-key column values with deterministic synthetic IDs and omit primary-key vectors from change-event metadata.</li>
 </ul>
-<p>Redaction must be used carefully because it can change query plans and outcomes.</p>
+<p>Replay redaction is primary-key focused. Non-key payload columns remain in the bundle so integrity replay can still materialize table rows, and redaction must be used carefully because it can change query plans and outcomes.</p>
 <h2 id="3-apis">3. APIs<a class="headerlink" href="#3-apis" title="Permanent link">¶</a></h2>
 <h3 id="31-skeinql-additions">3.1 SkeinQL additions<a class="headerlink" href="#31-skeinql-additions" title="Permanent link">¶</a></h3>
 <ul>
 <li><code>query.select</code>: add optional <code>as_of</code> ISO timestamp.</li>
 <li><code>tx.begin</code>: add optional <code>as_of</code> timestamp; default <code>read_only=true</code> for historical snapshots.</li>
-<li><code>maintenance.replay.export</code>: creates a replay bundle from all tables or a selected database, with optional <code>from_lsn</code> / <code>to_lsn</code> filtering for included change-event metadata.</li>
+<li><code>maintenance.replay.export</code>: creates a replay bundle from all tables or a selected database, with optional <code>from_lsn</code> / <code>to_lsn</code> filtering for included change-event metadata and optional <code>redaction: {mode, salt}</code> primary-key redaction.</li>
 <li><code>maintenance.replay.import</code>: imports a bundle into a hidden replay workspace identified by <code>workspace_id</code>.</li>
 <li><code>maintenance.replay.run</code>: reopens a replay workspace and reports checksum verification results (<code>expected_checksum</code>, <code>observed_checksum</code>, table checksums, and replayed table/row/change counts).</li>
 </ul>
 <h3 id="32-cli-additions">3.2 CLI additions<a class="headerlink" href="#32-cli-additions" title="Permanent link">¶</a></h3>
 <ul>
-<li><code>skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --out file.sreplay</code></li>
+<li><code>skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --redaction hash_pk --redaction-salt optional --out file.sreplay</code></li>
 <li><code>skeindb replay verify --bundle file.sreplay</code></li>
 <li><code>skeindb replay run --bundle file.sreplay</code></li>
 </ul>
@@ -330,6 +330,13 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li>The profile uses format <code>skein.replay.performance.v1</code> and captures <code>lsm_state</code> (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), <code>cache_warm</code> (select/patch cache entry counts plus hot-table hints), and <code>timing</code> (change count, commit-span, and p50/p95/p99 inter-event deltas).</li>
 <li>The performance profile has its own checksum and is validated by <code>maintenance.replay.import</code> and <code>maintenance.replay.run</code> without changing the correctness checksum for older data-only bundles.</li>
 <li><code>maintenance.replay.run</code> returns <code>performance_report</code> when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.</li>
+</ul>
+<p>Current R14/T185 redaction implementation:</p>
+<ul>
+<li><code>maintenance.replay.export</code> accepts optional <code>redaction</code> with <code>none</code>, <code>hash_pk</code>, or <code>drop_pk</code> modes.</li>
+<li>Redacted bundles carry a <code>redaction</code> metadata section while older unredacted bundles remain valid because the field is optional.</li>
+<li>Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.</li>
+<li>SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes <code>--redaction</code> plus <code>--redaction-salt</code>.</li>
 </ul>
 <p>Remaining R18 work:</p>
 <ul>

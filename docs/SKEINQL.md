@@ -1987,6 +1987,9 @@ Maintenance methods are defined in `docs/PROJECT_BACKLOG.md`. Current runtime su
 - `maintenance.compaction.set_policy`: persist `compaction.*` settings including `policy`, `enabled`, `paused`, `max_l0_files`, `max_l0_bytes`, `budget`, and `peak_windows`.
 - `maintenance.compaction.pause`
 - `maintenance.compaction.resume`
+- `maintenance.replay.export`: export snapshot-based replay bundles. Params include optional `db`, `from_lsn`, `to_lsn`, `bundle_id`, and `redaction: {"mode":"none"|"hash_pk"|"drop_pk", "salt":"optional"}`.
+- `maintenance.replay.import`: validate and materialize a replay bundle into a hidden replay workspace.
+- `maintenance.replay.run`: reopen a replay workspace and compare canonical checksums; returns `performance_report` for performance-annotated bundles.
 
 ### 10.20 telemetry.* / advisor.* / admin.* / cluster.*
 

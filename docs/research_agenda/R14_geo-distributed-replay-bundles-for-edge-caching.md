@@ -45,3 +45,9 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
+
+Current adaptation:
+
+- `maintenance.replay.export` now accepts optional primary-key redaction with `none`, `hash_pk`, and `drop_pk` modes.
+- Redacted replay bundles carry optional `redaction` metadata and compute table, bundle, and performance checksums after redaction.
+- `edge.bundle.request` continues to use the same redaction mode vocabulary for bounded change-window bundles.

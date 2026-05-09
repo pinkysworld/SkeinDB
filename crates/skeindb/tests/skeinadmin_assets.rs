@@ -123,6 +123,8 @@ fn skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls() {
         "maintenance.history.set_policy",
         "maintenance.history.gc",
         "maintenance.replay.export",
+        "replayRedactionMode",
+        "replayRedactionSalt",
         "maintenance.replay.import",
         "maintenance.replay.run",
         "wire('btnTimeTravelRun', timeTravelRunQuery);",

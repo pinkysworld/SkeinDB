@@ -200,7 +200,7 @@ Security note:
 - Point-in-time query runner built on `query.select as_of`, with ISO/epoch timestamp entry, seeded query JSON from the selected table, and inline result-grid rendering.
 - History retention dashboard built on `maintenance.history.status`, showing per-table live/tombstone/purgeable counts plus the effective retention policy.
 - History retention policy save + GC controls via `maintenance.history.set_policy` and `maintenance.history.gc`.
-- Replay bundle export/download/import/integrity flows built on `maintenance.replay.export`, `maintenance.replay.import`, and `maintenance.replay.run`, including session-local replay workspace tracking and checksum summaries.
+- Replay bundle export/download/import/integrity flows built on `maintenance.replay.export`, `maintenance.replay.import`, and `maintenance.replay.run`, including primary-key redaction controls, session-local replay workspace tracking, and checksum summaries.
 - Edge bundle request/apply/status workflows built on `edge.bundle.request`, `edge.bundle.apply`, and `edge.bundle.status`, including redaction mode, sequence windows, and query route checks.
 
 ### 4.9 Server Load & Statistics

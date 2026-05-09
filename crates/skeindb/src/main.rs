@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use skeindb_skeinql::methods::{
-    MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
-    ReplayBundle,
+    EdgeBundleRedaction, MaintenanceReplayExportParams, MaintenanceReplayImportParams,
+    MaintenanceReplayRunParams, ReplayBundle,
 };
 
 mod engine;
@@ -281,6 +281,10 @@ mod tests {
             "10",
             "--to-lsn",
             "20",
+            "--redaction",
+            "hash_pk",
+            "--redaction-salt",
+            "test-salt",
             "--out",
             "bundle.sreplay",
         ])
@@ -292,12 +296,16 @@ mod tests {
                     db,
                     from_lsn,
                     to_lsn,
+                    redaction,
+                    redaction_salt,
                     out,
                 } => {
                     assert_eq!(data, "./data");
                     assert_eq!(db.as_deref(), Some("app"));
                     assert_eq!(from_lsn, Some(10));
                     assert_eq!(to_lsn, Some(20));
+                    assert_eq!(redaction, "hash_pk");
+                    assert_eq!(redaction_salt.as_deref(), Some("test-salt"));
                     assert_eq!(out, "bundle.sreplay");
                 }
                 _ => panic!("expected replay export command"),
@@ -583,6 +591,14 @@ enum ReplayCommands {
         #[arg(long)]
         to_lsn: Option<u64>,
 
+        /// Primary-key redaction mode: none, hash_pk, or drop_pk
+        #[arg(long, default_value = "none")]
+        redaction: String,
+
+        /// Optional salt used by hash_pk redaction
+        #[arg(long)]
+        redaction_salt: Option<String>,
+
         /// Output replay bundle path (.sreplay)
         #[arg(long)]
         out: String,
@@ -691,14 +707,25 @@ async fn main() -> anyhow::Result<()> {
                 db,
                 from_lsn,
                 to_lsn,
+                redaction,
+                redaction_salt,
                 out,
             } => {
                 let engine = engine::Engine::open(&data)?;
+                let redaction = if redaction == "none" && redaction_salt.is_none() {
+                    None
+                } else {
+                    Some(EdgeBundleRedaction {
+                        mode: redaction,
+                        salt: redaction_salt,
+                    })
+                };
                 let result = engine.maintenance_replay_export(MaintenanceReplayExportParams {
                     db,
                     from_lsn,
                     to_lsn,
                     bundle_id: None,
+                    redaction,
                 })?;
                 let out_path = PathBuf::from(out);
                 if let Some(parent) = out_path.parent() {
