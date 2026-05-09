@@ -87,7 +87,8 @@ const PANEL_META = {
   advisor:    { title: 'Index Advisor (R16)',   subtitle: 'Synthesize, review, and apply index recommendations.' },
   migration:  { title: 'Migration (R17)',      subtitle: 'Compatibility rewrites and migration reports.' },
   nl:         { title: 'NL Lab (R11-R12)',     subtitle: 'NL-to-SkeinQL translation and autoparameterization.' },
-  rpc:        { title: 'RPC Explorer',         subtitle: 'Full access to every SkeinDB method.' }
+  rpc:        { title: 'RPC Explorer',         subtitle: 'Full access to every SkeinDB method.' },
+  help:       { title: 'Help & Documentation', subtitle: 'Quick start, panel reference, research-track index, shortcuts, and links to the canonical docs site.' }
 };
 
 // ---------------------------------------------------------------------------
@@ -5914,6 +5915,101 @@ async function rpcSend() {
 // ---------------------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------------------
+const HELP_PANEL_REFERENCE = [
+  { panel: 'overview',  title: 'Overview',          purpose: 'Operator command center with live connection, selection, and session summary bands.', actions: 'Quick create DB/table, browse data, open cluster, see hardened-research counts.' },
+  { panel: 'easy',      title: 'Easy Viewer',       purpose: 'Click-first inline grid editor and guided forms for daily row operations.', actions: 'Browse, insert, edit, delete rows; design schema in the WYSIWYG ALTER planner.' },
+  { panel: 'workspace', title: 'SQL Workspace',     purpose: 'Run SQL/SkeinQL, prepare statements, manage explicit transaction handles.', actions: 'Execute (⌘↵), prepare/execute, begin/commit/rollback, ETag-aware patches.' },
+  { panel: 'schema',    title: 'Schema',            purpose: 'Database, table, column, and secondary-index DDL with conflict-free evolution.', actions: 'CREATE/ALTER tables, manage indexes, propose/merge/apply schema changes (R15).' },
+  { panel: 'data',      title: 'Data Browse',       purpose: 'Row browser with filters, pagination, and inline edits.', actions: 'Filter, paginate, patch rows, cross-link to CDC and replay panels.' },
+  { panel: 'cluster',   title: 'Cluster',           purpose: 'Topology, transport capabilities, shard placement, and node enrollment.', actions: 'Observe nodes, enroll members, plan shard placement, inspect QUIC/HTTP transport.' },
+  { panel: 'settings',  title: 'Settings',          purpose: 'Server settings and feature flags with safe round-tripping.', actions: 'Read/update settings; toggle dedup, MVCC, cache, and research feature flags.' },
+  { panel: 'engine',    title: 'Engine Config',     purpose: 'Storage, compaction, energy policy, and learned-index controls.', actions: 'Configure compaction (R20 energy-aware), MVCC, learned ValueID index (R01).' },
+  { panel: 'users',     title: 'Users & Grants',    purpose: 'Identity and access control surface.', actions: 'Create users, assign roles, grant per-database privileges.' },
+  { panel: 'security',  title: 'Security',          purpose: 'Tokens, sensitive operations, top-query review.', actions: 'Manage bearer tokens, review activity, enforce limits.' },
+  { panel: 'encryption',title: 'Encryption',        purpose: 'At-rest encryption mode and key management.', actions: 'Toggle ENC_OFF/ENC_RANDOM/ENC_MLE_DB, register keys, set active key, rotate.' },
+  { panel: 'import',    title: 'Import / Export',   purpose: 'Bulk import data and export schemas/rows.', actions: 'Import JSON/CSV, export schema and table contents.' },
+  { panel: 'telemetry', title: 'Telemetry',         purpose: 'Workload insights, plan cache, slow queries, compatibility usage.', actions: 'Inspect plan cache, slow query log, feature usage histograms.' },
+  { panel: 'cdc',       title: 'CDC',               purpose: 'Change-data-capture subscriptions over tables and prepared queries.', actions: 'Subscribe, poll, ack, close; inspect lag and event grid.' },
+  { panel: 'replay',    title: 'Time Travel & Replay', purpose: 'Point-in-time queries, history retention, replay-bundle integrity, edge bundles.', actions: 'Run point-in-time, GC history, export/import/run replay bundles (with R14 redaction), R18 performance variance reports.' },
+  { panel: 'research',  title: 'Research Dashboard',purpose: 'Single-pane status for all 20 research tracks.', actions: 'See hardened vs prototype state, jump to each track\'s panel, open relevant RPC methods.' },
+  { panel: 'vectors',   title: 'Vectors (R10)',     purpose: 'First-class vector columns with kNN search.', actions: 'Insert, index status, top-k similarity search.' },
+  { panel: 'privacy',   title: 'Privacy & DP',      purpose: 'Differential privacy aggregates and oblivious execution.', actions: 'Run DP aggregates with budget, register oblivious policies, explain padding.' },
+  { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with verification and forensic queries.', actions: 'Audit status, verify chain, query and export forensic events.' },
+  { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, status, drop, explain dependencies.' },
+  { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions and Wasm merge modules.', actions: 'Apply, register, simulate; manage Wasm merge registry.' },
+  { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, run, inspect plan artifacts, package for edge.' },
+  { panel: 'advisor',   title: 'Index Advisor',     purpose: 'Workload-driven index recommendation and synthesis.', actions: 'Synthesize, history, apply, dismiss recommendations.' },
+  { panel: 'migration', title: 'Migration',         purpose: 'Compatibility telemetry, rewrite previews, intent reports.', actions: 'Preview rewrites, export intent reports as JSON/Markdown.' },
+  { panel: 'nl',        title: 'NL Lab',            purpose: 'Natural-language to SkeinQL translation and SQL autoparameterization.', actions: 'Translate, explain, approve-and-execute; classify and analyze.' },
+  { panel: 'rpc',       title: 'RPC Explorer',      purpose: 'Browse every advertised method and dispatch JSON params directly.', actions: 'Filter methods, load templates, send raw RPC.' },
+  { panel: 'help',      title: 'Help & Docs',       purpose: 'This page. Quick start, panel reference, research index, shortcuts, glossary, and doc links.', actions: 'Search topics, jump to any panel, open canonical documentation.' }
+];
+
+function renderHelpPanel() {
+  const panelTbody = document.getElementById('helpPanelTable');
+  if (panelTbody) {
+    panelTbody.innerHTML = HELP_PANEL_REFERENCE.map(row => `
+      <tr data-help-row="panel" data-help-text="${row.panel} ${row.title} ${row.purpose} ${row.actions}">
+        <td><strong>${row.title}</strong></td>
+        <td>${row.purpose}</td>
+        <td>${row.actions}</td>
+        <td><button class="sm" data-panel="${row.panel}">Open</button></td>
+      </tr>`).join('');
+    panelTbody.querySelectorAll('button[data-panel]').forEach(btn => {
+      btn.addEventListener('click', () => setActivePanel(btn.dataset.panel, true));
+    });
+  }
+  const researchTbody = document.getElementById('helpResearchTable');
+  if (researchTbody) {
+    researchTbody.innerHTML = RESEARCH_TRACKS.map(track => `
+      <tr data-help-row="research" data-help-text="${track.id} ${track.title} ${track.desc} ${track.methods.join(' ')} ${track.status}">
+        <td><strong>${track.id}</strong></td>
+        <td>${track.title}<div class="hint" style="font-size:11px">${track.desc}</div></td>
+        <td><span class="pill ${track.status === 'hardened' ? 'ok' : 'warn'}">${track.status}</span></td>
+        <td><code style="font-size:11px">${track.methods.slice(0,3).join(', ')}${track.methods.length > 3 ? '…' : ''}</code></td>
+        <td><button class="sm" data-panel="${track.panel}">Open</button></td>
+      </tr>`).join('');
+    researchTbody.querySelectorAll('button[data-panel]').forEach(btn => {
+      btn.addEventListener('click', () => setActivePanel(btn.dataset.panel, true));
+    });
+  }
+  const search = document.getElementById('helpSearch');
+  const results = document.getElementById('helpResults');
+  if (search && !search.dataset.wired) {
+    search.dataset.wired = '1';
+    search.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      const sections = document.querySelectorAll('section[data-panel="help"] [data-help-section]');
+      let visible = 0;
+      let matchedRows = 0;
+      sections.forEach(sec => {
+        const rows = sec.querySelectorAll('[data-help-row]');
+        if (rows.length === 0) {
+          const text = sec.textContent.toLowerCase();
+          const hit = !q || text.includes(q);
+          sec.style.display = hit ? '' : 'none';
+          if (hit) visible++;
+          return;
+        }
+        let anyVisible = false;
+        rows.forEach(row => {
+          const text = (row.dataset.helpText || row.textContent).toLowerCase();
+          const hit = !q || text.includes(q);
+          row.style.display = hit ? '' : 'none';
+          if (hit) { anyVisible = true; matchedRows++; }
+        });
+        sec.style.display = (anyVisible || !q) ? '' : 'none';
+        if (anyVisible || !q) visible++;
+      });
+      if (results) {
+        results.textContent = q
+          ? `Showing ${visible} section(s), ${matchedRows} matching row(s) for "${q}".`
+          : '';
+      }
+    });
+  }
+}
+
 function setActivePanel(panel, updateHash) {
   document.querySelectorAll('.panel').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
   document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.panel === panel));
@@ -5925,6 +6021,7 @@ function setActivePanel(panel, updateHash) {
   }
   if (panel === 'cdc') renderCdcPanel();
   if (panel === 'replay') renderReplayPanel();
+  if (panel === 'help') renderHelpPanel();
   if (panel === 'overview') {
     refreshTopTables();
     refreshSlowQueries();
@@ -6112,6 +6209,14 @@ function initKeyboardShortcuts() {
     // Escape = close command palette
     if (e.key === 'Escape') {
       closeCommandPalette();
+    }
+    // ? = open Help panel (only when not typing in an input)
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+        e.preventDefault();
+        setActivePanel('help', true);
+      }
     }
   });
 }

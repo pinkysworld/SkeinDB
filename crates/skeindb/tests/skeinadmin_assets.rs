@@ -418,6 +418,52 @@ fn skeinadmin_wires_research_runtime_surfaces() {
 }
 
 #[test]
+fn skeinadmin_help_panel_exposes_comprehensive_documentation_center() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-panel=\"help\"",
+        "SkeinAdmin Help Center",
+        "Quick Start (5 steps)",
+        "Panel Reference",
+        "Research Tracks (R01-R20)",
+        "Keyboard Shortcuts",
+        "Canonical Documentation",
+        "Glossary",
+        "helpSearch",
+        "helpPanelTable",
+        "helpResearchTable",
+        "btnHelp",
+        "Help &amp; Docs",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin help html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function renderHelpPanel()",
+        "HELP_PANEL_REFERENCE",
+        "if (panel === 'help') renderHelpPanel();",
+        "helpPanelTable",
+        "helpResearchTable",
+        "help:       { title: 'Help & Documentation'",
+        "setActivePanel('help', true);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin help js should contain {marker}"
+        );
+    }
+}
+
+#[test]
 fn skeinadmin_research_tracks_have_entry_points_for_all_twenty_items() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let js_path = repo_root.join("web/skeinadmin/src/main.js");

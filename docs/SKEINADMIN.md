@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-04-25
+Last updated: 2026-05-09 (v0.3.8)
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -13,6 +13,30 @@ SkeinDB now ships an embedded SkeinAdmin build at:
 - `/console` for SQL/workspace-first operation
 
 The same UI bundle powers both routes, with mode-aware navigation and controls.
+
+## In-app Help Center (v0.3.8)
+
+The console now includes a dedicated **Help & Docs** panel reachable from the
+left nav, the top tab strip, the topbar `? Help` button, and the `?` keyboard
+shortcut. The Help Center contains:
+
+- A 5-step quick-start checklist (connect, pick a database, browse/design, run
+  queries, operate).
+- A panel reference table that lists every panel with its purpose, key actions,
+  and a one-click "Open" jump button.
+- A research-track index covering all twenty R01-R20 tracks with their current
+  hardness state (`hardened` vs `prototype`) and primary RPC methods.
+- Keyboard-shortcut reference and a deep-link hash table (`#<panel>`).
+- Direct links to the canonical documentation site (Getting Started, SkeinQL,
+  API Reference, MySQL/PG compatibility, Time Travel & Replay, CDC, Index
+  Advisor, research backlog, and the True Status Matrix).
+- A live-filter search box that scopes both the panel-reference and the
+  research-track tables.
+- A glossary of recurring terms (SkeinQL, ValueID, ETag chain, replay bundle,
+  CDC subscription, prepared query, audit chain, edge bundle, differential
+  privacy, oblivious policy).
+- A support section with direct links to the GitHub issue tracker, support
+  policy, and commercial licensing.
 
 Recent UI updates:
 - **v0.3.4 polish**: live wiring for the previously-stubbed Overview cards (Top Tables / Slow Query Log / Active Sessions / Index Health) via `information_schema.tables`, `stats.slow_queries`, and `stats.snapshot`; Security panel response-shape fixes for create/list/top-queries flows; auto-refresh on Overview/Security tab switches; Active Sessions labels aligned with `stats.snapshot` (`Sessions` / `Open Txns` / `Avg Latency`).

@@ -126,7 +126,7 @@
     <article class="doc-article">
       <h1 id="skeinadmin-standalone-management-console">SkeinAdmin (Standalone Management Console)<a class="headerlink" href="#skeinadmin-standalone-management-console" title="Permanent link">¶</a></h1>
 <p>Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-04-25</p>
+Last updated: 2026-05-09 (v0.3.8)</p>
 <p>SkeinAdmin is a <strong>standalone</strong> management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
@@ -135,6 +135,29 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
 - <code>/admin</code> for full control-plane administration
 - <code>/console</code> for SQL/workspace-first operation</p>
 <p>The same UI bundle powers both routes, with mode-aware navigation and controls.</p>
+<h2 id="in-app-help-center-v038">In-app Help Center (v0.3.8)<a class="headerlink" href="#in-app-help-center-v038" title="Permanent link">¶</a></h2>
+<p>The console now includes a dedicated <strong>Help &amp; Docs</strong> panel reachable from the
+left nav, the top tab strip, the topbar <code>? Help</code> button, and the <code>?</code> keyboard
+shortcut. The Help Center contains:</p>
+<ul>
+<li>A 5-step quick-start checklist (connect, pick a database, browse/design, run
+  queries, operate).</li>
+<li>A panel reference table that lists every panel with its purpose, key actions,
+  and a one-click "Open" jump button.</li>
+<li>A research-track index covering all twenty R01-R20 tracks with their current
+  hardness state (<code>hardened</code> vs <code>prototype</code>) and primary RPC methods.</li>
+<li>Keyboard-shortcut reference and a deep-link hash table (<code>#&lt;panel&gt;</code>).</li>
+<li>Direct links to the canonical documentation site (Getting Started, SkeinQL,
+  API Reference, MySQL/PG compatibility, Time Travel &amp; Replay, CDC, Index
+  Advisor, research backlog, and the True Status Matrix).</li>
+<li>A live-filter search box that scopes both the panel-reference and the
+  research-track tables.</li>
+<li>A glossary of recurring terms (SkeinQL, ValueID, ETag chain, replay bundle,
+  CDC subscription, prepared query, audit chain, edge bundle, differential
+  privacy, oblivious policy).</li>
+<li>A support section with direct links to the GitHub issue tracker, support
+  policy, and commercial licensing.</li>
+</ul>
 <p>Recent UI updates:
 - <strong>v0.3.4 polish</strong>: live wiring for the previously-stubbed Overview cards (Top Tables / Slow Query Log / Active Sessions / Index Health) via <code>information_schema.tables</code>, <code>stats.slow_queries</code>, and <code>stats.snapshot</code>; Security panel response-shape fixes for create/list/top-queries flows; auto-refresh on Overview/Security tab switches; Active Sessions labels aligned with <code>stats.snapshot</code> (<code>Sessions</code> / <code>Open Txns</code> / <code>Avg Latency</code>).
 - <strong>Overview dashboard</strong> now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage &amp; deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC &amp; compaction (versions, delta chains, L0 files, stall rate), query &amp; cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
@@ -463,6 +486,7 @@ so administrators can host it independently (IIS/Apache/Nginx/static hosting) an
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
+<li><a href="#in-app-help-center-v038">In-app Help Center (v0.3.8)</a></li>
 <li><a href="#1-design-goals">1) Design goals</a></li>
 <li><a href="#2-deployment-models">2) Deployment models</a><ul>
 <li><a href="#21-static-spa-recommended">2.1 Static SPA (recommended)</a></li>

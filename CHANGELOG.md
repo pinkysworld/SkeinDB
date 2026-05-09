@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.8 - 2026-05-09
+
+- Adds a comprehensive **Help & Docs** panel to SkeinAdmin: quick-start checklist, panel reference table with one-click jumps, R01-R20 research-track index with hardness pills and primary RPC methods, keyboard-shortcut and deep-link reference, glossary, and links to the canonical documentation site.
+- Wires Help into the left nav, top tabs, the topbar `? Help` button, and a `?` keyboard shortcut.
+- Adds live filter search across panel and research entries inside the Help Center.
+- Locks the new Help panel surface with `skeinadmin_help_panel_exposes_comprehensive_documentation_center` so docs claims stay test-backed.
+- Keeps the research backlog status honest: 29 done / 80 open, 18 hardened / 2 prototype tracks (R18 perf replay and R19 Wasm operators remain at prototype level).
+- Updates README, SKEINADMIN.md, the public website, and the docs site to advertise v0.3.8 and the new Help Center.
+- Refreshes the Homebrew formula to v0.3.8.
+
 ## v0.3.7 - 2026-05-09
 
 - Promotes the post-R12/R17/R20 hardening line into a versioned release-prep state.

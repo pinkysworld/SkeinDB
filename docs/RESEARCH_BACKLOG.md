@@ -39,6 +39,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-08: T204-T207 are closed with `energy_aware` compaction policy support, CPU/IO energy estimates, persisted external power/price/carbon signals, SkeinAdmin controls, and deterministic energy-vs-p99 evaluation output.
 - 2026-05-08: T114-T118 are closed with intent-pattern detection for pagination/polling/soft deletes/hierarchies/EXISTS/defaults, sequence-level polling correlation, SkeinQL-native rewrite snippets, SkeinAdmin migration assistant wiring, and the `migration.report_export` JSON/Markdown exporter.
 - 2026-05-08: T310-T316 are closed with `ai.nl.translate` prompt packages and rule translation, dependency-backed `ai.nl.explain` summaries plus preview rows, approval-token-gated `ai.nl.execute`, the `skeindb nl-eval` execution-match harness, SkeinAdmin NL Lab wiring, and focused engine/RPC/eval tests.
+- 2026-05-09 (v0.3.8 admin help-center release): No research-track closures. SkeinAdmin gains a dedicated **Help & Docs** panel (quick start, panel reference, R01-R20 index with hardness pills, keyboard shortcuts, glossary, doc links, live search), locked by `skeinadmin_help_panel_exposes_comprehensive_documentation_center`. Counts unchanged at 29 done / 80 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`

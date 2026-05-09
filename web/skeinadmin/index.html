@@ -410,6 +410,7 @@
           <button class="nav-item" data-panel="migration" data-scope="admin">Migration (R17)</button>
           <button class="nav-item" data-panel="nl" data-scope="admin">NL Lab (R11-R12)</button>
           <button class="nav-item" data-panel="rpc" data-scope="admin">RPC Explorer</button>
+          <button class="nav-item" data-panel="help">Help &amp; Docs</button>
         </nav>
         <div class="sidebar-section">
           <div class="sidebar-title">Databases</div>
@@ -437,6 +438,7 @@
               <button id="btnStats" class="admin-only sm">Stats</button>
               <button id="btnCapabilities" class="admin-only sm">Capabilities</button>
               <button id="btnTransport" class="admin-only sm">Transport</button>
+              <button id="btnHelp" class="sm" data-panel="help" title="Open Help &amp; Docs">? Help</button>
               <button id="btnShutdown" class="admin-only danger sm">Shutdown</button>
             </div>
             <div class="topbar-meta"><div class="pill" id="connBadge"><span class="conn-dot warn" id="connDot"></span>Disconnected</div><div class="hint" id="connSummary">Connect to start.</div></div>
@@ -457,6 +459,7 @@
           <button class="tab-btn" data-panel="encryption" data-scope="admin">Encryption</button>
           <button class="tab-btn" data-panel="research" data-scope="admin">Research</button>
           <button class="tab-btn" data-panel="rpc" data-scope="admin">RPC</button>
+          <button class="tab-btn" data-panel="help">Help</button>
         </nav>
         <div class="context-bar">
           <div class="context-item"><span class="context-label">Server</span><span class="context-value" id="contextServer">--</span></div>
@@ -1562,6 +1565,100 @@
               <pre id="rpcOut">Ready.</pre>
             </div>
             <div class="card"><h2>Methods</h2><div class="list" id="methodList">Load capabilities.</div></div>
+          </div>
+        </section>
+
+        <!-- HELP --><section class="panel" data-panel="help">
+          <div class="panel-grid">
+            <div class="card full section-band">
+              <div class="section-band-head">
+                <div><div class="section-kicker">Help &amp; Documentation</div><h2>SkeinAdmin Help Center</h2><p class="section-body">Quick start, panel reference, research-track index, keyboard shortcuts, glossary, and links to the canonical SkeinDB documentation. Use the search box to filter topics. Every entry maps directly to a panel or RPC method you can open with one click.</p></div>
+                <div class="section-links"><a class="sm" href="/docs/" target="_blank" rel="noopener">Open Docs Site</a><a class="ghost sm" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a><button class="ghost sm" data-panel="overview">Back to Overview</button></div>
+              </div>
+            </div>
+            <div class="card full">
+              <div class="row"><div class="field"><label>Search Help Topics</label><input id="helpSearch" placeholder="quick start, replay, encryption, R10, vector, advisor…" /></div></div>
+              <div id="helpResults" class="hint" style="margin-top:6px"></div>
+            </div>
+            <div class="card full" data-help-section="quickstart">
+              <h2>Quick Start (5 steps)</h2>
+              <ol style="margin:0;padding-left:18px;line-height:1.6;font-size:12px">
+                <li><strong>Connect</strong> — set the Base URL (default <code>http://localhost:8080</code>) and a bearer token, then click <em>Connect</em>. The pill in the top-right confirms reachability.</li>
+                <li><strong>Pick a database</strong> — use the left tree (or click <em>New Database</em> on the Overview hero) to establish the active working set. The context bar at the top shows the current server / database / table.</li>
+                <li><strong>Browse or design</strong> — open <em>Easy Viewer</em> for click-first row editing, <em>Schema</em> to design tables and indexes, or <em>Data</em> to browse and patch existing rows.</li>
+                <li><strong>Run queries</strong> — go to <em>SQL Console</em> (<kbd>⌘↵</kbd> to execute), or open <em>RPC Explorer</em> for typed SkeinQL methods. Prepared queries and transactions persist across panels in the same browser session.</li>
+                <li><strong>Operate</strong> — Telemetry shows live stats; CDC streams change events; Replay verifies historical snapshots; Cluster manages nodes and shard placement.</li>
+              </ol>
+            </div>
+            <div class="card full" data-help-section="panels">
+              <h2>Panel Reference</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Panel</th><th>Purpose</th><th>Key Actions</th><th>Open</th></tr></thead>
+                  <tbody id="helpPanelTable"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card full" data-help-section="research">
+              <h2>Research Tracks (R01-R20)</h2>
+              <p class="hint">Status reflects the runtime hardness level. <strong>Hardened</strong> tracks have real algorithms, integration tests, and SkeinAdmin wiring. <strong>Prototype</strong> tracks have a working code path but still need stronger evaluation or productionization.</p>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Primary RPC Methods</th><th>Open</th></tr></thead>
+                  <tbody id="helpResearchTable"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card" data-help-section="shortcuts">
+              <h2>Keyboard Shortcuts</h2>
+              <ul style="margin:0;padding-left:18px;line-height:1.7;font-size:12px">
+                <li><kbd>⌘K</kbd> / <kbd>Ctrl K</kbd> — Command palette</li>
+                <li><kbd>⌘↵</kbd> / <kbd>Ctrl ↵</kbd> — Run SQL in workspace</li>
+                <li><kbd>Esc</kbd> — Close dialog or palette</li>
+                <li><kbd>?</kbd> — Open this Help panel</li>
+                <li>Click any panel name in the left nav to jump there; the URL hash <code>#&lt;panel&gt;</code> deep-links into a specific panel.</li>
+              </ul>
+            </div>
+            <div class="card" data-help-section="docs">
+              <h2>Canonical Documentation</h2>
+              <ul style="margin:0;padding-left:18px;line-height:1.7;font-size:12px">
+                <li><a href="/docs/guide/getting-started.html" target="_blank" rel="noopener">Getting Started</a></li>
+                <li><a href="/docs/guide/skeinql.html" target="_blank" rel="noopener">SkeinQL Reference</a></li>
+                <li><a href="/docs/guide/api-reference.html" target="_blank" rel="noopener">API Reference</a></li>
+                <li><a href="/docs/guide/skeinadmin.html" target="_blank" rel="noopener">SkeinAdmin Guide</a></li>
+                <li><a href="/docs/guide/mysql-compat.html" target="_blank" rel="noopener">MySQL Compatibility</a></li>
+                <li><a href="/docs/guide/pg-compat.html" target="_blank" rel="noopener">PostgreSQL Compatibility</a></li>
+                <li><a href="/docs/guide/time-travel-replay.html" target="_blank" rel="noopener">Time Travel &amp; Replay</a></li>
+                <li><a href="/docs/guide/cdc-changefeed.html" target="_blank" rel="noopener">CDC Changefeeds</a></li>
+                <li><a href="/docs/guide/index-advisor.html" target="_blank" rel="noopener">Index Advisor</a></li>
+                <li><a href="/docs/guide/research-backlog.html" target="_blank" rel="noopener">Research Backlog</a></li>
+                <li><a href="/docs/guide/true-status-matrix.html" target="_blank" rel="noopener">True Status Matrix</a></li>
+              </ul>
+            </div>
+            <div class="card full" data-help-section="glossary">
+              <h2>Glossary</h2>
+              <dl style="margin:0;display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;font-size:12px">
+                <dt><strong>SkeinQL</strong></dt><dd>Native typed RPC method surface. Each method has structured params and results; see API Reference.</dd>
+                <dt><strong>ValueID</strong></dt><dd>Cell-interned identifier that backs SkeinDB's MVCC and dedup. Lookup distribution feeds the learned-index path (R01).</dd>
+                <dt><strong>ETag chain</strong></dt><dd>Causal-consistency token attached to reads/writes; enables stale detection and dependency tracking (R13).</dd>
+                <dt><strong>Replay bundle</strong></dt><dd>Self-contained snapshot + recorded query log produced by <code>maintenance.replay.export</code>, importable on another instance for verification (R14, R18).</dd>
+                <dt><strong>CDC subscription</strong></dt><dd>Change-data-capture cursor over a database, polled with <code>cdc.poll</code> and acknowledged with <code>cdc.ack</code>.</dd>
+                <dt><strong>Prepared query</strong></dt><dd>Pre-parsed SkeinQL plan saved by name and re-executed with bound parameters; surfaced in Workspace.</dd>
+                <dt><strong>Audit chain</strong></dt><dd>Hash-linked WAL of administrative events, verifiable via <code>maintenance.audit_verify</code> (R06).</dd>
+                <dt><strong>Edge bundle</strong></dt><dd>Geo-distributed read-only snapshot package for edge caches (R14), with optional primary-key redaction.</dd>
+                <dt><strong>Differential privacy</strong></dt><dd>Calibrated Laplace noise on aggregates with budget tracking (R04). Configure via the Privacy panel.</dd>
+                <dt><strong>Oblivious policy</strong></dt><dd>Padding + dummy-row injection to obscure access patterns (R05).</dd>
+              </dl>
+            </div>
+            <div class="card" data-help-section="support">
+              <h2>Support &amp; Reporting</h2>
+              <p class="hint" style="font-size:12px;line-height:1.6">SkeinDB is open-source and ships with a commercial licensing track. For bug reports, feature requests, and security disclosures use the GitHub repository. Include the version string from the <em>Version</em> button in the topbar.</p>
+              <div class="actions">
+                <a class="primary sm" href="https://github.com/pinkysworld/SkeinDB/issues" target="_blank" rel="noopener">File an issue</a>
+                <a class="sm" href="/SUPPORT.html" target="_blank" rel="noopener">Support policy</a>
+                <a class="ghost sm" href="/COMMERCIAL.html" target="_blank" rel="noopener">Commercial</a>
+              </div>
+            </div>
           </div>
         </section>
       </main>
