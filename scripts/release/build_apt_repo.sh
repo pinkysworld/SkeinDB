@@ -52,8 +52,10 @@ fi
 
 rm -rf "$output_dir"
 
-pool_dir="$output_dir/pool/$component/s/skeindb"
-binary_dir="$output_dir/dists/$suite/$component/binary-$arch"
+pool_rel="pool/$component/s/skeindb"
+binary_rel="dists/$suite/$component/binary-$arch"
+pool_dir="$output_dir/$pool_rel"
+binary_dir="$output_dir/$binary_rel"
 mkdir -p "$pool_dir" "$binary_dir"
 
 deb_name="$(basename "$deb_path")"
@@ -61,8 +63,8 @@ cp "$deb_path" "$pool_dir/$deb_name"
 
 pushd "$output_dir" >/dev/null
 
-dpkg-scanpackages --multiversion pool /dev/null > "$binary_dir/Packages"
-gzip -9c "$binary_dir/Packages" > "$binary_dir/Packages.gz"
+dpkg-scanpackages --multiversion pool /dev/null > "$binary_rel/Packages"
+gzip -9c "$binary_rel/Packages" > "$binary_rel/Packages.gz"
 
 cat > apt-ftparchive.conf <<EOF
 APT::FTPArchive::Release::Origin "$origin";

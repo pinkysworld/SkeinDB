@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -206,4 +208,73 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
     }
 
     fs::remove_dir_all(outdir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn apt_repo_script_writes_paths_inside_output_dir() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = temp_dir("release_packaging_apt");
+    let fake_bin = dir.join("bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+
+    let dpkg_scanpackages = fake_bin.join("dpkg-scanpackages");
+    fs::write(
+        &dpkg_scanpackages,
+        "#!/usr/bin/env bash\necho 'Package: skeindb'\necho 'Version: 0.3.7'\necho 'Architecture: amd64'\n",
+    )
+    .expect("write fake dpkg-scanpackages");
+    fs::set_permissions(&dpkg_scanpackages, fs::Permissions::from_mode(0o755))
+        .expect("chmod fake dpkg-scanpackages");
+
+    let apt_ftparchive = fake_bin.join("apt-ftparchive");
+    fs::write(
+        &apt_ftparchive,
+        "#!/usr/bin/env bash\necho 'Origin: SkeinDB'\necho 'Label: SkeinDB'\n",
+    )
+    .expect("write fake apt-ftparchive");
+    fs::set_permissions(&apt_ftparchive, fs::Permissions::from_mode(0o755))
+        .expect("chmod fake apt-ftparchive");
+
+    let deb = dir.join("skeindb_0.3.7_amd64.deb");
+    fs::write(&deb, b"fake deb").expect("write fake deb");
+    let output_dir = dir.join("apt-repo");
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let status = Command::new(repo_root.join("scripts/release/build_apt_repo.sh"))
+        .arg("--deb")
+        .arg(&deb)
+        .arg("--output")
+        .arg(&output_dir)
+        .env("PATH", path)
+        .status()
+        .expect("run apt repo script");
+    assert!(status.success(), "apt repo script should succeed");
+
+    assert!(
+        output_dir
+            .join("dists/stable/main/binary-amd64/Packages")
+            .is_file(),
+        "Packages should be written inside the selected output dir"
+    );
+    assert!(
+        output_dir
+            .join("dists/stable/main/binary-amd64/Packages.gz")
+            .is_file(),
+        "Packages.gz should be written inside the selected output dir"
+    );
+    assert!(
+        output_dir.join("dists/stable/Release").is_file(),
+        "Release should be written inside the selected output dir"
+    );
+    assert!(
+        !output_dir.join("dists/stable/InRelease").exists(),
+        "unsigned test run should not create signed metadata"
+    );
+
+    fs::remove_dir_all(dir).ok();
 }
