@@ -3,7 +3,9 @@
 Last updated: 2026-05-09
 Honest claims: SkeinDB does **not** provide and does **not** claim "100% MySQL compatibility." Coverage is measured against the regression corpus at `tests/compat/corpus.sql` (1658 lines / ~700+ statements) which is exercised on every commit by [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs). The surface that *is* supported is enumerated in [docs/MYSQL_COMPAT.md](./MYSQL_COMPAT.md). Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.
 
-2026-05-09 (v0.3.7 release-prep sync): Crate/package metadata is bumped to `0.3.7` and public docs/site status strings are synced after the R12/R17/R20 hardening batch. The research backlog is still **26 done / 83 open**; this version is a progress release, not a claim that the full research backlog is finished. The remaining prototype tracks are still R18 and R19 until their code/test/docs evidence lands.
+2026-05-09 (R19 ABI sync): The research backlog is now **27 done / 82 open** after closing T084 with columnar batch ABI/data interchange evidence. `wasm.plan.compile` now returns artifact metadata, `wasm.plan.inspect` validates and describes artifacts, `wasm.plan.edge_package` emits a host-backed manifest/JS runner, and SkeinAdmin's Wasm panel uses the current query/artifact API. R19 remains prototype because native Wasm codegen, SIMD exploration, and standalone edge execution are still open.
+
+2026-05-09 (v0.3.7 release-prep sync): Crate/package metadata is bumped to `0.3.7` and public docs/site status strings are synced after the R12/R17/R20 hardening batch. The research backlog was **26 done / 83 open** at release-prep time; this version is a progress release, not a claim that the full research backlog is finished. The remaining prototype tracks were still R18 and R19 until their code/test/docs evidence lands.
 
 2026-05-08 (truth sync + review): The core project backlog now has **140 done / 0 open** checked roadmap tasks; remaining product work is captured as partial-phase hardening notes, future PostgreSQL/driver compatibility follow-ups, and the separate research backlog. Runtime review of the high-risk MVCC, WAL recovery, Wasm UDF, encryption, RowDir, PostgreSQL SQL rewrite/dispatch, stats, replay, history, and compaction surfaces found no high-confidence correctness or security fixes. One hygiene fix landed in `system.capabilities`: the advertised SkeinQL method list no longer duplicates `cdc.subscribe_query`, and `crates/skeindb/src/server.rs::system_capabilities_method_list_is_unique` now locks the canonical advertised count at 127 unique methods. The PostgreSQL startup log now says trust/SCRAM auth instead of the stale trust/cleartext wording.
 
@@ -37,7 +39,7 @@ Interpretation:
 ## 1) Backlog checklist snapshot
 
 - `docs/PROJECT_BACKLOG.md`: **140 done / 0 open** (140 top-level roadmap tasks; remaining product gaps are tracked as partial-phase hardening notes and future compatibility/research work rather than unchecked core-roadmap boxes)
-- `docs/RESEARCH_BACKLOG.md`: **26 done / 83 open** (109 total)
+- `docs/RESEARCH_BACKLOG.md`: **27 done / 82 open** (109 total)
 
 Why `RESEARCH_BACKLOG` mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
@@ -95,7 +97,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R16 Auto index synthesis | Hardened | `advisor.index_synthesize/apply_index/history/dismiss` plus the SkeinAdmin Index Advisor page with ranked suggestions/history and observed-before/expected-after reports; engine coverage verifies candidate suppression when a MySQL-compatible prefix index already exists, `advisor.apply_index` now queues background builds with queued/building/completed/failed history state and rollback metadata, and integration tests assert both successful apply/dismiss round-trips and rollback-on-failure resurface behavior (`cluster_rpc.rs::r16_index_advisor_synthesis_workflow`, `cluster_rpc.rs::r16_index_advisor_apply_roundtrip_and_suppresses_suggestion`, `cluster_rpc.rs::r16_index_advisor_apply_failure_rolls_back_and_resurfaces_suggestion`). |
 | R17 Intent inference | Hardened | `migration.intent_report`, `migration.rewrite_preview`, and `migration.report_export`; pattern library covers pagination, polling, soft deletes, hierarchy self-joins, recursive CTEs, EXISTS membership, and COALESCE defaults with JSON/Markdown report export coverage. |
 | R18 Perf regression replay | Prototype implemented | Replay/perf scaffolds and harness direction. |
-| R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/run` + batch ABI scaffolds. |
+| R19 Wasm query operators | Prototype implemented | `wasm.plan.compile/inspect/edge_package/run`, host-interpreted plan artifacts, batch ABI/data interchange, and SkeinAdmin query/artifact controls. Native Wasm codegen and SIMD remain open. |
 | R20 Energy-aware compaction | Hardened | `energy_aware` compaction policy, CPU/IO joule estimates, persisted external energy signals, status/stats JSON, SkeinAdmin controls, safe-mode constraint preservation, and synthetic energy-vs-p99 evaluation harness. |
 
 ## 4) Recommended “next truth-maintenance” rule

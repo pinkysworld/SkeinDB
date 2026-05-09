@@ -551,7 +551,7 @@ If a server uses a different hash (e.g., BLAKE3), it MUST specify it in `system.
 
 ## 10) Method catalog (v1)
 
-This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 127 unique methods through `system.capabilities`; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.
+This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 129 unique methods through `system.capabilities`; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.
 
 ### 10.0 Reading the catalog
 
@@ -1738,7 +1738,62 @@ Result:
 {
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
-  "artifact_b64": "..."
+  "artifact_b64": "...",
+  "target": "wasm32-unknown-unknown",
+  "execution": "host_interpreted_v1",
+  "artifact_bytes": 392,
+  "operator_count": 3,
+  "operators": ["scan", "filter", "project"],
+  "supports_edge_package": true,
+  "supports_simd": false
+}
+```
+
+#### wasm.plan.inspect
+Params:
+
+```json
+{"artifact_b64":"..."}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.plan.v1",
+  "abi": "skein.wasm.batch.v1",
+  "target": "wasm32-unknown-unknown",
+  "execution": "host_interpreted_v1",
+  "artifact_bytes": 392,
+  "operator_count": 3,
+  "operators": ["scan", "filter", "project"],
+  "table": {"db":"app","table":"users"},
+  "has_filter": true,
+  "projection_count": 2,
+  "supports_edge_package": true,
+  "supports_simd": false
+}
+```
+
+#### wasm.plan.edge_package
+Params:
+
+```json
+{"artifact_b64":"...","package_name":"users-score-plan"}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.edge_package.v1",
+  "package_name": "users-score-plan",
+  "artifact_b64": "...",
+  "artifact_bytes": 392,
+  "artifact_sha256": "...",
+  "manifest_json": "{...}",
+  "runner_js": "export async function runSkeinWasmPlan(...) { ... }",
+  "instructions": ["Store artifact_b64 and manifest_json with the edge worker or browser bundle."]
 }
 ```
 

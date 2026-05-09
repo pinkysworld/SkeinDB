@@ -126,7 +126,7 @@
     <article class="doc-article">
       <h1 id="skeindb-api-reference">SkeinDB API Reference<a class="headerlink" href="#skeindb-api-reference" title="Permanent link">¶</a></h1>
 <p>Last updated: 2026-05-09
-Runtime baseline: v0.3.7, SkeinQL 1.0, 127 advertised RPC methods</p>
+Runtime baseline: v0.3.7, SkeinQL 1.0, 129 advertised RPC methods</p>
 <p>This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in <code>SKEINQL.md</code>; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.</p>
 <h2 id="transport-endpoints">Transport endpoints<a class="headerlink" href="#transport-endpoints" title="Permanent link">¶</a></h2>
 <table>
@@ -386,9 +386,9 @@ Runtime baseline: v0.3.7, SkeinQL 1.0, 127 advertised RPC methods</p>
 </tr>
 <tr>
 <td><code>wasm.plan.*</code></td>
-<td>compile, run</td>
+<td>compile, inspect, edge_package, run</td>
 <td>Prototype</td>
-<td>Wasm query-operator ABI.</td>
+<td>Host-interpreted Wasm query-operator artifact ABI plus edge packaging helper.</td>
 </tr>
 <tr>
 <td><code>security.token.*</code></td>
@@ -433,7 +433,7 @@ settings.encryption.status, settings.encryption.set_mode, settings.encryption.re
 settings.encryption.set_active_key, settings.encryption.rotate_key,
 edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
-wasm.plan.compile, wasm.plan.run,
+wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.status, view.explain_deps,
 advisor.index_synthesize, advisor.apply_index, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,

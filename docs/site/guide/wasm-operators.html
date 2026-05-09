@@ -125,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="wasm-query-operators">Wasm Query Operators<a class="headerlink" href="#wasm-query-operators" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-31</p>
+<p>Status: Prototype
+Last updated: 2026-05-09</p>
 <p>Goal:
 Define a stable ABI for columnar batches and a portable plan artifact so SkeinDB can compile query operators to WebAssembly.</p>
 <p>This document defines the v1 ABI and the initial plan subset used by <code>wasm.plan.*</code>.</p>
@@ -200,6 +200,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;plan&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;ops&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">}},</span>
@@ -213,7 +215,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <p>Rules:
 - <code>scan</code> must be first and exactly once.
 - <code>project</code> must be last and exactly once.
-- <code>filter</code> is optional and must appear between scan and project.</p>
+- <code>filter</code> is optional and must appear between scan and project.
+- <code>execution</code> is <code>host_interpreted_v1</code> in the current implementation. Native Wasm code generation remains open work.</p>
 <hr />
 <h2 id="5-skeinql-methods">5) SkeinQL methods<a class="headerlink" href="#5-skeinql-methods" title="Permanent link">¶</a></h2>
 <h3 id="wasmplancompile">wasm.plan.compile<a class="headerlink" href="#wasmplancompile" title="Permanent link">¶</a></h3>
@@ -229,10 +232,64 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;supports_edge_package&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
 <span class="p">}</span>
 </code></pre></div>
 
+<h3 id="wasmplaninspect">wasm.plan.inspect<a class="headerlink" href="#wasmplaninspect" title="Permanent link">¶</a></h3>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;has_filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;projection_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_edge_package&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="wasmplanedge_package">wasm.plan.edge_package<a class="headerlink" href="#wasmplanedge_package" title="Permanent link">¶</a></h3>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;package_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users-score-plan&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.edge_package.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;package_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users-score-plan&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_sha256&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;manifest_json&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{...}&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;runner_js&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;export async function runSkeinWasmPlan(...) { ... }&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s2">&quot;Store artifact_b64 and manifest_json with the edge worker or browser bundle.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format.&quot;</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The v1 edge package ships the plan artifact, a manifest, and a small JavaScript runner that calls <code>wasm.plan.run</code> on a SkeinDB host. It does not yet execute a generated Wasm module inside the edge process.</p>
 <h3 id="wasmplanrun">wasm.plan.run<a class="headerlink" href="#wasmplanrun" title="Permanent link">¶</a></h3>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -256,9 +313,11 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <hr />
 <h2 id="6-prototype-notes">6) Prototype notes<a class="headerlink" href="#6-prototype-notes" title="Permanent link">¶</a></h2>
 <p>Current implementation:
-- The plan artifact is interpreted by the host (no Wasm codegen yet).
-- Only the filter/project subset is accepted.
-- <code>abi</code> and <code>target</code> are validated but otherwise ignored in v1.</p>
+- The plan artifact is interpreted by the host (<code>execution: "host_interpreted_v1"</code>).
+- Only the scan/filter/project subset is accepted.
+- <code>abi</code> and <code>target</code> are validated; <code>target</code> is recorded in the artifact for inspection and packaging.
+- <code>wasm.plan.inspect</code> exposes artifact metadata without running the query.
+- <code>wasm.plan.edge_package</code> emits a host-backed edge runner package. Native in-edge Wasm codegen and SIMD remain open T085/T086 work.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/WASM_OPERATORS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -288,6 +347,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <li><a href="#4-plan-artifact-format-skeinwasmplanv1">4) Plan artifact format (skein.wasm.plan.v1)</a></li>
 <li><a href="#5-skeinql-methods">5) SkeinQL methods</a><ul>
 <li><a href="#wasmplancompile">wasm.plan.compile</a></li>
+<li><a href="#wasmplaninspect">wasm.plan.inspect</a></li>
+<li><a href="#wasmplanedge_package">wasm.plan.edge_package</a></li>
 <li><a href="#wasmplanrun">wasm.plan.run</a></li>
 </ul>
 </li>

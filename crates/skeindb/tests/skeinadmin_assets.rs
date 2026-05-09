@@ -368,6 +368,10 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         "btnEdgeApply",
         "btnEdgeStatus",
         "edgeBundleJson",
+        "Artifact B64",
+        "btnWasmInspect",
+        "btnWasmEdgePackage",
+        "Package name",
     ] {
         assert!(
             html.contains(marker),
@@ -395,6 +399,12 @@ fn skeinadmin_wires_research_runtime_surfaces() {
         "edge.bundle.status",
         "wire('btnCompactionStatus', compactionStatus);",
         "wire('btnEdgeRequest', edgeRequestBundle);",
+        "async function wasmInspect()",
+        "async function wasmEdgePackage()",
+        "wasm.plan.inspect",
+        "wasm.plan.edge_package",
+        "wire('btnWasmInspect', wasmInspect);",
+        "wire('btnWasmEdgePackage', wasmEdgePackage);",
     ] {
         assert!(
             js.contains(marker),

@@ -129,7 +129,7 @@
 <p>Notes:
 - These items are <strong>research-oriented</strong>: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be <strong>optional</strong> and do not block core MySQL compatibility.</p>
-<h2 id="reality-sync-2026-05-08">Reality sync (2026-05-08)<a class="headerlink" href="#reality-sync-2026-05-08" title="Permanent link">¶</a></h2>
+<h2 id="reality-sync-2026-05-09">Reality sync (2026-05-09)<a class="headerlink" href="#reality-sync-2026-05-09" title="Permanent link">¶</a></h2>
 <p>Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
 - <strong>18 tracks are now hardened</strong> with real algorithms and dedicated tests:
@@ -153,6 +153,7 @@
   - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
+- Checklist count: <strong>27 done / 82 open</strong> after closing the R19 columnar batch ABI/data interchange item. Native Wasm codegen, SIMD, and standalone in-edge execution remain open.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
@@ -435,10 +436,10 @@
 </ul>
 <h3 id="extend-phase-8-wasm-query-operators-r19">Extend Phase 8 — Wasm query operators (R19)<a class="headerlink" href="#extend-phase-8-wasm-query-operators-r19" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T084: Wasm operator ABI (columnar batches) + data interchange format</li>
+<li>[x] T084: Wasm operator ABI (columnar batches) + data interchange format. Evidence: <code>docs/WASM_OPERATORS.md</code>, <code>wasm.plan.compile/run</code>, <code>wasm_batch_v1</code> result format, <code>wasm.plan.inspect</code>, and <code>engine::tests::wasm_plan_compile_and_run</code>.</li>
 <li>[ ] T085: Compile a restricted plan subset to Wasm (filter/project)</li>
 <li>[ ] T086: Wasm SIMD exploration + perf tests</li>
-<li>[ ] T087: Edge runtime packaging (ship plan artifact)</li>
+<li>[ ] T087: Edge runtime packaging (ship plan artifact). Partial evidence now exists in <code>wasm.plan.edge_package</code>, but v1 still delegates execution back to <code>wasm.plan.run</code> on a SkeinDB host.</li>
 </ul>
 <h3 id="extend-phase-10-adaptive-rowcolumn-execution-r02">Extend Phase 10 — Adaptive row/column execution (R02)<a class="headerlink" href="#extend-phase-10-adaptive-rowcolumn-execution-r02" title="Permanent link">¶</a></h3>
 <ul>
@@ -502,7 +503,7 @@
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#reality-sync-2026-05-08">Reality sync (2026-05-08)</a></li>
+<li><a href="#reality-sync-2026-05-09">Reality sync (2026-05-09)</a></li>
 <li><a href="#mapping-table-proposal-repo">Mapping table (proposal → repo)</a></li>
 <li><a href="#task-definitions-new-additions">Task definitions (new additions)</a><ul>
 <li><a href="#phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)</a></li>

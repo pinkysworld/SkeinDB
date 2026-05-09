@@ -1871,6 +1871,63 @@ pub struct WasmPlanCompileResult {
     pub format: String,
     pub abi: String,
     pub artifact_b64: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
+    pub execution: String,
+    pub artifact_bytes: usize,
+    pub operator_count: usize,
+    pub operators: Vec<String>,
+    pub supports_edge_package: bool,
+    pub supports_simd: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanInspectParams {
+    pub artifact_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanInspectResult {
+    pub format: String,
+    pub abi: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
+    pub execution: String,
+    pub artifact_bytes: usize,
+    pub operator_count: usize,
+    pub operators: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    pub has_filter: bool,
+    pub projection_count: usize,
+    pub supports_edge_package: bool,
+    pub supports_simd: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanEdgePackageParams {
+    pub artifact_b64: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanEdgePackageResult {
+    pub format: String,
+    pub package_name: String,
+    pub artifact_b64: String,
+    pub artifact_bytes: usize,
+    pub artifact_sha256: String,
+    pub manifest_json: String,
+    pub runner_js: String,
+    pub instructions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

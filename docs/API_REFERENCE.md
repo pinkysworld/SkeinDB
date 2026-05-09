@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
 Last updated: 2026-05-09
-Runtime baseline: v0.3.7, SkeinQL 1.0, 127 advertised RPC methods
+Runtime baseline: v0.3.7, SkeinQL 1.0, 129 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
@@ -82,7 +82,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `migration.*` | intent report, rewrite preview, report export | Experimental | Migration intent detection and reporting. |
 | `maintenance.*` | audit, compaction, history GC, replay export/import/run | Core + experimental | Operational maintenance and replay bundles. |
 | `edge.*` | bundle request/apply/status | Experimental | Bounded replay bundles for edge replication. |
-| `wasm.plan.*` | compile, run | Prototype | Wasm query-operator ABI. |
+| `wasm.plan.*` | compile, inspect, edge_package, run | Prototype | Host-interpreted Wasm query-operator artifact ABI plus edge packaging helper. |
 | `security.token.*` | create, list, revoke | Core | Bearer-token management. |
 | `admin.user.*` | create, list, drop, grant, revoke | Core | Embedded admin user/role helpers. |
 
@@ -118,7 +118,7 @@ settings.encryption.status, settings.encryption.set_mode, settings.encryption.re
 settings.encryption.set_active_key, settings.encryption.rotate_key,
 edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
-wasm.plan.compile, wasm.plan.run,
+wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.status, view.explain_deps,
 advisor.index_synthesize, advisor.apply_index, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,

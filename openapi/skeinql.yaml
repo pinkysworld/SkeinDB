@@ -126,6 +126,8 @@ x-skeinql-methods:
   - merge.wasm.list
   - merge.wasm.drop
   - wasm.plan.compile
+  - wasm.plan.inspect
+  - wasm.plan.edge_package
   - wasm.plan.run
   - view.create
   - view.drop

@@ -67,6 +67,8 @@ use skeindb_skeinql::methods::{
     VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
     ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult,
     ViewStatusParams, ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult,
+    WasmPlanEdgePackageParams, WasmPlanEdgePackageResult, WasmPlanInspectParams,
+    WasmPlanInspectResult,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -728,12 +730,24 @@ struct MergeWasmRegistryDisk {
 
 const WASM_PLAN_FORMAT_V1: &str = "skein.wasm.plan.v1";
 const WASM_PLAN_ABI_V1: &str = "skein.wasm.batch.v1";
+const WASM_PLAN_EXECUTION_V1: &str = "host_interpreted_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WasmPlanArtifactV1 {
     format: String,
     abi: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+
+    #[serde(default = "default_wasm_plan_execution")]
+    execution: String,
+
     plan: WasmPlanV1,
+}
+
+fn default_wasm_plan_execution() -> String {
+    WASM_PLAN_EXECUTION_V1.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6906,10 +6920,12 @@ impl Engine {
         if abi != WASM_PLAN_ABI_V1 {
             anyhow::bail!("invalid_request: unsupported wasm plan abi");
         }
-        if let Some(target) = params.target.as_deref() {
-            if !matches!(target, "wasm32-unknown-unknown" | "wasm32-wasi") {
-                anyhow::bail!("invalid_request: unsupported wasm plan target");
-            }
+        let target = params
+            .target
+            .clone()
+            .unwrap_or_else(|| "wasm32-unknown-unknown".to_string());
+        if !matches!(target.as_str(), "wasm32-unknown-unknown" | "wasm32-wasi") {
+            anyhow::bail!("invalid_request: unsupported wasm plan target");
         }
 
         let plan = wasm_plan_from_query(&params.query)?;
@@ -6918,15 +6934,79 @@ impl Engine {
         let artifact = WasmPlanArtifactV1 {
             format: format.clone(),
             abi: abi.clone(),
+            target: Some(target.clone()),
+            execution: WASM_PLAN_EXECUTION_V1.to_string(),
             plan,
         };
         let bytes = serde_json::to_vec(&artifact)?;
         let artifact_b64 = BASE64_STANDARD.encode(&bytes);
+        let info = wasm_plan_info_from_artifact(&artifact, bytes.len())?;
 
         Ok(WasmPlanCompileResult {
             format,
             abi,
             artifact_b64,
+            target: Some(target),
+            execution: info.execution,
+            artifact_bytes: info.artifact_bytes,
+            operator_count: info.operator_count,
+            operators: info.operators,
+            supports_edge_package: info.supports_edge_package,
+            supports_simd: info.supports_simd,
+        })
+    }
+
+    pub fn wasm_plan_inspect(
+        &self,
+        params: WasmPlanInspectParams,
+    ) -> anyhow::Result<WasmPlanInspectResult> {
+        let (artifact, artifact_bytes) = decode_wasm_plan_artifact(&params.artifact_b64)?;
+        wasm_plan_info_from_artifact(&artifact, artifact_bytes)
+    }
+
+    pub fn wasm_plan_edge_package(
+        &self,
+        params: WasmPlanEdgePackageParams,
+    ) -> anyhow::Result<WasmPlanEdgePackageResult> {
+        let package_name = params
+            .package_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("skein-wasm-plan")
+            .to_string();
+        let (artifact, artifact_bytes) = decode_wasm_plan_artifact(&params.artifact_b64)?;
+        let info = wasm_plan_info_from_artifact(&artifact, artifact_bytes)?;
+        let raw_artifact = BASE64_STANDARD.decode(params.artifact_b64.as_bytes())?;
+        let artifact_sha256 = hex_encode(&Sha256::digest(&raw_artifact));
+        let manifest_json = serde_json::to_string_pretty(&serde_json::json!({
+            "format": "skein.wasm.edge_package.v1",
+            "package_name": package_name,
+            "artifact_format": info.format,
+            "artifact_abi": info.abi,
+            "artifact_sha256": artifact_sha256,
+            "execution": info.execution,
+            "target": info.target,
+            "operators": info.operators,
+            "table": info.table,
+            "has_filter": info.has_filter,
+            "projection_count": info.projection_count,
+            "supports_simd": info.supports_simd,
+        }))?;
+
+        Ok(WasmPlanEdgePackageResult {
+            format: "skein.wasm.edge_package.v1".to_string(),
+            package_name,
+            artifact_b64: params.artifact_b64,
+            artifact_bytes,
+            artifact_sha256,
+            manifest_json,
+            runner_js: wasm_plan_edge_runner_js(),
+            instructions: vec![
+                "Store artifact_b64 and manifest_json with the edge worker or browser bundle.".to_string(),
+                "Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format.".to_string(),
+                "This v1 package executes through wasm.plan.run on a SkeinDB host; native in-edge Wasm codegen remains tracked by T085/T086.".to_string(),
+            ],
         })
     }
 
@@ -6942,17 +7022,7 @@ impl Engine {
         wire_known_valueids: Option<&HashSet<String>>,
         wire_skeinpack: bool,
     ) -> anyhow::Result<QuerySelectResult> {
-        let bytes = BASE64_STANDARD
-            .decode(artifact_b64.as_bytes())
-            .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
-        let artifact: WasmPlanArtifactV1 = serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
-        if artifact.format != WASM_PLAN_FORMAT_V1 {
-            anyhow::bail!("invalid_request: unsupported wasm plan format");
-        }
-        if artifact.abi != WASM_PLAN_ABI_V1 {
-            anyhow::bail!("invalid_request: unsupported wasm plan abi");
-        }
+        let (artifact, _artifact_bytes) = decode_wasm_plan_artifact(artifact_b64)?;
 
         let query = query_from_wasm_plan(&artifact.plan)?;
 
@@ -12025,6 +12095,102 @@ fn query_from_wasm_plan(plan: &WasmPlanV1) -> anyhow::Result<Query> {
         limit: None,
         lock: None,
     })
+}
+
+fn decode_wasm_plan_artifact(artifact_b64: &str) -> anyhow::Result<(WasmPlanArtifactV1, usize)> {
+    let bytes = BASE64_STANDARD
+        .decode(artifact_b64.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
+    let artifact_bytes = bytes.len();
+    let artifact: WasmPlanArtifactV1 = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm plan artifact"))?;
+    if artifact.format != WASM_PLAN_FORMAT_V1 {
+        anyhow::bail!("invalid_request: unsupported wasm plan format");
+    }
+    if artifact.abi != WASM_PLAN_ABI_V1 {
+        anyhow::bail!("invalid_request: unsupported wasm plan abi");
+    }
+    if artifact.execution != WASM_PLAN_EXECUTION_V1 {
+        anyhow::bail!("invalid_request: unsupported wasm plan execution");
+    }
+    query_from_wasm_plan(&artifact.plan)?;
+    Ok((artifact, artifact_bytes))
+}
+
+fn wasm_plan_info_from_artifact(
+    artifact: &WasmPlanArtifactV1,
+    artifact_bytes: usize,
+) -> anyhow::Result<WasmPlanInspectResult> {
+    let mut operators = Vec::new();
+    let mut table = None;
+    let mut has_filter = false;
+    let mut projection_count = 0usize;
+
+    for operator in artifact.plan.ops.iter() {
+        match operator {
+            WasmPlanOpV1::Scan { table: scan_table } => {
+                operators.push("scan".to_string());
+                table = Some(scan_table.clone());
+            }
+            WasmPlanOpV1::Filter { .. } => {
+                operators.push("filter".to_string());
+                has_filter = true;
+            }
+            WasmPlanOpV1::Project { projection } => {
+                operators.push("project".to_string());
+                projection_count = projection.len();
+            }
+        }
+    }
+
+    query_from_wasm_plan(&artifact.plan)?;
+    Ok(WasmPlanInspectResult {
+        format: artifact.format.clone(),
+        abi: artifact.abi.clone(),
+        target: artifact.target.clone(),
+        execution: artifact.execution.clone(),
+        artifact_bytes,
+        operator_count: operators.len(),
+        operators,
+        table,
+        has_filter,
+        projection_count,
+        supports_edge_package: true,
+        supports_simd: false,
+    })
+}
+
+fn wasm_plan_edge_runner_js() -> String {
+    r#"export async function runSkeinWasmPlan({ rpcUrl, artifactB64, args = [], resultFormat = 'objects_json', token = null, cache = null }) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const body = {
+    skeinql: '1.0',
+    id: `edge-${Date.now()}`,
+    method: 'wasm.plan.run',
+    params: {
+      artifact_b64: artifactB64,
+      args,
+      result_format: resultFormat,
+      cache
+    }
+  };
+  const response = await fetch(rpcUrl.replace(/\/$/, '') + '/api/v1/rpc', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`SkeinDB RPC HTTP ${response.status}`);
+  const payload = await response.json();
+  if (payload.error) throw new Error(payload.error.message || payload.error.code || 'SkeinDB RPC error');
+  return payload.result;
+}
+
+export function parseSkeinWasmPlanManifest(manifestJson) {
+  return typeof manifestJson === 'string' ? JSON.parse(manifestJson) : manifestJson;
+}
+"#
+    .to_string()
 }
 
 fn validate_wasm_expr(expr: &Expr) -> anyhow::Result<()> {
@@ -25780,7 +25946,8 @@ mod tests {
     use skeindb_skeinql::methods::{
         AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
         AdvisorIndexSynthesizeParams, EdgeBundleWindow, MigrationIntentReportParams,
-        MigrationIntentSample, WasmPlanCompileParams,
+        MigrationIntentSample, WasmPlanCompileParams, WasmPlanEdgePackageParams,
+        WasmPlanInspectParams,
     };
     use skeindb_skeinql::types::{
         Cte, ExistsExpr, JoinRef, JoinTableRef, JoinType, LimitClause, SelectItem, SetOp, SetOpKind,
@@ -32924,6 +33091,30 @@ mod tests {
             abi: None,
             target: None,
         })?;
+
+        assert_eq!(compiled.format, WASM_PLAN_FORMAT_V1);
+        assert_eq!(compiled.abi, WASM_PLAN_ABI_V1);
+        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_V1);
+        assert_eq!(compiled.operators, vec!["scan", "filter", "project"]);
+        assert!(compiled.artifact_bytes > 0);
+        assert!(compiled.supports_edge_package);
+        assert!(!compiled.supports_simd);
+
+        let inspected = engine.wasm_plan_inspect(WasmPlanInspectParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+        })?;
+        assert_eq!(inspected.operator_count, 3);
+        assert_eq!(inspected.projection_count, 2);
+        assert!(inspected.has_filter);
+
+        let edge_package = engine.wasm_plan_edge_package(WasmPlanEdgePackageParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+            package_name: Some("users-score-plan".to_string()),
+        })?;
+        assert_eq!(edge_package.format, "skein.wasm.edge_package.v1");
+        assert_eq!(edge_package.package_name, "users-score-plan");
+        assert!(edge_package.manifest_json.contains("host_interpreted_v1"));
+        assert!(edge_package.runner_js.contains("runSkeinWasmPlan"));
 
         let result = engine.wasm_plan_run(
             &compiled.artifact_b64,

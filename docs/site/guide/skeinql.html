@@ -526,7 +526,7 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <p>If a server uses a different hash (e.g., BLAKE3), it MUST specify it in <code>system.capabilities</code>.</p>
 <hr />
 <h2 id="10-method-catalog-v1">10) Method catalog (v1)<a class="headerlink" href="#10-method-catalog-v1" title="Permanent link">¶</a></h2>
-<p>This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 127 unique methods through <code>system.capabilities</code>; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.</p>
+<p>This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 129 unique methods through <code>system.capabilities</code>; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.</p>
 <h3 id="100-reading-the-catalog">10.0 Reading the catalog<a class="headerlink" href="#100-reading-the-catalog" title="Permanent link">¶</a></h3>
 <p>Method stability levels used below:</p>
 <ul>
@@ -1440,7 +1440,54 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;supports_edge_package&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="wasmplaninspect">wasm.plan.inspect<a class="headerlink" href="#wasmplaninspect" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;has_filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;projection_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_edge_package&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;supports_simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="wasmplanedge_package">wasm.plan.edge_package<a class="headerlink" href="#wasmplanedge_package" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="nt">&quot;package_name&quot;</span><span class="p">:</span><span class="s2">&quot;users-score-plan&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.edge_package.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;package_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users-score-plan&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_sha256&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;manifest_json&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{...}&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;runner_js&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;export async function runSkeinWasmPlan(...) { ... }&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Store artifact_b64 and manifest_json with the edge worker or browser bundle.&quot;</span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 

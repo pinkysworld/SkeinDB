@@ -1,7 +1,7 @@
 # Wasm Query Operators
 
-Status: Draft
-Last updated: 2026-01-31
+Status: Prototype
+Last updated: 2026-05-09
 
 Goal:
 Define a stable ABI for columnar batches and a portable plan artifact so SkeinDB can compile query operators to WebAssembly.
@@ -103,6 +103,8 @@ The portable plan artifact is JSON, base64-encoded for transport:
 {
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
+  "target": "wasm32-unknown-unknown",
+  "execution": "host_interpreted_v1",
   "plan": {
     "ops": [
       {"op": "scan", "table": {"db": "app", "table": "users"}},
@@ -117,6 +119,7 @@ Rules:
 - `scan` must be first and exactly once.
 - `project` must be last and exactly once.
 - `filter` is optional and must appear between scan and project.
+- `execution` is `host_interpreted_v1` in the current implementation. Native Wasm code generation remains open work.
 
 ---
 
@@ -140,9 +143,74 @@ Result:
 {
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
-  "artifact_b64": "..."
+  "artifact_b64": "...",
+  "target": "wasm32-unknown-unknown",
+  "execution": "host_interpreted_v1",
+  "artifact_bytes": 392,
+  "operator_count": 3,
+  "operators": ["scan", "filter", "project"],
+  "supports_edge_package": true,
+  "supports_simd": false
 }
 ```
+
+### wasm.plan.inspect
+
+Params:
+
+```json
+{"artifact_b64":"..."}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.plan.v1",
+  "abi": "skein.wasm.batch.v1",
+  "target": "wasm32-unknown-unknown",
+  "execution": "host_interpreted_v1",
+  "artifact_bytes": 392,
+  "operator_count": 3,
+  "operators": ["scan", "filter", "project"],
+  "table": {"db":"app","table":"users"},
+  "has_filter": true,
+  "projection_count": 2,
+  "supports_edge_package": true,
+  "supports_simd": false
+}
+```
+
+### wasm.plan.edge_package
+
+Params:
+
+```json
+{
+  "artifact_b64": "...",
+  "package_name": "users-score-plan"
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.edge_package.v1",
+  "package_name": "users-score-plan",
+  "artifact_b64": "...",
+  "artifact_bytes": 392,
+  "artifact_sha256": "...",
+  "manifest_json": "{...}",
+  "runner_js": "export async function runSkeinWasmPlan(...) { ... }",
+  "instructions": [
+    "Store artifact_b64 and manifest_json with the edge worker or browser bundle.",
+    "Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format."
+  ]
+}
+```
+
+The v1 edge package ships the plan artifact, a manifest, and a small JavaScript runner that calls `wasm.plan.run` on a SkeinDB host. It does not yet execute a generated Wasm module inside the edge process.
 
 ### wasm.plan.run
 
@@ -175,6 +243,8 @@ When `result_format: "wasm_batch_v1"` is used, `data` contains a columnar batch:
 ## 6) Prototype notes
 
 Current implementation:
-- The plan artifact is interpreted by the host (no Wasm codegen yet).
-- Only the filter/project subset is accepted.
-- `abi` and `target` are validated but otherwise ignored in v1.
+- The plan artifact is interpreted by the host (`execution: "host_interpreted_v1"`).
+- Only the scan/filter/project subset is accepted.
+- `abi` and `target` are validated; `target` is recorded in the artifact for inspection and packaging.
+- `wasm.plan.inspect` exposes artifact metadata without running the query.
+- `wasm.plan.edge_package` emits a host-backed edge runner package. Native in-edge Wasm codegen and SIMD remain open T085/T086 work.

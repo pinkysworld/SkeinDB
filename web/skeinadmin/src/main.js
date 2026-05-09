@@ -55,7 +55,8 @@ const STATE = {
   edgeLastBundle: null,
   replayImports: [],
   replaySelectedWorkspaceId: '',
-  replayLastRun: null
+  replayLastRun: null,
+  wasmArtifactB64: ''
 };
 
 // ---------------------------------------------------------------------------
@@ -203,7 +204,9 @@ const RPC_TEMPLATES = [
   { label: 'view.status', method: 'view.status', params: { view:{db:'demo',table:'active_users'} } },
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
   { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { name:'merge_sum', wasm_b64:'AA==' } },
-  { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { wasm_b64:'AA==', schema:{columns:[{name:'x',type:'i64'}]} } },
+  { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { query:{body:{select:{projection:[{expr:{col:'id'}}],from:[{db:'demo',table:'users'}]}}} } },
+  { label: 'wasm.plan.inspect', method: 'wasm.plan.inspect', params: { artifact_b64:'<compile-result-artifact>' } },
+  { label: 'wasm.plan.edge_package', method: 'wasm.plan.edge_package', params: { artifact_b64:'<compile-result-artifact>', package_name:'demo-plan' } },
   { label: 'advisor.index_synthesize', method: 'advisor.index_synthesize', params: { table:{db:'demo',table:'users'}, limit:5, min_queries:1, min_rows:1 } },
   { label: 'advisor.apply_index', method: 'advisor.apply_index', params: { table:{db:'demo',table:'users'}, columns:['city'], include:['name'] } },
   { label: 'advisor.history', method: 'advisor.history', params: { table:{db:'demo',table:'users'}, limit:10 } },
@@ -5599,20 +5602,45 @@ async function mergeWasmDrop() {
 // ---------------------------------------------------------------------------
 // Wasm Operators (R19)
 // ---------------------------------------------------------------------------
+function readWasmArtifact() {
+  const artifact = ($('wasmArtifact')?.value || STATE.wasmArtifactB64 || '').trim();
+  if (!artifact) throw new Error('Compile or paste an artifact first');
+  return artifact;
+}
+
 async function wasmCompile() {
   try {
-    const b64 = $('wasmB64')?.value.trim() || 'AA==';
-    const schema = parseJsonInput($('wasmSchema')?.value,'Schema');
-    await call('wasm.plan.compile', cleanParams({wasm_b64:b64,schema:schema?{columns:schema}:undefined}), 'wasmOut');
+    const query = parseJsonInput($('wasmQuery')?.value, 'Query');
+    if (!query) throw new Error('Query JSON required');
+    const target = $('wasmTarget')?.value || 'wasm32-unknown-unknown';
+    const res = await call('wasm.plan.compile', cleanParams({ query, target }), 'wasmOut');
+    const result = unwrapRpcResult(res, 'wasm.plan.compile');
+    STATE.wasmArtifactB64 = result.artifact_b64 || '';
+    if ($('wasmArtifact')) $('wasmArtifact').value = STATE.wasmArtifactB64;
+  } catch (e) { setOut({error:String(e)},'wasmOut'); }
+}
+
+async function wasmInspect() {
+  try {
+    const artifact_b64 = readWasmArtifact();
+    await call('wasm.plan.inspect', { artifact_b64 }, 'wasmOut');
+  } catch (e) { setOut({error:String(e)},'wasmOut'); }
+}
+
+async function wasmEdgePackage() {
+  try {
+    const artifact_b64 = readWasmArtifact();
+    const package_name = $('wasmPackageName')?.value.trim() || 'skein-wasm-plan';
+    await call('wasm.plan.edge_package', cleanParams({ artifact_b64, package_name }), 'wasmOut');
   } catch (e) { setOut({error:String(e)},'wasmOut'); }
 }
 
 async function wasmRun() {
   try {
-    const b64 = $('wasmB64')?.value.trim() || 'AA==';
-    const schema = parseJsonInput($('wasmSchema')?.value,'Schema');
-    const input = parseJsonInput($('wasmInput')?.value,'Input');
-    await call('wasm.plan.run', cleanParams({wasm_b64:b64,schema:schema?{columns:schema}:undefined,input:input||undefined}), 'wasmOut');
+    const artifact_b64 = readWasmArtifact();
+    const args = parseJsonInput($('wasmArgs')?.value, 'Args') || [];
+    const result_format = $('wasmResultFormat')?.value || 'objects_json';
+    await call('wasm.plan.run', cleanParams({ artifact_b64, args, result_format }), 'wasmOut');
   } catch (e) { setOut({error:String(e)},'wasmOut'); }
 }
 
@@ -6423,6 +6451,8 @@ wire('btnMergeWasmDrop', mergeWasmDrop);
 
 // Wasm
 wire('btnWasmCompile', wasmCompile);
+wire('btnWasmInspect', wasmInspect);
+wire('btnWasmEdgePackage', wasmEdgePackage);
 wire('btnWasmRun', wasmRun);
 
 // Advisor

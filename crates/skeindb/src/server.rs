@@ -47,7 +47,8 @@ use skeindb_skeinql::{
         SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
         TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
         VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
-        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanRunParams,
+        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams,
+        WasmPlanInspectParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -16474,6 +16475,20 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "wasm.plan.inspect" => {
+                    let p: WasmPlanInspectParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.wasm_plan_inspect(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "wasm.plan.edge_package" => {
+                    let p: WasmPlanEdgePackageParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.wasm_plan_edge_package(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "wasm.plan.run" => {
                     let p: WasmPlanRunParams = parse_params(params.clone())?;
                     let want_etag = p.cache.as_ref().and_then(|c| c.want_etag).unwrap_or(true);
@@ -26238,6 +26253,8 @@ fn is_read_only_method(method: &str) -> bool {
             | "edge.bundle.request"
             | "edge.bundle.status"
             | "wasm.plan.compile"
+            | "wasm.plan.inspect"
+            | "wasm.plan.edge_package"
             | "wasm.plan.run"
             | "view.status"
             | "view.explain_deps"
@@ -26428,6 +26445,8 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "merge.wasm.list",
         "merge.wasm.drop",
         "wasm.plan.compile",
+        "wasm.plan.inspect",
+        "wasm.plan.edge_package",
         "wasm.plan.run",
         "view.create",
         "view.drop",
@@ -27842,7 +27861,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 127);
+        assert_eq!(methods.len(), 129);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -29496,7 +29515,58 @@ mod tests {
         )
         .await;
         assert!(resp.ok);
-        let artifact_b64 = resp.result.expect("missing result")["artifact_b64"]
+        let compile_result = resp.result.expect("missing result");
+        assert_eq!(
+            compile_result["execution"].as_str(),
+            Some("host_interpreted_v1")
+        );
+        assert_eq!(compile_result["operator_count"].as_u64(), Some(3));
+        assert_eq!(
+            compile_result["supports_edge_package"].as_bool(),
+            Some(true)
+        );
+        let artifact_b64 = compile_result["artifact_b64"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let resp = call_rpc(
+            &state,
+            "wasm.plan.inspect",
+            json!({
+                "artifact_b64": artifact_b64.clone()
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let inspect_result = resp.result.expect("missing result");
+        assert_eq!(
+            inspect_result["operators"].as_array().map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(inspect_result["projection_count"].as_u64(), Some(2));
+
+        let resp = call_rpc(
+            &state,
+            "wasm.plan.edge_package",
+            json!({
+                "artifact_b64": artifact_b64.clone(),
+                "package_name": "users-score-plan"
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let edge_result = resp.result.expect("missing result");
+        assert_eq!(
+            edge_result["package_name"].as_str(),
+            Some("users-score-plan")
+        );
+        assert!(edge_result["runner_js"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("runSkeinWasmPlan"));
+
+        let artifact_b64 = edge_result["artifact_b64"]
             .as_str()
             .unwrap_or_default()
             .to_string();

@@ -6,7 +6,7 @@ Notes:
 - These items are **research-oriented**: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be **optional** and do not block core MySQL compatibility.
 
-## Reality sync (2026-05-08)
+## Reality sync (2026-05-09)
 
 Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
@@ -31,6 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
+- Checklist count: **27 done / 82 open** after closing the R19 columnar batch ABI/data interchange item. Native Wasm codegen, SIMD, and standalone in-edge execution remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -176,10 +177,10 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [x] T076: Bench: reconstruction latency vs write amplification. Evidence: `ValueStore::delta_benchmark()` p50/p99/p99.9 steps, topology byte/savings metrics, and `topology_analysis()` depth/fanout reports.
 
 ### Extend Phase 8 — Wasm query operators (R19)
-- [ ] T084: Wasm operator ABI (columnar batches) + data interchange format
+- [x] T084: Wasm operator ABI (columnar batches) + data interchange format. Evidence: `docs/WASM_OPERATORS.md`, `wasm.plan.compile/run`, `wasm_batch_v1` result format, `wasm.plan.inspect`, and `engine::tests::wasm_plan_compile_and_run`.
 - [ ] T085: Compile a restricted plan subset to Wasm (filter/project)
 - [ ] T086: Wasm SIMD exploration + perf tests
-- [ ] T087: Edge runtime packaging (ship plan artifact)
+- [ ] T087: Edge runtime packaging (ship plan artifact). Partial evidence now exists in `wasm.plan.edge_package`, but v1 still delegates execution back to `wasm.plan.run` on a SkeinDB host.
 
 ### Extend Phase 10 — Adaptive row/column execution (R02)
 - [ ] T103: Column snapshot cost model (build vs benefit)
