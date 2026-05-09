@@ -50,7 +50,7 @@
   <text x="641" y="220" fill="#9fb2d7" font-size="16" font-family="JetBrains Mono, monospace">research depth</text>
   <text x="641" y="274" fill="url(#cyan)" font-size="58" font-family="Inter, Arial, sans-serif" font-weight="900">20</text>
   <text x="641" y="308" fill="#f8fafc" font-size="26" font-family="Inter, Arial, sans-serif" font-weight="700">tracks</text>
-  <text x="641" y="332" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">14 hardened, 6 prototype surfaces carried in one executable</text>
+  <text x="641" y="332" fill="#90a2c4" font-size="18" font-family="Inter, Arial, sans-serif">18 hardened, 2 prototype surfaces carried in one executable</text>
 
   <rect x="918" y="178" width="282" height="162" rx="24" fill="url(#panel)" stroke="#2a3652"/>
   <text x="950" y="220" fill="#9fb2d7" font-size="16" font-family="JetBrains Mono, monospace">cluster telemetry</text>

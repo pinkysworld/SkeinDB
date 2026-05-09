@@ -4,7 +4,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-05-08 (v0.3.6).
+Last updated: 2026-05-09 (v0.3.7).
 
 **SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
@@ -233,6 +233,7 @@ Tagged releases now drive the install surfaces:
 - `vX.Y.Z` tags build a source tarball, a Linux `amd64` tarball, and a Debian package.
 - The same workflow renders a stable `Formula/skeindb.rb` entry in this repo for the Homebrew tap.
 - If `APT_GPG_PRIVATE_KEY`, `APT_GPG_KEY_ID`, and the optional `APT_GPG_PASSPHRASE` GitHub Actions secrets are configured, the workflow also publishes a signed apt repository to the `apt` branch.
+- See `docs/RELEASE_PACKAGING.md` for the optional apt-signing behavior and why the checked-in formula can lag until the tag workflow completes.
 
 ---
 

@@ -75,6 +75,7 @@ NAV: list[Section] = [
         DocPage("clustering",             "CLUSTERING.md",                     "Clustering",                   "Admin Guide"),
         DocPage("observability",          "OBSERVABILITY.md",                  "Observability",                "Admin Guide"),
         DocPage("performance",            "PERFORMANCE.md",                    "Performance",                  "Admin Guide"),
+        DocPage("release-packaging",      "RELEASE_PACKAGING.md",              "Release packaging",            "Admin Guide"),
         DocPage("audit-wal",              "AUDIT_WAL.md",                      "Audit WAL",                    "Admin Guide"),
         DocPage("time-travel-replay",     "TIME_TRAVEL_REPLAY.md",             "Time-travel & replay",         "Admin Guide"),
         DocPage("compaction-scheduler",   "COMPACTION_SCHEDULER.md",           "Compaction scheduler",         "Admin Guide"),

@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: v0.3.6 truth sync
-Last updated: 2026-05-08
+Status: v0.3.7 truth sync
+Last updated: 2026-05-09
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.

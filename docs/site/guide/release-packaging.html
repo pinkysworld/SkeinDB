@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Incremental Views (Prototype) — SkeinDB Docs</title>
-<meta name="description" content="Incremental Views (Prototype) — part of the SkeinDB documentation.">
+<title>Release Packaging Notes — SkeinDB Docs</title>
+<meta name="description" content="Release Packaging Notes — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -77,7 +77,7 @@
 <li><a href="clustering.html">Clustering</a></li>
 <li><a href="observability.html">Observability</a></li>
 <li><a href="performance.html">Performance</a></li>
-<li><a href="release-packaging.html">Release packaging</a></li>
+<li><a href="release-packaging.html" class="active">Release packaging</a></li>
 <li><a href="audit-wal.html">Audit WAL</a></li>
 <li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
 <li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
@@ -101,7 +101,7 @@
 <li><a href="delta-values.html">Delta-chained values</a></li>
 <li><a href="column-snapshots.html">Column snapshots</a></li>
 <li><a href="convergent-encryption.html">Convergent encryption</a></li>
-<li><a href="incremental-views.html" class="active">Incremental views</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
 <li><a href="learned-indexes.html">Learned indexes</a></li>
 <li><a href="oblivious-execution.html">Oblivious execution</a></li>
 <li><a href="traffic-reduction.html">Traffic reduction</a></li>
@@ -120,78 +120,37 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Incremental Views (Prototype)</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Admin Guide</span> <span>›</span> <span>Release Packaging Notes</span>
     </div>
     <article class="doc-article">
-      <h1 id="incremental-views-prototype">Incremental Views (Prototype)<a class="headerlink" href="#incremental-views-prototype" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-04-25</p>
-<p>This document describes the prototype incremental view maintenance for R08.</p>
-<h2 id="1-overview">1) Overview<a class="headerlink" href="#1-overview" title="Permanent link">¶</a></h2>
-<p>SkeinDB can materialize simple views and refresh them incrementally using the change log.</p>
-<p>Supported methods:
-- <code>view.create</code>
-- <code>view.drop</code>
-- <code>view.refresh</code>
-- <code>view.status</code>
-- <code>view.explain_deps</code></p>
-<p>View state is stored in <code>views.json</code> (format v2).</p>
-<h2 id="2-supported-view-definitions">2) Supported view definitions<a class="headerlink" href="#2-supported-view-definitions" title="Permanent link">¶</a></h2>
-<p>Only a restricted SELECT form is supported:
-- single-table <code>FROM</code> (no joins, no subqueries)
-- optional <code>GROUP BY</code> over base-table columns only
-- grouped projections may only contain grouped columns plus <code>COUNT</code>, <code>SUM</code>, <code>AVG</code>, <code>MIN</code>, and <code>MAX</code>
-- no <code>HAVING</code> or <code>DISTINCT</code>
-- no <code>ORDER BY</code> or <code>LIMIT</code></p>
-<p>The base table must have a primary key.</p>
-<h2 id="3-incremental-refresh">3) Incremental refresh<a class="headerlink" href="#3-incremental-refresh" title="Permanent link">¶</a></h2>
-<p><code>view.refresh</code> supports:
-- <code>mode: "full"</code>: recompute from scratch
-- <code>mode: "incremental"</code>: apply deltas from the change log
-- <code>mode: "auto"</code>: choose between incremental and full recompute based on changed primary keys, grouped cardinality, and stale state</p>
-<p>Incremental refresh:
-- re-evaluates the view predicate for each changed primary key
-- upserts or removes view rows accordingly
-- for grouped views, persists the contributing source rows in <code>views.json</code> and recomputes only the touched groups during incremental refresh</p>
-<p>Views are marked <code>stale=true</code> when base tables change.
-Reads may return stale results until the view is refreshed.</p>
-<h2 id="4-dependencies">4) Dependencies<a class="headerlink" href="#4-dependencies" title="Permanent link">¶</a></h2>
-<p><code>view.status</code> and <code>view.explain_deps</code> return one dependency object per base table.
-Each object currently includes:</p>
+      <h1 id="release-packaging-notes">Release Packaging Notes<a class="headerlink" href="#release-packaging-notes" title="Permanent link">¶</a></h1>
+<p>Last updated: 2026-05-09</p>
+<p>SkeinDB release tags run <code>.github/workflows/release-packages.yml</code>, which builds the Linux binary tarball, source tarball, Debian package, checksums, and a rendered Homebrew formula.</p>
+<p>The signed apt repository path is optional. To publish the <code>apt</code> branch, configure these repository secrets before pushing a release tag:</p>
 <ul>
-<li><code>columns</code>: the full set of columns referenced anywhere in the view definition</li>
-<li><code>projection_columns</code>: columns used by the view projection</li>
-<li><code>predicate_columns</code>: columns used by the <code>WHERE</code> predicate</li>
-<li><code>group_by_columns</code>: columns used by <code>GROUP BY</code> in grouped views</li>
+<li><code>APT_GPG_PRIVATE_KEY</code></li>
+<li><code>APT_GPG_KEY_ID</code></li>
+<li><code>APT_GPG_PASSPHRASE</code> (only when the imported key requires one)</li>
 </ul>
-<p>For the current single-table prototype, this metadata is derived from the same
-query-analysis path used by other planner surfaces and then persisted alongside
-the view entry, which keeps dependency tracking aligned with predicate and
-projection extraction in the rest of the engine across restarts.</p>
-<p>This metadata is intended for dependency tracking, future optimizer work, and
-operator visibility in SkeinAdmin.</p>
+<p>When those secrets are absent, <code>scripts/release/build_apt_repo.sh</code> still creates an unsigned repository layout for inspection, and the publish step skips the <code>apt</code> branch because signed <code>InRelease</code> and <code>pubkey.gpg</code> artifacts are not present.</p>
+<p>The checked-in Homebrew formula may point at the previous release until the tag workflow finishes. The workflow renders the formula from the tagged source tarball SHA and commits the updated formula back to the default branch.</p>
       <hr>
       <p class="edit-link">
-        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/INCREMENTAL_VIEWS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/RELEASE_PACKAGING.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
         &nbsp;&middot;&nbsp;
-        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/INCREMENTAL_VIEWS.md" target="_blank" rel="noopener">View source</a>
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/RELEASE_PACKAGING.md" target="_blank" rel="noopener">View source</a>
       </p>
     </article>
     <div class="prev-next">
-<a class="prev" href="convergent-encryption.html"><span>← Previous</span>Convergent encryption</a>
-<a class="next" href="learned-indexes.html"><span>Next →</span>Learned indexes</a>
+<a class="prev" href="performance.html"><span>← Previous</span>Performance</a>
+<a class="next" href="audit-wal.html"><span>Next →</span>Audit WAL</a>
 </div>
   </main>
 
   <aside class="toc" id="toc">
     <div class="toc-title">On this page</div>
     <div class="toc">
-<ul>
-<li><a href="#1-overview">1) Overview</a></li>
-<li><a href="#2-supported-view-definitions">2) Supported view definitions</a></li>
-<li><a href="#3-incremental-refresh">3) Incremental refresh</a></li>
-<li><a href="#4-dependencies">4) Dependencies</a></li>
-</ul>
+<ul></ul>
 </div>
 
   </aside>

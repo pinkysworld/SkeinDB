@@ -28321,6 +28321,100 @@ mod tests {
     }
 
     #[test]
+    fn migration_intent_report_combines_patterns_without_false_pagination() -> anyhow::Result<()> {
+        let dir = temp_dir("intent_combined_patterns");
+        let engine = Engine::open(&dir)?;
+
+        let soft_delete_pred = Expr::Op {
+            op: "is_null".to_string(),
+            a: Some(Box::new(Expr::Col {
+                col: "deleted_at".to_string(),
+                table: None,
+            })),
+            b: None,
+            args: None,
+            list: None,
+            lo: None,
+            hi: None,
+        };
+        let mut combined = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            Some(soft_delete_pred),
+        );
+        combined.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        combined.limit = Some(LimitClause {
+            limit: Some(25),
+            offset: Some(50),
+        });
+
+        let mut limit_only = base_query(
+            "app",
+            "events",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        limit_only.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "created_at".to_string(),
+                table: None,
+            },
+            dir: None,
+        }];
+        limit_only.limit = Some(LimitClause {
+            limit: Some(10),
+            offset: None,
+        });
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: combined,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+        let intents = report
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.intent.as_str())
+            .collect::<Vec<_>>();
+        assert!(intents.contains(&"pagination.offset_limit"));
+        assert!(intents.contains(&"soft_delete.filter"));
+
+        let report = engine.migration_intent_report(MigrationIntentReportParams {
+            samples: Some(vec![MigrationIntentSample {
+                query: limit_only,
+                args: Vec::new(),
+                at_ms: None,
+            }]),
+            limit: Some(10),
+            window_ms: None,
+        })?;
+        assert!(!report
+            .suggestions
+            .iter()
+            .any(|suggestion| suggestion.intent == "pagination.offset_limit"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn migration_rewrite_preview_exists() -> anyhow::Result<()> {
         let dir = temp_dir("intent_rewrite_exists");
         let engine = Engine::open(&dir)?;
@@ -28885,13 +28979,35 @@ mod tests {
             .ai_nl_execute(AiNlExecuteParams {
                 query: tampered,
                 args: None,
-                approval_token: explained.approval_token,
+                approval_token: explained.approval_token.clone(),
                 result_format: Some(ResultFormat::ObjectsJson),
                 want_etag: None,
                 if_none_match: None,
                 min_causality: None,
             })
             .expect_err("changed query must require a new approval token");
+        assert!(err.to_string().contains("approval_token mismatch"));
+
+        let other_query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            }],
+            None,
+        );
+        let err = engine
+            .ai_nl_execute(AiNlExecuteParams {
+                query: other_query,
+                args: None,
+                approval_token: explained.approval_token,
+                result_format: Some(ResultFormat::ObjectsJson),
+                want_etag: None,
+                if_none_match: None,
+                min_causality: None,
+            })
+            .expect_err("etag or foreign token must not approve a different query");
         assert!(err.to_string().contains("approval_token mismatch"));
 
         fs::remove_dir_all(&dir).ok();

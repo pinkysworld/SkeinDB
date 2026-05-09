@@ -1,7 +1,9 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-05-08
+Last updated: 2026-05-09
 Honest claims: SkeinDB does **not** provide and does **not** claim "100% MySQL compatibility." Coverage is measured against the regression corpus at `tests/compat/corpus.sql` (1658 lines / ~700+ statements) which is exercised on every commit by [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs). The surface that *is* supported is enumerated in [docs/MYSQL_COMPAT.md](./MYSQL_COMPAT.md). Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.
+
+2026-05-09 (v0.3.7 release-prep sync): Crate/package metadata is bumped to `0.3.7` and public docs/site status strings are synced after the R12/R17/R20 hardening batch. The research backlog is still **26 done / 83 open**; this version is a progress release, not a claim that the full research backlog is finished. The remaining prototype tracks are still R18 and R19 until their code/test/docs evidence lands.
 
 2026-05-08 (truth sync + review): The core project backlog now has **140 done / 0 open** checked roadmap tasks; remaining product work is captured as partial-phase hardening notes, future PostgreSQL/driver compatibility follow-ups, and the separate research backlog. Runtime review of the high-risk MVCC, WAL recovery, Wasm UDF, encryption, RowDir, PostgreSQL SQL rewrite/dispatch, stats, replay, history, and compaction surfaces found no high-confidence correctness or security fixes. One hygiene fix landed in `system.capabilities`: the advertised SkeinQL method list no longer duplicates `cdc.subscribe_query`, and `crates/skeindb/src/server.rs::system_capabilities_method_list_is_unique` now locks the canonical advertised count at 127 unique methods. The PostgreSQL startup log now says trust/SCRAM auth instead of the stale trust/cleartext wording.
 

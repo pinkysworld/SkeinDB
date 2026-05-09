@@ -1,6 +1,6 @@
 [package]
 name = "skeindb"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 license = "Apache-2.0"
 description = "Single-binary database server with SkeinQL, SkeinAdmin, MySQL, and early PostgreSQL surfaces"

@@ -1,6 +1,6 @@
 # SkeinDB Documentation
 
-Last updated: 2026-05-08
+Last updated: 2026-05-09
 
 This folder contains the design notes, specifications, and operator/developer documentation for **SkeinDB**.
 
@@ -38,6 +38,7 @@ The repo is intentionally written so you can read it in two ways:
 5) **Clustering & operations**
    - `CLUSTERING.md` (cluster configuration and goals)
    - `OBSERVABILITY.md` (server load / stats endpoint)
+   - `RELEASE_PACKAGING.md` (tag-driven release assets, Homebrew formula rendering, optional apt signing)
    - `TELEMETRY_AND_MIGRATION.md` (compatibility telemetry + migration hints)
 
 6) **Research roadmap**
