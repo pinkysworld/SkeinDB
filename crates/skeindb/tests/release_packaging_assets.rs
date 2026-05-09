@@ -42,6 +42,9 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
     let formula = fs::read_to_string(repo_root.join("Formula/skeindb.rb")).expect("read formula");
     let apt_script = fs::read_to_string(repo_root.join("scripts/release/build_apt_repo.sh"))
         .expect("read apt repo script");
+    let macos_script =
+        fs::read_to_string(repo_root.join("scripts/release/build_macos_signed_artifact.sh"))
+            .expect("read macOS signing script");
     let formula_script =
         fs::read_to_string(repo_root.join("scripts/release/render_homebrew_formula.py"))
             .expect("read formula render script");
@@ -77,7 +80,11 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
 
     for marker in [
         "cargo install cargo-deb --locked",
+        "macos-latest",
+        "build_macos_signed_artifact.sh",
         "softprops/action-gh-release@v2",
+        "macos-*.tar.gz",
+        "macos-*-codesign.txt",
         "render_homebrew_formula.py",
         "build_apt_repo.sh",
         "git push --force origin apt",
@@ -126,6 +133,19 @@ fn release_packaging_assets_cover_apt_and_homebrew() {
         assert!(
             apt_script.contains(marker),
             "apt script should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "codesign --verify --strict --verbose=2",
+        "MACOS_CODESIGN_IDENTITY",
+        "shasum -a 256",
+        "tar -C",
+        "-codesign.txt",
+    ] {
+        assert!(
+            macos_script.contains(marker),
+            "macOS signing script should contain {marker}"
         );
     }
 

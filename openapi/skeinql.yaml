@@ -9,6 +9,7 @@ info:
     plus optional cacheable prepared-query GET endpoints and changefeed streams.
 
     The normative method catalog and semantics are specified in docs/SKEINQL.md.
+    A compact runtime API map is maintained in docs/API_REFERENCE.md.
 
 servers:
   - url: http://localhost:{port}
@@ -19,82 +20,131 @@ servers:
 x-skeinql-methods:
   - system.ping
   - system.version
+  - system.shutdown
   - system.capabilities
-  - auth.login
-  - auth.logout
+  - transport.capabilities
+  - tx.begin
+  - tx.commit
+  - tx.rollback
+  - stats.snapshot
+  - stats.top_queries
+  - stats.slow_queries
   - settings.get
-  - settings.set
   - settings.list
+  - settings.set
+  - cluster.status
+  - cluster.nodes
+  - cluster.join_token.create
+  - cluster.node.join
+  - cluster.node.remove
+  - cluster.node.leave
+  - cluster.replica.promote
+  - cluster.shard.create
+  - cluster.shard.move
+  - cluster.shard.rebalance
+  - cluster.replication_stats
+  - objects.need
+  - objects.missing
+  - objects.fetch
+  - objects.pull
   - schema.list_databases
   - schema.create_database
   - schema.drop_database
   - schema.list_tables
-  - schema.describe_table
   - schema.create_table
-  - schema.alter_table
   - schema.drop_table
-  - schema.create_index
-  - schema.drop_index
-  - tx.begin
-  - tx.commit
-  - tx.rollback
+  - schema.describe_table
+  - schema.propose_change
+  - schema.merge_status
+  - schema.apply_merge
+  - advisor.index_synthesize
+  - advisor.apply_index
+  - advisor.dismiss
+  - advisor.history
+  - migration.intent_report
+  - migration.rewrite_preview
+  - migration.report_export
+  - telemetry.feature_flags
+  - telemetry.compat_summary
+  - telemetry.migration_hints
+  - telemetry.workload_features
+  - plan_cache.status
+  - plan_cache.clear
+  - stats.coalescing
+  - sql.exec
   - data.get
   - data.insert
   - data.update
   - data.delete
-  - data.upsert
+  - vector.insert
+  - vector.search
+  - vector.index.status
+  - ai.autoparam.classify
+  - ai.autoparam.analyze
+  - ai.nl.translate
+  - ai.nl.explain
+  - ai.nl.execute
+  - query.prepare
+  - query.execute_prepared
   - query.select
   - query.patch
-  - query.prepare
-  - query.open_cursor
-  - query.fetch
-  - query.close
-  - query.explain
   - query.subscribe
-  - sql.exec
-  - sql.prepare
-  - sql.explain
-  - sql.translate
+  - dp.aggregate
+  - dp.budget.set
+  - dp.budget.get
+  - dp.audit.log
+  - oblivious.policy.set
+  - oblivious.policy.get
+  - oblivious.explain
+  - forensic.query
+  - forensic.verify
+  - forensic.export
+  - maintenance.audit_status
+  - maintenance.audit_verify
+  - maintenance.compaction.status
+  - maintenance.compaction.set_policy
+  - maintenance.compaction.pause
+  - maintenance.compaction.resume
+  - maintenance.history.status
+  - maintenance.history.set_policy
+  - maintenance.history.gc
+  - maintenance.replay.export
+  - maintenance.replay.import
+  - maintenance.replay.run
+  - settings.encryption.status
+  - settings.encryption.set_mode
+  - settings.encryption.register_key
+  - settings.encryption.set_active_key
+  - settings.encryption.rotate_key
+  - edge.bundle.request
+  - edge.bundle.apply
+  - edge.bundle.status
+  - merge.register
+  - merge.apply
+  - merge.simulate
+  - merge.wasm.register
+  - merge.wasm.list
+  - merge.wasm.drop
+  - wasm.plan.compile
+  - wasm.plan.run
+  - view.create
+  - view.drop
+  - view.refresh
+  - view.status
+  - view.explain_deps
   - cdc.subscribe_table
   - cdc.subscribe_query
   - cdc.poll
   - cdc.ack
   - cdc.close
-  - udf.install
-  - udf.list
-  - udf.drop
-  - maintenance.checkpoint
-  - maintenance.compact
-  - maintenance.compaction.status
-  - maintenance.compaction.set_policy
-  - maintenance.compaction.pause
-  - maintenance.compaction.resume
-  - maintenance.snapshot_build
-  - maintenance.snapshot.status
-  - maintenance.audit.verify_wal
-  - maintenance.replay.export
-  - maintenance.replay.import
-  - maintenance.replay.run
-  - telemetry.compat_summary
-  - telemetry.migration_hints
-  - advisor.workload.snapshot
-  - advisor.index.recommend
-  - advisor.cluster.recommend
-  - stats.snapshot
+  - security.token.create
+  - security.token.list
+  - security.token.revoke
   - admin.user.create
   - admin.user.list
   - admin.user.drop
-  - admin.role.create
-  - admin.role.list
-  - admin.role.drop
-  - admin.grant
-  - admin.revoke
-  - cluster.status
-  - cluster.join
-  - cluster.add_node
-  - cluster.remove_node
-  - cluster.promote
-  - cluster.rebalance
+  - admin.user.grant
+  - admin.user.revoke
 
 paths:
   /api/v1/rpc:
@@ -129,7 +179,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RpcResponse"
-  /api/v1/cdc/{sub_id}:
+  /api/v1/cdc/sse/{sub_id}:
     get:
       summary: Stream CDC events via text/event-stream (optional)
       parameters:

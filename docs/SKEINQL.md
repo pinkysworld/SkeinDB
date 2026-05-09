@@ -1,7 +1,7 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable)
-Last updated: 2026-01-31
+Status: Draft v1.0 (implementable; v0.3.7 runtime sync)
+Last updated: 2026-05-09
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:
@@ -109,6 +109,8 @@ SkeinQL defines optional `auth.*` methods for deployments that want built-in aut
 Servers MAY add new methods at any time. Breaking changes require SkeinQL v2.
 
 Servers SHOULD expose supported method names in `system.capabilities` so clients can feature-detect.
+
+For a compact client-facing API map, see `docs/API_REFERENCE.md`. This SkeinQL document remains the language and protocol specification; the API reference is the operational catalog for current runtime method families, result formats, and client checklists.
 
 ---
 
@@ -549,7 +551,24 @@ If a server uses a different hash (e.g., BLAKE3), it MUST specify it in `system.
 
 ## 10) Method catalog (v1)
 
-This section defines SkeinQL methods and their request/response shapes.
+This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 127 unique methods through `system.capabilities`; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.
+
+### 10.0 Reading the catalog
+
+Method stability levels used below:
+
+- **Core**: intended for normal clients and admin automation.
+- **Compatibility**: primarily used by SQL/MySQL/PostgreSQL adoption paths.
+- **Experimental**: callable today but still tied to a research track or operator workflow.
+- **Prototype**: shape is documented, but compatibility is deliberately looser while the feature hardens.
+
+Common parameter conventions:
+
+- `table` is always `{ "db": "...", "table": "..." }` unless a method explicitly uses SQL text.
+- `args` are positional typed literals that satisfy `{ "param": N }` expressions.
+- `result_format` defaults to `rows_json` for tabular calls unless otherwise documented.
+- Cache-aware methods accept `want_etag`, `if_none_match`, or `min_causality` either directly or under `cache`.
+- Methods that mutate state return either an explicit `ok` boolean or a lifecycle object with `status`, `affected`, `applied`, or `accepted`.
 
 ### 10.1 system.*
 

@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SkeinDB API Reference — SkeinDB Docs</title>
+<meta name="description" content="SkeinDB API Reference — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="cdc-with-sse.html">CDC with SSE</a></li>
+<li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
+<li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="release-packaging.html">Release packaging</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="api-reference.html" class="active">API reference</a></li>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>SkeinDB API Reference</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="skeindb-api-reference">SkeinDB API Reference<a class="headerlink" href="#skeindb-api-reference" title="Permanent link">¶</a></h1>
+<p>Last updated: 2026-05-09
+Runtime baseline: v0.3.7, SkeinQL 1.0, 127 advertised RPC methods</p>
+<p>This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in <code>SKEINQL.md</code>; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.</p>
+<h2 id="transport-endpoints">Transport endpoints<a class="headerlink" href="#transport-endpoints" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Endpoint</th>
+<th>Purpose</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SkeinQL RPC</td>
+<td><code>POST /api/v1/rpc</code></td>
+<td>JSON-RPC-style request/response envelope</td>
+<td>Always inspect the envelope <code>ok</code> flag; HTTP 200 may contain an RPC error.</td>
+</tr>
+<tr>
+<td>Prepared query GET</td>
+<td><code>GET /api/v1/q/{query_id}</code></td>
+<td>Cacheable prepared-query execution</td>
+<td>Supports <code>If-None-Match</code> and returns ETags.</td>
+</tr>
+<tr>
+<td>CDC SSE</td>
+<td><code>GET /api/v1/cdc/sse/{sub_id}</code></td>
+<td>Server-Sent Events stream for table/query subscriptions</td>
+<td>Supports <code>Last-Event-ID</code> and emits <code>resnapshot</code> when the retention horizon is missed.</td>
+</tr>
+<tr>
+<td>MySQL wire</td>
+<td>TCP port 3306 by default</td>
+<td>Compatibility adoption surface</td>
+<td>MySQL behavior is corpus-backed, not claimed as 100% parity.</td>
+</tr>
+<tr>
+<td>PostgreSQL wire</td>
+<td>TCP port 5432 by default</td>
+<td>Early PG v3 compatibility surface</td>
+<td>Partial baseline: startup/auth, simple query, extended query, catalog probes, transactions/savepoints.</td>
+</tr>
+<tr>
+<td>QUIC RPC</td>
+<td>Configured QUIC listener</td>
+<td>SkeinQL over QUIC</td>
+<td>Mirrors core RPC behavior and zero-RTT write rejection tests.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="request-and-response-contract">Request and response contract<a class="headerlink" href="#request-and-response-contract" title="Permanent link">¶</a></h2>
+<p>Every SkeinQL RPC request is an object:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;skeinql&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;req-1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;query.select&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Successful response:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="s2">&quot;req-1&quot;</span><span class="p">,</span><span class="nt">&quot;ok&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;result&quot;</span><span class="p">:{}}</span>
+</code></pre></div>
+
+<p>Error response:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="s2">&quot;req-1&quot;</span><span class="p">,</span><span class="nt">&quot;ok&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="nt">&quot;error&quot;</span><span class="p">:{</span><span class="nt">&quot;code&quot;</span><span class="p">:</span><span class="s2">&quot;invalid_request&quot;</span><span class="p">,</span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="s2">&quot;Missing field: query&quot;</span><span class="p">,</span><span class="nt">&quot;details&quot;</span><span class="p">:{</span><span class="nt">&quot;field&quot;</span><span class="p">:</span><span class="s2">&quot;query&quot;</span><span class="p">}}}</span>
+</code></pre></div>
+
+<p>Clients should treat <code>id</code> as opaque, send <code>skeinql:"1.0"</code>, and use <code>system.capabilities</code> before relying on experimental families.</p>
+<h2 id="result-formats">Result formats<a class="headerlink" href="#result-formats" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Use it for</th>
+<th>Shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rows_json</code></td>
+<td>Compact row arrays and table-like UI</td>
+<td><code>columns[]</code> plus <code>rows[][]</code> typed literals.</td>
+</tr>
+<tr>
+<td><code>objects_json</code></td>
+<td>Application code and admin panels</td>
+<td>Array/object rows keyed by column names.</td>
+</tr>
+<tr>
+<td><code>skeinpack_v1</code></td>
+<td>Traffic reduction with known ValueIDs</td>
+<td>Dictionary-backed wire object returned under <code>wire</code>.</td>
+</tr>
+<tr>
+<td><code>wasm_batch_v1</code></td>
+<td>Wasm operator batches</td>
+<td><code>format:"skein.wasm.batch.v1"</code> plus column metadata and packed rows.</td>
+</tr>
+</tbody>
+</table>
+<p>Cache-aware query methods can return <code>etag</code>, <code>deps</code>, <code>causality</code>, and <code>not_modified</code>. Use <code>min_causality</code> with <code>etag_chain_v1</code> tokens when a client must observe at least the writes from an earlier read.</p>
+<h2 id="method-families">Method families<a class="headerlink" href="#method-families" title="Permanent link">¶</a></h2>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Methods</th>
+<th>Stability</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>system.*</code></td>
+<td><code>system.ping</code>, <code>system.version</code>, <code>system.shutdown</code>, <code>system.capabilities</code></td>
+<td>Core</td>
+<td>Capability discovery is the canonical method list.</td>
+</tr>
+<tr>
+<td><code>transport.*</code></td>
+<td><code>transport.capabilities</code></td>
+<td>Core</td>
+<td>Reports HTTP/QUIC availability.</td>
+</tr>
+<tr>
+<td><code>settings.*</code></td>
+<td><code>settings.get</code>, <code>settings.list</code>, <code>settings.set</code></td>
+<td>Core</td>
+<td>Runtime configuration surface.</td>
+</tr>
+<tr>
+<td><code>tx.*</code></td>
+<td><code>tx.begin</code>, <code>tx.commit</code>, <code>tx.rollback</code></td>
+<td>Core</td>
+<td>Snapshot/read-only flags; failures map to stable RPC errors.</td>
+</tr>
+<tr>
+<td><code>schema.*</code></td>
+<td>database/table DDL plus <code>schema.propose_change</code>, <code>schema.merge_status</code>, <code>schema.apply_merge</code></td>
+<td>Core + experimental</td>
+<td>Conflict-free schema evolution is experimental.</td>
+</tr>
+<tr>
+<td><code>data.*</code></td>
+<td><code>data.get</code>, <code>data.insert</code>, <code>data.update</code>, <code>data.delete</code></td>
+<td>Core</td>
+<td>Typed literal row APIs.</td>
+</tr>
+<tr>
+<td><code>query.*</code></td>
+<td><code>query.prepare</code>, <code>query.execute_prepared</code>, <code>query.select</code>, <code>query.patch</code>, <code>query.subscribe</code></td>
+<td>Core + experimental</td>
+<td>ETags, query patches, prepared GET, and CDC hooks.</td>
+</tr>
+<tr>
+<td><code>sql.*</code></td>
+<td><code>sql.exec</code></td>
+<td>Compatibility</td>
+<td>SQL facade used by MySQL/PG/admin workflows.</td>
+</tr>
+<tr>
+<td><code>cdc.*</code></td>
+<td><code>cdc.subscribe_table</code>, <code>cdc.subscribe_query</code>, <code>cdc.poll</code>, <code>cdc.ack</code>, <code>cdc.close</code></td>
+<td>Core</td>
+<td>Poll and SSE share event payloads.</td>
+</tr>
+<tr>
+<td><code>stats.*</code></td>
+<td><code>stats.snapshot</code>, <code>stats.top_queries</code>, <code>stats.slow_queries</code>, <code>stats.coalescing</code></td>
+<td>Core</td>
+<td>Live operational telemetry.</td>
+</tr>
+<tr>
+<td><code>cluster.*</code></td>
+<td>status, node lifecycle, shard create/move/rebalance, replica promote, replication stats</td>
+<td>Experimental</td>
+<td>Single-binary cluster control plane.</td>
+</tr>
+<tr>
+<td><code>objects.*</code></td>
+<td><code>objects.need</code>, <code>objects.missing</code>, <code>objects.fetch</code>, <code>objects.pull</code></td>
+<td>Experimental</td>
+<td>ValueID object transfer for shard moves and replication.</td>
+</tr>
+<tr>
+<td><code>settings.encryption.*</code></td>
+<td>status, mode, key registration, active key, rotation</td>
+<td>Experimental</td>
+<td>Envelope/key-management controls.</td>
+</tr>
+<tr>
+<td><code>dp.*</code></td>
+<td>aggregate, budget, audit log</td>
+<td>Experimental</td>
+<td>Differential privacy budget accounting.</td>
+</tr>
+<tr>
+<td><code>oblivious.*</code></td>
+<td>policy get/set, explain</td>
+<td>Experimental</td>
+<td>Padding/shuffle access-pattern controls.</td>
+</tr>
+<tr>
+<td><code>forensic.*</code></td>
+<td>query, verify, export</td>
+<td>Experimental</td>
+<td>Hash-chain audit and proof surfaces.</td>
+</tr>
+<tr>
+<td><code>merge.*</code></td>
+<td>register, apply, simulate, Wasm registry</td>
+<td>Experimental</td>
+<td>Optimistic conflict resolution and merge policies.</td>
+</tr>
+<tr>
+<td><code>view.*</code></td>
+<td>create, drop, refresh, status, explain deps</td>
+<td>Experimental</td>
+<td>Incremental/full/auto materialized views.</td>
+</tr>
+<tr>
+<td><code>vector.*</code></td>
+<td>insert, search, index status</td>
+<td>Experimental</td>
+<td>Embedding storage and ANN search.</td>
+</tr>
+<tr>
+<td><code>ai.*</code></td>
+<td>autoparam classification/analysis, NL translate/explain/execute</td>
+<td>Experimental</td>
+<td>Verification-gated natural-language workflows.</td>
+</tr>
+<tr>
+<td><code>advisor.*</code></td>
+<td>synthesize, apply, dismiss, history</td>
+<td>Experimental</td>
+<td>Dependency-driven index suggestions and lifecycle.</td>
+</tr>
+<tr>
+<td><code>migration.*</code></td>
+<td>intent report, rewrite preview, report export</td>
+<td>Experimental</td>
+<td>Migration intent detection and reporting.</td>
+</tr>
+<tr>
+<td><code>maintenance.*</code></td>
+<td>audit, compaction, history GC, replay export/import/run</td>
+<td>Core + experimental</td>
+<td>Operational maintenance and replay bundles.</td>
+</tr>
+<tr>
+<td><code>edge.*</code></td>
+<td>bundle request/apply/status</td>
+<td>Experimental</td>
+<td>Bounded replay bundles for edge replication.</td>
+</tr>
+<tr>
+<td><code>wasm.plan.*</code></td>
+<td>compile, run</td>
+<td>Prototype</td>
+<td>Wasm query-operator ABI.</td>
+</tr>
+<tr>
+<td><code>security.token.*</code></td>
+<td>create, list, revoke</td>
+<td>Core</td>
+<td>Bearer-token management.</td>
+</tr>
+<tr>
+<td><code>admin.user.*</code></td>
+<td>create, list, drop, grant, revoke</td>
+<td>Core</td>
+<td>Embedded admin user/role helpers.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="current-advertised-method-set">Current advertised method set<a class="headerlink" href="#current-advertised-method-set" title="Permanent link">¶</a></h2>
+<p>The runtime advertises this set through <code>system.capabilities.methods</code> in v0.3.7:</p>
+<div class="codehilite"><pre><span></span><code>system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,
+tx.begin, tx.commit, tx.rollback,
+stats.snapshot, stats.top_queries, stats.slow_queries, stats.coalescing,
+settings.get, settings.list, settings.set,
+cluster.status, cluster.nodes, cluster.join_token.create, cluster.node.join, cluster.node.remove,
+cluster.node.leave, cluster.replica.promote, cluster.shard.create, cluster.shard.move,
+cluster.shard.rebalance, cluster.replication_stats,
+objects.need, objects.missing, objects.fetch, objects.pull,
+schema.list_databases, schema.create_database, schema.drop_database, schema.list_tables,
+schema.create_table, schema.drop_table, schema.describe_table, schema.propose_change,
+schema.merge_status, schema.apply_merge,
+sql.exec, data.get, data.insert, data.update, data.delete,
+query.prepare, query.execute_prepared, query.select, query.patch, query.subscribe,
+cdc.subscribe_table, cdc.subscribe_query, cdc.poll, cdc.ack, cdc.close,
+vector.insert, vector.search, vector.index.status,
+ai.autoparam.classify, ai.autoparam.analyze, ai.nl.translate, ai.nl.explain, ai.nl.execute,
+dp.aggregate, dp.budget.set, dp.budget.get, dp.audit.log,
+oblivious.policy.set, oblivious.policy.get, oblivious.explain,
+forensic.query, forensic.verify, forensic.export,
+maintenance.audit_status, maintenance.audit_verify, maintenance.compaction.status,
+maintenance.compaction.set_policy, maintenance.compaction.pause, maintenance.compaction.resume,
+maintenance.history.status, maintenance.history.set_policy, maintenance.history.gc,
+maintenance.replay.export, maintenance.replay.import, maintenance.replay.run,
+settings.encryption.status, settings.encryption.set_mode, settings.encryption.register_key,
+settings.encryption.set_active_key, settings.encryption.rotate_key,
+edge.bundle.request, edge.bundle.apply, edge.bundle.status,
+merge.register, merge.apply, merge.simulate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
+wasm.plan.compile, wasm.plan.run,
+view.create, view.drop, view.refresh, view.status, view.explain_deps,
+advisor.index_synthesize, advisor.apply_index, advisor.dismiss, advisor.history,
+migration.intent_report, migration.rewrite_preview, migration.report_export,
+telemetry.feature_flags, telemetry.compat_summary, telemetry.migration_hints, telemetry.workload_features,
+plan_cache.status, plan_cache.clear,
+security.token.create, security.token.list, security.token.revoke,
+admin.user.create, admin.user.list, admin.user.drop, admin.user.grant, admin.user.revoke
+</code></pre></div>
+
+<h2 id="client-checklist">Client checklist<a class="headerlink" href="#client-checklist" title="Permanent link">¶</a></h2>
+<ul>
+<li>Call <code>system.version</code> and <code>system.capabilities</code> at startup.</li>
+<li>Prefer typed literals over untyped JSON values.</li>
+<li>Use <code>query.prepare</code> plus <code>GET /api/v1/q/{query_id}</code> for cacheable read paths.</li>
+<li>Use <code>want_etag</code>, <code>if_none_match</code>, and <code>min_causality</code> for web/mobile clients that need coherent reads.</li>
+<li>Treat every experimental family as capability-gated.</li>
+<li>Surface <code>error.code</code> to retry logic; do not parse <code>message</code> for behavior.</li>
+<li>For compatibility migrations, collect samples through SQL/MySQL/PG paths, translate to SkeinQL ASTs, then run <code>migration.intent_report</code> and <code>migration.report_export</code>.</li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/API_REFERENCE.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/API_REFERENCE.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="telemetry-and-migration.html"><span>← Previous</span>Telemetry &amp; migration</a>
+<a class="next" href="skeinir.html"><span>Next →</span>SkeinIR</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#transport-endpoints">Transport endpoints</a></li>
+<li><a href="#request-and-response-contract">Request and response contract</a></li>
+<li><a href="#result-formats">Result formats</a></li>
+<li><a href="#method-families">Method families</a></li>
+<li><a href="#current-advertised-method-set">Current advertised method set</a></li>
+<li><a href="#client-checklist">Client checklist</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

@@ -83,6 +83,7 @@ NAV: list[Section] = [
         DocPage("telemetry-and-migration","TELEMETRY_AND_MIGRATION.md",        "Telemetry & migration",        "Admin Guide"),
     ]),
     Section("Developer / API", "⚡", [
+      DocPage("api-reference",          "API_REFERENCE.md",                 "API reference",                "Developer / API"),
         DocPage("skeinir",                "SKEINIR.md",                        "SkeinIR",                      "Developer / API"),
         DocPage("skeinql-research",       "SKEINQL_RESEARCH_EXTENSIONS.md",    "SkeinQL research extensions",  "Developer / API"),
         DocPage("wasm-udfs",              "WASM_UDFS.md",                      "Wasm UDFs",                    "Developer / API"),

@@ -86,6 +86,7 @@
 </ul>
 <div class="group-title">⚡ &nbsp;Developer / API</div>
 <ul>
+<li><a href="api-reference.html">API reference</a></li>
 <li><a href="skeinir.html">SkeinIR</a></li>
 <li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
 <li><a href="wasm-udfs.html">Wasm UDFs</a></li>
@@ -124,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
-<p>Status: Draft v1.0 (implementable)
-Last updated: 2026-01-31</p>
+<p>Status: Draft v1.0 (implementable; v0.3.7 runtime sync)
+Last updated: 2026-05-09</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <ul>
@@ -207,6 +208,7 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 </ul>
 <p>Servers MAY add new methods at any time. Breaking changes require SkeinQL v2.</p>
 <p>Servers SHOULD expose supported method names in <code>system.capabilities</code> so clients can feature-detect.</p>
+<p>For a compact client-facing API map, see <code>docs/API_REFERENCE.md</code>. This SkeinQL document remains the language and protocol specification; the API reference is the operational catalog for current runtime method families, result formats, and client checklists.</p>
 <hr />
 <h2 id="3-core-data-model">3) Core data model<a class="headerlink" href="#3-core-data-model" title="Permanent link">¶</a></h2>
 <h3 id="31-identifiers">3.1 Identifiers<a class="headerlink" href="#31-identifiers" title="Permanent link">¶</a></h3>
@@ -524,7 +526,23 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <p>If a server uses a different hash (e.g., BLAKE3), it MUST specify it in <code>system.capabilities</code>.</p>
 <hr />
 <h2 id="10-method-catalog-v1">10) Method catalog (v1)<a class="headerlink" href="#10-method-catalog-v1" title="Permanent link">¶</a></h2>
-<p>This section defines SkeinQL methods and their request/response shapes.</p>
+<p>This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 127 unique methods through <code>system.capabilities</code>; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.</p>
+<h3 id="100-reading-the-catalog">10.0 Reading the catalog<a class="headerlink" href="#100-reading-the-catalog" title="Permanent link">¶</a></h3>
+<p>Method stability levels used below:</p>
+<ul>
+<li><strong>Core</strong>: intended for normal clients and admin automation.</li>
+<li><strong>Compatibility</strong>: primarily used by SQL/MySQL/PostgreSQL adoption paths.</li>
+<li><strong>Experimental</strong>: callable today but still tied to a research track or operator workflow.</li>
+<li><strong>Prototype</strong>: shape is documented, but compatibility is deliberately looser while the feature hardens.</li>
+</ul>
+<p>Common parameter conventions:</p>
+<ul>
+<li><code>table</code> is always <code>{ "db": "...", "table": "..." }</code> unless a method explicitly uses SQL text.</li>
+<li><code>args</code> are positional typed literals that satisfy <code>{ "param": N }</code> expressions.</li>
+<li><code>result_format</code> defaults to <code>rows_json</code> for tabular calls unless otherwise documented.</li>
+<li>Cache-aware methods accept <code>want_etag</code>, <code>if_none_match</code>, or <code>min_causality</code> either directly or under <code>cache</code>.</li>
+<li>Methods that mutate state return either an explicit <code>ok</code> boolean or a lifecycle object with <code>status</code>, <code>affected</code>, <code>applied</code>, or <code>accepted</code>.</li>
+</ul>
 <h3 id="101-system">10.1 system.*<a class="headerlink" href="#101-system" title="Permanent link">¶</a></h3>
 <h4 id="systemping">system.ping<a class="headerlink" href="#systemping" title="Permanent link">¶</a></h4>
 <p>Params: <code>{}</code></p>
@@ -1867,6 +1885,7 @@ Servers SHOULD expose supported method names in <code>system.capabilities</code>
 </li>
 <li><a href="#9-canonicalization-and-stable-hashes">9) Canonicalization and stable hashes</a></li>
 <li><a href="#10-method-catalog-v1">10) Method catalog (v1)</a><ul>
+<li><a href="#100-reading-the-catalog">10.0 Reading the catalog</a></li>
 <li><a href="#101-system">10.1 system.*</a></li>
 <li><a href="#102-settings-core">10.2 settings.* (core)</a></li>
 <li><a href="#103-schema">10.3 schema.*</a></li>

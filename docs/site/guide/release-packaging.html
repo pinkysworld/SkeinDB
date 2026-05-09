@@ -86,6 +86,7 @@
 </ul>
 <div class="group-title">⚡ &nbsp;Developer / API</div>
 <ul>
+<li><a href="api-reference.html">API reference</a></li>
 <li><a href="skeinir.html">SkeinIR</a></li>
 <li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
 <li><a href="wasm-udfs.html">Wasm UDFs</a></li>
@@ -125,7 +126,26 @@
     <article class="doc-article">
       <h1 id="release-packaging-notes">Release Packaging Notes<a class="headerlink" href="#release-packaging-notes" title="Permanent link">¶</a></h1>
 <p>Last updated: 2026-05-09</p>
-<p>SkeinDB release tags run <code>.github/workflows/release-packages.yml</code>, which builds the Linux binary tarball, source tarball, Debian package, checksums, and a rendered Homebrew formula.</p>
+<p>SkeinDB release tags run <code>.github/workflows/release-packages.yml</code>, which builds the Linux binary tarball, source tarball, Debian package, checksums, a signed macOS binary tarball, and a rendered Homebrew formula.</p>
+<h2 id="macos-signing">macOS signing<a class="headerlink" href="#macos-signing" title="Permanent link">¶</a></h2>
+<p>The release workflow includes a <code>macos-latest</code> job that builds <code>target/release/skeindb</code>, signs it with <code>codesign</code>, verifies the signature, and uploads:</p>
+<ul>
+<li><code>skeindb-&lt;version&gt;-macos-&lt;arch&gt;.tar.gz</code></li>
+<li><code>skeindb-&lt;version&gt;-macos-&lt;arch&gt;.tar.gz.sha256</code></li>
+<li><code>skeindb-&lt;version&gt;-macos-&lt;arch&gt;-codesign.txt</code></li>
+</ul>
+<p>By default, CI uses an ad-hoc signature (<code>codesign --sign -</code>) so every macOS artifact is sealed and verification-friendly without requiring Apple account secrets. For a Developer ID signature on a Mac or a self-hosted runner with the certificate already installed, set <code>MACOS_CODESIGN_IDENTITY</code> or pass <code>--identity</code> to <code>scripts/release/build_macos_signed_artifact.sh</code>.</p>
+<p>Local Developer ID or Apple Development signing example:</p>
+<div class="codehilite"><pre><span></span><code>cargo<span class="w"> </span>build<span class="w"> </span>--release<span class="w"> </span>-p<span class="w"> </span>skeindb
+<span class="nv">MACOS_CODESIGN_IDENTITY</span><span class="o">=</span><span class="s2">&quot;Developer ID Application: Example Inc (TEAMID)&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>scripts/release/build_macos_signed_artifact.sh<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--version<span class="w"> </span><span class="m">0</span>.3.7<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--binary<span class="w"> </span>target/release/skeindb<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--output<span class="w"> </span>dist
+</code></pre></div>
+
+<p>Use the exact signing identity from <code>security find-identity -v -p codesigning</code>. The script verifies with <code>codesign --verify --strict --verbose=2</code> before producing the archive.</p>
+<h2 id="apt-signing">apt signing<a class="headerlink" href="#apt-signing" title="Permanent link">¶</a></h2>
 <p>The signed apt repository path is optional. To publish the <code>apt</code> branch, configure these repository secrets before pushing a release tag:</p>
 <ul>
 <li><code>APT_GPG_PRIVATE_KEY</code></li>
@@ -150,7 +170,10 @@
   <aside class="toc" id="toc">
     <div class="toc-title">On this page</div>
     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#macos-signing">macOS signing</a></li>
+<li><a href="#apt-signing">apt signing</a></li>
+</ul>
 </div>
 
   </aside>

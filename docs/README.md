@@ -16,6 +16,7 @@ The repo is intentionally written so you can read it in two ways:
    - includes storage/dedup `stats.snapshot` quick check
 
 2) **Core APIs**
+   - `API_REFERENCE.md` (runtime method families, transports, result formats, client checklist)
    - `SKEINQL.md` (JSON-RPC control plane spec)
    - `MYSQL_COMPAT.md` (MySQL protocol surface and current coverage)
    - `PG_COMPAT.md` (current PostgreSQL wire-protocol baseline and open gaps)

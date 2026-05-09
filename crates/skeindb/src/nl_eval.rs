@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -221,15 +222,19 @@ fn apply_fixtures(engine: &mut Engine, fixtures: &NlEvalFixtures) -> anyhow::Res
 }
 
 fn temp_dir(label: &str) -> PathBuf {
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let mut dir = std::env::temp_dir();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let unique = format!(
-        "skeindb_{}_{}_{}",
+        "skeindb_{}_{}_{}_{}",
         label,
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis()
+            .as_nanos(),
+        sequence
     );
     dir.push(unique);
     std::fs::create_dir_all(&dir).ok();

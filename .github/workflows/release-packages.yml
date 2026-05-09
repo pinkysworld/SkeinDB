@@ -130,3 +130,55 @@ jobs:
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin apt
           popd >/dev/null
+
+  macos-signed-artifacts:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve and verify version
+        id: resolve_version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python3 - "$VERSION" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          crate = tomllib.loads(pathlib.Path("crates/skeindb/Cargo.toml").read_text(encoding="utf-8"))
+          crate_version = crate["package"]["version"]
+          tag_version = sys.argv[1]
+          if crate_version != tag_version:
+              raise SystemExit(f"tag version {tag_version} does not match crates/skeindb/Cargo.toml ({crate_version})")
+          PY
+
+      - name: Build macOS release binary
+        run: cargo build --release -p skeindb
+
+      - name: Sign macOS release binary
+        env:
+          VERSION: ${{ steps.resolve_version.outputs.version }}
+        run: |
+          scripts/release/build_macos_signed_artifact.sh \
+            --version "$VERSION" \
+            --binary target/release/skeindb \
+            --output dist
+
+      - name: Publish signed macOS release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/skeindb-${{ steps.resolve_version.outputs.version }}-macos-*.tar.gz
+            dist/skeindb-${{ steps.resolve_version.outputs.version }}-macos-*.tar.gz.sha256
+            dist/skeindb-${{ steps.resolve_version.outputs.version }}-macos-*-codesign.txt

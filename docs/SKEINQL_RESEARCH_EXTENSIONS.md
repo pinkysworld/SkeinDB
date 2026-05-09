@@ -1,11 +1,14 @@
 # SkeinQL Research Extensions (Experimental)
 
+Last updated: 2026-05-09
+
 This document lists **experimental** SkeinQL method families that support the **20-proposal research agenda**.
 
 Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.7 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04

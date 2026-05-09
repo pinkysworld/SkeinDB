@@ -646,6 +646,18 @@
       <p>SkeinQL RPC runs over HTTP/1.1, HTTP/2, and QUIC from the same binary, with dedicated integration tests for transport parity and reconnect behavior.</p>
     </div>
     <div class="feature-card">
+      <span class="status-badge status-implemented">Documented</span>
+      <div class="feature-icon" style="background:rgba(99,102,241,.1);color:var(--accent-light)">📚</div>
+      <h3>SkeinQL API Reference</h3>
+      <p>The API surface now has a dedicated <a href="../docs/site/guide/api-reference.html">client reference</a>: transports, envelopes, result formats, method families, and the current 127-method <code>system.capabilities</code> map are documented beside the full SkeinQL language spec.</p>
+    </div>
+    <div class="feature-card">
+      <span class="status-badge status-implemented">Signed</span>
+      <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔏</div>
+      <h3>Signed macOS Artifacts</h3>
+      <p>Tagged releases now build a macOS binary, seal it with <code>codesign</code>, verify the signature, and upload the archive, checksum, and signing metadata. The <a href="../docs/site/guide/release-packaging.html">release packaging guide</a> documents local Developer ID signing too.</p>
+    </div>
+    <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(245,158,11,.1);color:var(--amber)">🖥️</div>
       <h3>Web Admin (SkeinAdmin)</h3>
@@ -781,7 +793,7 @@
 <section id="quickstart">
   <div class="section-header">
     <h2>Quick Start</h2>
-    <p>From zero to running in four commands. Tagged releases also drive a repo-local Homebrew tap formula and a signed apt publication path.</p>
+    <p>From zero to running in four commands. Tagged releases also drive a repo-local Homebrew tap formula, signed macOS archives, and a signed apt publication path.</p>
   </div>
   <div class="quickstart">
     <div class="quickstart-header">
@@ -892,6 +904,7 @@
     <div class="footer-col">
       <h4>Documentation</h4>
       <a href="../docs/site/guide/index.html">All Docs</a>
+      <a href="../docs/site/guide/api-reference.html">API Reference</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/GETTING_STARTED.md" target="_blank">Getting Started</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/SKEINQL.md" target="_blank">SkeinQL Reference</a>
       <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/MYSQL_COMPAT.md" target="_blank">MySQL Compat</a>
