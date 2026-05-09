@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.9 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.10 runtime sync)
 Last updated: 2026-05-09
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
@@ -1173,6 +1173,57 @@ Result:
     "query_fingerprint": "abcd1234",
     "budget": {"principal":"analyst","remaining_epsilon":9.0,"remaining_delta":0.000999}
   }
+}
+```
+
+#### dp.evaluate
+
+`dp.evaluate` runs the same bounded DP aggregate plan against an exact baseline and a seeded grid of noisy trials. It is intended for research/evaluation and CI-style reports, not production query serving. The method does **not** consume a principal privacy budget because it omits `principal` by design.
+
+Params:
+
+```json
+{
+  "table": {"db":"mydb","table":"orders"},
+  "aggregates": [
+    {"op":"sum","column":"amount","bounds":{"min":0,"max":1000},"as":"total_amount"}
+  ],
+  "where": {"op":"eq","a":{"col":"status"},"b":{"lit":{"t":"str","v":"paid"}}},
+  "group_by": ["region"],
+  "epsilons": [0.25, 0.5, 1.0, 2.0],
+  "delta": 0.0,
+  "mechanism": "laplace",
+  "trials": 25,
+  "seed": 42
+}
+```
+
+Result:
+
+```json
+{
+  "table": {"db":"mydb","table":"orders"},
+  "columns": ["region","total_amount"],
+  "exact_rows": [[{"t":"str","v":"EU"},{"t":"f64","v":4567.0}]],
+  "rows_examined": 1200,
+  "rows_matched": 410,
+  "exact_latency_ms": 0.42,
+  "mechanism": "laplace",
+  "delta": 0.0,
+  "trials": 25,
+  "report": [
+    {
+      "epsilon": 0.5,
+      "trials": 25,
+      "samples": 25,
+      "mean_abs_error": 23.1,
+      "p95_abs_error": 71.4,
+      "max_abs_error": 95.0,
+      "mean_relative_error": 0.005,
+      "avg_latency_ms": 0.48,
+      "overhead_vs_exact": 1.14
+    }
+  ]
 }
 ```
 

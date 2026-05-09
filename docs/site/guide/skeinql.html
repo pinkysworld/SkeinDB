@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
-<p>Status: Draft v1.0 (implementable; v0.3.9 runtime sync)
+<p>Status: Draft v1.0 (implementable; v0.3.10 runtime sync)
 Last updated: 2026-05-09</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
@@ -998,6 +998,51 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">    </span><span class="nt">&quot;query_fingerprint&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abcd1234&quot;</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;budget&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;principal&quot;</span><span class="p">:</span><span class="s2">&quot;analyst&quot;</span><span class="p">,</span><span class="nt">&quot;remaining_epsilon&quot;</span><span class="p">:</span><span class="mf">9.0</span><span class="p">,</span><span class="nt">&quot;remaining_delta&quot;</span><span class="p">:</span><span class="mf">0.000999</span><span class="p">}</span>
 <span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="dpevaluate">dp.evaluate<a class="headerlink" href="#dpevaluate" title="Permanent link">¶</a></h4>
+<p><code>dp.evaluate</code> runs the same bounded DP aggregate plan against an exact baseline and a seeded grid of noisy trials. It is intended for research/evaluation and CI-style reports, not production query serving. The method does <strong>not</strong> consume a principal privacy budget because it omits <code>principal</code> by design.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;orders&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;aggregates&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">,</span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="s2">&quot;amount&quot;</span><span class="p">,</span><span class="nt">&quot;bounds&quot;</span><span class="p">:{</span><span class="nt">&quot;min&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;max&quot;</span><span class="p">:</span><span class="mi">1000</span><span class="p">},</span><span class="nt">&quot;as&quot;</span><span class="p">:</span><span class="s2">&quot;total_amount&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;where&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;status&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;paid&quot;</span><span class="p">}}},</span>
+<span class="w">  </span><span class="nt">&quot;group_by&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;region&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;epsilons&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">0.25</span><span class="p">,</span><span class="w"> </span><span class="mf">0.5</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span><span class="w"> </span><span class="mf">2.0</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;delta&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mechanism&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;laplace&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;trials&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;seed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;orders&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;region&quot;</span><span class="p">,</span><span class="s2">&quot;total_amount&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;exact_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;EU&quot;</span><span class="p">},{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;f64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mf">4567.0</span><span class="p">}]],</span>
+<span class="w">  </span><span class="nt">&quot;rows_examined&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;rows_matched&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">410</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;exact_latency_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mechanism&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;laplace&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;delta&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;trials&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;report&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;epsilon&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.5</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;trials&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;mean_abs_error&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">23.1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;p95_abs_error&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">71.4</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;max_abs_error&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">95.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;mean_relative_error&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.005</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;avg_latency_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.48</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;overhead_vs_exact&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.14</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 

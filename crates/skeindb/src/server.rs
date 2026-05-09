@@ -35,15 +35,16 @@ use skeindb_skeinql::{
         ClusterNodeRemoveParams, ClusterNodesParams, ClusterReplicaPromoteParams,
         ClusterShardCreateParams, ClusterShardMoveParams, ClusterShardRebalanceParams,
         DataDeleteParams, DataGetParams, DataInsertParams, DataUpdateParams, DpAggregateParams,
-        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, EdgeBundleApplyParams,
-        EdgeBundleRequestParams, EdgeBundleStatusParams, ForensicExportParams, ForensicQueryParams,
-        ForensicVerifyParams, MaintenanceReplayExportParams, MaintenanceReplayImportParams,
-        MaintenanceReplayRunParams, MergeApplyParams, MergeRegisterParams, MergeSimulateParams,
-        MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
-        MigrationReportExportParams, MigrationRewritePreviewParams, ObjectsPullParams,
-        ObliviousExplainParams, ObliviousPolicyGetParams, ObliviousPolicySetParams,
-        PlanCacheClearParams, PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams,
-        QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        DpAuditLogParams, DpBudgetGetParams, DpBudgetSetParams, DpEvaluateParams,
+        EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
+        ForensicExportParams, ForensicQueryParams, ForensicVerifyParams,
+        MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
+        MergeApplyParams, MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams,
+        MergeWasmRegisterParams, MigrationIntentReportParams, MigrationReportExportParams,
+        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousExplainParams,
+        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
+        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
+        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
         SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
         TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
         VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
@@ -15820,6 +15821,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "dp.evaluate" => {
+                    let p: DpEvaluateParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.dp_evaluate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "dp.budget.set" => {
                     let p: DpBudgetSetParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
@@ -26409,6 +26417,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "query.patch",
         "query.subscribe",
         "dp.aggregate",
+        "dp.evaluate",
         "dp.budget.set",
         "dp.budget.get",
         "dp.audit.log",
@@ -27861,7 +27870,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 129);
+        assert_eq!(methods.len(), 130);
         assert!(methods.contains(&"migration.report_export"));
     }
 

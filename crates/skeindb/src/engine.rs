@@ -19,7 +19,7 @@ use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -42,38 +42,38 @@ use skeindb_skeinql::methods::{
     AiNlExecuteParams, AiNlExecuteResult, AiNlExplainParams, AiNlExplainResult, AiNlPromptPackage,
     AiNlPromptTable, AiNlTranslateParams, AiNlTranslateResult, ClientStateSummary,
     DpAggregateParams, DpAggregateResult, DpAggregateSpec, DpAuditLogParams, DpAuditLogResult,
-    DpBounds, DpBudgetGetParams, DpBudgetGetResult, DpBudgetSetParams, EdgeBundle,
-    EdgeBundleApplyParams, EdgeBundleApplyResult, EdgeBundleCoverage, EdgeBundleRecord,
-    EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult, EdgeBundleRoute,
-    EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams, ForensicExportResult,
-    ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams, ForensicVerifyResult,
-    MaintenanceReplayExportParams, MaintenanceReplayExportResult, MaintenanceReplayImportParams,
-    MaintenanceReplayImportResult, MaintenanceReplayRunParams, MaintenanceReplayRunResult,
-    MergeApplyParams, MergeApplyResult, MergeFunctionRef, MergePolicySpec, MergeRegisterParams,
-    MergeRegisterResult, MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities,
-    MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
-    MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
-    MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
-    MigrationIntentSuggestion, MigrationReportExportParams, MigrationReportExportResult,
-    MigrationRewritePreview, MigrationRewritePreviewParams, MigrationRewritePreviewResult,
-    ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams,
-    ObliviousPolicyGetResult, ObliviousPolicySetParams, ReplayBundle, ReplayBundleChangeEvent,
-    ReplayBundleManifest, ReplayBundlePerformanceCacheVariance,
-    ReplayBundlePerformanceCacheWarmHints, ReplayBundlePerformanceHotTable,
-    ReplayBundlePerformanceLsmState, ReplayBundlePerformanceProfile,
-    ReplayBundlePerformanceRunReport, ReplayBundlePerformanceStorageVariance,
-    ReplayBundlePerformanceTableState, ReplayBundlePerformanceTimingProfile,
-    ReplayBundlePerformanceTimingVariance, ReplayBundleRowEntry, ReplayBundleTable,
-    ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
-    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
-    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
-    SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
-    VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
-    VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
-    ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult,
-    ViewStatusParams, ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult,
-    WasmPlanEdgePackageParams, WasmPlanEdgePackageResult, WasmPlanInspectParams,
-    WasmPlanInspectResult,
+    DpBounds, DpBudgetGetParams, DpBudgetGetResult, DpBudgetSetParams, DpEvaluateParams,
+    DpEvaluatePoint, DpEvaluateResult, EdgeBundle, EdgeBundleApplyParams, EdgeBundleApplyResult,
+    EdgeBundleCoverage, EdgeBundleRecord, EdgeBundleRedaction, EdgeBundleRequestParams,
+    EdgeBundleRequestResult, EdgeBundleRoute, EdgeBundleStatusParams, EdgeBundleStatusResult,
+    ForensicExportParams, ForensicExportResult, ForensicQueryParams, ForensicQueryResult,
+    ForensicVerifyParams, ForensicVerifyResult, MaintenanceReplayExportParams,
+    MaintenanceReplayExportResult, MaintenanceReplayImportParams, MaintenanceReplayImportResult,
+    MaintenanceReplayRunParams, MaintenanceReplayRunResult, MergeApplyParams, MergeApplyResult,
+    MergeFunctionRef, MergePolicySpec, MergeRegisterParams, MergeRegisterResult,
+    MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities, MergeWasmDropParams,
+    MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo, MergeWasmRegisterParams,
+    MergeWasmRegisterResult, MigrationIntentEvidence, MigrationIntentReportParams,
+    MigrationIntentReportResult, MigrationIntentSample, MigrationIntentSuggestion,
+    MigrationReportExportParams, MigrationReportExportResult, MigrationRewritePreview,
+    MigrationRewritePreviewParams, MigrationRewritePreviewResult, ObliviousExplainParams,
+    ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams, ObliviousPolicyGetResult,
+    ObliviousPolicySetParams, ReplayBundle, ReplayBundleChangeEvent, ReplayBundleManifest,
+    ReplayBundlePerformanceCacheVariance, ReplayBundlePerformanceCacheWarmHints,
+    ReplayBundlePerformanceHotTable, ReplayBundlePerformanceLsmState,
+    ReplayBundlePerformanceProfile, ReplayBundlePerformanceRunReport,
+    ReplayBundlePerformanceStorageVariance, ReplayBundlePerformanceTableState,
+    ReplayBundlePerformanceTimingProfile, ReplayBundlePerformanceTimingVariance,
+    ReplayBundleRowEntry, ReplayBundleTable, ReplayBundleTableChecksum, ReplayBundleTableSchema,
+    RowObject, SchemaApplyMergeParams, SchemaApplyMergeResult, SchemaChangeConflict,
+    SchemaChangeOp, SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams,
+    SchemaMergeStatusResult, SchemaProposeChangeParams, SchemaProposeChangeResult,
+    VectorIndexStatusParams, VectorIndexStatusResult, VectorInsertParams, VectorInsertResult,
+    VectorSearchMatch, VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult,
+    ViewDropParams, ViewDropResult, ViewExplainDepsParams, ViewExplainDepsResult,
+    ViewRefreshParams, ViewRefreshResult, ViewStatusParams, ViewStatusResult,
+    WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
+    WasmPlanEdgePackageResult, WasmPlanInspectParams, WasmPlanInspectResult,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -899,6 +899,13 @@ struct DpGroupState {
     key: Vec<Lit>,
     accs: Vec<DpAggAccumulator>,
 }
+
+type DpAggregateGroups = (
+    Vec<DpAggSpecResolved>,
+    BTreeMap<String, DpGroupState>,
+    u64,
+    u64,
+);
 
 #[derive(Debug, Clone)]
 enum DpAggAccumulator {
@@ -5271,6 +5278,71 @@ impl Engine {
         Ok(DpAuditLogResult { events, next_id })
     }
 
+    fn dp_collect_aggregate_groups(
+        &self,
+        params: &DpAggregateParams,
+    ) -> anyhow::Result<DpAggregateGroups> {
+        let (schema, tdata) = self.get_table(&params.table)?;
+
+        for col in params.group_by.iter() {
+            if !schema.columns.iter().any(|c| c.name == *col) {
+                anyhow::bail!("invalid_request: unknown group_by column {col}");
+            }
+        }
+
+        let resolved = resolve_dp_aggregates(schema, &params.aggregates)?;
+        let predicate_plan = params.r#where.as_ref().and_then(|predicate| {
+            let key = TableKey {
+                db: params.table.db.clone(),
+                table: params.table.table.clone(),
+            };
+            compile_interned_predicate_for_table(self, &key, schema, predicate, &[])
+        });
+
+        let mut groups: BTreeMap<String, DpGroupState> = BTreeMap::new();
+        let mut rows_examined = 0u64;
+        let mut rows_matched = 0u64;
+
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            rows_examined += 1;
+            if let Some(pred) = params.r#where.as_ref() {
+                let matches = if let Some(plan) = predicate_plan.as_ref() {
+                    compiled_interned_predicate_matches_row(plan, &entry.row)
+                        .unwrap_or(eval_predicate(pred, &entry.row, None, &[])?)
+                } else {
+                    eval_predicate(pred, &entry.row, None, &[])?
+                };
+                if !matches {
+                    continue;
+                }
+            }
+            rows_matched += 1;
+
+            let mut key_vals = Vec::new();
+            for col in params.group_by.iter() {
+                let Some(v) = entry.row.get(col) else {
+                    anyhow::bail!("invalid_request: missing group_by column {col}");
+                };
+                key_vals.push(v.clone());
+            }
+            let key = dp_group_key(&key_vals);
+
+            let group = groups.entry(key).or_insert_with(|| DpGroupState {
+                key: key_vals,
+                accs: resolved.iter().map(dp_init_acc).collect(),
+            });
+
+            for (idx, spec) in resolved.iter().enumerate() {
+                dp_update_acc(&mut group.accs[idx], spec, &entry.row)?;
+            }
+        }
+
+        Ok((resolved, groups, rows_examined, rows_matched))
+    }
+
     pub fn dp_aggregate(&mut self, params: DpAggregateParams) -> anyhow::Result<DpAggregateResult> {
         if params.aggregates.is_empty() {
             anyhow::bail!("invalid_request: aggregates is required");
@@ -5309,67 +5381,8 @@ impl Engine {
             }
         }
 
-        let (resolved, mut groups, rows_examined, rows_matched) = {
-            let (schema, tdata) = self.get_table(&params.table)?;
-
-            for col in params.group_by.iter() {
-                if !schema.columns.iter().any(|c| c.name == *col) {
-                    anyhow::bail!("invalid_request: unknown group_by column {col}");
-                }
-            }
-
-            let resolved = resolve_dp_aggregates(schema, &params.aggregates)?;
-            let predicate_plan = params.r#where.as_ref().and_then(|predicate| {
-                let key = TableKey {
-                    db: params.table.db.clone(),
-                    table: params.table.table.clone(),
-                };
-                compile_interned_predicate_for_table(self, &key, schema, predicate, &[])
-            });
-
-            let mut groups: BTreeMap<String, DpGroupState> = BTreeMap::new();
-            let mut rows_examined = 0u64;
-            let mut rows_matched = 0u64;
-
-            for entry in tdata.rows.iter() {
-                if entry.deleted {
-                    continue;
-                }
-                rows_examined += 1;
-                if let Some(pred) = params.r#where.as_ref() {
-                    let matches = if let Some(plan) = predicate_plan.as_ref() {
-                        compiled_interned_predicate_matches_row(plan, &entry.row)
-                            .unwrap_or(eval_predicate(pred, &entry.row, None, &[])?)
-                    } else {
-                        eval_predicate(pred, &entry.row, None, &[])?
-                    };
-                    if !matches {
-                        continue;
-                    }
-                }
-                rows_matched += 1;
-
-                let mut key_vals = Vec::new();
-                for col in params.group_by.iter() {
-                    let Some(v) = entry.row.get(col) else {
-                        anyhow::bail!("invalid_request: missing group_by column {col}");
-                    };
-                    key_vals.push(v.clone());
-                }
-                let key = dp_group_key(&key_vals);
-
-                let group = groups.entry(key).or_insert_with(|| DpGroupState {
-                    key: key_vals,
-                    accs: resolved.iter().map(dp_init_acc).collect(),
-                });
-
-                for (idx, spec) in resolved.iter().enumerate() {
-                    dp_update_acc(&mut group.accs[idx], spec, &entry.row)?;
-                }
-            }
-
-            (resolved, groups, rows_examined, rows_matched)
-        };
+        let (resolved, mut groups, rows_examined, rows_matched) =
+            self.dp_collect_aggregate_groups(&params)?;
 
         let group_count = groups.len() as u64;
         let per_agg_epsilon = params.epsilon / resolved.len() as f64;
@@ -5474,6 +5487,130 @@ impl Engine {
             columns,
             rows,
             privacy: Some(privacy),
+        })
+    }
+
+    pub fn dp_evaluate(&mut self, params: DpEvaluateParams) -> anyhow::Result<DpEvaluateResult> {
+        let epsilons = if params.epsilons.is_empty() {
+            vec![0.25, 0.5, 1.0, 2.0]
+        } else {
+            params.epsilons.clone()
+        };
+        for epsilon in epsilons.iter() {
+            if !epsilon.is_finite() || *epsilon <= 0.0 {
+                anyhow::bail!("invalid_request: epsilons must be finite and > 0");
+            }
+        }
+
+        let trials = params.trials.unwrap_or(25);
+        if trials == 0 || trials > 500 {
+            anyhow::bail!("invalid_request: trials must be between 1 and 500");
+        }
+
+        let delta = params.delta.unwrap_or(0.0);
+        if delta < 0.0 {
+            anyhow::bail!("invalid_request: delta must be >= 0");
+        }
+
+        let mechanism = params
+            .mechanism
+            .clone()
+            .unwrap_or_else(|| "laplace".to_string())
+            .to_lowercase();
+        if mechanism != "laplace" && mechanism != "gaussian" {
+            anyhow::bail!("invalid_request: unknown mechanism");
+        }
+        if mechanism == "gaussian" && delta <= 0.0 {
+            anyhow::bail!("invalid_request: gaussian requires delta");
+        }
+
+        let base_params = DpAggregateParams {
+            table: params.table.clone(),
+            aggregates: params.aggregates.clone(),
+            r#where: params.r#where.clone(),
+            group_by: params.group_by.clone(),
+            epsilon: 1.0,
+            delta: Some(delta),
+            mechanism: Some(mechanism.clone()),
+            principal: None,
+            seed: None,
+        };
+
+        let exact_started = Instant::now();
+        let (resolved, mut exact_groups, rows_examined, rows_matched) =
+            self.dp_collect_aggregate_groups(&base_params)?;
+        let exact_rows_lit = dp_exact_rows(&resolved, &mut exact_groups)?;
+        let exact_latency_ms = exact_started.elapsed().as_secs_f64() * 1000.0;
+
+        let mut columns = params.group_by.clone();
+        columns.extend(resolved.iter().map(|spec| spec.label.clone()));
+
+        let mut exact_rows = Vec::new();
+        for row in exact_rows_lit.iter() {
+            let mut json_row = Vec::new();
+            for lit in row.iter() {
+                json_row.push(lit_to_json_value(lit.clone())?);
+            }
+            exact_rows.push(json_row);
+        }
+
+        let seed_base = params.seed.unwrap_or(1);
+        let group_by_len = params.group_by.len();
+        let mut report = Vec::new();
+
+        for epsilon in epsilons {
+            let mut errors = Vec::new();
+            let mut relative_errors = Vec::new();
+            let mut total_latency_ms = 0.0;
+
+            for trial in 0..trials {
+                let run_seed = seed_base
+                    .wrapping_add(trial)
+                    .wrapping_add(epsilon.to_bits().rotate_left(17));
+                let run_params = DpAggregateParams {
+                    table: params.table.clone(),
+                    aggregates: params.aggregates.clone(),
+                    r#where: params.r#where.clone(),
+                    group_by: params.group_by.clone(),
+                    epsilon,
+                    delta: Some(delta),
+                    mechanism: Some(mechanism.clone()),
+                    principal: None,
+                    seed: Some(run_seed),
+                };
+                let started = Instant::now();
+                let noisy = self.dp_aggregate(run_params)?;
+                total_latency_ms += started.elapsed().as_secs_f64() * 1000.0;
+                dp_record_eval_errors(
+                    &exact_rows_lit,
+                    &noisy.rows,
+                    group_by_len,
+                    &mut errors,
+                    &mut relative_errors,
+                )?;
+            }
+
+            report.push(dp_evaluate_point(
+                epsilon,
+                trials,
+                &mut errors,
+                &relative_errors,
+                total_latency_ms / trials as f64,
+                exact_latency_ms,
+            ));
+        }
+
+        Ok(DpEvaluateResult {
+            table: params.table,
+            columns,
+            exact_rows,
+            rows_examined,
+            rows_matched,
+            exact_latency_ms,
+            mechanism,
+            delta,
+            trials,
+            report,
         })
     }
 
@@ -18210,6 +18347,118 @@ fn dp_finalize_acc(
                 None => Ok(Lit::Null),
             }
         }
+    }
+}
+
+fn dp_finalize_acc_exact(
+    spec: &DpAggSpecResolved,
+    acc: &mut DpAggAccumulator,
+) -> anyhow::Result<Lit> {
+    match acc {
+        DpAggAccumulator::Count(count) => Ok(Lit::U64 { v: *count }),
+        DpAggAccumulator::Sum { sum } => Ok(Lit::F64 { v: *sum }),
+        DpAggAccumulator::Avg { sum, count } => {
+            if *count == 0 {
+                Ok(Lit::Null)
+            } else {
+                Ok(Lit::F64 {
+                    v: *sum / *count as f64,
+                })
+            }
+        }
+        DpAggAccumulator::Percentile { values } => {
+            let Some(q) = spec.percentile else {
+                return Ok(Lit::Null);
+            };
+            match dp_quantile(values, q) {
+                Some(v) => Ok(Lit::F64 { v }),
+                None => Ok(Lit::Null),
+            }
+        }
+    }
+}
+
+fn dp_exact_rows(
+    resolved: &[DpAggSpecResolved],
+    groups: &mut BTreeMap<String, DpGroupState>,
+) -> anyhow::Result<Vec<Vec<Lit>>> {
+    let mut rows = Vec::new();
+    for group in groups.values_mut() {
+        let mut row = group.key.clone();
+        for (spec, acc) in resolved.iter().zip(group.accs.iter_mut()) {
+            row.push(dp_finalize_acc_exact(spec, acc)?);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn dp_record_eval_errors(
+    exact_rows: &[Vec<Lit>],
+    noisy_rows: &[Vec<serde_json::Value>],
+    group_by_len: usize,
+    errors: &mut Vec<f64>,
+    relative_errors: &mut Vec<f64>,
+) -> anyhow::Result<()> {
+    for (exact_row, noisy_row) in exact_rows.iter().zip(noisy_rows.iter()) {
+        for idx in group_by_len..exact_row.len().min(noisy_row.len()) {
+            let Some(exact) = dp_lit_to_f64(&exact_row[idx]) else {
+                continue;
+            };
+            let noisy: Lit = serde_json::from_value(noisy_row[idx].clone())?;
+            let Some(noisy) = dp_lit_to_f64(&noisy) else {
+                continue;
+            };
+            let error = (noisy - exact).abs();
+            errors.push(error);
+            relative_errors.push(error / exact.abs().max(1.0));
+        }
+    }
+    Ok(())
+}
+
+fn dp_evaluate_point(
+    epsilon: f64,
+    trials: u64,
+    errors: &mut [f64],
+    relative_errors: &[f64],
+    avg_latency_ms: f64,
+    exact_latency_ms: f64,
+) -> DpEvaluatePoint {
+    errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let samples = errors.len() as u64;
+    let mean_abs_error = if errors.is_empty() {
+        0.0
+    } else {
+        errors.iter().sum::<f64>() / errors.len() as f64
+    };
+    let p95_abs_error = if errors.is_empty() {
+        0.0
+    } else {
+        let idx = ((errors.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        errors[idx.min(errors.len() - 1)]
+    };
+    let max_abs_error = errors.last().copied().unwrap_or(0.0);
+    let mean_relative_error = if relative_errors.is_empty() {
+        0.0
+    } else {
+        relative_errors.iter().sum::<f64>() / relative_errors.len() as f64
+    };
+    let overhead_vs_exact = if exact_latency_ms > 0.0 {
+        avg_latency_ms / exact_latency_ms
+    } else {
+        0.0
+    };
+    DpEvaluatePoint {
+        epsilon,
+        trials,
+        samples,
+        mean_abs_error,
+        p95_abs_error,
+        max_abs_error,
+        mean_relative_error,
+        avg_latency_ms,
+        overhead_vs_exact,
     }
 }
 
@@ -32615,6 +32864,96 @@ mod tests {
         match sum_lit {
             Lit::F64 { v } => assert!((v - expected_sum).abs() < 1e-6),
             _ => panic!("expected sum as f64"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn dp_evaluate_reports_accuracy_and_overhead() -> anyhow::Result<()> {
+        let dir = temp_dir("dp_eval");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "metrics",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("f64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            vec![
+                row(&[("id", Lit::U64 { v: 1 }), ("score", Lit::F64 { v: 4.0 })]),
+                row(&[("id", Lit::U64 { v: 2 }), ("score", Lit::F64 { v: 6.0 })]),
+            ],
+            None,
+        )?;
+
+        let result = engine.dp_evaluate(DpEvaluateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            aggregates: vec![DpAggregateSpec {
+                op: "sum".to_string(),
+                column: Some("score".to_string()),
+                percentile: None,
+                bounds: Some(DpBounds {
+                    min: 0.0,
+                    max: 10.0,
+                }),
+                r#as: None,
+            }],
+            r#where: None,
+            group_by: Vec::new(),
+            epsilons: vec![0.5, 2.0],
+            delta: None,
+            mechanism: Some("laplace".to_string()),
+            trials: Some(8),
+            seed: Some(7),
+        })?;
+
+        assert_eq!(result.columns, vec!["sum_score".to_string()]);
+        assert_eq!(result.rows_examined, 2);
+        assert_eq!(result.rows_matched, 2);
+        assert_eq!(result.trials, 8);
+        assert_eq!(result.report.len(), 2);
+
+        let exact: Lit = serde_json::from_value(result.exact_rows[0][0].clone())?;
+        match exact {
+            Lit::F64 { v } => assert!((v - 10.0).abs() < 1e-6),
+            other => panic!("expected f64 exact baseline, got {other:?}"),
+        }
+
+        for point in result.report.iter() {
+            assert_eq!(point.trials, 8);
+            assert_eq!(point.samples, 8);
+            assert!(point.mean_abs_error >= 0.0);
+            assert!(point.p95_abs_error >= point.mean_abs_error || point.samples <= 1);
+            assert!(point.max_abs_error >= point.p95_abs_error);
+            assert!(point.avg_latency_ms >= 0.0);
+            assert!(point.overhead_vs_exact >= 0.0);
         }
 
         fs::remove_dir_all(&dir).ok();

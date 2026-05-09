@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.10 - 2026-05-09
+
+- Adds `dp.evaluate`, a deterministic differential-privacy evaluation harness that reports exact baselines, accuracy-vs-epsilon error metrics, noisy-query latency, and overhead-vs-exact timings for seeded DP aggregate trials.
+- Wires `dp.evaluate` through `system.capabilities`, JSON-RPC dispatch, RPC templates, and SkeinAdmin's Privacy panel with epsilon-grid, trials, seed, mechanism, and bounds controls.
+- Fixes SkeinAdmin's existing DP aggregate/budget/audit actions to send the typed `aggregates`, `principal`, and budget/audit parameter shapes expected by the runtime.
+- Closes research backlog T246 and updates status counts to **31 done / 78 open** while keeping R18/R19 prototype caveats intact.
+- Updates API/SkeinQL/SkeinAdmin docs, website method counts, generated docs site, and release packaging metadata for v0.3.10.
+
 ## v0.3.9 - 2026-05-09
 
 - Closes R18/T189 with a replay-regression CI comparison harness: `skeindb replay run --json --out <report.json>` emits machine-readable run evidence, and `skeindb replay compare --baseline <base.json> --candidate <head.json>` compares p95/p99/span/storage/cache-hot-table deltas against threshold flags.

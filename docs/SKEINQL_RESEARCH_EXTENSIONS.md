@@ -8,12 +8,13 @@ Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
-- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.9 runtime method map exposed through `system.capabilities`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.10 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04
 
 - `dp.aggregate` — aggregates with DP parameters (epsilon, delta, mechanism)
+- `dp.evaluate` — seeded accuracy-vs-epsilon and overhead-vs-exact report for bounded DP aggregate plans
 - `dp.budget.get` / `dp.budget.set` — budget tracking and policies
 - `dp.audit.log` — budget consumption events
 

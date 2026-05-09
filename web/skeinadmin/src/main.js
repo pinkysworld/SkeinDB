@@ -98,7 +98,7 @@ const RESEARCH_TRACKS = [
   { id: 'R01', title: 'Learned Index Structures', desc: 'CDF-based learned indexes for ValueID lookup.', methods: ['stats.snapshot', 'system.capabilities'], panel: 'overview', status: 'prototype' },
   { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['stats.snapshot', 'settings.get'], panel: 'engine', status: 'hardened' },
-  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
+  { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.evaluate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
@@ -195,7 +195,8 @@ const RPC_TEMPLATES = [
   { label: 'tx.commit', method: 'tx.commit', params: { tx_id:'tx_demo' } },
   { label: 'tx.rollback', method: 'tx.rollback', params: { tx_id:'tx_demo' } },
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
-  { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregate:{op:'count',col:'id'}, epsilon:1.0 } },
+  { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'count'}], epsilon:1.0, mechanism:'laplace', seed:42 } },
+  { label: 'dp.evaluate', method: 'dp.evaluate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'sum',column:'value',bounds:{min:0,max:100}}], epsilons:[0.25,0.5,1,2], trials:25, mechanism:'laplace', seed:42 } },
   { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { db:'demo', table:'events' } },
   { label: 'maintenance.audit_status', method: 'maintenance.audit_status', params: {} },
   { label: 'maintenance.audit_verify', method: 'maintenance.audit_verify', params: {} },
@@ -5420,28 +5421,85 @@ async function vecIndexStatus() {
 // ---------------------------------------------------------------------------
 // Privacy / DP (R04-R05)
 // ---------------------------------------------------------------------------
+function readDpAggregateSpec() {
+  const op = $('dpOp')?.value || 'count';
+  const col = $('dpCol')?.value.trim();
+  const spec = { op };
+  if (col && (op !== 'count' || col !== '*')) spec.column = col;
+  if (op !== 'count') {
+    spec.bounds = {
+      min: parseFloat($('dpBoundsMin')?.value) || 0,
+      max: parseFloat($('dpBoundsMax')?.value) || 100,
+    };
+  }
+  return spec;
+}
+
+function readDpMechanismParams() {
+  const mechanism = $('dpMechanism')?.value || 'laplace';
+  const delta = parseFloat($('dpDelta')?.value) || 0;
+  return { mechanism, delta };
+}
+
 async function dpAggregate() {
   try {
     const t = readDbTable('dpDb','dpTable');
-    const op = $('dpOp')?.value || 'count', col = $('dpCol')?.value.trim() || 'id', eps = parseFloat($('dpEpsilon')?.value) || 1.0;
-    await call('dp.aggregate', { table: t, aggregate: { op, col }, epsilon: eps }, 'dpOut');
+    const eps = parseFloat($('dpEpsilon')?.value) || 1.0;
+    const principal = $('dpPrincipal')?.value.trim();
+    const { mechanism, delta } = readDpMechanismParams();
+    await call('dp.aggregate', {
+      table: t,
+      aggregates: [readDpAggregateSpec()],
+      epsilon: eps,
+      delta,
+      mechanism,
+      principal: principal || undefined,
+      seed: parseInt($('dpSeed')?.value, 10) || undefined,
+    }, 'dpOut');
+  } catch (e) { setOut({error:String(e)},'dpOut'); }
+}
+
+async function dpEvaluate() {
+  try {
+    const t = readDbTable('dpDb','dpTable');
+    const { mechanism, delta } = readDpMechanismParams();
+    const epsilons = ($('dpEvalEps')?.value || '0.25,0.5,1,2')
+      .split(',')
+      .map(v => parseFloat(v.trim()))
+      .filter(v => Number.isFinite(v) && v > 0);
+    await call('dp.evaluate', {
+      table: t,
+      aggregates: [readDpAggregateSpec()],
+      epsilons,
+      delta,
+      mechanism,
+      trials: parseInt($('dpTrials')?.value, 10) || 25,
+      seed: parseInt($('dpSeed')?.value, 10) || 42,
+    }, 'dpOut');
   } catch (e) { setOut({error:String(e)},'dpOut'); }
 }
 
 async function dpBudgetGet() {
-  try { const t = readDbTable('dpDb','dpTable'); await call('dp.budget.get',{table:t},'dpOut'); } catch (e) { setOut({error:String(e)},'dpOut'); }
+  try {
+    const principal = $('dpPrincipal')?.value.trim();
+    await call('dp.budget.get',{principal:principal || undefined,include_usage:true},'dpOut');
+  } catch (e) { setOut({error:String(e)},'dpOut'); }
 }
 
 async function dpBudgetSet() {
   try {
-    const t = readDbTable('dpDb','dpTable');
+    const principal = $('dpPrincipal')?.value.trim() || 'analyst';
     const eps = parseFloat($('dpEpsilon')?.value) || 1.0;
-    await call('dp.budget.set',{table:t,budget:{total_epsilon:eps}},'dpOut');
+    const delta = parseFloat($('dpDelta')?.value) || 0;
+    await call('dp.budget.set',{principal,total_epsilon:eps,total_delta:delta},'dpOut');
   } catch (e) { setOut({error:String(e)},'dpOut'); }
 }
 
 async function dpAudit() {
-  try { const t = readDbTable('dpDb','dpTable'); await call('dp.audit.log',{table:t},'dpOut'); } catch (e) { setOut({error:String(e)},'dpOut'); }
+  try {
+    const principal = $('dpPrincipal')?.value.trim();
+    await call('dp.audit.log',{principal:principal || undefined,limit:50},'dpOut');
+  } catch (e) { setOut({error:String(e)},'dpOut'); }
 }
 
 async function oblGet() {
@@ -6491,6 +6549,7 @@ wire('btnVecIndexStatus', vecIndexStatus);
 
 // Privacy
 wire('btnDpAggregate', dpAggregate);
+wire('btnDpEvaluate', dpEvaluate);
 wire('btnDpBudgetGet', dpBudgetGet);
 wire('btnDpBudgetSet', dpBudgetSet);
 wire('btnDpAudit', dpAudit);

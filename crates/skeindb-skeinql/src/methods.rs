@@ -942,6 +942,60 @@ pub struct DpAuditLogResult {
     pub next_id: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpEvaluateParams {
+    pub table: BaseTableRef,
+    pub aggregates: Vec<DpAggregateSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<Expr>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epsilons: Vec<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trials: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpEvaluatePoint {
+    pub epsilon: f64,
+    pub trials: u64,
+    pub samples: u64,
+    pub mean_abs_error: f64,
+    pub p95_abs_error: f64,
+    pub max_abs_error: f64,
+    pub mean_relative_error: f64,
+    pub avg_latency_ms: f64,
+    pub overhead_vs_exact: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpEvaluateResult {
+    pub table: BaseTableRef,
+    pub columns: Vec<String>,
+    pub exact_rows: Vec<Vec<serde_json::Value>>,
+    pub rows_examined: u64,
+    pub rows_matched: u64,
+    pub exact_latency_ms: f64,
+    pub mechanism: String,
+    pub delta: f64,
+    pub trials: u64,
+    pub report: Vec<DpEvaluatePoint>,
+}
+
 // --------------------------------
 // advisor.* (research / experimental)
 // --------------------------------
