@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.9 - 2026-05-09
+
+- Closes R18/T189 with a replay-regression CI comparison harness: `skeindb replay run --json --out <report.json>` emits machine-readable run evidence, and `skeindb replay compare --baseline <base.json> --candidate <head.json>` compares p95/p99/span/storage/cache-hot-table deltas against threshold flags.
+- Adds focused CLI parsing and threshold regression tests for the replay comparison path.
+- Keeps R18 honestly prototype-level because deterministic timing injection and cache/LSM reconstruction fidelity remain open under T188.
+- Updates the research backlog and True Status Matrix to **30 done / 79 open**.
+- Refreshes README, formula metadata, runtime baseline docs, docs site, and website status for v0.3.9.
+
 ## v0.3.8 - 2026-05-09
 
 - Adds a comprehensive **Help & Docs** panel to SkeinAdmin: quick-start checklist, panel reference table with one-click jumps, R01-R20 research-track index with hardness pills and primary RPC methods, keyboard-shortcut and deep-link reference, glossary, and links to the canonical documentation site.

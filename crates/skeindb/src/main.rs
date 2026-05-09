@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use skeindb_skeinql::methods::{
     EdgeBundleRedaction, MaintenanceReplayExportParams, MaintenanceReplayImportParams,
-    MaintenanceReplayRunParams, ReplayBundle,
+    MaintenanceReplayRunParams, MaintenanceReplayRunResult, ReplayBundle,
 };
 
 mod engine;
@@ -112,7 +113,7 @@ fn run_replay_bundle_in_workspace(
     bundle: &ReplayBundle,
     workspace_root: &std::path::Path,
     workspace_id: &str,
-) -> anyhow::Result<skeindb_skeinql::methods::MaintenanceReplayRunResult> {
+) -> anyhow::Result<MaintenanceReplayRunResult> {
     let engine =
         engine::Engine::open_with_storage_mode_name(workspace_root, &bundle.manifest.storage_mode)?;
     let _ = engine.maintenance_replay_import(MaintenanceReplayImportParams {
@@ -122,6 +123,171 @@ fn run_replay_bundle_in_workspace(
     engine.maintenance_replay_run(MaintenanceReplayRunParams {
         workspace_id: workspace_id.to_string(),
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayCiThresholds {
+    max_p95_delta_ms: i64,
+    max_p99_delta_ms: i64,
+    max_span_delta_ms: i64,
+    max_disk_bytes_delta: i64,
+    max_missing_hot_tables_delta: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayCiCheck {
+    name: String,
+    baseline: i64,
+    candidate: i64,
+    delta: i64,
+    threshold: i64,
+    ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayCiSummary {
+    bundle_id: String,
+    ok: bool,
+    checksum_match: bool,
+    replayed_tables: u64,
+    replayed_rows: u64,
+    replayed_changes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayCiComparisonReport {
+    ok: bool,
+    baseline: ReplayCiSummary,
+    candidate: ReplayCiSummary,
+    thresholds: ReplayCiThresholds,
+    checks: Vec<ReplayCiCheck>,
+    failures: Vec<String>,
+}
+
+fn replay_ci_summary(result: &MaintenanceReplayRunResult) -> ReplayCiSummary {
+    ReplayCiSummary {
+        bundle_id: result.bundle_id.clone(),
+        ok: result.ok,
+        checksum_match: result
+            .performance_report
+            .as_ref()
+            .map(|report| report.checksum_match)
+            .unwrap_or(false),
+        replayed_tables: result.replayed_tables,
+        replayed_rows: result.replayed_rows,
+        replayed_changes: result.replayed_changes,
+    }
+}
+
+fn replay_ci_check(name: &str, baseline: i64, candidate: i64, threshold: i64) -> ReplayCiCheck {
+    let delta = candidate - baseline;
+    ReplayCiCheck {
+        name: name.to_string(),
+        baseline,
+        candidate,
+        delta,
+        threshold,
+        ok: delta <= threshold,
+    }
+}
+
+fn compare_replay_run_reports(
+    baseline: &MaintenanceReplayRunResult,
+    candidate: &MaintenanceReplayRunResult,
+    thresholds: ReplayCiThresholds,
+) -> anyhow::Result<ReplayCiComparisonReport> {
+    let baseline_perf = baseline
+        .performance_report
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("baseline replay report is missing performance_report"))?;
+    let candidate_perf = candidate
+        .performance_report
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("candidate replay report is missing performance_report"))?;
+
+    let mut failures = Vec::new();
+    if !baseline.ok {
+        failures.push("baseline replay run failed correctness verification".to_string());
+    }
+    if !candidate.ok {
+        failures.push("candidate replay run failed correctness verification".to_string());
+    }
+    if !baseline_perf.checksum_match {
+        failures.push("baseline performance checksum did not match".to_string());
+    }
+    if !candidate_perf.checksum_match {
+        failures.push("candidate performance checksum did not match".to_string());
+    }
+
+    let checks = vec![
+        replay_ci_check(
+            "p95_inter_event_ms_delta",
+            baseline_perf.timing.p95_inter_event_ms_delta,
+            candidate_perf.timing.p95_inter_event_ms_delta,
+            thresholds.max_p95_delta_ms,
+        ),
+        replay_ci_check(
+            "p99_inter_event_ms_delta",
+            baseline_perf.timing.p99_inter_event_ms_delta,
+            candidate_perf.timing.p99_inter_event_ms_delta,
+            thresholds.max_p99_delta_ms,
+        ),
+        replay_ci_check(
+            "span_ms_delta",
+            baseline_perf.timing.span_ms_delta,
+            candidate_perf.timing.span_ms_delta,
+            thresholds.max_span_delta_ms,
+        ),
+        replay_ci_check(
+            "disk_bytes_delta",
+            baseline_perf.storage.disk_bytes_delta,
+            candidate_perf.storage.disk_bytes_delta,
+            thresholds.max_disk_bytes_delta,
+        ),
+        replay_ci_check(
+            "missing_hot_table_count",
+            baseline_perf.cache_warm.missing_hot_table_count as i64,
+            candidate_perf.cache_warm.missing_hot_table_count as i64,
+            thresholds.max_missing_hot_tables_delta,
+        ),
+    ];
+
+    for check in checks.iter().filter(|check| !check.ok) {
+        failures.push(format!(
+            "{} regressed by {} (threshold {})",
+            check.name, check.delta, check.threshold
+        ));
+    }
+
+    Ok(ReplayCiComparisonReport {
+        ok: failures.is_empty(),
+        baseline: replay_ci_summary(baseline),
+        candidate: replay_ci_summary(candidate),
+        thresholds,
+        checks,
+        failures,
+    })
+}
+
+fn read_replay_run_report(path: &str) -> anyhow::Result<MaintenanceReplayRunResult> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn write_json_report<T: Serialize>(report: &T, out: Option<&str>) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(report)?;
+    if let Some(out) = out {
+        let out_path = PathBuf::from(out);
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(out_path, bytes)?;
+    } else {
+        println!("{}", String::from_utf8(bytes)?);
+    }
+    Ok(())
 }
 
 fn run_info_command(data: &str, json: bool) -> anyhow::Result<()> {
@@ -328,6 +494,138 @@ mod tests {
             },
             _ => panic!("expected replay command"),
         }
+    }
+
+    #[test]
+    fn replay_compare_parses_threshold_flags() {
+        let cli = Cli::try_parse_from([
+            "skeindb",
+            "replay",
+            "compare",
+            "--baseline",
+            "baseline.json",
+            "--candidate",
+            "candidate.json",
+            "--max-p95-delta-ms",
+            "15",
+            "--max-p99-delta-ms",
+            "25",
+            "--max-span-delta-ms",
+            "100",
+            "--max-disk-bytes-delta",
+            "4096",
+            "--max-missing-hot-tables-delta",
+            "1",
+            "--out",
+            "report.json",
+        ])
+        .expect("parse replay compare");
+        match cli.command {
+            Commands::Replay { command } => match command {
+                ReplayCommands::Compare {
+                    baseline,
+                    candidate,
+                    max_p95_delta_ms,
+                    max_p99_delta_ms,
+                    max_span_delta_ms,
+                    max_disk_bytes_delta,
+                    max_missing_hot_tables_delta,
+                    out,
+                } => {
+                    assert_eq!(baseline, "baseline.json");
+                    assert_eq!(candidate, "candidate.json");
+                    assert_eq!(max_p95_delta_ms, 15);
+                    assert_eq!(max_p99_delta_ms, 25);
+                    assert_eq!(max_span_delta_ms, 100);
+                    assert_eq!(max_disk_bytes_delta, 4096);
+                    assert_eq!(max_missing_hot_tables_delta, 1);
+                    assert_eq!(out.as_deref(), Some("report.json"));
+                }
+                _ => panic!("expected replay compare command"),
+            },
+            _ => panic!("expected replay command"),
+        }
+    }
+
+    fn replay_result_with_perf(
+        bundle_id: &str,
+        p95_delta: i64,
+        p99_delta: i64,
+        missing_hot_tables: u64,
+    ) -> MaintenanceReplayRunResult {
+        use skeindb_skeinql::methods::{
+            ReplayBundlePerformanceCacheVariance, ReplayBundlePerformanceRunReport,
+            ReplayBundlePerformanceStorageVariance, ReplayBundlePerformanceTimingVariance,
+        };
+
+        MaintenanceReplayRunResult {
+            ok: true,
+            workspace_id: format!("{bundle_id}-workspace"),
+            bundle_id: bundle_id.to_string(),
+            workspace_path: ".replay_workspaces/test".to_string(),
+            expected_checksum: "abc".to_string(),
+            observed_checksum: "abc".to_string(),
+            table_checksums: Vec::new(),
+            replayed_tables: 1,
+            replayed_rows: 10,
+            replayed_changes: 4,
+            performance_report: Some(ReplayBundlePerformanceRunReport {
+                format: "skein.replay.performance.v1".to_string(),
+                baseline_checksum: "perf".to_string(),
+                observed_checksum: "perf".to_string(),
+                checksum_match: true,
+                storage: ReplayBundlePerformanceStorageVariance {
+                    disk_bytes_delta: 0,
+                    wal_bytes_delta: 0,
+                    total_tables_delta: 0,
+                    total_rows_delta: 0,
+                    mvcc_versions_delta: 0,
+                    delta_chains_delta: 0,
+                },
+                cache_warm: ReplayBundlePerformanceCacheVariance {
+                    cached_select_entries_delta: 0,
+                    cached_patch_entries_delta: 0,
+                    hot_table_match_count: 1,
+                    missing_hot_table_count: missing_hot_tables,
+                    extra_hot_table_count: 0,
+                },
+                timing: ReplayBundlePerformanceTimingVariance {
+                    change_count_delta: 0,
+                    span_ms_delta: 0,
+                    p50_inter_event_ms_delta: 0,
+                    p95_inter_event_ms_delta: p95_delta,
+                    p99_inter_event_ms_delta: p99_delta,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn replay_compare_reports_threshold_failures() {
+        let baseline = replay_result_with_perf("baseline", 4, 8, 0);
+        let candidate = replay_result_with_perf("candidate", 22, 40, 2);
+        let report = compare_replay_run_reports(
+            &baseline,
+            &candidate,
+            ReplayCiThresholds {
+                max_p95_delta_ms: 10,
+                max_p99_delta_ms: 20,
+                max_span_delta_ms: 0,
+                max_disk_bytes_delta: 0,
+                max_missing_hot_tables_delta: 1,
+            },
+        )
+        .expect("compare replay reports");
+
+        assert!(!report.ok);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("p95_inter_event_ms_delta")));
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("missing_hot_table_count")));
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -616,6 +914,49 @@ enum ReplayCommands {
         /// Replay bundle path
         #[arg(long)]
         bundle: String,
+
+        /// Emit the full replay run result as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Optional output path for --json
+        #[arg(long)]
+        out: Option<String>,
+    },
+
+    /// Compare two JSON replay run reports and fail on performance regressions.
+    Compare {
+        /// Baseline replay run JSON, usually from the main/base commit
+        #[arg(long)]
+        baseline: String,
+
+        /// Candidate replay run JSON, usually from the PR/head commit
+        #[arg(long)]
+        candidate: String,
+
+        /// Maximum allowed increase in p95 inter-event replay variance
+        #[arg(long, default_value_t = 0)]
+        max_p95_delta_ms: i64,
+
+        /// Maximum allowed increase in p99 inter-event replay variance
+        #[arg(long, default_value_t = 0)]
+        max_p99_delta_ms: i64,
+
+        /// Maximum allowed increase in total replay span variance
+        #[arg(long, default_value_t = 0)]
+        max_span_delta_ms: i64,
+
+        /// Maximum allowed increase in disk-byte replay variance
+        #[arg(long, default_value_t = 0)]
+        max_disk_bytes_delta: i64,
+
+        /// Maximum allowed increase in missing hot-table hints
+        #[arg(long, default_value_t = 0)]
+        max_missing_hot_tables_delta: i64,
+
+        /// Optional JSON output path for the comparison report
+        #[arg(long)]
+        out: Option<String>,
     },
 }
 
@@ -769,20 +1110,24 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
-            ReplayCommands::Run { bundle } => {
+            ReplayCommands::Run { bundle, json, out } => {
                 let bundle_path = PathBuf::from(bundle);
                 let bundle: ReplayBundle = serde_json::from_slice(&fs::read(&bundle_path)?)?;
                 let temp = replay_temp_dir("replay_run")?;
                 let result = run_replay_bundle_in_workspace(&bundle, &temp, "run")?;
-                println!(
-                    "Replay run {} completed in {}: checksum {} (tables={}, rows={}, changes={})",
-                    result.bundle_id,
-                    result.workspace_path,
-                    result.observed_checksum,
-                    result.replayed_tables,
-                    result.replayed_rows,
-                    result.replayed_changes
-                );
+                if json || out.is_some() {
+                    write_json_report(&result, out.as_deref())?;
+                } else {
+                    println!(
+                        "Replay run {} completed in {}: checksum {} (tables={}, rows={}, changes={})",
+                        result.bundle_id,
+                        result.workspace_path,
+                        result.observed_checksum,
+                        result.replayed_tables,
+                        result.replayed_rows,
+                        result.replayed_changes
+                    );
+                }
                 if result.ok {
                     Ok(())
                 } else {
@@ -791,6 +1136,38 @@ async fn main() -> anyhow::Result<()> {
                         result.expected_checksum,
                         result.observed_checksum
                     );
+                }
+            }
+            ReplayCommands::Compare {
+                baseline,
+                candidate,
+                max_p95_delta_ms,
+                max_p99_delta_ms,
+                max_span_delta_ms,
+                max_disk_bytes_delta,
+                max_missing_hot_tables_delta,
+                out,
+            } => {
+                let baseline = read_replay_run_report(&baseline)?;
+                let candidate = read_replay_run_report(&candidate)?;
+                let report = compare_replay_run_reports(
+                    &baseline,
+                    &candidate,
+                    ReplayCiThresholds {
+                        max_p95_delta_ms,
+                        max_p99_delta_ms,
+                        max_span_delta_ms,
+                        max_disk_bytes_delta,
+                        max_missing_hot_tables_delta,
+                    },
+                )?;
+                let ok = report.ok;
+                let failures = report.failures.join("; ");
+                write_json_report(&report, out.as_deref())?;
+                if ok {
+                    Ok(())
+                } else {
+                    anyhow::bail!("replay regression comparison failed: {failures}");
                 }
             }
         },

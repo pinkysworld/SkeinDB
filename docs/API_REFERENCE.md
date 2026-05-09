@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
 Last updated: 2026-05-09
-Runtime baseline: v0.3.7, SkeinQL 1.0, 129 advertised RPC methods
+Runtime baseline: v0.3.9, SkeinQL 1.0, 129 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
@@ -88,7 +88,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 
 ## Current advertised method set
 
-The runtime advertises this set through `system.capabilities.methods` in v0.3.7:
+The runtime advertises this set through `system.capabilities.methods` in v0.3.9:
 
 ```text
 system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,

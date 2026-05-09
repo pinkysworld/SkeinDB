@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **29 done / 80 open** after closing the replay bundle primary-key redaction item, the R19 columnar batch ABI/data interchange item, and the R18 performance-bundle metadata extension. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **30 done / 79 open** after closing the R18 replay-regression CI comparison harness. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -40,6 +40,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-08: T114-T118 are closed with intent-pattern detection for pagination/polling/soft deletes/hierarchies/EXISTS/defaults, sequence-level polling correlation, SkeinQL-native rewrite snippets, SkeinAdmin migration assistant wiring, and the `migration.report_export` JSON/Markdown exporter.
 - 2026-05-08: T310-T316 are closed with `ai.nl.translate` prompt packages and rule translation, dependency-backed `ai.nl.explain` summaries plus preview rows, approval-token-gated `ai.nl.execute`, the `skeindb nl-eval` execution-match harness, SkeinAdmin NL Lab wiring, and focused engine/RPC/eval tests.
 - 2026-05-09 (v0.3.8 admin help-center release): No research-track closures. SkeinAdmin gains a dedicated **Help & Docs** panel (quick start, panel reference, R01-R20 index with hardness pills, keyboard shortcuts, glossary, doc links, live search), locked by `skeinadmin_help_panel_exposes_comprehensive_documentation_center`. Counts unchanged at 29 done / 80 open.
+- 2026-05-09 (v0.3.9 replay CI release): T189 is closed with `skeindb replay run --json --out`, `skeindb replay compare`, thresholded p95/p99/span/storage/cache-hot-table checks, JSON comparison reports, and focused CLI tests. Counts now 30 done / 79 open; R18 remains prototype until T188 timing injection and cache/LSM reconstruction fidelity land.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -208,7 +209,7 @@ The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 - [ ] T186: Geo-distributed “bundle windows” + routing rules (bounded staleness)
 - [x] T187: Performance bundle extensions (LSM state, cache warm hints, timing annotations). Evidence: optional `ReplayBundle.performance`, `ReplayBundlePerformanceProfile`, storage/cache/timing sections, checksum validation, and `replay_bundle_export_import_run_roundtrip`.
 - [ ] T188: Deterministic performance replay runner + variance report. Partial evidence: `maintenance.replay.run` now returns `performance_report`; timing injection and cache/LSM reconstruction fidelity remain open.
-- [ ] T189: Regression CI harness: compare latency distributions across commits
+- [x] T189: Regression CI harness: compare latency distributions across commits. Evidence: `skeindb replay run --json --out`, `skeindb replay compare --baseline --candidate`, threshold flags for p95/p99/span/storage/cache-hot-table deltas, JSON comparison reports, non-zero exit on regressions, and focused CLI tests.
 
 ### Extend Phase 21 — Energy-aware compaction (R20)
 - [x] T204: Energy model instrumentation (CPU + IO estimate; optional external signals). Evidence: `CompactionEnergyConfig`, `CompactionEnergyRuntime`, `estimate_compaction_energy`, and `stats.snapshot.compaction.scheduler.energy`.

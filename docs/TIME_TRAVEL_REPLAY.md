@@ -148,7 +148,8 @@ Replay redaction is primary-key focused. Non-key payload columns remain in the b
 
 - `skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --redaction hash_pk --redaction-salt optional --out file.sreplay`
 - `skeindb replay verify --bundle file.sreplay`
-- `skeindb replay run --bundle file.sreplay`
+- `skeindb replay run --bundle file.sreplay --json --out replay-report.json`
+- `skeindb replay compare --baseline main-report.json --candidate pr-report.json --max-p95-delta-ms 10 --max-p99-delta-ms 20 --out regression-report.json`
 
 ## 4. Observability
 
@@ -212,6 +213,7 @@ Current R18 implementation:
 - The profile uses format `skein.replay.performance.v1` and captures `lsm_state` (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), `cache_warm` (select/patch cache entry counts plus hot-table hints), and `timing` (change count, commit-span, and p50/p95/p99 inter-event deltas).
 - The performance profile has its own checksum and is validated by `maintenance.replay.import` and `maintenance.replay.run` without changing the correctness checksum for older data-only bundles.
 - `maintenance.replay.run` returns `performance_report` when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.
+- `skeindb replay run --json --out <report.json>` writes the full replay run result for CI artifacts, and `skeindb replay compare --baseline <base.json> --candidate <head.json>` fails when candidate p95/p99/span/storage/cache-hot-table deltas exceed configured thresholds.
 
 Current R14/T185 redaction implementation:
 
@@ -219,6 +221,12 @@ Current R14/T185 redaction implementation:
 - Redacted bundles carry a `redaction` metadata section while older unredacted bundles remain valid because the field is optional.
 - Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.
 - SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes `--redaction` plus `--redaction-salt`.
+
+Current R18/T189 CI harness behavior:
+
+- The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.
+- Threshold flags cover `--max-p95-delta-ms`, `--max-p99-delta-ms`, `--max-span-delta-ms`, `--max-disk-bytes-delta`, and `--max-missing-hot-tables-delta`.
+- The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.
 
 Remaining R18 work:
 

@@ -276,7 +276,8 @@ surface's <code>oldest_tombstone_commit_ts_ms</code> to confirm the steady state
 <ul>
 <li><code>skeindb replay export --data ./data --db mydb --from-lsn X --to-lsn Y --redaction hash_pk --redaction-salt optional --out file.sreplay</code></li>
 <li><code>skeindb replay verify --bundle file.sreplay</code></li>
-<li><code>skeindb replay run --bundle file.sreplay</code></li>
+<li><code>skeindb replay run --bundle file.sreplay --json --out replay-report.json</code></li>
+<li><code>skeindb replay compare --baseline main-report.json --candidate pr-report.json --max-p95-delta-ms 10 --max-p99-delta-ms 20 --out regression-report.json</code></li>
 </ul>
 <h2 id="4-observability">4. Observability<a class="headerlink" href="#4-observability" title="Permanent link">¶</a></h2>
 <p>Current runtime behavior:</p>
@@ -330,6 +331,7 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li>The profile uses format <code>skein.replay.performance.v1</code> and captures <code>lsm_state</code> (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), <code>cache_warm</code> (select/patch cache entry counts plus hot-table hints), and <code>timing</code> (change count, commit-span, and p50/p95/p99 inter-event deltas).</li>
 <li>The performance profile has its own checksum and is validated by <code>maintenance.replay.import</code> and <code>maintenance.replay.run</code> without changing the correctness checksum for older data-only bundles.</li>
 <li><code>maintenance.replay.run</code> returns <code>performance_report</code> when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.</li>
+<li><code>skeindb replay run --json --out &lt;report.json&gt;</code> writes the full replay run result for CI artifacts, and <code>skeindb replay compare --baseline &lt;base.json&gt; --candidate &lt;head.json&gt;</code> fails when candidate p95/p99/span/storage/cache-hot-table deltas exceed configured thresholds.</li>
 </ul>
 <p>Current R14/T185 redaction implementation:</p>
 <ul>
@@ -337,6 +339,12 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li>Redacted bundles carry a <code>redaction</code> metadata section while older unredacted bundles remain valid because the field is optional.</li>
 <li>Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.</li>
 <li>SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes <code>--redaction</code> plus <code>--redaction-salt</code>.</li>
+</ul>
+<p>Current R18/T189 CI harness behavior:</p>
+<ul>
+<li>The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.</li>
+<li>Threshold flags cover <code>--max-p95-delta-ms</code>, <code>--max-p99-delta-ms</code>, <code>--max-span-delta-ms</code>, <code>--max-disk-bytes-delta</code>, and <code>--max-missing-hot-tables-delta</code>.</li>
+<li>The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.</li>
 </ul>
 <p>Remaining R18 work:</p>
 <ul>
