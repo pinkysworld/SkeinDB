@@ -216,7 +216,7 @@
 <li><code>SHOW VARIABLES</code>, <code>SHOW STATUS</code>, <code>SHOW CHARACTER SET</code>, <code>SHOW COLLATION</code>, <code>SHOW ENGINES</code>, <code>SHOW GRANTS</code> (including compatibility values for WordPress/common bootstrap variables such as <code>sql_auto_is_null</code>, charset/collation variables, <code>time_zone</code>, and <code>transaction_isolation</code>; unfiltered and scoped forms like <code>SHOW [SESSION|GLOBAL] VARIABLES</code>; simple <code>WHERE Variable_name ...</code> / <code>WHERE Charset ...</code> filters; plus wildcard patterns like <code>SHOW VARIABLES LIKE 'character_set_%'</code>)</li>
 <li><code>information_schema.schemata</code> virtual table</li>
 <li><code>information_schema.tables</code> virtual table with real table metadata</li>
-<li><code>information_schema.columns</code> virtual table with column metadata, ordinal positions, nullable/PK info</li>
+<li><code>information_schema.columns</code> virtual table with column metadata, ordinal positions, nullable/PK info, MySQL-style <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code>, character length, numeric precision/scale, charset/collation, <code>EXTRA</code>, <code>COLUMN_COMMENT</code>, <code>PRIVILEGES</code>, and <code>GENERATION_EXPRESSION</code> fields for ORM/bootstrap probes</li>
 <li><code>information_schema.statistics</code> virtual table with real index data from PK + secondary indexes</li>
 <li><code>information_schema.key_column_usage</code> virtual table (PK + UNIQUE key columns)</li>
 <li><code>information_schema.table_constraints</code> virtual table (PK + UNIQUE constraints)</li>

@@ -16,6 +16,11 @@ fn skeinadmin_forensics_panel_exposes_audit_controls() {
         "btnForAuditVerify",
         "forAuditSummary",
         "Proof Verify",
+        "forDb",
+        "forTable",
+        "forOp",
+        "forToId",
+        "forBundleId",
     ] {
         assert!(
             html.contains(marker),
@@ -26,8 +31,10 @@ fn skeinadmin_forensics_panel_exposes_audit_controls() {
     for marker in [
         "async function forAuditStatus()",
         "async function forAuditVerify()",
+        "function readForensicParams(includeBundle)",
         "maintenance.audit_status",
         "maintenance.audit_verify",
+        "forensic.query",
         "wire('btnForAuditStatus', forAuditStatus);",
         "wire('btnForAuditVerify', forAuditVerify);",
     ] {

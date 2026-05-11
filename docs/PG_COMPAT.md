@@ -1,6 +1,6 @@
 # PostgreSQL Compatibility
 
-Last updated: 2026-05-08
+Last updated: 2026-05-11
 
 Status: Partial advanced baseline
 
@@ -52,6 +52,7 @@ Notes:
 - `INSERT` / `UPDATE` / `DELETE ... RETURNING` extraction with supported follow-up reads, and explicit `0A000` errors for `COPY FROM STDIN` / `COPY TO STDOUT`
 - PG DDL compatibility: `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` → auto-increment integer columns, `CREATE SCHEMA` → `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY` (accepted/ignored), `CREATE INDEX IF NOT EXISTS`, `COMMENT ON` (silently accepted)
 - virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- shared `information_schema.columns` introspection through `sql.exec`, including common metadata fields (`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and `EXTRA`) used by cross-dialect ORMs
 
 ## Module map
 

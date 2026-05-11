@@ -101,7 +101,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CHARACTER SET`, `SHOW COLLATION`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `sql_auto_is_null`, charset/collation variables, `time_zone`, and `transaction_isolation`; unfiltered and scoped forms like `SHOW [SESSION|GLOBAL] VARIABLES`; simple `WHERE Variable_name ...` / `WHERE Charset ...` filters; plus wildcard patterns like `SHOW VARIABLES LIKE 'character_set_%'`)
   - `information_schema.schemata` virtual table
   - `information_schema.tables` virtual table with real table metadata
-  - `information_schema.columns` virtual table with column metadata, ordinal positions, nullable/PK info
+   - `information_schema.columns` virtual table with column metadata, ordinal positions, nullable/PK info, MySQL-style `DATA_TYPE`/`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, `EXTRA`, `COLUMN_COMMENT`, `PRIVILEGES`, and `GENERATION_EXPRESSION` fields for ORM/bootstrap probes
   - `information_schema.statistics` virtual table with real index data from PK + secondary indexes
   - `information_schema.key_column_usage` virtual table (PK + UNIQUE key columns)
   - `information_schema.table_constraints` virtual table (PK + UNIQUE constraints)

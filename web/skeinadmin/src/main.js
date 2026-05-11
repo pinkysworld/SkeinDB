@@ -100,7 +100,7 @@ const RESEARCH_TRACKS = [
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['stats.snapshot', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.evaluate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding, dummy lookups, leakage reports, and overhead reports for access-pattern protection.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain', 'oblivious.evaluate'], panel: 'privacy', status: 'hardened' },
-  { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
+  { id: 'R06', title: 'Forensic Audit', desc: 'Filtered hash-chain queries with boundary, checkpoint, and Merkle inclusion proofs.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
@@ -201,8 +201,9 @@ const RPC_TEMPLATES = [
   { label: 'oblivious.evaluate', method: 'oblivious.evaluate', params: { table:{db:'demo', table:'events'}, trace_rows:[1,2,8,16,32,64] } },
   { label: 'maintenance.audit_status', method: 'maintenance.audit_status', params: {} },
   { label: 'maintenance.audit_verify', method: 'maintenance.audit_verify', params: {} },
-  { label: 'forensic.verify', method: 'forensic.verify', params: { from_id:0, limit:100 } },
-  { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50 } },
+  { label: 'forensic.verify', method: 'forensic.verify', params: { records:[], start_hash:'genesis' } },
+  { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50, filter:{op:'eq', a:{col:'db'}, b:{lit:{t:'str', v:'demo'}}} } },
+  { label: 'forensic.export', method: 'forensic.export', params: { from_id:0, limit:50, bundle_id:'incident-demo' } },
   { label: 'view.create', method: 'view.create', params: { view:{db:'demo',table:'active_users'}, query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
   { label: 'view.status', method: 'view.status', params: { view:{db:'demo',table:'active_users'} } },
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
@@ -5598,25 +5599,47 @@ async function forAuditVerify() {
   } catch (e) { setOut({error:String(e)}, 'forAuditOut'); }
 }
 
+function readForensicParams(includeBundle) {
+  const from = parseInt($('forFromId')?.value, 10);
+  const to = parseInt($('forToId')?.value, 10);
+  const limit = parseInt($('forLimit')?.value, 10);
+  const db = ($('forDb')?.value || '').trim();
+  const table = ($('forTable')?.value || '').trim();
+  const op = ($('forOp')?.value || '').trim();
+  const bundleId = ($('forBundleId')?.value || '').trim();
+  const filter = parseJsonInput($('forFilter')?.value || '', 'Filter');
+  const payload = cleanParams({
+    from_id: Number.isFinite(from) ? from : undefined,
+    to_id: Number.isFinite(to) ? to : undefined,
+    limit: Number.isFinite(limit) && limit > 0 ? limit : 100,
+    op: op || undefined,
+    filter: filter || undefined
+  });
+  if (db && table) payload.table = { db, table };
+  if (includeBundle && bundleId) payload.bundle_id = bundleId;
+  return payload;
+}
+
 async function forVerify() {
   try {
-    const from = parseInt($('forFromId')?.value,10) || 0, limit = parseInt($('forLimit')?.value,10) || 100;
-    await call('forensic.verify',{from_id:from,limit},'forOut');
+    const queryRes = await call('forensic.query', readForensicParams(false), 'forOut');
+    const query = unwrapRpcResult(queryRes, 'forensic.query');
+    const startHash = query?.proof?.preceding_hash || 'genesis';
+    const verifyRes = await call('forensic.verify', { records: query?.records || [], start_hash: startHash }, 'forOut');
+    const verify = unwrapRpcResult(verifyRes, 'forensic.verify');
+    setOut({ query, verify }, 'forOut');
   } catch (e) { setOut({error:String(e)},'forOut'); }
 }
 
 async function forQuery() {
   try {
-    const from = parseInt($('forFromId')?.value,10) || 0, limit = parseInt($('forLimit')?.value,10) || 100;
-    const filter = parseJsonInput($('forFilter')?.value || '','Filter');
-    await call('forensic.query', cleanParams({from_id:from,limit,filter:filter||undefined}), 'forOut');
+    await call('forensic.query', readForensicParams(false), 'forOut');
   } catch (e) { setOut({error:String(e)},'forOut'); }
 }
 
 async function forExport() {
   try {
-    const from = parseInt($('forFromId')?.value,10) || 0, limit = parseInt($('forLimit')?.value,10) || 100;
-    await call('forensic.export',{from_id:from,limit},'forOut');
+    await call('forensic.export', readForensicParams(true), 'forOut');
   } catch (e) { setOut({error:String(e)},'forOut'); }
 }
 
@@ -6012,7 +6035,7 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'research',  title: 'Research Dashboard',purpose: 'Single-pane status for all 20 research tracks.', actions: 'See hardened vs prototype state, jump to each track\'s panel, open relevant RPC methods.' },
   { panel: 'vectors',   title: 'Vectors (R10)',     purpose: 'First-class vector columns with kNN search.', actions: 'Insert, index status, top-k similarity search.' },
   { panel: 'privacy',   title: 'Privacy & DP',      purpose: 'Differential privacy aggregates and oblivious execution.', actions: 'Run DP aggregates with budget, register oblivious policies, explain padding.' },
-  { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with verification and forensic queries.', actions: 'Audit status, verify chain, query and export forensic events.' },
+  { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with filtered verification and forensic proof bundles.', actions: 'Audit status, verify chain, query by DB/table/op/id/filter, proof-verify the returned slice, and export report bundles.' },
   { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, status, drop, explain dependencies.' },
   { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions and Wasm merge modules.', actions: 'Apply, register, simulate; manage Wasm merge registry.' },
   { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, run, inspect plan artifacts, package for edge.' },

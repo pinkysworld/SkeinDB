@@ -1447,6 +1447,9 @@ pub struct ForensicQueryParams {
     pub op: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_id: Option<u64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1491,6 +1494,9 @@ pub struct ForensicExportParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<serde_json::Value>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_id: Option<u64>,

@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="postgresql-compatibility">PostgreSQL Compatibility<a class="headerlink" href="#postgresql-compatibility" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-05-08</p>
+<p>Last updated: 2026-05-11</p>
 <p>Status: Partial advanced baseline</p>
 <p>SkeinDB now ships a PostgreSQL v3 wire protocol listener alongside the MySQL listener and HTTP control plane.
 The current implementation is intentionally narrow: it is good for protocol bring-up, smoke tests, and exercising the shared SQL engine over a PG socket, but it is not yet full PostgreSQL compatibility.</p>
@@ -171,6 +171,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li><code>INSERT</code> / <code>UPDATE</code> / <code>DELETE ... RETURNING</code> extraction with supported follow-up reads, and explicit <code>0A000</code> errors for <code>COPY FROM STDIN</code> / <code>COPY TO STDOUT</code></li>
 <li>PG DDL compatibility: <code>SERIAL</code>/<code>BIGSERIAL</code>/<code>SMALLSERIAL</code> → auto-increment integer columns, <code>CREATE SCHEMA</code> → <code>CREATE DATABASE</code>, <code>CREATE INDEX CONCURRENTLY</code> (accepted/ignored), <code>CREATE INDEX IF NOT EXISTS</code>, <code>COMMENT ON</code> (silently accepted)</li>
 <li>virtual <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
+<li>shared <code>information_schema.columns</code> introspection through <code>sql.exec</code>, including common metadata fields (<code>COLUMN_TYPE</code>, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and <code>EXTRA</code>) used by cross-dialect ORMs</li>
 </ul>
 <h2 id="module-map">Module map<a class="headerlink" href="#module-map" title="Permanent link">¶</a></h2>
 <table>

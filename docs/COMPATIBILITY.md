@@ -1,7 +1,7 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: v0.3.12 truth sync
-Last updated: 2026-05-09
+Status: v0.3.13 truth sync
+Last updated: 2026-05-11
 
 SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
@@ -102,7 +102,7 @@ SkeinDB adoption strategy:
 
 ### INFORMATION_SCHEMA
 - `tables` with real table metadata (catalog, schema, name, type, engine, rows)
-- `columns` with column metadata (ordinal position, nullable, data type, column key)
+- `columns` with column metadata (ordinal position, nullable, data type, column type, length/precision/scale, charset/collation, column key, privileges/comments/generated expression, and `EXTRA`)
 - `schemata`
 - `statistics` with real index data from primary keys and secondary indexes
 - `key_column_usage` (primary key + unique key columns)

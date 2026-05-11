@@ -2065,11 +2065,72 @@ fn mysql_type_desc_display(desc: &Value) -> String {
         "json" => "json".to_string(),
         "bytes" => "blob".to_string(),
         "bool" => "tinyint(1)".to_string(),
-        "string" => match max {
+        "string" | "str" => match max {
             Some(len) => format!("varchar({len})"),
             None => "longtext".to_string(),
         },
         other => other.to_string(),
+    }
+}
+
+fn mysql_data_type_name(desc: &Value) -> String {
+    let kind = desc
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("string")
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "u64" | "i64" => "bigint".to_string(),
+        "f64" => "double".to_string(),
+        "datetime" => "datetime".to_string(),
+        "date" => "date".to_string(),
+        "time" => "time".to_string(),
+        "json" => "json".to_string(),
+        "bytes" => "blob".to_string(),
+        "bool" => "tinyint".to_string(),
+        "string" | "str" => {
+            if desc.get("max").and_then(|v| v.as_u64()).is_some() {
+                "varchar".to_string()
+            } else {
+                "longtext".to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+fn mysql_is_textual_type_desc(desc: &Value) -> bool {
+    matches!(
+        desc.get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("string")
+            .to_ascii_lowercase()
+            .as_str(),
+        "string" | "str" | "text" | "varchar" | "char"
+    )
+}
+
+fn mysql_character_maximum_length(desc: &Value) -> Option<u64> {
+    if mysql_is_textual_type_desc(desc) {
+        desc.get("max").and_then(|v| v.as_u64()).or(Some(255))
+    } else {
+        None
+    }
+}
+
+fn mysql_numeric_precision_scale(desc: &Value) -> (Option<u64>, Option<u64>) {
+    let kind = desc
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("string")
+        .to_ascii_lowercase();
+    let precision = desc.get("precision").and_then(|v| v.as_u64());
+    let scale = desc.get("scale").and_then(|v| v.as_u64());
+    match kind.as_str() {
+        "u64" | "i64" => (precision.or(Some(20)), scale.or(Some(0))),
+        "f64" => (precision.or(Some(53)), scale),
+        "bool" => (Some(1), Some(0)),
+        _ => (None, None),
     }
 }
 
@@ -23399,12 +23460,21 @@ fn information_schema_select_result(
                         .get("nullable")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
-                    let data_type = col
-                        .get("type")
-                        .and_then(|v| v.get("kind"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("string")
-                        .to_string();
+                    let type_desc = col.get("type").unwrap_or(&Value::Null);
+                    let data_type = mysql_data_type_name(type_desc);
+                    let column_type = mysql_type_desc_display(type_desc);
+                    let character_maximum_length = mysql_character_maximum_length(type_desc);
+                    let (numeric_precision, numeric_scale) =
+                        mysql_numeric_precision_scale(type_desc);
+                    let is_textual = mysql_is_textual_type_desc(type_desc);
+                    let column_default = mysql_desc_column_default(&desc, &name)
+                        .as_ref()
+                        .and_then(mysql_default_cell_value)
+                        .map_or(Lit::Null, |v| Lit::Str { v });
+                    let auto_increment = col
+                        .get("auto_increment")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let mut row = BTreeMap::new();
                     row.insert(
                         "TABLE_CATALOG".to_string(),
@@ -23428,6 +23498,57 @@ fn information_schema_select_result(
                         },
                     );
                     row.insert("DATA_TYPE".to_string(), Lit::Str { v: data_type });
+                    row.insert("COLUMN_DEFAULT".to_string(), column_default);
+                    row.insert("COLUMN_TYPE".to_string(), Lit::Str { v: column_type });
+                    row.insert(
+                        "CHARACTER_MAXIMUM_LENGTH".to_string(),
+                        character_maximum_length.map_or(Lit::Null, |v| Lit::U64 { v }),
+                    );
+                    row.insert(
+                        "NUMERIC_PRECISION".to_string(),
+                        numeric_precision.map_or(Lit::Null, |v| Lit::U64 { v }),
+                    );
+                    row.insert(
+                        "NUMERIC_SCALE".to_string(),
+                        numeric_scale.map_or(Lit::Null, |v| Lit::U64 { v }),
+                    );
+                    row.insert(
+                        "CHARACTER_SET_NAME".to_string(),
+                        if is_textual {
+                            Lit::Str {
+                                v: "utf8mb4".to_string(),
+                            }
+                        } else {
+                            Lit::Null
+                        },
+                    );
+                    row.insert(
+                        "COLLATION_NAME".to_string(),
+                        if is_textual {
+                            Lit::Str {
+                                v: "utf8mb4_general_ci".to_string(),
+                            }
+                        } else {
+                            Lit::Null
+                        },
+                    );
+                    row.insert(
+                        "EXTRA".to_string(),
+                        Lit::Str {
+                            v: if auto_increment { "auto_increment" } else { "" }.to_string(),
+                        },
+                    );
+                    row.insert("COLUMN_COMMENT".to_string(), Lit::Str { v: String::new() });
+                    row.insert(
+                        "PRIVILEGES".to_string(),
+                        Lit::Str {
+                            v: "select,insert,update,references".to_string(),
+                        },
+                    );
+                    row.insert(
+                        "GENERATION_EXPRESSION".to_string(),
+                        Lit::Str { v: String::new() },
+                    );
                     row.insert(
                         "COLUMN_KEY".to_string(),
                         Lit::Str {
@@ -23446,6 +23567,17 @@ fn information_schema_select_result(
             "ORDINAL_POSITION",
             "IS_NULLABLE",
             "DATA_TYPE",
+            "COLUMN_DEFAULT",
+            "COLUMN_TYPE",
+            "CHARACTER_MAXIMUM_LENGTH",
+            "NUMERIC_PRECISION",
+            "NUMERIC_SCALE",
+            "CHARACTER_SET_NAME",
+            "COLLATION_NAME",
+            "EXTRA",
+            "COLUMN_COMMENT",
+            "PRIVILEGES",
+            "GENERATION_EXPRESSION",
             "COLUMN_KEY",
         ]
     } else if table.table.eq_ignore_ascii_case("schemata") {
@@ -28374,6 +28506,43 @@ mod tests {
         assert_eq!(column_rows[0][0]["v"].as_str(), Some("id"));
         assert_eq!(column_rows[1][0]["v"].as_str(), Some("name"));
 
+        let column_meta = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT column_name, data_type, column_type, character_maximum_length, numeric_precision, numeric_scale, character_set_name, collation_name, column_key, privileges, extra FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'users' ORDER BY ordinal_position ASC"
+            }),
+        )
+        .await;
+        assert!(column_meta.ok);
+        let meta_rows = column_meta
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(meta_rows.len(), 2);
+        assert_eq!(meta_rows[0][0]["v"].as_str(), Some("id"));
+        assert_eq!(meta_rows[0][1]["v"].as_str(), Some("bigint"));
+        assert_eq!(meta_rows[0][2]["v"].as_str(), Some("bigint unsigned"));
+        assert!(meta_rows[0][3].get("t").and_then(|v| v.as_str()) == Some("null"));
+        assert_eq!(meta_rows[0][4]["v"].as_u64(), Some(20));
+        assert_eq!(meta_rows[0][5]["v"].as_u64(), Some(0));
+        assert_eq!(meta_rows[0][8]["v"].as_str(), Some("PRI"));
+        assert_eq!(
+            meta_rows[0][9]["v"].as_str(),
+            Some("select,insert,update,references")
+        );
+        assert_eq!(meta_rows[1][0]["v"].as_str(), Some("name"));
+        assert_eq!(meta_rows[1][1]["v"].as_str(), Some("varchar"));
+        assert_eq!(meta_rows[1][2]["v"].as_str(), Some("varchar(255)"));
+        assert_eq!(meta_rows[1][3]["v"].as_u64(), Some(255));
+        assert_eq!(meta_rows[1][6]["v"].as_str(), Some("utf8mb4"));
+        assert_eq!(meta_rows[1][7]["v"].as_str(), Some("utf8mb4_general_ci"));
+        assert_eq!(meta_rows[1][10]["v"].as_str(), Some(""));
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -29072,10 +29241,33 @@ mod tests {
 
         let state = build_state(dir.clone(), engine);
 
-        let resp = call_rpc(&state, "forensic.query", json!({})).await;
+        let resp = call_rpc(
+            &state,
+            "forensic.query",
+            json!({
+                "filter": {"op":"eq","a":{"col":"table"},"b":{"lit":{"t":"str","v":"events"}}},
+                "limit": 10
+            }),
+        )
+        .await;
         assert!(resp.ok);
         let result = resp.result.expect("missing result");
         let records = result["records"].clone();
+        assert_eq!(records.as_array().map(|rows| rows.len()), Some(2));
+        assert_eq!(
+            result["proof"]["format"].as_str(),
+            Some("skein.forensic.proof.v1")
+        );
+        assert_eq!(
+            result["proof"]["inclusion_proofs"]
+                .as_array()
+                .map(|rows| rows.len()),
+            Some(2)
+        );
+        assert_eq!(
+            result["proof"]["index_summary"]["by_op"]["insert"].as_u64(),
+            Some(2)
+        );
         let start_hash = result["proof"]["preceding_hash"]
             .as_str()
             .map(|s| s.to_string())
@@ -29094,6 +29286,28 @@ mod tests {
         assert!(resp.result.expect("missing result")["ok"]
             .as_bool()
             .unwrap_or(false));
+
+        let resp = call_rpc(
+            &state,
+            "forensic.export",
+            json!({
+                "filter": {"op":"and","args":[
+                    {"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"app"}}},
+                    {"op":"eq","a":{"col":"op"},"b":{"lit":{"t":"str","v":"insert"}}}
+                ]},
+                "bundle_id": "incident-rpc",
+                "limit": 10
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let bundle = &resp.result.expect("missing result")["bundle"];
+        assert_eq!(bundle["bundle_id"].as_str(), Some("incident-rpc"));
+        assert_eq!(bundle["records"].as_array().map(|rows| rows.len()), Some(2));
+        assert_eq!(
+            bundle["proof"]["index_summary"]["by_table"]["app.events"].as_u64(),
+            Some(2)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

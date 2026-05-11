@@ -8,7 +8,7 @@ Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
-- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.12 runtime method map exposed through `system.capabilities`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.13 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04
@@ -28,9 +28,9 @@ Related: R05
 ## 3. forensic.* — Forensic WAL queries with proofs
 Related: R06
 
-- `forensic.query` — run a forensic query over the hash-chained WAL
-- `forensic.verify` — verify returned proofs
-- `forensic.export` — export a signed/anchored report bundle
+- `forensic.query` — run table/op/id-bounded forensic queries with the SkeinForensic JSON filter grammar and return boundary, checkpoint-anchor, Merkle-root, inclusion-proof, and index-summary metadata
+- `forensic.verify` — verify contiguous returned record slices against a supplied start hash
+- `forensic.export` — export `skein.forensic.bundle.v1` report bundles with the query manifest, records, proof, and verification summary
 
 ## 4. merge.* — Optimistic writes with merge semantics
 Related: R07

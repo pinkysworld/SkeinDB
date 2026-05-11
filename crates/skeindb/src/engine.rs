@@ -5826,6 +5826,11 @@ impl Engine {
                     continue;
                 }
             }
+            if let Some(filter) = params.filter.as_ref() {
+                if !forensic_filter_matches(rec, filter)? {
+                    continue;
+                }
+            }
             records.push(rec.clone());
             if records.len() >= limit {
                 break;
@@ -5862,8 +5867,40 @@ impl Engine {
         } else {
             None
         };
+        let first_chain_index = records
+            .first()
+            .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+            .map(|idx| idx as u64);
+        let last_chain_index = records
+            .last()
+            .and_then(|r| forensic_index_by_id(&self.forensic_chain, r.id))
+            .map(|idx| idx as u64);
+        let checkpoint_anchor = first_chain_index
+            .and_then(|idx| {
+                self.checkpoint_anchors
+                    .iter()
+                    .rev()
+                    .find(|anchor| anchor.chain_len <= idx)
+                    .cloned()
+            })
+            .or_else(|| {
+                if records.is_empty() {
+                    self.checkpoint_anchors.last().cloned()
+                } else {
+                    None
+                }
+            });
+        let next_checkpoint_anchor = last_chain_index.and_then(|idx| {
+            self.checkpoint_anchors
+                .iter()
+                .find(|anchor| anchor.chain_len > idx + 1)
+                .cloned()
+        });
+        let inclusion_proofs = forensic_inclusion_proofs(&self.forensic_chain, &records);
+        let index_summary = forensic_index_summary(&self.forensic_chain, &records);
 
         let proof = serde_json::json!({
+            "format": "skein.forensic.proof.v1",
             "contiguous": contiguous,
             "from_id": from_id,
             "to_id": to_id,
@@ -5871,10 +5908,20 @@ impl Engine {
             "end_hash": end_hash,
             "preceding_hash": preceding_hash,
             "following_hash": following_hash,
+            "boundary": {
+                "preceding_hash": preceding_hash,
+                "following_hash": following_hash,
+                "complete_chain_range": contiguous,
+            },
+            "checkpoint_anchor": checkpoint_anchor,
+            "next_checkpoint_anchor": next_checkpoint_anchor,
+            "anchor_count": self.checkpoint_anchors.len(),
             "chain_head": chain_head,
             "record_count": records.len(),
             "merkle_root": forensic_merkle_root(&records),
             "chain_merkle_root": forensic_merkle_root(&self.forensic_chain),
+            "inclusion_proofs": inclusion_proofs,
+            "index_summary": index_summary,
         });
 
         let out_records = records
@@ -5956,20 +6003,50 @@ impl Engine {
         let query = ForensicQueryParams {
             table: params.table.clone(),
             op: params.op.clone(),
+            filter: params.filter.clone(),
             from_id: params.from_id,
             to_id: params.to_id,
             limit: params.limit,
         };
-        let result = self.forensic_query(query)?;
+        let result = self.forensic_query(query.clone())?;
         let bundle_id = params
             .bundle_id
             .unwrap_or_else(|| format!("bundle_{:x}", now_millis()));
+        let query_manifest = serde_json::json!({
+            "table": query.table,
+            "op": query.op,
+            "filter": query.filter,
+            "from_id": query.from_id,
+            "to_id": query.to_id,
+            "limit": query.limit,
+        });
+        let contiguous = result.proof["contiguous"].as_bool().unwrap_or(false);
+        let verification = if contiguous {
+            serde_json::to_value(
+                self.forensic_verify(ForensicVerifyParams {
+                    records: result.records.clone(),
+                    start_hash: result.proof["preceding_hash"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| Some("genesis".to_string())),
+                })?,
+            )?
+        } else {
+            serde_json::json!({
+                "strategy": "merkle_inclusion_filtered",
+                "chain_slice_ok": null,
+                "generated_inclusion_proofs": result.proof["inclusion_proofs"].as_array().map(|items| items.len()).unwrap_or(0),
+            })
+        };
 
         let bundle = serde_json::json!({
+            "format": "skein.forensic.bundle.v1",
             "bundle_id": bundle_id,
             "generated_at_ms": now_millis(),
+            "query": query_manifest,
             "records": result.records,
-            "proof": result.proof
+            "proof": result.proof,
+            "verification": verification,
         });
 
         Ok(ForensicExportResult { bundle })
@@ -18779,6 +18856,277 @@ fn forensic_genesis_hash() -> String {
 
 fn forensic_index_by_id(records: &[ForensicRecord], id: u64) -> Option<usize> {
     records.iter().position(|r| r.id == id)
+}
+
+fn forensic_filter_matches(
+    rec: &ForensicRecord,
+    filter: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    if filter.is_null() {
+        return Ok(true);
+    }
+    let Some(obj) = filter.as_object() else {
+        anyhow::bail!("invalid_request: forensic filter must be a JSON object");
+    };
+    let looks_like_expr = obj
+        .get("op")
+        .and_then(|v| v.as_str())
+        .map(|op| forensic_filter_operator(op).is_some())
+        .unwrap_or(false)
+        && (obj.contains_key("a") || obj.contains_key("b") || obj.contains_key("args"));
+
+    if !looks_like_expr {
+        for (field, expected) in obj {
+            let actual = forensic_filter_field_value(rec, field)?;
+            let expected = forensic_filter_literal_value(expected)?;
+            if actual != expected {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+
+    let op = obj
+        .get("op")
+        .and_then(|v| v.as_str())
+        .and_then(forensic_filter_operator)
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown forensic filter operator"))?;
+    match op {
+        "and" => {
+            for arg in forensic_filter_args(obj)? {
+                if !forensic_filter_matches(rec, arg)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        "or" => {
+            for arg in forensic_filter_args(obj)? {
+                if forensic_filter_matches(rec, arg)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "not" => {
+            let arg = obj.get("a").or_else(|| obj.get("arg")).ok_or_else(|| {
+                anyhow::anyhow!("invalid_request: not filter requires an operand")
+            })?;
+            Ok(!forensic_filter_matches(rec, arg)?)
+        }
+        "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "contains" => {
+            let left = forensic_filter_operand_value(rec, obj.get("a"))?;
+            let right = forensic_filter_operand_value(rec, obj.get("b"))?;
+            let matched = match op {
+                "eq" => left == right,
+                "ne" => left != right,
+                "contains" => forensic_value_contains(&left, &right),
+                "gt" | "ge" | "lt" | "le" => forensic_compare_values(&left, &right, op)?,
+                _ => false,
+            };
+            Ok(matched)
+        }
+        _ => anyhow::bail!("invalid_request: unknown forensic filter operator"),
+    }
+}
+
+fn forensic_filter_operator(op: &str) -> Option<&'static str> {
+    match op.to_ascii_lowercase().as_str() {
+        "and" => Some("and"),
+        "or" => Some("or"),
+        "not" => Some("not"),
+        "eq" | "=" => Some("eq"),
+        "ne" | "!=" | "<>" => Some("ne"),
+        "gt" | ">" => Some("gt"),
+        "ge" | ">=" => Some("ge"),
+        "lt" | "<" => Some("lt"),
+        "le" | "<=" => Some("le"),
+        "contains" => Some("contains"),
+        _ => None,
+    }
+}
+
+fn forensic_filter_args(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<Vec<&serde_json::Value>> {
+    if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
+        return Ok(args.iter().collect());
+    }
+    let mut args = Vec::new();
+    if let Some(a) = obj.get("a") {
+        args.push(a);
+    }
+    if let Some(b) = obj.get("b") {
+        args.push(b);
+    }
+    if args.is_empty() {
+        anyhow::bail!("invalid_request: forensic boolean filter requires args");
+    }
+    Ok(args)
+}
+
+fn forensic_filter_operand_value(
+    rec: &ForensicRecord,
+    operand: Option<&serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    let operand = operand
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: forensic filter missing operand"))?;
+    if let Some(obj) = operand.as_object() {
+        if let Some(col) = obj.get("col").and_then(|v| v.as_str()) {
+            return forensic_filter_field_value(rec, col);
+        }
+        if let Some(lit) = obj.get("lit") {
+            return forensic_filter_literal_value(lit);
+        }
+        if let Some(value) = obj.get("value") {
+            return forensic_filter_literal_value(value);
+        }
+    }
+    forensic_filter_literal_value(operand)
+}
+
+fn forensic_filter_literal_value(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    if value.get("t").is_some() {
+        let lit: Lit = serde_json::from_value(value.clone())?;
+        return Ok(forensic_lit_plain_value(&lit));
+    }
+    Ok(value.clone())
+}
+
+fn forensic_filter_field_value(
+    rec: &ForensicRecord,
+    field: &str,
+) -> anyhow::Result<serde_json::Value> {
+    match field.to_ascii_lowercase().as_str() {
+        "id" => Ok(serde_json::json!(rec.id)),
+        "ts" | "ts_ms" | "time" => Ok(serde_json::json!(rec.ts_ms)),
+        "db" | "schema" => Ok(serde_json::json!(rec.db)),
+        "table" => Ok(serde_json::json!(rec.table)),
+        "op" | "operation" => Ok(serde_json::json!(rec.op)),
+        "change_seq" | "seq" => Ok(serde_json::json!(rec.change_seq)),
+        "prev_hash" => Ok(serde_json::json!(rec.prev_hash)),
+        "hash" => Ok(serde_json::json!(rec.hash)),
+        "pk" => serde_json::to_value(&rec.pk).map_err(|e| anyhow::anyhow!(e)),
+        other => anyhow::bail!("invalid_request: unknown forensic filter field {other}"),
+    }
+}
+
+fn forensic_lit_plain_value(lit: &Lit) -> serde_json::Value {
+    match lit {
+        Lit::Null => serde_json::Value::Null,
+        Lit::Bool { v } => serde_json::json!(v),
+        Lit::I64 { v } => serde_json::json!(v),
+        Lit::U64 { v } => serde_json::json!(v),
+        Lit::F64 { v } => serde_json::json!(v),
+        Lit::Dec { v } | Lit::Str { v } | Lit::Uuid { v } => serde_json::json!(v),
+        Lit::Bytes { b64 } => serde_json::json!(b64),
+        Lit::Json { v } => v.clone(),
+        Lit::Embedding { dims, v, model } => serde_json::json!({
+            "dims": dims,
+            "v": v,
+            "model": model,
+        }),
+        Lit::Date { iso } | Lit::Time { iso } | Lit::Datetime { iso } => serde_json::json!(iso),
+    }
+}
+
+fn forensic_value_contains(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => left.contains(right),
+        (serde_json::Value::Array(items), needle) => items.iter().any(|item| item == needle),
+        _ => false,
+    }
+}
+
+fn forensic_compare_values(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    op: &str,
+) -> anyhow::Result<bool> {
+    if let (Some(left), Some(right)) = (left.as_f64(), right.as_f64()) {
+        return Ok(match op {
+            "gt" => left > right,
+            "ge" => left >= right,
+            "lt" => left < right,
+            "le" => left <= right,
+            _ => false,
+        });
+    }
+    let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
+        anyhow::bail!("invalid_request: forensic comparison requires numeric or string operands");
+    };
+    Ok(match op {
+        "gt" => left > right,
+        "ge" => left >= right,
+        "lt" => left < right,
+        "le" => left <= right,
+        _ => false,
+    })
+}
+
+fn forensic_inclusion_proofs(
+    chain: &[ForensicRecord],
+    records: &[ForensicRecord],
+) -> Vec<serde_json::Value> {
+    records
+        .iter()
+        .filter_map(|rec| {
+            let chain_index = forensic_index_by_id(chain, rec.id)?;
+            let siblings = forensic_merkle_proof(chain, chain_index)
+                .into_iter()
+                .map(|(hash, sibling_is_right)| {
+                    serde_json::json!({
+                        "hash": hash,
+                        "sibling_side": if sibling_is_right { "right" } else { "left" },
+                    })
+                })
+                .collect::<Vec<_>>();
+            Some(serde_json::json!({
+                "record_id": rec.id,
+                "chain_index": chain_index,
+                "record_hash": rec.hash,
+                "siblings": siblings,
+            }))
+        })
+        .collect()
+}
+
+fn forensic_index_summary(
+    chain: &[ForensicRecord],
+    records: &[ForensicRecord],
+) -> serde_json::Value {
+    let mut by_table: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_op: BTreeMap<String, u64> = BTreeMap::new();
+    let mut by_actor: BTreeMap<String, u64> = BTreeMap::new();
+    let mut first_id = None;
+    let mut last_id = None;
+    let mut min_ts_ms = None;
+    let mut max_ts_ms = None;
+
+    for rec in records {
+        *by_table
+            .entry(format!("{}.{}", rec.db, rec.table))
+            .or_default() += 1;
+        *by_op.entry(rec.op.clone()).or_default() += 1;
+        *by_actor.entry("unknown".to_string()).or_default() += 1;
+        first_id = Some(first_id.map_or(rec.id, |v: u64| v.min(rec.id)));
+        last_id = Some(last_id.map_or(rec.id, |v: u64| v.max(rec.id)));
+        min_ts_ms = Some(min_ts_ms.map_or(rec.ts_ms, |v: u64| v.min(rec.ts_ms)));
+        max_ts_ms = Some(max_ts_ms.map_or(rec.ts_ms, |v: u64| v.max(rec.ts_ms)));
+    }
+
+    serde_json::json!({
+        "format": "skein.forensic.index.v1",
+        "chain_records": chain.len(),
+        "matched_records": records.len(),
+        "first_id": first_id,
+        "last_id": last_id,
+        "min_ts_ms": min_ts_ms,
+        "max_ts_ms": max_ts_ms,
+        "by_table": by_table,
+        "by_op": by_op,
+        "by_actor": by_actor,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -33505,6 +33853,7 @@ mod tests {
         let result = engine.forensic_query(ForensicQueryParams {
             table: None,
             op: None,
+            filter: None,
             from_id: None,
             to_id: None,
             limit: None,
@@ -33516,6 +33865,66 @@ mod tests {
                 .map(|s| s.to_string()),
         })?;
         assert!(verify.ok);
+        assert_eq!(
+            result.proof["format"].as_str(),
+            Some("skein.forensic.proof.v1")
+        );
+        assert_eq!(
+            result.proof["inclusion_proofs"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(result.records.len())
+        );
+        assert_eq!(
+            result.proof["index_summary"]["by_table"]["app.audit"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            result.proof["index_summary"]["by_actor"]["unknown"].as_u64(),
+            Some(2)
+        );
+
+        let filtered = engine.forensic_query(ForensicQueryParams {
+            table: None,
+            op: None,
+            filter: Some(serde_json::json!({
+                "op": "and",
+                "args": [
+                    {"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"app"}}},
+                    {"op":"eq","a":{"col":"table"},"b":{"lit":{"t":"str","v":"audit"}}},
+                    {"op":"ge","a":{"col":"id"},"b":{"lit":{"t":"u64","v":1}}}
+                ]
+            })),
+            from_id: None,
+            to_id: None,
+            limit: None,
+        })?;
+        assert_eq!(filtered.records.len(), 2);
+
+        engine.checkpoint_for_shutdown()?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "audit".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 3 })])],
+            None,
+        )?;
+        let anchored = engine.forensic_query(ForensicQueryParams {
+            table: None,
+            op: Some("insert".to_string()),
+            filter: Some(serde_json::json!({"table":"audit"})),
+            from_id: Some(3),
+            to_id: None,
+            limit: Some(1),
+        })?;
+        assert_eq!(anchored.records.len(), 1);
+        assert_eq!(anchored.proof["anchor_count"].as_u64(), Some(1));
+        assert_eq!(
+            anchored.proof["checkpoint_anchor"]["chain_len"].as_u64(),
+            Some(2)
+        );
 
         let mut tampered = result.records;
         if let Some(first) = tampered.first_mut() {
@@ -33528,6 +33937,104 @@ mod tests {
             start_hash: None,
         })?;
         assert!(!verify.ok);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn forensic_case_study_exports_incident_timeline() -> anyhow::Result<()> {
+        let dir = temp_dir("forensic_case_study");
+        let mut engine = Engine::open(&dir)?;
+        for table in ["sessions", "payments"] {
+            engine.create_table(
+                "app",
+                table,
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+        }
+
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "sessions".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 1 })])],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "payments".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 2 })])],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "sessions".to_string(),
+                r#as: None,
+            },
+            vec![row(&[("id", Lit::U64 { v: 3 })])],
+            None,
+        )?;
+
+        let timeline = engine.forensic_query(ForensicQueryParams {
+            table: None,
+            op: Some("insert".to_string()),
+            filter: Some(serde_json::json!({
+                "op":"and",
+                "args":[
+                    {"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"app"}}},
+                    {"op":"eq","a":{"col":"table"},"b":{"lit":{"t":"str","v":"sessions"}}},
+                    {"op":"contains","a":{"col":"hash"},"b":{"lit":{"t":"str","v":""}}}
+                ]
+            })),
+            from_id: None,
+            to_id: None,
+            limit: Some(10),
+        })?;
+        assert_eq!(timeline.records.len(), 2);
+        assert_eq!(timeline.proof["contiguous"].as_bool(), Some(false));
+        assert_eq!(
+            timeline.proof["inclusion_proofs"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(2)
+        );
+
+        let export = engine.forensic_export(ForensicExportParams {
+            table: None,
+            op: Some("insert".to_string()),
+            filter: Some(serde_json::json!({"table":"sessions"})),
+            from_id: None,
+            to_id: None,
+            limit: Some(10),
+            bundle_id: Some("incident-timeline".to_string()),
+        })?;
+        assert_eq!(
+            export.bundle["format"].as_str(),
+            Some("skein.forensic.bundle.v1")
+        );
+        assert_eq!(
+            export.bundle["bundle_id"].as_str(),
+            Some("incident-timeline")
+        );
+        assert_eq!(
+            export.bundle["verification"]["strategy"].as_str(),
+            Some("merkle_inclusion_filtered")
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

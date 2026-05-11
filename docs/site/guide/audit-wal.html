@@ -125,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="tamper-evident-audit-logging-hash-chained-wal">Tamper-evident Audit Logging (Hash-chained WAL)<a class="headerlink" href="#tamper-evident-audit-logging-hash-chained-wal" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-19</p>
+<p>Status: Hardened runtime surface (prototype WAL log, test-backed proofs)
+Last updated: 2026-05-11</p>
 <p>Goal:
 Provide a tamper-evident history of committed operations by hash-chaining the WAL.</p>
 <p>A hash-chained WAL makes it possible to detect deletion, insertion, or modification of WAL records after the fact.</p>
@@ -169,25 +169,87 @@ If audit retention is required:
 - keep archived WAL segments in an audit/ directory
 - do not delete segments unless the operator accepts breaking the chain</p>
 <hr />
-<h2 id="6-api-surface">6) API surface<a class="headerlink" href="#6-api-surface" title="Permanent link">¶</a></h2>
+<h2 id="6-runtime-api-surface">6) Runtime API surface<a class="headerlink" href="#6-runtime-api-surface" title="Permanent link">¶</a></h2>
 <p>SkeinQL:
-- maintenance.audit_verify { from_checkpoint_id?, from_wal_segment? }
+- maintenance.audit_verify
 - maintenance.audit_status
-- forensic.query / forensic.verify / forensic.export (prototype)</p>
+- forensic.query / forensic.verify / forensic.export</p>
 <p>CLI:
 - skeindb audit-verify --data ./data</p>
-<p>Prototype note:
-- The current scaffold stores a hash-chained record log in <code>forensic_chain.json</code>.
-- Each entry links to the previous hash and records db/table/op/pk metadata.
-- <code>skeindb audit-verify</code> and <code>maintenance.audit_verify</code> currently verify that prototype chain, persist <code>last_verified_ms</code> on success, and return a non-zero CLI exit on mismatch.
-- SkeinAdmin's Forensics panel exposes <code>maintenance.audit_status</code> / <code>maintenance.audit_verify</code> for chain health plus the prototype <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> tooling.
-- Checkpoint-scoped verification flags such as <code>--from-checkpoint</code> remain future work until the WAL-backed verifier lands.</p>
+<p>Runtime note:
+- The current runtime stores a hash-chained record log in <code>forensic_chain.json</code>.
+- Each entry links to the previous hash and records id, timestamp, db, table, op, primary key, change sequence, previous hash, and record hash metadata.
+- <code>skeindb audit-verify</code> and <code>maintenance.audit_verify</code> verify the persisted chain, persist <code>last_verified_ms</code> on success, and return a non-zero CLI exit on mismatch.
+- <code>forensic.query</code> returns filtered records plus a <code>skein.forensic.proof.v1</code> proof with boundary hashes, checkpoint anchor metadata, Merkle roots, inclusion proofs, and an index summary.
+- <code>forensic.verify</code> verifies contiguous returned record slices from a supplied <code>start_hash</code>.
+- <code>forensic.export</code> emits a <code>skein.forensic.bundle.v1</code> report bundle with the query manifest, records, proof, and verification summary.
+- SkeinAdmin's Forensics panel exposes chain health, verification, filtered query, proof verification, and bundle export controls.</p>
+<h3 id="61-skeinforensic-json-filter-grammar">6.1 SkeinForensic JSON filter grammar<a class="headerlink" href="#61-skeinforensic-json-filter-grammar" title="Permanent link">¶</a></h3>
+<p>The minimal query grammar is JSON so it can be sent through SkeinQL without a separate parser:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;and&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;db&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">}}},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;table&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;sessions&quot;</span><span class="p">}}},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;ge&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;id&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">}}}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Supported operators:
+- <code>and</code>, <code>or</code>, <code>not</code>
+- <code>eq</code>, <code>ne</code>, <code>gt</code>, <code>ge</code>, <code>lt</code>, <code>le</code>
+- <code>contains</code> for string containment or array membership</p>
+<p>Supported columns:
+- <code>id</code>, <code>ts_ms</code>, <code>db</code>, <code>schema</code>, <code>table</code>, <code>op</code>, <code>operation</code>, <code>change_seq</code>, <code>seq</code>, <code>pk</code>, <code>prev_hash</code>, <code>hash</code></p>
+<p>For short exact-match filters, an object without expression operands is treated as field equality:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;sessions&quot;</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<h3 id="62-query-and-proof-format">6.2 Query and proof format<a class="headerlink" href="#62-query-and-proof-format" title="Permanent link">¶</a></h3>
+<p>Example query:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;sessions&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;from_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;op&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">}}}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The proof contains:
+- <code>format</code>: <code>skein.forensic.proof.v1</code>
+- <code>contiguous</code>: whether the returned records form a contiguous hash-chain slice
+- <code>preceding_hash</code> / <code>following_hash</code>: boundary proof material for contiguous slices
+- <code>checkpoint_anchor</code> / <code>next_checkpoint_anchor</code> / <code>anchor_count</code>: incremental verification anchors
+- <code>chain_head</code>: current chain head hash
+- <code>merkle_root</code> and <code>chain_merkle_root</code>: filtered result root and full-chain root
+- <code>inclusion_proofs</code>: per-record Merkle sibling paths against the full-chain root
+- <code>index_summary</code>: matched record counts by table, operation, actor bucket, id range, and timestamp range</p>
+<p>For filtered non-contiguous result sets, the boundary chain cannot be verified as a standalone contiguous slice; use the Merkle inclusion proofs and full-chain root instead.</p>
+<h3 id="63-export-bundle-format">6.3 Export bundle format<a class="headerlink" href="#63-export-bundle-format" title="Permanent link">¶</a></h3>
+<p><code>forensic.export</code> returns:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;bundle&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.forensic.bundle.v1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;incident-17&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;generated_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1778500000000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;from_id&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">,</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">50</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;records&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">    </span><span class="nt">&quot;proof&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;skein.forensic.proof.v1&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;verification&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;ok&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;head_hash&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>When a filter produces a non-contiguous result set, <code>verification.strategy</code> is <code>merkle_inclusion_filtered</code> and the bundle carries generated inclusion proofs rather than a contiguous chain-slice verification result.</p>
 <hr />
 <h2 id="7-threats-and-limitations">7) Threats and limitations<a class="headerlink" href="#7-threats-and-limitations" title="Permanent link">¶</a></h2>
 <ul>
 <li>Hash chaining detects tampering but does not prevent it.</li>
 <li>For non-repudiation, anchoring (signing) is required.</li>
 <li>If an attacker can both tamper and rewrite the signature anchor, the system is compromised.</li>
+<li>The current record log captures operation metadata, not full WAL payload bytes.</li>
+<li>Actor/user attribution is currently summarized as <code>unknown</code> until authenticated principal metadata is attached to forensic records.</li>
 </ul>
 <hr />
 <h2 id="8-metrics">8) Metrics<a class="headerlink" href="#8-metrics" title="Permanent link">¶</a></h2>
@@ -217,7 +279,12 @@ If audit retention is required:
 <li><a href="#3-checkpoints-and-anchoring">3) Checkpoints and anchoring</a></li>
 <li><a href="#4-verification-algorithm">4) Verification algorithm</a></li>
 <li><a href="#5-retention-policies">5) Retention policies</a></li>
-<li><a href="#6-api-surface">6) API surface</a></li>
+<li><a href="#6-runtime-api-surface">6) Runtime API surface</a><ul>
+<li><a href="#61-skeinforensic-json-filter-grammar">6.1 SkeinForensic JSON filter grammar</a></li>
+<li><a href="#62-query-and-proof-format">6.2 Query and proof format</a></li>
+<li><a href="#63-export-bundle-format">6.3 Export bundle format</a></li>
+</ul>
+</li>
 <li><a href="#7-threats-and-limitations">7) Threats and limitations</a></li>
 <li><a href="#8-metrics">8) Metrics</a></li>
 </ul>

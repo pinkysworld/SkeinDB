@@ -153,7 +153,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <li><strong>19. WebAssembly-Native Query Operators</strong> → <code>docs/research_agenda/R19_webassembly-native-query-operators.md</code></li>
 <li><strong>20. Energy-Aware Compaction Scheduling</strong> → <code>docs/research_agenda/R20_energy-aware-compaction-scheduling.md</code></li>
 </ul>
-<h2 id="implementation-status-snapshot-2026-05-08">Implementation status snapshot (2026-05-08)<a class="headerlink" href="#implementation-status-snapshot-2026-05-08" title="Permanent link">¶</a></h2>
+<h2 id="implementation-status-snapshot-2026-05-11">Implementation status snapshot (2026-05-11)<a class="headerlink" href="#implementation-status-snapshot-2026-05-11" title="Permanent link">¶</a></h2>
 <p>All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.</p>
 <table>
 <thead>
@@ -191,8 +191,8 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 </tr>
 <tr>
 <td>R06</td>
-<td>Implemented (prototype)</td>
-<td>Forensic WAL query/verify/export (<code>forensic.*</code>) + tamper checks</td>
+<td>Hardened</td>
+<td>Forensic WAL query/verify/export (<code>forensic.*</code>), SkeinForensic JSON filters, boundary/checkpoint/Merkle inclusion proofs, export bundles, incident-timeline test coverage, and SkeinAdmin Forensics wiring</td>
 </tr>
 <tr>
 <td>R07</td>
@@ -433,7 +433,7 @@ Each proposal is designed to produce publishable research contributions while ad
 <ul>
 <li><a href="#executive-summary">Executive Summary</a></li>
 <li><a href="#proposals-20">Proposals (20)</a></li>
-<li><a href="#implementation-status-snapshot-2026-05-08">Implementation status snapshot (2026-05-08)</a></li>
+<li><a href="#implementation-status-snapshot-2026-05-11">Implementation status snapshot (2026-05-11)</a></li>
 <li><a href="#priority-matrix-from-agenda">Priority Matrix (from agenda)</a></li>
 <li><a href="#dependency-tracking-as-infrastructure">Dependency Tracking as Infrastructure</a></li>
 <li><a href="#webassembly-as-universal-sandbox">WebAssembly as Universal Sandbox</a></li>

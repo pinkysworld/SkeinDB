@@ -31,7 +31,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
-## Implementation status snapshot (2026-05-08)
+## Implementation status snapshot (2026-05-11)
 
 All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
 
@@ -42,7 +42,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R03 | Hardened | Delta-chained values, periodic snapshots, skip patches, compaction restructuring, topology reports, and delta benchmarks (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
 | R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
 | R05 | Hardened | Oblivious policy/explain/evaluate (`oblivious.*`), padded scans, dummy lookups, trace leakage/overhead reports, and SkeinAdmin controls |
-| R06 | Implemented (prototype) | Forensic WAL query/verify/export (`forensic.*`) + tamper checks |
+| R06 | Hardened | Forensic WAL query/verify/export (`forensic.*`), SkeinForensic JSON filters, boundary/checkpoint/Merkle inclusion proofs, export bundles, incident-timeline test coverage, and SkeinAdmin Forensics wiring |
 | R07 | Implemented (prototype) | Merge policies + wasm merge registry (`merge.*`) + conflict tests |
 | R08 | Implemented (prototype) | Incremental view APIs (`view.*`) + dependency refresh tests |
 | R09 | Implemented | QUIC-native SkeinQL transport + `tests/quic_rpc.rs` |

@@ -4,7 +4,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-05-11 (v0.3.12).
+Last updated: 2026-05-11 (v0.3.13).
 
 **SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
@@ -15,7 +15,7 @@ What sets SkeinDB apart is what's already working under the hood:
 - **Content-addressed deduplication out of the box.** Every value passes through a hash-keyed ValueStore. Live `dedup_ratio` and bytes-saved metrics are exposed in `stats.snapshot` and rendered live in the admin dashboard — no opt-in flag, no extra build.
 - **Delta-chained values** keep similar payloads compact by storing only the diff against a base entry, with policy-driven chain-depth limits and compaction-time rebase.
 - **MVCC time-travel reads.** Run `SELECT ... AS OF '2026-04-01T00:00:00Z'` or set `@@skein.as_of` and read the database as it was at any retained timestamp, with history retention/GC controllable at runtime.
-- **Tamper-evident audit WAL.** A BLAKE3-256 hash chain plus checkpoint anchors plus Merkle inclusion proofs — verify the entire log with one RPC.
+- **Tamper-evident audit WAL.** A BLAKE3-256 hash chain plus checkpoint anchors, filtered forensic queries, boundary hashes, and Merkle inclusion proofs — verify the chain or export a proof bundle with one RPC.
 - **Dedup-preserving encryption.** Two AEAD modes (`ENC_RANDOM` and the convergent `ENC_MLE_DB`), key registration / rotation / re-encryption progress reporting, and a redacted in-memory audit ring — all driven from the SkeinAdmin Encryption panel.
 - **Vector search** with an HNSW graph index (`vector.insert`, `vector.search`).
 - **Differential privacy** with COUNT/SUM/AVG aggregates, persisted budgets/audit, privacy ETags, seeded Laplace/Gaussian noise, and Rényi-DP composition tracking (`dp.*`).
@@ -43,14 +43,14 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 - **MySQL compatibility** is the most mature adoption path. The 1600-line compatibility corpus covers DML, joins, aggregates, window functions, JSON functions, CTEs, UNION, GROUP BY, prepared statements, and more — and runs end-to-end on every commit.
 - **WordPress-class workloads** are a first-class target: installer/admin query shapes are covered, and a live WordPress smoke test runs against the listener.
 - **PostgreSQL v3** wire baseline with SCRAM-SHA-256 auth, simple + extended query protocol, virtual `pg_catalog`, transaction/savepoint state, and SQLSTATE-mapped errors.
-- **SkeinAdmin** is a real embedded control panel: schema browsing, SQL workspaces, Easy Viewer with inline edit + WYSIWYG schema design, dashboards with live storage/dedup/MVCC/cache cards, settings + token/user management, telemetry, privacy controls, index-advisor workflows, CDC, time-travel, replay, encryption, and forensics.
+- **SkeinAdmin** is a real embedded control panel: schema browsing, SQL workspaces, Easy Viewer with inline edit + WYSIWYG schema design, dashboards with live storage/dedup/MVCC/cache cards, settings + token/user management, telemetry, privacy controls, index-advisor workflows, CDC, time-travel, replay, encryption, and forensic query/proof export workflows.
 - **SkeinQL** is the preferred native API: typed JSON-RPC over HTTP and QUIC.
 - **Row persistence** defaults to segment-backed `.rseg` storage.
 
 ## What's Still Partial
 
 - PostgreSQL support is real but still partial: COPY protocol, portal suspension, broader dialect/catalog parity, and production-grade driver matrices are still open. See [docs/PG_COMPAT.md](docs/PG_COMPAT.md).
-- Eighteen research tracks (`R01`–`R20`) are hardened with evidence-backed tests, while `R18` and `R19` remain prototype-level. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
+- Eighteen research tracks (`R01`–`R20`) are hardened with evidence-backed tests, with the R06 checklist now closed; `R18` and `R19` remain prototype-level. See [docs/TRUE_STATUS_MATRIX.md](docs/TRUE_STATUS_MATRIX.md).
 - Clustering, CDC, snapshots, Wasm operators, and advisor flows are wired end-to-end; R19 now includes artifact inspection and host-backed edge packaging, while native Wasm codegen/SIMD still need hardening.
 - SkeinDB does **not** claim 100% MySQL or PostgreSQL parity.
 

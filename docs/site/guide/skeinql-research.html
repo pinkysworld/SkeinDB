@@ -131,7 +131,7 @@
 - These methods are <strong>not required</strong> for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in <code>docs/research_agenda/</code>.
-- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.12 runtime method map exposed through <code>system.capabilities</code>.</p>
+- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.13 runtime method map exposed through <code>system.capabilities</code>.</p>
 <h2 id="1-dp-differential-privacy">1. dp.* — Differential privacy<a class="headerlink" href="#1-dp-differential-privacy" title="Permanent link">¶</a></h2>
 <p>Related: R04</p>
 <ul>
@@ -150,9 +150,9 @@
 <h2 id="3-forensic-forensic-wal-queries-with-proofs">3. forensic.* — Forensic WAL queries with proofs<a class="headerlink" href="#3-forensic-forensic-wal-queries-with-proofs" title="Permanent link">¶</a></h2>
 <p>Related: R06</p>
 <ul>
-<li><code>forensic.query</code> — run a forensic query over the hash-chained WAL</li>
-<li><code>forensic.verify</code> — verify returned proofs</li>
-<li><code>forensic.export</code> — export a signed/anchored report bundle</li>
+<li><code>forensic.query</code> — run table/op/id-bounded forensic queries with the SkeinForensic JSON filter grammar and return boundary, checkpoint-anchor, Merkle-root, inclusion-proof, and index-summary metadata</li>
+<li><code>forensic.verify</code> — verify contiguous returned record slices against a supplied start hash</li>
+<li><code>forensic.export</code> — export <code>skein.forensic.bundle.v1</code> report bundles with the query manifest, records, proof, and verification summary</li>
 </ul>
 <h2 id="4-merge-optimistic-writes-with-merge-semantics">4. merge.* — Optimistic writes with merge semantics<a class="headerlink" href="#4-merge-optimistic-writes-with-merge-semantics" title="Permanent link">¶</a></h2>
 <p>Related: R07</p>

@@ -125,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="skeindb-compatibility-mysql-postgresql-sql">SkeinDB Compatibility (MySQL / PostgreSQL / SQL)<a class="headerlink" href="#skeindb-compatibility-mysql-postgresql-sql" title="Permanent link">¶</a></h1>
-<p>Status: v0.3.12 truth sync
-Last updated: 2026-05-09</p>
+<p>Status: v0.3.13 truth sync
+Last updated: 2026-05-11</p>
 <p>SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
 - Speak PostgreSQL wire protocol (port 5432, partial baseline today) so early PG clients can connect while broader dialect/catalog parity is completed.
@@ -229,7 +229,7 @@ Last updated: 2026-05-09</p>
 <h3 id="information_schema">INFORMATION_SCHEMA<a class="headerlink" href="#information_schema" title="Permanent link">¶</a></h3>
 <ul>
 <li><code>tables</code> with real table metadata (catalog, schema, name, type, engine, rows)</li>
-<li><code>columns</code> with column metadata (ordinal position, nullable, data type, column key)</li>
+<li><code>columns</code> with column metadata (ordinal position, nullable, data type, column type, length/precision/scale, charset/collation, column key, privileges/comments/generated expression, and <code>EXTRA</code>)</li>
 <li><code>schemata</code></li>
 <li><code>statistics</code> with real index data from primary keys and secondary indexes</li>
 <li><code>key_column_usage</code> (primary key + unique key columns)</li>

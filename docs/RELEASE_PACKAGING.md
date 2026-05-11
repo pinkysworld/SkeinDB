@@ -20,7 +20,7 @@ Local Developer ID or Apple Development signing example:
 cargo build --release -p skeindb
 MACOS_CODESIGN_IDENTITY="Developer ID Application: Example Inc (TEAMID)" \
 	scripts/release/build_macos_signed_artifact.sh \
-		--version 0.3.12 \
+		--version 0.3.13 \
 		--binary target/release/skeindb \
 		--output dist
 ```

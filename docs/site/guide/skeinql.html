@@ -125,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
-<p>Status: Draft v1.0 (implementable; v0.3.12 runtime sync)
-Last updated: 2026-05-09</p>
+<p>Status: Draft v1.0 (implementable; v0.3.13 runtime sync)
+Last updated: 2026-05-11</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <ul>
@@ -1376,17 +1376,38 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="p">}</span>
 </code></pre></div>
 
-<h3 id="1013-forensic-experimental">10.13 forensic.* (experimental)<a class="headerlink" href="#1013-forensic-experimental" title="Permanent link">¶</a></h3>
-<p>Forensic query and verification over the hash-chained audit log.</p>
+<h3 id="1013-forensic-experimental-r06-hardened">10.13 forensic.* (experimental, R06 hardened)<a class="headerlink" href="#1013-forensic-experimental-r06-hardened" title="Permanent link">¶</a></h3>
+<p>Forensic query and verification over the hash-chained audit log. <code>forensic.query</code> accepts structured table/op/id bounds plus a minimal JSON filter grammar, and returns proof material for contiguous chain slices and filtered Merkle-inclusion result sets.</p>
 <h4 id="forensicquery">forensic.query<a class="headerlink" href="#forensicquery" title="Permanent link">¶</a></h4>
 <p>Params:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;from_id&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">200</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;from_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;to_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;op&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">}}}</span>
+<span class="p">}</span>
 </code></pre></div>
 
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;records&quot;</span><span class="p">:[{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">,</span><span class="nt">&quot;hash&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">}],</span><span class="nt">&quot;proof&quot;</span><span class="p">:{</span><span class="nt">&quot;chain_head&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">,</span><span class="nt">&quot;contiguous&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">}}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;records&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">,</span><span class="nt">&quot;hash&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">,</span><span class="nt">&quot;prev_hash&quot;</span><span class="p">:</span><span class="s2">&quot;genesis&quot;</span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;proof&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.forensic.proof.v1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;contiguous&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;preceding_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;following_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;checkpoint_anchor&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chain_head&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abcd&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;merkle_root&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chain_merkle_root&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;inclusion_proofs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;record_id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;chain_index&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;record_hash&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">,</span><span class="nt">&quot;siblings&quot;</span><span class="p">:[]}],</span>
+<span class="w">    </span><span class="nt">&quot;index_summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;matched_records&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;by_table&quot;</span><span class="p">:{</span><span class="nt">&quot;mydb.users&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">},</span><span class="nt">&quot;by_op&quot;</span><span class="p">:{</span><span class="nt">&quot;insert&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">},</span><span class="nt">&quot;by_actor&quot;</span><span class="p">:{</span><span class="nt">&quot;unknown&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">}}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
 </code></pre></div>
 
+<p>Filter operators: <code>and</code>, <code>or</code>, <code>not</code>, <code>eq</code>, <code>ne</code>, <code>gt</code>, <code>ge</code>, <code>lt</code>, <code>le</code>, and <code>contains</code>. Filter operands can reference <code>id</code>, <code>ts_ms</code>, <code>db</code>, <code>schema</code>, <code>table</code>, <code>op</code>, <code>operation</code>, <code>change_seq</code>, <code>seq</code>, <code>pk</code>, <code>prev_hash</code>, or <code>hash</code> with <code>{ "col": "..." }</code>, or typed SkeinQL literals with <code>{ "lit": {"t":"str","v":"..."} }</code>.</p>
 <h4 id="forensicverify">forensic.verify<a class="headerlink" href="#forensicverify" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;records&quot;</span><span class="p">:[{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">,</span><span class="nt">&quot;hash&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">,</span><span class="nt">&quot;prev_hash&quot;</span><span class="p">:</span><span class="s2">&quot;genesis&quot;</span><span class="p">}],</span><span class="nt">&quot;start_hash&quot;</span><span class="p">:</span><span class="s2">&quot;genesis&quot;</span><span class="p">}</span>
@@ -1398,11 +1419,21 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 
 <h4 id="forensicexport">forensic.export<a class="headerlink" href="#forensicexport" title="Permanent link">¶</a></h4>
 <p>Params:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="s2">&quot;case-17&quot;</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="s2">&quot;case-17&quot;</span><span class="p">,</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">200</span><span class="p">}</span>
 </code></pre></div>
 
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;bundle&quot;</span><span class="p">:{</span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="s2">&quot;case-17&quot;</span><span class="p">,</span><span class="nt">&quot;records&quot;</span><span class="p">:[{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">}],</span><span class="nt">&quot;proof&quot;</span><span class="p">:{</span><span class="nt">&quot;chain_head&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">}}}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;bundle&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.forensic.bundle.v1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;case-17&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;generated_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1778500000000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;query&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">200</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;records&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;insert&quot;</span><span class="p">}],</span>
+<span class="w">    </span><span class="nt">&quot;proof&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;skein.forensic.proof.v1&quot;</span><span class="p">,</span><span class="nt">&quot;chain_head&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;verification&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;ok&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;head_hash&quot;</span><span class="p">:</span><span class="s2">&quot;abcd&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
 </code></pre></div>
 
 <h3 id="1014-merge-experimental">10.14 merge.* (experimental)<a class="headerlink" href="#1014-merge-experimental" title="Permanent link">¶</a></h3>
@@ -2028,7 +2059,7 @@ Servers SHOULD expose supported method names in <code>system.capabilities</code>
 <li><a href="#1010-vector-experimental">10.10 vector.* (experimental)</a></li>
 <li><a href="#1011-ai-experimental">10.11 ai.* (experimental)</a></li>
 <li><a href="#1012-oblivious-experimental">10.12 oblivious.* (experimental)</a></li>
-<li><a href="#1013-forensic-experimental">10.13 forensic.* (experimental)</a></li>
+<li><a href="#1013-forensic-experimental-r06-hardened">10.13 forensic.* (experimental, R06 hardened)</a></li>
 <li><a href="#1014-merge-experimental">10.14 merge.* (experimental)</a></li>
 <li><a href="#1015-wasmplan-experimental">10.15 wasm.plan.* (experimental)</a></li>
 <li><a href="#1016-view-experimental">10.16 view.* (experimental)</a></li>

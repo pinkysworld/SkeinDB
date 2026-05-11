@@ -1427,7 +1427,8 @@
             </div>
             <div class="card wide"><h2>Forensic Query &amp; Export</h2>
               <div class="callout">Explore the prototype forensic chain directly with filtered queries, slice verification, and export tooling. These controls complement the maintenance audit status/verify path above.</div>
-              <div class="row"><div class="field"><label>From ID</label><input id="forFromId" type="number" value="0" /></div><div class="field"><label>Limit</label><input id="forLimit" type="number" value="100" /></div></div>
+              <div class="row"><div class="field"><label>DB</label><input id="forDb" placeholder="optional" /></div><div class="field"><label>Table</label><input id="forTable" placeholder="optional" /></div><div class="field"><label>Operation</label><input id="forOp" placeholder="insert" /></div></div>
+              <div class="row"><div class="field"><label>From ID</label><input id="forFromId" type="number" value="0" /></div><div class="field"><label>To ID</label><input id="forToId" type="number" placeholder="optional" /></div><div class="field"><label>Limit</label><input id="forLimit" type="number" value="100" /></div><div class="field"><label>Bundle ID</label><input id="forBundleId" placeholder="optional" /></div></div>
               <div class="field"><label>Filter</label><textarea id="forFilter" rows="2" placeholder='{"op":"eq","a":{"col":"db"},"b":{"lit":{"t":"str","v":"demo"}}}'></textarea></div>
               <div class="actions"><button id="btnForVerify" class="primary sm">Proof Verify</button><button id="btnForQuery" class="sm">Query</button><button id="btnForExport" class="secondary sm">Export</button></div>
               <pre id="forOut">Ready.</pre>

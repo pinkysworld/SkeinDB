@@ -85,7 +85,7 @@ Phase 0 verification checklist:
 ## Phase 9 - Tamper-evident WAL audit
 - [x] T090: WALHeader v2 with hash chaining (docs/AUDIT_WAL.md)
 - [x] T091: checkpoint anchors + audit status
-- [x] T092: audit verify CLI/API + console page. Latest: SkeinAdmin's Forensics panel now exposes `maintenance.audit_status` and `maintenance.audit_verify` alongside the prototype `forensic.query` / `forensic.verify` / `forensic.export` tools.
+- [x] T092: audit verify CLI/API + console page. Latest: SkeinAdmin's Forensics panel now exposes `maintenance.audit_status` and `maintenance.audit_verify` alongside filtered `forensic.query`, proof-backed `forensic.verify`, and `forensic.export` report bundle tools.
 
 ## Phase 10 - Hybrid row/column snapshots
 - [x] T100: Snapshot builder (scan MVCC at snapshot_ts) + cseg writer (docs/COLUMN_SNAPSHOTS.md). Latest: snapshot builds now honor `snapshot_ts`, persist `manifest.json` + `.cseg` sidecars under `data/snapshots/`, and keep those artifacts in sync during incremental refresh.

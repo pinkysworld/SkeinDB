@@ -1,7 +1,7 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.12 runtime sync)
-Last updated: 2026-05-09
+Status: Draft v1.0 (implementable; v0.3.13 runtime sync)
+Last updated: 2026-05-11
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:
@@ -1640,22 +1640,44 @@ Result:
 }
 ```
 
-### 10.13 forensic.* (experimental)
+### 10.13 forensic.* (experimental, R06 hardened)
 
-Forensic query and verification over the hash-chained audit log.
+Forensic query and verification over the hash-chained audit log. `forensic.query` accepts structured table/op/id bounds plus a minimal JSON filter grammar, and returns proof material for contiguous chain slices and filtered Merkle-inclusion result sets.
 
 #### forensic.query
 Params:
 
 ```json
-{"table":{"db":"mydb","table":"users"},"from_id":0,"limit":200}
+{
+  "table": {"db":"mydb","table":"users"},
+  "from_id": 0,
+  "to_id": 500,
+  "limit": 200,
+  "filter": {"op":"eq","a":{"col":"op"},"b":{"lit":{"t":"str","v":"insert"}}}
+}
 ```
 
 Result:
 
 ```json
-{"records":[{"id":1,"op":"insert","hash":"abcd"}],"proof":{"chain_head":"abcd","contiguous":true}}
+{
+  "records": [{"id":1,"op":"insert","hash":"abcd","prev_hash":"genesis"}],
+  "proof": {
+    "format": "skein.forensic.proof.v1",
+    "contiguous": true,
+    "preceding_hash": null,
+    "following_hash": null,
+    "checkpoint_anchor": null,
+    "chain_head": "abcd",
+    "merkle_root": "...",
+    "chain_merkle_root": "...",
+    "inclusion_proofs": [{"record_id":1,"chain_index":0,"record_hash":"abcd","siblings":[]}],
+    "index_summary": {"matched_records":1,"by_table":{"mydb.users":1},"by_op":{"insert":1},"by_actor":{"unknown":1}}
+  }
+}
 ```
+
+Filter operators: `and`, `or`, `not`, `eq`, `ne`, `gt`, `ge`, `lt`, `le`, and `contains`. Filter operands can reference `id`, `ts_ms`, `db`, `schema`, `table`, `op`, `operation`, `change_seq`, `seq`, `pk`, `prev_hash`, or `hash` with `{ "col": "..." }`, or typed SkeinQL literals with `{ "lit": {"t":"str","v":"..."} }`.
 
 #### forensic.verify
 Params:
@@ -1674,13 +1696,23 @@ Result:
 Params:
 
 ```json
-{"table":{"db":"mydb","table":"users"},"bundle_id":"case-17"}
+{"table":{"db":"mydb","table":"users"},"bundle_id":"case-17","limit":200}
 ```
 
 Result:
 
 ```json
-{"bundle":{"bundle_id":"case-17","records":[{"id":1,"op":"insert"}],"proof":{"chain_head":"abcd"}}}
+{
+  "bundle": {
+    "format": "skein.forensic.bundle.v1",
+    "bundle_id": "case-17",
+    "generated_at_ms": 1778500000000,
+    "query": {"table":{"db":"mydb","table":"users"},"limit":200},
+    "records": [{"id":1,"op":"insert"}],
+    "proof": {"format":"skein.forensic.proof.v1","chain_head":"abcd"},
+    "verification": {"ok":true,"head_hash":"abcd"}
+  }
+}
 ```
 
 ### 10.14 merge.* (experimental)

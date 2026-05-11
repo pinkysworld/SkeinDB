@@ -22,17 +22,18 @@ Implemented navigation areas:
 - **Cluster** (join tokens, node join/leave, replica promotion, shard create/move/rebalance)
 - **Settings Manager** (`settings.get` / `settings.set`, including `cluster.state.v1`)
 - **Time Travel & Replay** (`query.select as_of`, `maintenance.history.*`, `maintenance.replay.*`, edge bundle request/apply/status, bundle download/import, integrity summary)
+- **Forensics** (`maintenance.audit_status`, `maintenance.audit_verify`, filtered `forensic.query`, proof-backed verify flow, and `forensic.export` report bundles)
 - **RPC Explorer** (full method-level access)
   - includes CDC cursor helpers such as `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close`
 - **Research Dashboard**: all R01-R20 tracks link to a concrete panel or one-click RPC template, including R01 learned-index stats, R14 edge bundles, and R20 compaction scheduling.
 - **Migration Assistant** (intent + rewrite preview)
 - **NL Lab** (translate/explain/execute workflow)
+- **Help & Documentation** (quick start, panel reference, research track index, keyboard/deep-link reference, glossary, doc links, and live search)
 
 Roadmap areas:
 - **Index Advisor** + **Index Synthesis** (dependency-driven)
 - **Views** (incremental maintenance)
 - **CDC** dedicated subscriptions page + lag visualization
-- **Forensics** (hash-chained WAL verification + proofs)
 - **Performance Replay extensions** (timing capture / variance analysis beyond current snapshot-based replay bundles)
 - Experimental: **Embeddings**, **NL Query**
 

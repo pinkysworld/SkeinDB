@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.13 - 2026-05-11
+
+- Closes R06/T260-T266 with the SkeinForensic JSON filter grammar, chain-consistent index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots, per-record inclusion proofs, and `skein.forensic.bundle.v1` report exports.
+- Fixes SkeinAdmin's Forensics panel so Proof Verify first queries records and then calls `forensic.verify` with the correct `{records,start_hash}` payload; query/export now share DB/table/op/id/filter/bundle controls.
+- Adds a simulated incident-timeline harness covering non-contiguous filtered forensic results and proof-bundle export strategy.
+- Improves MySQL/ORM compatibility by expanding `information_schema.columns` with `COLUMN_TYPE`, length/precision/scale, charset/collation, privileges, comments, generated expression, and `EXTRA` metadata.
+- Updates the research backlog and True Status Matrix to **51 done / 58 open** while keeping R18/R19 prototype caveats intact.
+- Refreshes README, SkeinQL/API/Audit WAL/SkeinAdmin/docs-site/website status copy and release metadata for v0.3.13.
+
 ## v0.3.12 - 2026-05-11
 
 - Closes R05/T250-T256 with a documented oblivious-execution threat model, per-table policy schema, padded scan/dummy ValueStore lookup execution, explain output, and deterministic leakage/overhead evaluation reports.

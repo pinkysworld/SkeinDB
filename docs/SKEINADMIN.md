@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-11 (v0.3.12)
+Last updated: 2026-05-11 (v0.3.13)
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -283,9 +283,9 @@ Security note:
 (See `docs/AUDIT_WAL.md` and `docs/research_agenda/R06_*`)
 - Inspect chain length, checkpoint anchors, and last verified time via `maintenance.audit_status`
 - Run full-chain verification via `maintenance.audit_verify` and surface the persisted `last_verified_ms`
-- Run forensic queries over the hash-chained WAL
-- Verify proof slices (completeness/inclusion)
-- Export signed forensic reports
+- Run filtered forensic queries over the hash-chained WAL by DB, table, operation, id bounds, and SkeinForensic JSON filter
+- Proof-verify the current query slice by first fetching records and then calling `forensic.verify` with the returned `records` and boundary hash
+- Export `skein.forensic.bundle.v1` report bundles with query manifest, proof, records, and verification summary
 
 ### 4.15 Migration Assistant (MySQL → SkeinQL)
 (See `docs/TELEMETRY_AND_MIGRATION.md` and `docs/research_agenda/R17_*`)

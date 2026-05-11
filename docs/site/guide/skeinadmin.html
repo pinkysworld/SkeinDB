@@ -126,7 +126,7 @@
     <article class="doc-article">
       <h1 id="skeinadmin-standalone-management-console">SkeinAdmin (Standalone Management Console)<a class="headerlink" href="#skeinadmin-standalone-management-console" title="Permanent link">¶</a></h1>
 <p>Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-11 (v0.3.12)</p>
+Last updated: 2026-05-11 (v0.3.13)</p>
 <p>SkeinAdmin is a <strong>standalone</strong> management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
@@ -399,9 +399,9 @@ shortcut. The Help Center contains:</p>
 <p>(See <code>docs/AUDIT_WAL.md</code> and <code>docs/research_agenda/R06_*</code>)
 - Inspect chain length, checkpoint anchors, and last verified time via <code>maintenance.audit_status</code>
 - Run full-chain verification via <code>maintenance.audit_verify</code> and surface the persisted <code>last_verified_ms</code>
-- Run forensic queries over the hash-chained WAL
-- Verify proof slices (completeness/inclusion)
-- Export signed forensic reports</p>
+- Run filtered forensic queries over the hash-chained WAL by DB, table, operation, id bounds, and SkeinForensic JSON filter
+- Proof-verify the current query slice by first fetching records and then calling <code>forensic.verify</code> with the returned <code>records</code> and boundary hash
+- Export <code>skein.forensic.bundle.v1</code> report bundles with query manifest, proof, records, and verification summary</p>
 <h3 id="415-migration-assistant-mysql-skeinql">4.15 Migration Assistant (MySQL → SkeinQL)<a class="headerlink" href="#415-migration-assistant-mysql-skeinql" title="Permanent link">¶</a></h3>
 <p>(See <code>docs/TELEMETRY_AND_MIGRATION.md</code> and <code>docs/research_agenda/R17_*</code>)
 - Compatibility report (unsupported features)

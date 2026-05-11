@@ -27,6 +27,19 @@ SkeinDB's tamper-evident WAL enables forensic analysis, but the paper doesn't de
 - **E4:** Index overhead (space, maintenance) vs. query acceleration.
 - **E5:** Case study: simulate a data breach investigation using SkeinForensic.
 
+## Runtime Status (2026-05-11)
+
+R06 is now implemented as a hardened experimental runtime surface in v0.3.13:
+
+- `forensic.query` accepts table/op/id bounds plus a SkeinForensic JSON filter grammar (`and`, `or`, `not`, comparison operators, and `contains`).
+- Query proofs use `skein.forensic.proof.v1` with boundary hashes, checkpoint anchors, chain/Merkle roots, per-record inclusion proofs, and a chain-consistent index summary by time/id range, table, operation, and actor bucket.
+- `forensic.verify` verifies contiguous returned record slices and detects tampering.
+- `forensic.export` emits `skein.forensic.bundle.v1` report bundles with a query manifest, records, proof, and verification summary.
+- SkeinAdmin's Forensics panel exposes chain health, query, proof verify, and export controls.
+- Focused coverage includes RPC roundtrips, tamper detection, checkpoint-anchor proof metadata, and a simulated incident-timeline export harness.
+
+Current limitations remain research-visible: the runtime records operation metadata rather than full WAL payload bytes, absence proofs for arbitrary negation queries are not yet implemented, and authenticated actor attribution is currently summarized as `unknown` until principal metadata is attached to forensic records.
+
 ## Expected Contributions
 
 - First forensic query language designed for cryptographically verifiable logs.

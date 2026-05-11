@@ -16,7 +16,7 @@ Runtime status and checklist status intentionally differ:
   - **R03** — Delta topology analysis (hot-chain detection, topology reports)
   - **R04** — Differential privacy (Laplace noise, RDP composition, budget tracking)
   - **R05** — Oblivious execution (threat model, per-table policies, padded scans, dummy lookups, explain/evaluate reports, admin wiring)
-  - **R06** — Forensic Merkle proofs (SHA-256 hash chains, inclusion verification)
+  - **R06** — Forensic WAL queries (JSON filter grammar, verifiable index summary, boundary/inclusion proofs, checkpoint anchors, export bundles, admin wiring)
   - **R07** — Client-side merge functions (conflict resolution + merge.list test)
   - **R08** — Incremental view maintenance (dependency graphs, cascading invalidation)
   - **R09** — QUIC-native protocol (multi-stream RPCs + rebind verification test)
@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **44 done / 65 open** after closing R05 oblivious execution hardening. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **51 done / 58 open** after closing R06 forensic query hardening. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -44,6 +44,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-09 (v0.3.10 DP evaluation release): T246 is closed with `dp.evaluate`, exact-baseline rows, seeded epsilon-grid noisy trials, mean/p95/max absolute error, mean relative error, noisy latency, overhead-vs-exact metrics, SkeinAdmin Privacy controls, and focused engine/admin/capability tests. Counts now 31 done / 78 open.
 - 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with `dp.aggregate` COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and `privacy_etag` cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table `oblivious.policy.*` persistence, padded scan/dummy lookup enforcement, `oblivious.explain`, `oblivious.evaluate` trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
+- 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, `forensic.query` / `forensic.verify` / `forensic.export` bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -102,13 +103,13 @@ Source of truth matrix:
 - [x] T256: Admin UI settings for per-table obliviousness levels. Evidence: SkeinAdmin Privacy R05 controls for level/pad/target/dummy/shuffle/trace rows, `oblEvaluate()`, and `skeinadmin_privacy_panel_exposes_dp_evaluation_harness` asset coverage.
 
 ### Phase 27 — Forensic query language (R06)
-- [ ] T260: Define SkeinForensic query grammar (minimal) + JSON form over SkeinQL
-- [ ] T261: Build verifiable WAL index (time/table/user) consistent with hash chain
-- [ ] T262: Proof format for inclusion + boundary proofs; verifier tool
-- [ ] T263: `forensic.query` SkeinQL endpoint + exportable report bundles
-- [ ] T264: Incremental verification via checkpoint anchors
-- [ ] T265: Case-study harness: simulated incident timelines + proofs
-- [ ] T266: SkeinAdmin “Forensics” page (query + verify + export)
+- [x] T260: Define SkeinForensic query grammar (minimal) + JSON form over SkeinQL. Evidence: `ForensicQueryParams.filter`, `forensic_filter_matches`, operators `and/or/not/eq/ne/gt/ge/lt/le/contains`, typed-literal operands, field equality shorthand, docs in `docs/AUDIT_WAL.md`, and focused engine/RPC tests.
+- [x] T261: Build verifiable WAL index (time/table/user) consistent with hash chain. Evidence: `forensic_index_summary` emits timestamp/id ranges, `by_table`, `by_op`, and `by_actor` buckets tied to the returned chain/proof; actor remains `unknown` until authenticated principal metadata is recorded.
+- [x] T262: Proof format for inclusion + boundary proofs; verifier tool. Evidence: `skein.forensic.proof.v1`, boundary `preceding_hash`/`following_hash`, `forensic_merkle_root`, `forensic_merkle_proof`, per-record `inclusion_proofs`, and `forensic.verify` tamper detection.
+- [x] T263: `forensic.query` SkeinQL endpoint + exportable report bundles. Evidence: JSON-RPC dispatch, capability advertising, `skein.forensic.bundle.v1` query manifest/proof/verification export shape, and RPC roundtrip coverage.
+- [x] T264: Incremental verification via checkpoint anchors. Evidence: persisted `CheckpointAnchor` records and proof fields `checkpoint_anchor`, `next_checkpoint_anchor`, and `anchor_count`, with engine coverage after `checkpoint_for_shutdown()`.
+- [x] T265: Case-study harness: simulated incident timelines + proofs. Evidence: `forensic_case_study_exports_incident_timeline` covers non-contiguous filtered incident timelines, inclusion proofs, and export-bundle verification strategy.
+- [x] T266: SkeinAdmin “Forensics” page (query + verify + export). Evidence: DB/table/op/id/bundle/filter controls, `readForensicParams`, proof verify now queries then calls `forensic.verify` with returned records/start hash, export includes bundle/filter params, and static asset coverage.
 
 ### Phase 28 — Merge functions for optimistic concurrency (R07)
 - [ ] T270: Conflict model (write-write, constraint, dependency) + detection hooks
