@@ -499,7 +499,7 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 - Added in v0.2 as an optional metadata file.
 - If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
 <h3 id="114-viewsjson">11.4 views.json<a class="headerlink" href="#114-viewsjson" title="Permanent link">¶</a></h3>
-<p>Prototype materialized-view state for <code>view.create/drop/refresh/status/explain_deps</code>.</p>
+<p>Materialized-view state for <code>view.create/drop/refresh/evaluate/status/explain_deps</code>.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
@@ -551,6 +551,7 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 
 <p>Compatibility notes:
 - Format v2 persists dependency-usage breakdown (<code>projection_columns</code>, <code>predicate_columns</code>, <code>group_by_columns</code>) per dependency plus grouped-view <code>source_rows</code> shadow state used by incremental maintenance.
+- v0.3.15 adds the read-only <code>view.evaluate</code> oracle/benchmark and compatibility catalogs without changing this on-disk format.
 - Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and <code>source_rows</code> defaults to empty.
 - If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
 <h3 id="115-schema_flagsjson">11.5 schema_flags.json<a class="headerlink" href="#115-schema_flagsjson" title="Permanent link">¶</a></h3>

@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.14 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.15 runtime sync)
 Last updated: 2026-05-11
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
@@ -2038,6 +2038,23 @@ Result:
 
 When `mode` is `"auto"`, the result `mode` reports the actual path chosen by the
 engine (`"incremental"` or `"full"`).
+
+#### view.evaluate
+Params:
+
+```json
+{"view":{"db":"mydb","table":"top_users"},"iterations":5}
+```
+
+Result:
+
+```json
+{"format":"skein.view.evaluate.v1","iterations":5,"pending_changes":3,"touched_pks":3,"stale_before":true,"incremental_ok":true,"correct":true,"rows_incremental":42,"rows_full":42,"mean_incremental_ns":18000,"mean_full_ns":97000,"speedup_vs_full":5.38,"recommended_mode":"incremental"}
+```
+
+The method is read-only: it clones the stored view state, compares incremental
+refresh with full recompute, reports timing/speedup, and leaves the live view
+unchanged.
 
 #### view.status
 Params:

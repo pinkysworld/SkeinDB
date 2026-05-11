@@ -1,6 +1,6 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: v0.3.14 truth sync
+Status: v0.3.15 truth sync
 Last updated: 2026-05-11
 
 SkeinDB adoption strategy:
@@ -101,7 +101,7 @@ SkeinDB adoption strategy:
 - SHOW PROFILES (empty result stub)
 
 ### INFORMATION_SCHEMA
-- `tables` with real table metadata (catalog, schema, name, type, engine, rows)
+- `tables` with real table metadata (catalog, schema, name, type, engine, rows) and `VIEW` rows for native materialized views
 - `columns` with column metadata (ordinal position, nullable, data type, column type, length/precision/scale, charset/collation, column key, privileges/comments/generated expression, and `EXTRA`)
 - `schemata`
 - `statistics` with real index data from primary keys and secondary indexes
@@ -112,7 +112,7 @@ SkeinDB adoption strategy:
 - `engines` (SkeinDB engine row)
 - `routines` (empty stub)
 - `triggers` (empty stub)
-- `views` (empty stub)
+- `views` with native materialized view definitions and MySQL-style metadata
 - `processlist` (single-row stub)
 - `user_privileges` (single-row stub)
 - `table_privileges` (per-table privilege rows for common ORM probes)
@@ -203,7 +203,7 @@ The implementation is still partial but substantially deeper than the first brin
 - **Wire protocol:** PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for `ParameterStatus`, `BackendKeyData`, `ReadyForQuery`, `RowDescription`, `DataRow`, `CommandComplete`, and `ErrorResponse`
 - **Authentication:** trust mode when `SKEINDB_TOKEN` is unset; SCRAM-SHA-256 when it is set
 - **Simple query flow:** shared SQL execution engine behind the PG socket, including `SELECT 1`-style queries, a `SELECT version()` compatibility response, and typed `RowDescription` metadata for the current `BOOL` / `INT8` / `FLOAT8` / `TEXT` / `DATE` / `TIME` / `TIMESTAMP` / `JSONB` / `BYTEA` / `UUID` baseline when the shared engine exposes those schema or literal types
-- **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- **Virtual catalogs:** shared-executor `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
 - **PG dialect and DML:** `::` casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, array constructors, common `ON CONFLICT` rewrites, supported `RETURNING` extraction, and explicit unsupported-feature errors for `COPY`
 - **Transaction handling:** PostgreSQL-style `ReadyForQuery` state (`I` / `T` / `E`), failed-transaction-block behavior, and undo-log-backed `SAVEPOINT` / `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
 - **Extended query protocol:** `Parse` / `Bind` / `Describe` / `Execute` / `Sync` / `Close` / `Flush`, named statements + portals, `$1` placeholders, sync-based recovery after extended-query errors, typed `RowDescription` metadata, and binary result encoding for the current common scalar OID baseline

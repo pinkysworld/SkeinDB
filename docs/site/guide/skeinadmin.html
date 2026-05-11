@@ -126,7 +126,7 @@
     <article class="doc-article">
       <h1 id="skeinadmin-standalone-management-console">SkeinAdmin (Standalone Management Console)<a class="headerlink" href="#skeinadmin-standalone-management-console" title="Permanent link">¶</a></h1>
 <p>Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-11 (v0.3.14)</p>
+Last updated: 2026-05-11 (v0.3.15)</p>
 <p>SkeinAdmin is a <strong>standalone</strong> management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
 so administrators can host it independently (IIS/Apache/Nginx/static hosting) and manage
@@ -165,6 +165,7 @@ shortcut. The Help Center contains:</p>
 - <strong>Privacy panel DP evaluation</strong>: the R04 card now exposes <code>dp.evaluate</code> with epsilon-grid, trials, seed, mechanism, and bounds controls, plus typed <code>dp.aggregate</code>, <code>dp.budget.*</code>, and <code>dp.audit.log</code> calls. The result metadata now includes per-aggregate sensitivities and <code>privacy_etag</code> validators for privacy-aware cache inspection.
 - <strong>Privacy panel oblivious evaluation</strong>: the R05 card now uses the runtime policy schema (<code>level</code>, <code>pad_to_multiple</code>, <code>target_rows</code>, <code>dummy_value_lookups</code>, <code>shuffle</code>), sends nested table payloads for get/set/explain, and exposes <code>oblivious.evaluate</code> for deterministic leakage and overhead reports.
 - <strong>Merge &amp; CRDT R07 hardening</strong>: the Merge panel now sends typed <code>merge.apply</code>, <code>merge.register</code>, <code>merge.simulate</code>, and <code>merge.evaluate</code> payloads; exposes <code>expected_etag</code>, <code>min_causality</code>, current/incoming row editors, workload-case evaluation controls, and values-only Wasm module limits; and uses <code>module_id</code> for Wasm register/drop so the UI matches the runtime RPC schema.
+- <strong>Views R08 hardening</strong>: the Views panel now exposes refresh mode selection, <code>view.evaluate</code> iterations, status/dependency summaries, and typed <code>view.create</code>, <code>view.refresh</code>, <code>view.evaluate</code>, <code>view.status</code>, <code>view.drop</code>, and <code>view.explain_deps</code> calls for incremental-vs-full correctness review.
 - <strong>Engine Config panel</strong> for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with <code>settings.set</code>.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded <strong>Shutdown</strong> action (<code>system.shutdown</code>) for graceful server stop.

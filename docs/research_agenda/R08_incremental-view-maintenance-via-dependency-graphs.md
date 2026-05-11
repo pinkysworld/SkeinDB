@@ -27,6 +27,26 @@ SkeinDB's CDC work tracks dependencies for invalidation signals. The natural ext
 - **E4:** TPC-H derived views under varying update rates.
 - **E5:** Comparison with dedicated IVM systems (Materialize, Noria).
 
+## Implementation Status
+
+Status: **Hardened in v0.3.15** for the restricted R08 surface.
+
+SkeinDB now supports native materialized view management through
+`view.create`, `view.drop`, `view.refresh`, `view.evaluate`, `view.status`, and
+`view.explain_deps`. The hardened scope covers restricted single-table
+filter/project views and grouped aggregate views over `COUNT`, `SUM`, `AVG`,
+`MIN`, and `MAX`. View definitions persist in `views.json` format v2 with
+column-granular dependency metadata. Incremental refresh consumes the change log
+and recomputes touched rows or touched groups, while `mode:"auto"` falls back to
+full recompute for broad change sets.
+
+`view.evaluate` is the R08 oracle/benchmark report. It compares cloned
+incremental refresh against cloned full recompute, verifies row signatures, and
+returns pending-change, timing, speedup, and recommended-mode fields without
+mutating the live view. SkeinAdmin exposes refresh mode and evaluation controls,
+and compatibility catalogs surface native views through MySQL
+`information_schema.views` and PostgreSQL `pg_catalog.pg_views`.
+
 ## Expected Contributions
 
 - Integration of incremental view maintenance with dependency-tracking CDC infrastructure.

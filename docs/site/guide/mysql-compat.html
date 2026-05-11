@@ -215,7 +215,7 @@
 <li>secondary-index-backed duplicate-key enforcement for <code>PRIMARY KEY</code> / <code>UNIQUE KEY</code> writes (including <code>PRIMARY KEY</code>-changing <code>UPDATE</code>s), declared PK / <code>UNIQUE KEY</code> conflict routing for <code>REPLACE</code> and <code>ON DUPLICATE KEY UPDATE</code>, duplicate-row rejection when creating a MySQL compatibility <code>UNIQUE INDEX</code> over existing data, durable per-table secondary-index cache metadata (<code>tables/&lt;db&gt;/&lt;table&gt;.sidx.json</code>) that reloads on reopen, and MySQL-style duplicate-key wire errors (<code>1062</code> / <code>23000</code>)</li>
 <li><code>SHOW VARIABLES</code>, <code>SHOW STATUS</code>, <code>SHOW CHARACTER SET</code>, <code>SHOW COLLATION</code>, <code>SHOW ENGINES</code>, <code>SHOW GRANTS</code> (including compatibility values for WordPress/common bootstrap variables such as <code>sql_auto_is_null</code>, charset/collation variables, <code>time_zone</code>, and <code>transaction_isolation</code>; unfiltered and scoped forms like <code>SHOW [SESSION|GLOBAL] VARIABLES</code>; simple <code>WHERE Variable_name ...</code> / <code>WHERE Charset ...</code> filters; plus wildcard patterns like <code>SHOW VARIABLES LIKE 'character_set_%'</code>)</li>
 <li><code>information_schema.schemata</code> virtual table</li>
-<li><code>information_schema.tables</code> virtual table with real table metadata</li>
+<li><code>information_schema.tables</code> virtual table with real table metadata and <code>TABLE_TYPE='VIEW'</code> rows for native materialized views</li>
 <li><code>information_schema.columns</code> virtual table with column metadata, ordinal positions, nullable/PK info, MySQL-style <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code>, character length, numeric precision/scale, charset/collation, <code>EXTRA</code>, <code>COLUMN_COMMENT</code>, <code>PRIVILEGES</code>, and <code>GENERATION_EXPRESSION</code> fields for ORM/bootstrap probes</li>
 <li><code>information_schema.statistics</code> virtual table with real index data from PK + secondary indexes</li>
 <li><code>information_schema.key_column_usage</code> virtual table (PK + UNIQUE key columns)</li>
@@ -225,7 +225,7 @@
 <li><code>information_schema.engines</code> virtual table</li>
 <li><code>information_schema.routines</code> virtual table (empty stub)</li>
 <li><code>information_schema.triggers</code> virtual table (empty stub)</li>
-<li><code>information_schema.views</code> virtual table (empty stub)</li>
+<li><code>information_schema.views</code> virtual table with native view definitions and MySQL-style updatability/check-option metadata</li>
 <li><code>information_schema.processlist</code> virtual table (single-row stub)</li>
 <li><code>information_schema.user_privileges</code> virtual table (single-row stub)</li>
 <li><code>information_schema.table_privileges</code> virtual table (per-table privilege rows for common ORM probes)</li>

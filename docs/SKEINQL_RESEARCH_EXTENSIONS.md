@@ -8,7 +8,7 @@ Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
-- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.14 runtime method map exposed through `system.capabilities`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.15 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04
@@ -46,6 +46,7 @@ Related: R08
 
 - `view.create` / `view.drop`
 - `view.refresh` — incremental, full, or auto refresh for restricted single-table views (including grouped views)
+- `view.evaluate` — read-only incremental-vs-full correctness oracle and timing report
 - `view.status` — lag/last refresh
 - `view.explain_deps` — dependency graph edges
 

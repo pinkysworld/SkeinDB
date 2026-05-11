@@ -100,7 +100,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - secondary-index-backed duplicate-key enforcement for `PRIMARY KEY` / `UNIQUE KEY` writes (including `PRIMARY KEY`-changing `UPDATE`s), declared PK / `UNIQUE KEY` conflict routing for `REPLACE` and `ON DUPLICATE KEY UPDATE`, duplicate-row rejection when creating a MySQL compatibility `UNIQUE INDEX` over existing data, durable per-table secondary-index cache metadata (`tables/<db>/<table>.sidx.json`) that reloads on reopen, and MySQL-style duplicate-key wire errors (`1062` / `23000`)
   - `SHOW VARIABLES`, `SHOW STATUS`, `SHOW CHARACTER SET`, `SHOW COLLATION`, `SHOW ENGINES`, `SHOW GRANTS` (including compatibility values for WordPress/common bootstrap variables such as `sql_auto_is_null`, charset/collation variables, `time_zone`, and `transaction_isolation`; unfiltered and scoped forms like `SHOW [SESSION|GLOBAL] VARIABLES`; simple `WHERE Variable_name ...` / `WHERE Charset ...` filters; plus wildcard patterns like `SHOW VARIABLES LIKE 'character_set_%'`)
   - `information_schema.schemata` virtual table
-  - `information_schema.tables` virtual table with real table metadata
+   - `information_schema.tables` virtual table with real table metadata and `TABLE_TYPE='VIEW'` rows for native materialized views
    - `information_schema.columns` virtual table with column metadata, ordinal positions, nullable/PK info, MySQL-style `DATA_TYPE`/`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, `EXTRA`, `COLUMN_COMMENT`, `PRIVILEGES`, and `GENERATION_EXPRESSION` fields for ORM/bootstrap probes
   - `information_schema.statistics` virtual table with real index data from PK + secondary indexes
   - `information_schema.key_column_usage` virtual table (PK + UNIQUE key columns)
@@ -110,7 +110,7 @@ Even with protocol support, SQL dialect mismatches can break apps.
   - `information_schema.engines` virtual table
   - `information_schema.routines` virtual table (empty stub)
   - `information_schema.triggers` virtual table (empty stub)
-  - `information_schema.views` virtual table (empty stub)
+   - `information_schema.views` virtual table with native view definitions and MySQL-style updatability/check-option metadata
   - `information_schema.processlist` virtual table (single-row stub)
   - `information_schema.user_privileges` virtual table (single-row stub)
    - `information_schema.table_privileges` virtual table (per-table privilege rows for common ORM probes)

@@ -2249,6 +2249,36 @@ pub struct ViewRefreshResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewEvaluateParams {
+    pub view: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewEvaluateResult {
+    pub format: String,
+    pub view: BaseTableRef,
+    pub iterations: u64,
+    pub pending_changes: u64,
+    pub touched_pks: u64,
+    pub stale_before: bool,
+    pub incremental_ok: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental_error: Option<String>,
+
+    pub correct: bool,
+    pub rows_incremental: u64,
+    pub rows_full: u64,
+    pub mean_incremental_ns: u64,
+    pub mean_full_ns: u64,
+    pub speedup_vs_full: f64,
+    pub recommended_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewStatusParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<BaseTableRef>,

@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
-<p>Status: Draft v1.0 (implementable; v0.3.14 runtime sync)
+<p>Status: Draft v1.0 (implementable; v0.3.15 runtime sync)
 Last updated: 2026-05-11</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
@@ -1698,6 +1698,18 @@ views whose projection contains only grouped columns plus <code>COUNT</code>/<co
 
 <p>When <code>mode</code> is <code>"auto"</code>, the result <code>mode</code> reports the actual path chosen by the
 engine (<code>"incremental"</code> or <code>"full"</code>).</p>
+<h4 id="viewevaluate">view.evaluate<a class="headerlink" href="#viewevaluate" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;view&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;top_users&quot;</span><span class="p">},</span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="mi">5</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;skein.view.evaluate.v1&quot;</span><span class="p">,</span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="mi">5</span><span class="p">,</span><span class="nt">&quot;pending_changes&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">,</span><span class="nt">&quot;touched_pks&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">,</span><span class="nt">&quot;stale_before&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;incremental_ok&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;correct&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;rows_incremental&quot;</span><span class="p">:</span><span class="mi">42</span><span class="p">,</span><span class="nt">&quot;rows_full&quot;</span><span class="p">:</span><span class="mi">42</span><span class="p">,</span><span class="nt">&quot;mean_incremental_ns&quot;</span><span class="p">:</span><span class="mi">18000</span><span class="p">,</span><span class="nt">&quot;mean_full_ns&quot;</span><span class="p">:</span><span class="mi">97000</span><span class="p">,</span><span class="nt">&quot;speedup_vs_full&quot;</span><span class="p">:</span><span class="mf">5.38</span><span class="p">,</span><span class="nt">&quot;recommended_mode&quot;</span><span class="p">:</span><span class="s2">&quot;incremental&quot;</span><span class="p">}</span>
+</code></pre></div>
+
+<p>The method is read-only: it clones the stored view state, compares incremental
+refresh with full recompute, reports timing/speedup, and leaves the live view
+unchanged.</p>
 <h4 id="viewstatus">view.status<a class="headerlink" href="#viewstatus" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;view&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;top_users&quot;</span><span class="p">}}</span>

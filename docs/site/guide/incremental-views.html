@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Incremental Views (Prototype) — SkeinDB Docs</title>
-<meta name="description" content="Incremental Views (Prototype) — part of the SkeinDB documentation.">
+<title>Incremental Views — SkeinDB Docs</title>
+<meta name="description" content="Incremental Views — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -121,19 +121,20 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Incremental Views (Prototype)</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Incremental Views</span>
     </div>
     <article class="doc-article">
-      <h1 id="incremental-views-prototype">Incremental Views (Prototype)<a class="headerlink" href="#incremental-views-prototype" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-04-25</p>
-<p>This document describes the prototype incremental view maintenance for R08.</p>
+      <h1 id="incremental-views">Incremental Views<a class="headerlink" href="#incremental-views" title="Permanent link">¶</a></h1>
+<p>Status: Hardened research surface (v0.3.15)
+Last updated: 2026-05-11</p>
+<p>This document describes the R08 incremental view maintenance surface.</p>
 <h2 id="1-overview">1) Overview<a class="headerlink" href="#1-overview" title="Permanent link">¶</a></h2>
 <p>SkeinDB can materialize simple views and refresh them incrementally using the change log.</p>
 <p>Supported methods:
 - <code>view.create</code>
 - <code>view.drop</code>
 - <code>view.refresh</code>
+- <code>view.evaluate</code>
 - <code>view.status</code>
 - <code>view.explain_deps</code></p>
 <p>View state is stored in <code>views.json</code> (format v2).</p>
@@ -156,7 +157,22 @@ Last updated: 2026-04-25</p>
 - for grouped views, persists the contributing source rows in <code>views.json</code> and recomputes only the touched groups during incremental refresh</p>
 <p>Views are marked <code>stale=true</code> when base tables change.
 Reads may return stale results until the view is refreshed.</p>
-<h2 id="4-dependencies">4) Dependencies<a class="headerlink" href="#4-dependencies" title="Permanent link">¶</a></h2>
+<h2 id="4-evaluation-oracle-and-benchmark-report">4) Evaluation oracle and benchmark report<a class="headerlink" href="#4-evaluation-oracle-and-benchmark-report" title="Permanent link">¶</a></h2>
+<p><code>view.evaluate</code> is a read-only harness for a specific materialized view. It clones
+the current view state, runs incremental refresh on one clone and full recompute
+on another clone, compares the resulting row signatures, and reports:</p>
+<ul>
+<li><code>format: "skein.view.evaluate.v1"</code></li>
+<li>pending change count and touched primary-key count</li>
+<li>whether the incremental result matches full recompute</li>
+<li>mean incremental/full refresh nanoseconds over the requested iterations</li>
+<li>speedup versus full recompute</li>
+<li>the current auto-refresh recommendation (<code>incremental</code> or <code>full</code>)</li>
+</ul>
+<p>The harness is intentionally deterministic and does not mutate the live view.
+Focused tests cover a deterministic pseudo-random update workload plus the
+JSON-RPC roundtrip used by SkeinAdmin.</p>
+<h2 id="5-dependencies">5) Dependencies<a class="headerlink" href="#5-dependencies" title="Permanent link">¶</a></h2>
 <p><code>view.status</code> and <code>view.explain_deps</code> return one dependency object per base table.
 Each object currently includes:</p>
 <ul>
@@ -171,6 +187,16 @@ the view entry, which keeps dependency tracking aligned with predicate and
 projection extraction in the rest of the engine across restarts.</p>
 <p>This metadata is intended for dependency tracking, future optimizer work, and
 operator visibility in SkeinAdmin.</p>
+<h2 id="6-compatibility-catalogs">6) Compatibility catalogs<a class="headerlink" href="#6-compatibility-catalogs" title="Permanent link">¶</a></h2>
+<p>Materialized views now appear in virtual compatibility catalogs:</p>
+<ul>
+<li>MySQL <code>information_schema.tables</code> emits <code>TABLE_TYPE = 'VIEW'</code> rows.</li>
+<li>MySQL <code>information_schema.views</code> emits definition/updatability metadata.</li>
+<li>PostgreSQL <code>pg_catalog.pg_views</code> emits <code>schemaname</code>, <code>viewname</code>, <code>viewowner</code>, and <code>definition</code>.</li>
+</ul>
+<p>These are adoption shims for ORMs and admin tools; SQL <code>CREATE VIEW</code> remains a
+compatibility no-op while the native <code>view.create</code> method is the authoritative
+runtime surface.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/INCREMENTAL_VIEWS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -191,7 +217,9 @@ operator visibility in SkeinAdmin.</p>
 <li><a href="#1-overview">1) Overview</a></li>
 <li><a href="#2-supported-view-definitions">2) Supported view definitions</a></li>
 <li><a href="#3-incremental-refresh">3) Incremental refresh</a></li>
-<li><a href="#4-dependencies">4) Dependencies</a></li>
+<li><a href="#4-evaluation-oracle-and-benchmark-report">4) Evaluation oracle and benchmark report</a></li>
+<li><a href="#5-dependencies">5) Dependencies</a></li>
+<li><a href="#6-compatibility-catalogs">6) Compatibility catalogs</a></li>
 </ul>
 </div>
 

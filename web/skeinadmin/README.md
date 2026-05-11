@@ -33,7 +33,7 @@ Implemented navigation areas:
 
 Roadmap areas:
 - **Index Advisor** + **Index Synthesis** (dependency-driven)
-- **Views** (incremental maintenance)
+- **Views** (incremental maintenance, refresh mode, evaluation oracle)
 - **CDC** dedicated subscriptions page + lag visualization
 - **Performance Replay extensions** (timing capture / variance analysis beyond current snapshot-based replay bundles)
 - Experimental: **Embeddings**, **NL Query**

@@ -131,7 +131,7 @@
 - These methods are <strong>not required</strong> for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in <code>docs/research_agenda/</code>.
-- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.14 runtime method map exposed through <code>system.capabilities</code>.</p>
+- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.15 runtime method map exposed through <code>system.capabilities</code>.</p>
 <h2 id="1-dp-differential-privacy">1. dp.* — Differential privacy<a class="headerlink" href="#1-dp-differential-privacy" title="Permanent link">¶</a></h2>
 <p>Related: R04</p>
 <ul>
@@ -168,6 +168,7 @@
 <ul>
 <li><code>view.create</code> / <code>view.drop</code></li>
 <li><code>view.refresh</code> — incremental, full, or auto refresh for restricted single-table views (including grouped views)</li>
+<li><code>view.evaluate</code> — read-only incremental-vs-full correctness oracle and timing report</li>
 <li><code>view.status</code> — lag/last refresh</li>
 <li><code>view.explain_deps</code> — dependency graph edges</li>
 </ul>

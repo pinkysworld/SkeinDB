@@ -48,8 +48,9 @@ use skeindb_skeinql::{
         SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
         TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
         VectorIndexStatusParams, VectorInsertParams, VectorSearchParams, ViewCreateParams,
-        ViewDropParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
-        WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams, WasmPlanRunParams,
+        ViewDropParams, ViewEvaluateParams, ViewExplainDepsParams, ViewRefreshParams,
+        ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams,
+        WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -16641,6 +16642,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "view.evaluate" => {
+                    let p: ViewEvaluateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.view_evaluate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "view.status" => {
                     let p: ViewStatusParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
@@ -23429,6 +23437,28 @@ fn information_schema_select_result(
                 rows.push(row);
             }
         }
+        for view in eng.list_views() {
+            let mut row = BTreeMap::new();
+            row.insert(
+                "TABLE_CATALOG".to_string(),
+                Lit::Str {
+                    v: "def".to_string(),
+                },
+            );
+            row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: view.db });
+            row.insert("TABLE_NAME".to_string(), Lit::Str { v: view.name });
+            row.insert(
+                "TABLE_TYPE".to_string(),
+                Lit::Str {
+                    v: "VIEW".to_string(),
+                },
+            );
+            row.insert("ENGINE".to_string(), Lit::Null);
+            row.insert("TABLE_ROWS".to_string(), Lit::U64 { v: view.rows });
+            row.insert("DATA_LENGTH".to_string(), Lit::U64 { v: 0 });
+            row.insert("INDEX_LENGTH".to_string(), Lit::U64 { v: 0 });
+            rows.push(row);
+        }
         vec![
             "TABLE_CATALOG",
             "TABLE_SCHEMA",
@@ -23438,6 +23468,73 @@ fn information_schema_select_result(
             "TABLE_ROWS",
             "DATA_LENGTH",
             "INDEX_LENGTH",
+        ]
+    } else if table.table.eq_ignore_ascii_case("views") {
+        for view in eng.list_views() {
+            let mut row = BTreeMap::new();
+            row.insert(
+                "TABLE_CATALOG".to_string(),
+                Lit::Str {
+                    v: "def".to_string(),
+                },
+            );
+            row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: view.db });
+            row.insert("TABLE_NAME".to_string(), Lit::Str { v: view.name });
+            row.insert(
+                "VIEW_DEFINITION".to_string(),
+                Lit::Str {
+                    v: view.definition_json,
+                },
+            );
+            row.insert(
+                "CHECK_OPTION".to_string(),
+                Lit::Str {
+                    v: "NONE".to_string(),
+                },
+            );
+            row.insert(
+                "IS_UPDATABLE".to_string(),
+                Lit::Str {
+                    v: "NO".to_string(),
+                },
+            );
+            row.insert(
+                "DEFINER".to_string(),
+                Lit::Str {
+                    v: "'root'@'localhost'".to_string(),
+                },
+            );
+            row.insert(
+                "SECURITY_TYPE".to_string(),
+                Lit::Str {
+                    v: "DEFINER".to_string(),
+                },
+            );
+            row.insert(
+                "CHARACTER_SET_CLIENT".to_string(),
+                Lit::Str {
+                    v: "utf8mb4".to_string(),
+                },
+            );
+            row.insert(
+                "COLLATION_CONNECTION".to_string(),
+                Lit::Str {
+                    v: "utf8mb4_general_ci".to_string(),
+                },
+            );
+            rows.push(row);
+        }
+        vec![
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "VIEW_DEFINITION",
+            "CHECK_OPTION",
+            "IS_UPDATABLE",
+            "DEFINER",
+            "SECURITY_TYPE",
+            "CHARACTER_SET_CLIENT",
+            "COLLATION_CONNECTION",
         ]
     } else if table.table.eq_ignore_ascii_case("columns") {
         for db in eng.list_databases() {
@@ -24727,6 +24824,31 @@ fn pg_catalog_select_result(
             "hastriggers",
             "rowsecurity",
         ]
+    } else if table.table.eq_ignore_ascii_case("pg_views") {
+        for view in eng.list_views() {
+            let mut row = BTreeMap::new();
+            row.insert(
+                "schemaname".to_string(),
+                Lit::Str {
+                    v: "public".to_string(),
+                },
+            );
+            row.insert("viewname".to_string(), Lit::Str { v: view.name });
+            row.insert(
+                "viewowner".to_string(),
+                Lit::Str {
+                    v: "root".to_string(),
+                },
+            );
+            row.insert(
+                "definition".to_string(),
+                Lit::Str {
+                    v: view.definition_json,
+                },
+            );
+            rows.push(row);
+        }
+        vec!["schemaname", "viewname", "viewowner", "definition"]
     } else if table.table.eq_ignore_ascii_case("pg_type") {
         rows = pg_catalog_builtin_type_rows();
         vec![
@@ -26510,6 +26632,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "merge.simulate"
             | "merge.evaluate"
             | "merge.wasm.list"
+            | "view.evaluate"
             | "wasm.plan.compile"
             | "wasm.plan.inspect"
             | "wasm.plan.edge_package"
@@ -26712,6 +26835,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "view.create",
         "view.drop",
         "view.refresh",
+        "view.evaluate",
         "view.status",
         "view.explain_deps",
         "cdc.subscribe_table",
@@ -28147,7 +28271,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 132);
+        assert_eq!(methods.len(), 133);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -28579,6 +28703,17 @@ mod tests {
         .await;
         assert!(resp.ok);
 
+        let create_view = call_rpc(
+            &state,
+            "view.create",
+            json!({
+                "view": {"db": "app", "table": "user_names"},
+                "query": select_query("app", "users", vec!["id", "name"], None),
+            }),
+        )
+        .await;
+        assert!(create_view.ok, "{create_view:?}");
+
         let tables = call_sql_exec_http(
             &state,
             json!({
@@ -28599,6 +28734,50 @@ mod tests {
         assert_eq!(table_rows.len(), 1);
         assert_eq!(table_rows[0][0]["v"].as_str(), Some("app"));
         assert_eq!(table_rows[0][1]["v"].as_str(), Some("users"));
+
+        let view_table = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'app' AND table_name = 'user_names' AND table_type = 'VIEW'"
+            }),
+        )
+        .await;
+        assert!(view_table.ok);
+        let view_table_rows = view_table
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(view_table_rows.len(), 1);
+        assert_eq!(view_table_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(view_table_rows[0][1]["v"].as_str(), Some("user_names"));
+        assert_eq!(view_table_rows[0][2]["v"].as_str(), Some("VIEW"));
+
+        let views = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT table_schema, table_name, is_updatable FROM information_schema.views WHERE table_schema = 'app' AND table_name = 'user_names'"
+            }),
+        )
+        .await;
+        assert!(views.ok);
+        let view_rows = views
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(view_rows.len(), 1);
+        assert_eq!(view_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(view_rows[0][1]["v"].as_str(), Some("user_names"));
+        assert_eq!(view_rows[0][2]["v"].as_str(), Some("NO"));
 
         let storage = call_sql_exec_http(
             &state,
@@ -28780,6 +28959,17 @@ mod tests {
         .await;
         assert!(resp.ok, "{resp:?}");
 
+        let create_view = call_rpc(
+            &state,
+            "view.create",
+            json!({
+                "view": {"db": "app", "table": "user_names"},
+                "query": select_query("app", "users", vec!["id", "name"], None),
+            }),
+        )
+        .await;
+        assert!(create_view.ok, "{create_view:?}");
+
         let databases = call_sql_exec_http(
             &state,
             json!({
@@ -28845,6 +29035,29 @@ mod tests {
         assert_eq!(pg_table_rows[0][0]["v"].as_str(), Some("public"));
         assert_eq!(pg_table_rows[0][1]["v"].as_str(), Some("users"));
         assert_eq!(pg_table_rows[0][2]["v"].as_bool(), Some(true));
+
+        let pg_views = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT schemaname, viewname, viewowner FROM pg_catalog.pg_views WHERE schemaname = 'public' AND viewname = 'user_names'"
+            }),
+        )
+        .await;
+        assert!(pg_views.ok);
+        let pg_view_rows = pg_views
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pg_view_rows.len(), 1);
+        assert_eq!(pg_view_rows[0][0]["v"].as_str(), Some("public"));
+        assert_eq!(pg_view_rows[0][1]["v"].as_str(), Some("user_names"));
+        assert_eq!(pg_view_rows[0][2]["v"].as_str(), Some("root"));
 
         let settings = call_sql_exec_http(
             &state,
@@ -30734,6 +30947,26 @@ mod tests {
         )
         .await;
         assert!(resp.ok);
+
+        let eval = call_rpc(
+            &state,
+            "view.evaluate",
+            json!({
+                "view": {"db":"app","table":"top_users"},
+                "iterations": 3
+            }),
+        )
+        .await;
+        assert!(eval.ok, "{eval:?}");
+        let eval_result = eval.result.expect("missing view evaluation result");
+        assert_eq!(
+            eval_result["format"].as_str(),
+            Some("skein.view.evaluate.v1")
+        );
+        assert_eq!(eval_result["incremental_ok"].as_bool(), Some(true));
+        assert_eq!(eval_result["correct"].as_bool(), Some(true));
+        assert_eq!(eval_result["pending_changes"].as_u64(), Some(1));
+        assert_eq!(eval_result["rows_incremental"], eval_result["rows_full"]);
 
         let resp = call_rpc(
             &state,

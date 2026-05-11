@@ -41,8 +41,15 @@
 <div class="content">
 
   <div class="status-bar">
-    <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-dot implemented"></span>
+    <span class="status-text"><strong>Hardened in v0.3.15</strong> — R08 backlog tasks T280-T287 are closed with runtime tests, admin wiring, and compatibility catalogs.</span>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">✅</span> v0.3.15 Runtime Surface</h2>
+    <p>SkeinDB now ships native incremental materialized views through <code>view.create</code>, <code>view.drop</code>, <code>view.refresh</code>, <code>view.evaluate</code>, <code>view.status</code>, and <code>view.explain_deps</code>. The hardened scope covers restricted single-table filter/project views and grouped aggregate views over <code>COUNT</code>, <code>SUM</code>, <code>AVG</code>, <code>MIN</code>, and <code>MAX</code>.</p>
+    <p><code>view.evaluate</code> is a read-only oracle and benchmark report: it compares cloned incremental refresh with full recompute, checks row signatures, reports timing/speedup, and recommends the current refresh mode without mutating the live view.</p>
+    <p>SkeinAdmin exposes refresh-mode and evaluation controls, while MySQL <code>information_schema.views</code> and PostgreSQL <code>pg_catalog.pg_views</code> surface native views for compatibility probes.</p>
   </div>
 
   <div class="novelty-card">

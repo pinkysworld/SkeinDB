@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **58 done / 51 open** after closing R07 merge-function hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **66 done / 43 open** after closing R08 incremental-view hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -46,6 +46,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table `oblivious.policy.*` persistence, padded scan/dummy lookup enforcement, `oblivious.explain`, `oblivious.evaluate` trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
 - 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, `forensic.query` / `forensic.verify` / `forensic.export` bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
 - 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, `merge.evaluate` conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge & CRDT payloads/controls, PostgreSQL `pg_catalog.pg_tables`, MySQL `information_schema.table_privileges`, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.
+- 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted `view.create` definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only `view.evaluate` correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL `information_schema.views`, PostgreSQL `pg_catalog.pg_views`, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -122,14 +123,14 @@ Source of truth matrix:
 - [x] T276: SkeinAdmin "Merge rules" page. Evidence: Merge & CRDT panel now sends typed apply/register/simulate/evaluate/Wasm payloads and `skeinadmin_merge_panel_exposes_r07_hardening_controls` locks the controls.
 
 ### Phase 29 — Incremental view maintenance (R08)
-- [ ] T280: `view.create` SkeinQL method with persisted definition (SkeinIR)
-- [ ] T281: Dependency graph extension: view → base table deps at column granularity
-- [ ] T282: Delta derivation for a restricted operator set (filter, project, group-by)
-- [ ] T283: Incremental refresh pipeline (apply deltas from CDC stream)
-- [ ] T284: Cost-based switch: incremental vs full recompute
-- [ ] T285: Correctness oracle: compare incremental vs recompute on random workloads
-- [ ] T286: Bench: view maintenance overhead + query speedups
-- [ ] T287: SkeinAdmin “Views” page (status, refresh, explain deps)
+- [x] T280: `view.create` SkeinQL method with persisted definition (SkeinIR). Evidence: `view.create`, `views.json` format v2, restart persistence, and `view_dependency_usage_persists_in_views_json`.
+- [x] T281: Dependency graph extension: view → base table deps at column granularity. Evidence: dependency objects include `columns`, `projection_columns`, `predicate_columns`, `group_by_columns`, and `view.explain_deps` traverses direct/transitive graph edges.
+- [x] T282: Delta derivation for a restricted operator set (filter, project, group-by). Evidence: restricted single-table filter/project views, grouped aggregate plans for grouped columns plus `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, and grouped source-row persistence.
+- [x] T283: Incremental refresh pipeline (apply deltas from CDC stream). Evidence: `refresh_view_incremental`, `refresh_grouped_view_incremental`, change-log driven stale marking, touched-row/touched-group recompute, and restart coverage.
+- [x] T284: Cost-based switch: incremental vs full recompute. Evidence: `view.refresh` `mode:"auto"`, `view_refresh_stats`, `should_refresh_view_full`, and `view_grouped_auto_refresh_prefers_full_for_wide_change_sets`.
+- [x] T285: Correctness oracle: compare incremental vs recompute on random workloads. Evidence: `view.evaluate` compares cloned incremental and full refresh results and `r08_view_correctness_oracle_random_workload_matches_full_recompute` runs a deterministic pseudo-random workload.
+- [x] T286: Bench: view maintenance overhead + query speedups. Evidence: `view.evaluate` returns mean incremental/full nanoseconds, speedup-vs-full, pending changes, touched primary keys, and recommended mode.
+- [x] T287: SkeinAdmin “Views” page (status, refresh, explain deps). Evidence: Views panel now exposes refresh mode, evaluate iterations, `view.evaluate`, status, drop, dependency summaries, RPC templates, and static asset coverage.
 
 ### Phase 30 — HTTP/3 / QUIC-native protocol (R09)
 - [ ] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping

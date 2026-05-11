@@ -153,7 +153,7 @@
   - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: <strong>58 done / 51 open</strong> after closing R07 merge-function hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: <strong>66 done / 43 open</strong> after closing R08 incremental-view hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
@@ -167,7 +167,8 @@
 - 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with <code>dp.aggregate</code> COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and <code>privacy_etag</code> cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table <code>oblivious.policy.*</code> persistence, padded scan/dummy lookup enforcement, <code>oblivious.explain</code>, <code>oblivious.evaluate</code> trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
 - 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
-- 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, <code>merge.evaluate</code> conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge &amp; CRDT payloads/controls, PostgreSQL <code>pg_catalog.pg_tables</code>, MySQL <code>information_schema.table_privileges</code>, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.</p>
+- 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, <code>merge.evaluate</code> conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge &amp; CRDT payloads/controls, PostgreSQL <code>pg_catalog.pg_tables</code>, MySQL <code>information_schema.table_privileges</code>, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.
+- 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted <code>view.create</code> definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only <code>view.evaluate</code> correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL <code>information_schema.views</code>, PostgreSQL <code>pg_catalog.pg_views</code>, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -376,14 +377,14 @@
 </ul>
 <h3 id="phase-29-incremental-view-maintenance-r08">Phase 29 — Incremental view maintenance (R08)<a class="headerlink" href="#phase-29-incremental-view-maintenance-r08" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T280: <code>view.create</code> SkeinQL method with persisted definition (SkeinIR)</li>
-<li>[ ] T281: Dependency graph extension: view → base table deps at column granularity</li>
-<li>[ ] T282: Delta derivation for a restricted operator set (filter, project, group-by)</li>
-<li>[ ] T283: Incremental refresh pipeline (apply deltas from CDC stream)</li>
-<li>[ ] T284: Cost-based switch: incremental vs full recompute</li>
-<li>[ ] T285: Correctness oracle: compare incremental vs recompute on random workloads</li>
-<li>[ ] T286: Bench: view maintenance overhead + query speedups</li>
-<li>[ ] T287: SkeinAdmin “Views” page (status, refresh, explain deps)</li>
+<li>[x] T280: <code>view.create</code> SkeinQL method with persisted definition (SkeinIR). Evidence: <code>view.create</code>, <code>views.json</code> format v2, restart persistence, and <code>view_dependency_usage_persists_in_views_json</code>.</li>
+<li>[x] T281: Dependency graph extension: view → base table deps at column granularity. Evidence: dependency objects include <code>columns</code>, <code>projection_columns</code>, <code>predicate_columns</code>, <code>group_by_columns</code>, and <code>view.explain_deps</code> traverses direct/transitive graph edges.</li>
+<li>[x] T282: Delta derivation for a restricted operator set (filter, project, group-by). Evidence: restricted single-table filter/project views, grouped aggregate plans for grouped columns plus <code>COUNT</code>/<code>SUM</code>/<code>AVG</code>/<code>MIN</code>/<code>MAX</code>, and grouped source-row persistence.</li>
+<li>[x] T283: Incremental refresh pipeline (apply deltas from CDC stream). Evidence: <code>refresh_view_incremental</code>, <code>refresh_grouped_view_incremental</code>, change-log driven stale marking, touched-row/touched-group recompute, and restart coverage.</li>
+<li>[x] T284: Cost-based switch: incremental vs full recompute. Evidence: <code>view.refresh</code> <code>mode:"auto"</code>, <code>view_refresh_stats</code>, <code>should_refresh_view_full</code>, and <code>view_grouped_auto_refresh_prefers_full_for_wide_change_sets</code>.</li>
+<li>[x] T285: Correctness oracle: compare incremental vs recompute on random workloads. Evidence: <code>view.evaluate</code> compares cloned incremental and full refresh results and <code>r08_view_correctness_oracle_random_workload_matches_full_recompute</code> runs a deterministic pseudo-random workload.</li>
+<li>[x] T286: Bench: view maintenance overhead + query speedups. Evidence: <code>view.evaluate</code> returns mean incremental/full nanoseconds, speedup-vs-full, pending changes, touched primary keys, and recommended mode.</li>
+<li>[x] T287: SkeinAdmin “Views” page (status, refresh, explain deps). Evidence: Views panel now exposes refresh mode, evaluate iterations, <code>view.evaluate</code>, status, drop, dependency summaries, RPC templates, and static asset coverage.</li>
 </ul>
 <h3 id="phase-30-http3-quic-native-protocol-r09">Phase 30 — HTTP/3 / QUIC-native protocol (R09)<a class="headerlink" href="#phase-30-http3-quic-native-protocol-r09" title="Permanent link">¶</a></h3>
 <ul>

@@ -79,10 +79,10 @@ use skeindb_skeinql::methods::{
     SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
     VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
     VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
-    ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult,
-    ViewStatusParams, ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult,
-    WasmPlanEdgePackageParams, WasmPlanEdgePackageResult, WasmPlanInspectParams,
-    WasmPlanInspectResult,
+    ViewEvaluateParams, ViewEvaluateResult, ViewExplainDepsParams, ViewExplainDepsResult,
+    ViewRefreshParams, ViewRefreshResult, ViewStatusParams, ViewStatusResult,
+    WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
+    WasmPlanEdgePackageResult, WasmPlanInspectParams, WasmPlanInspectResult,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -719,6 +719,7 @@ struct MergePolicyDisk {
 
 const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
 const MERGE_EVALUATE_FORMAT_V1: &str = "skein.merge.evaluate.v1";
+const VIEW_EVALUATE_FORMAT_V1: &str = "skein.view.evaluate.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeWasmModuleEntry {
@@ -873,6 +874,14 @@ struct ViewState {
     last_change_seq: u64,
     stale: bool,
     last_refresh_mode: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewCatalogEntry {
+    pub db: String,
+    pub name: String,
+    pub definition_json: String,
+    pub rows: u64,
 }
 
 /// Edge in the view dependency graph.
@@ -7775,6 +7784,101 @@ impl Engine {
         }
 
         Ok(ViewExplainDepsResult { deps })
+    }
+
+    pub fn view_evaluate(&self, params: ViewEvaluateParams) -> anyhow::Result<ViewEvaluateResult> {
+        let key = TableKey {
+            db: params.view.db.clone(),
+            table: params.view.table.clone(),
+        };
+        let view = self
+            .views
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: view not found"))?;
+        let info = view_query_info(&view.query)?;
+        let stats = self.view_refresh_stats(view.last_change_seq, &info.base);
+        let iterations = params.iterations.unwrap_or(1).clamp(1, 1_000);
+        let prefer_full = should_refresh_view_full(&view, &info, stats);
+
+        let mut full_rows = 0_u64;
+        let mut full_signature = Vec::new();
+        let full_started = Instant::now();
+        for _ in 0..iterations {
+            let mut candidate = view.clone();
+            full_rows = self.refresh_view_full(&mut candidate)?;
+            full_signature = view_row_signature(&candidate);
+        }
+        let mean_full_ns = (full_started.elapsed().as_nanos() / u128::from(iterations))
+            .min(u128::from(u64::MAX)) as u64;
+
+        let mut incremental_rows = 0_u64;
+        let mut incremental_signature = Vec::new();
+        let mut incremental_error = None;
+        let mut incremental_runs = 0_u64;
+        let incremental_started = Instant::now();
+        for _ in 0..iterations {
+            let mut candidate = view.clone();
+            match self.refresh_view_incremental(&mut candidate) {
+                Ok(rows) => {
+                    incremental_runs += 1;
+                    incremental_rows = rows;
+                    incremental_signature = view_row_signature(&candidate);
+                }
+                Err(err) => {
+                    incremental_error = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+        let mean_incremental_ns = if incremental_runs == 0 {
+            0
+        } else {
+            (incremental_started.elapsed().as_nanos() / u128::from(incremental_runs))
+                .min(u128::from(u64::MAX)) as u64
+        };
+        let incremental_ok = incremental_error.is_none();
+        let correct = incremental_ok && incremental_signature == full_signature;
+        let speedup_vs_full = if incremental_ok && mean_incremental_ns > 0 {
+            mean_full_ns as f64 / mean_incremental_ns as f64
+        } else {
+            0.0
+        };
+
+        Ok(ViewEvaluateResult {
+            format: VIEW_EVALUATE_FORMAT_V1.to_string(),
+            view: params.view,
+            iterations,
+            pending_changes: stats.change_count as u64,
+            touched_pks: stats.touched_pks as u64,
+            stale_before: view.stale,
+            incremental_ok,
+            incremental_error,
+            correct,
+            rows_incremental: incremental_rows,
+            rows_full: full_rows,
+            mean_incremental_ns,
+            mean_full_ns,
+            speedup_vs_full,
+            recommended_mode: if prefer_full { "full" } else { "incremental" }.to_string(),
+        })
+    }
+
+    pub fn list_views(&self) -> Vec<ViewCatalogEntry> {
+        let mut views = self
+            .views
+            .values()
+            .map(|view| ViewCatalogEntry {
+                db: view.db.clone(),
+                name: view.name.clone(),
+                definition_json: serde_json::to_string(&view.query).unwrap_or_default(),
+                rows: view.rows.len() as u64,
+            })
+            .collect::<Vec<_>>();
+        views.sort_by(|a, b| {
+            (a.db.as_str(), a.name.as_str()).cmp(&(b.db.as_str(), b.name.as_str()))
+        });
+        views
     }
 
     fn merge_policy_for(&self, table: &BaseTableRef) -> MergePolicySpec {
@@ -24628,6 +24732,16 @@ fn view_dependency_json(dep: &ViewDependency) -> serde_json::Value {
     })
 }
 
+fn view_row_signature(view: &ViewState) -> Vec<(String, Vec<Lit>)> {
+    let mut rows = view
+        .rows
+        .iter()
+        .map(|row| (pk_key(&row.pk), row.values.clone()))
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
 fn view_is_grouped(info: &ViewQueryInfo) -> bool {
     !info.group_key_columns.is_empty()
 }
@@ -37849,6 +37963,149 @@ mod tests {
         let after_delete = grouped_rows(&engine);
         assert_eq!(after_delete.len(), 1);
         assert_eq!(after_delete.get("Oslo"), Some(&(2, 16.0)));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn r08_view_correctness_oracle_random_workload_matches_full_recompute() -> anyhow::Result<()> {
+        let dir = temp_dir("view_oracle_random");
+        let mut engine = Engine::open(&dir)?;
+
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "score".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let mut rows = Vec::new();
+        for id in 1..=16_u64 {
+            rows.push(row(&[
+                ("id", Lit::U64 { v: id }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: if id % 2 == 0 { "Oslo" } else { "Tokyo" }.to_string(),
+                    },
+                ),
+                ("score", Lit::U64 { v: id * 3 }),
+            ]));
+        }
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            rows,
+            None,
+        )?;
+
+        engine.view_create(ViewCreateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            query: base_query(
+                "app",
+                "users",
+                vec![
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Col {
+                        col: "city".to_string(),
+                        table: None,
+                    },
+                ],
+                Some(Expr::Op {
+                    op: "gt".to_string(),
+                    a: Some(Box::new(Expr::Col {
+                        col: "score".to_string(),
+                        table: None,
+                    })),
+                    b: Some(Box::new(Expr::Lit {
+                        lit: Lit::U64 { v: 20 },
+                    })),
+                    args: None,
+                    list: None,
+                    lo: None,
+                    hi: None,
+                }),
+            ),
+            if_not_exists: None,
+        })?;
+
+        let mut seed = 0x5eed_u64;
+        for _ in 0..24 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let id = (seed % 16) + 1;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let score = seed % 60;
+            let mut set = RowObject::new();
+            set.insert("score".to_string(), Lit::U64 { v: score });
+            engine.data_update(
+                &BaseTableRef {
+                    db: "app".to_string(),
+                    table: "users".to_string(),
+                    r#as: None,
+                },
+                &eq_expr(
+                    Expr::Col {
+                        col: "id".to_string(),
+                        table: None,
+                    },
+                    Expr::Lit {
+                        lit: Lit::U64 { v: id },
+                    },
+                ),
+                &set,
+                None,
+                None,
+                &[],
+            )?;
+        }
+
+        let report = engine.view_evaluate(ViewEvaluateParams {
+            view: BaseTableRef {
+                db: "app".to_string(),
+                table: "top_users".to_string(),
+                r#as: None,
+            },
+            iterations: Some(3),
+        })?;
+        assert_eq!(report.format, VIEW_EVALUATE_FORMAT_V1);
+        assert!(report.incremental_ok, "{:?}", report.incremental_error);
+        assert!(report.correct);
+        assert!(report.pending_changes > 0);
+        assert_eq!(report.rows_incremental, report.rows_full);
+        assert_eq!(report.recommended_mode, "full");
+        assert!(report.mean_full_ns > 0);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

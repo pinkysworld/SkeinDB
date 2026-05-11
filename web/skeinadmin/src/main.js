@@ -102,7 +102,7 @@ const RESEARCH_TRACKS = [
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding, dummy lookups, leakage reports, and overhead reports for access-pattern protection.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain', 'oblivious.evaluate'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Filtered hash-chain queries with boundary, checkpoint, and Merkle inclusion proofs.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions with conflict hooks, offline queues, evaluation, and values-only Wasm execution.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.evaluate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
-  { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
+  { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.evaluate', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
   { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
   { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
@@ -205,6 +205,8 @@ const RPC_TEMPLATES = [
   { label: 'forensic.query', method: 'forensic.query', params: { from_id:0, limit:50, filter:{op:'eq', a:{col:'db'}, b:{lit:{t:'str', v:'demo'}}} } },
   { label: 'forensic.export', method: 'forensic.export', params: { from_id:0, limit:50, bundle_id:'incident-demo' } },
   { label: 'view.create', method: 'view.create', params: { view:{db:'demo',table:'active_users'}, query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
+  { label: 'view.refresh', method: 'view.refresh', params: { view:{db:'demo',table:'active_users'}, mode:'auto' } },
+  { label: 'view.evaluate', method: 'view.evaluate', params: { view:{db:'demo',table:'active_users'}, iterations:5 } },
   { label: 'view.status', method: 'view.status', params: { view:{db:'demo',table:'active_users'} } },
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
   { label: 'merge.evaluate', method: 'merge.evaluate', params: { policy:{default:{kind:'builtin',name:'last_write_wins'},per_column:{count:{kind:'builtin',name:'sum'}}}, iterations:10, cases:[{name:'counter conflict',current:{count:{t:'u64',v:7}},incoming:{count:{t:'u64',v:4}},expected_etag_match:false,min_causality_satisfied:true,constraint_ok:true}] } },
@@ -716,6 +718,14 @@ function renderViewSummary(result, mode) {
     setViewSummaryMarkup('<strong>Refresh complete.</strong> Mode: ' + escapeHtml(String(result.mode || 'unknown'))
       + ' | <strong>Rows</strong>: ' + escapeHtml(String(Number(result.rows) || 0))
       + ' | <strong>Last change seq</strong>: ' + escapeHtml(String(Number(result.last_change_seq) || 0)));
+    return;
+  }
+  if (mode === 'evaluate') {
+    setViewSummaryMarkup('<strong>Evaluation complete.</strong> Correct: ' + escapeHtml(result.correct ? 'yes' : 'no')
+      + ' | <strong>Pending changes</strong>: ' + escapeHtml(String(Number(result.pending_changes) || 0))
+      + ' | <strong>Recommended</strong>: ' + escapeHtml(String(result.recommended_mode || 'unknown'))
+      + ' | <strong>Speedup vs full</strong>: ' + escapeHtml(Number(result.speedup_vs_full || 0).toFixed(2)) + 'x'
+      + (result.incremental_error ? '<br><strong>Incremental error</strong>: ' + escapeHtml(String(result.incremental_error)) : ''));
     return;
   }
   if (mode === 'drop') {
@@ -5656,7 +5666,19 @@ async function viewCreate() {
 }
 
 async function viewRefresh() {
-  try { const res = await call('view.refresh',{view:readViewRef()},'viewOut'); renderViewSummary(unwrapRpcResult(res, 'view.refresh'), 'refresh'); } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
+  try {
+    const mode = ($('viewRefreshMode')?.value || 'auto').trim() || 'auto';
+    const res = await call('view.refresh',{view:readViewRef(),mode},'viewOut');
+    renderViewSummary(unwrapRpcResult(res, 'view.refresh'), 'refresh');
+  } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
+}
+
+async function viewEvaluate() {
+  try {
+    const iterations = parseOptionalU64Input('viewEvalIterations', 'Evaluate iterations') || undefined;
+    const res = await call('view.evaluate',{view:readViewRef(),iterations},'viewOut');
+    renderViewSummary(unwrapRpcResult(res, 'view.evaluate'), 'evaluate');
+  } catch (e) { setViewSummaryMarkup('View action failed.'); setOut({error:String(e)},'viewOut'); }
 }
 
 async function viewStatus() {
@@ -6075,7 +6097,7 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'vectors',   title: 'Vectors (R10)',     purpose: 'First-class vector columns with kNN search.', actions: 'Insert, index status, top-k similarity search.' },
   { panel: 'privacy',   title: 'Privacy & DP',      purpose: 'Differential privacy aggregates and oblivious execution.', actions: 'Run DP aggregates with budget, register oblivious policies, explain padding.' },
   { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with filtered verification and forensic proof bundles.', actions: 'Audit status, verify chain, query by DB/table/op/id/filter, proof-verify the returned slice, and export report bundles.' },
-  { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, status, drop, explain dependencies.' },
+  { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, evaluate incremental-vs-full correctness, status, drop, explain dependencies.' },
   { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions, conflict evaluation, and values-only Wasm merge modules.', actions: 'Apply/register policies, simulate current+incoming rows, evaluate conflict workloads, manage Wasm modules.' },
   { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, run, inspect plan artifacts, package for edge.' },
   { panel: 'advisor',   title: 'Index Advisor',     purpose: 'Workload-driven index recommendation and synthesis.', actions: 'Synthesize, history, apply, dismiss recommendations.' },
@@ -6696,6 +6718,7 @@ wire('btnForExport', forExport);
 // Views
 wire('btnViewCreate', viewCreate);
 wire('btnViewRefresh', viewRefresh);
+wire('btnViewEvaluate', viewEvaluate);
 wire('btnViewStatus', viewStatus);
 wire('btnViewDrop', viewDrop);
 wire('btnViewExplainDeps', viewExplainDeps);

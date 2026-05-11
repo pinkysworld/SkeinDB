@@ -1,9 +1,9 @@
-# Incremental Views (Prototype)
+# Incremental Views
 
-Status: Draft
-Last updated: 2026-04-25
+Status: Hardened research surface (v0.3.15)
+Last updated: 2026-05-11
 
-This document describes the prototype incremental view maintenance for R08.
+This document describes the R08 incremental view maintenance surface.
 
 ## 1) Overview
 
@@ -13,6 +13,7 @@ Supported methods:
 - `view.create`
 - `view.drop`
 - `view.refresh`
+- `view.evaluate`
 - `view.status`
 - `view.explain_deps`
 
@@ -44,7 +45,24 @@ Incremental refresh:
 Views are marked `stale=true` when base tables change.
 Reads may return stale results until the view is refreshed.
 
-## 4) Dependencies
+## 4) Evaluation oracle and benchmark report
+
+`view.evaluate` is a read-only harness for a specific materialized view. It clones
+the current view state, runs incremental refresh on one clone and full recompute
+on another clone, compares the resulting row signatures, and reports:
+
+- `format: "skein.view.evaluate.v1"`
+- pending change count and touched primary-key count
+- whether the incremental result matches full recompute
+- mean incremental/full refresh nanoseconds over the requested iterations
+- speedup versus full recompute
+- the current auto-refresh recommendation (`incremental` or `full`)
+
+The harness is intentionally deterministic and does not mutate the live view.
+Focused tests cover a deterministic pseudo-random update workload plus the
+JSON-RPC roundtrip used by SkeinAdmin.
+
+## 5) Dependencies
 
 `view.status` and `view.explain_deps` return one dependency object per base table.
 Each object currently includes:
@@ -61,3 +79,15 @@ projection extraction in the rest of the engine across restarts.
 
 This metadata is intended for dependency tracking, future optimizer work, and
 operator visibility in SkeinAdmin.
+
+## 6) Compatibility catalogs
+
+Materialized views now appear in virtual compatibility catalogs:
+
+- MySQL `information_schema.tables` emits `TABLE_TYPE = 'VIEW'` rows.
+- MySQL `information_schema.views` emits definition/updatability metadata.
+- PostgreSQL `pg_catalog.pg_views` emits `schemaname`, `viewname`, `viewowner`, and `definition`.
+
+These are adoption shims for ORMs and admin tools; SQL `CREATE VIEW` remains a
+compatibility no-op while the native `view.create` method is the authoritative
+runtime surface.

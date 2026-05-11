@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.15 - 2026-05-11
+
+- Closes R08/T280-T287 with persisted `view.create`, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, a deterministic correctness oracle, and benchmark-style `view.evaluate` reports.
+- Adds `view.evaluate` to SkeinQL types, JSON-RPC dispatch, read-only capability handling, SkeinAdmin Views controls, RPC templates, and `system.capabilities` for 133 advertised methods.
+- Improves view compatibility metadata with MySQL `information_schema.views`, `information_schema.tables` VIEW rows, and PostgreSQL `pg_catalog.pg_views`, backed by focused SQL catalog tests.
+- Updates the research backlog and True Status Matrix to **66 done / 43 open** while keeping R18/R19 prototype caveats intact.
+- Refreshes README, SkeinQL/API/Incremental Views/SkeinAdmin/compat docs, generated docs site, website status copy, and release metadata for v0.3.15.
+
 ## v0.3.14 - 2026-05-11
 
 - Closes R07/T270-T276 with write-write/dependency/constraint conflict hooks, values-only Wasm merge policy execution, deterministic cancellation coverage, `merge.evaluate` workload reports, offline queue docs, and SkeinAdmin Merge & CRDT wiring.

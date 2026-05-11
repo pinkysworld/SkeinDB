@@ -429,7 +429,7 @@ Compatibility notes:
 
 ### 11.4 views.json
 
-Prototype materialized-view state for `view.create/drop/refresh/status/explain_deps`.
+Materialized-view state for `view.create/drop/refresh/evaluate/status/explain_deps`.
 
 Format:
 
@@ -484,6 +484,7 @@ Format:
 
 Compatibility notes:
 - Format v2 persists dependency-usage breakdown (`projection_columns`, `predicate_columns`, `group_by_columns`) per dependency plus grouped-view `source_rows` shadow state used by incremental maintenance.
+- v0.3.15 adds the read-only `view.evaluate` oracle/benchmark and compatibility catalogs without changing this on-disk format.
 - Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and `source_rows` defaults to empty.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 

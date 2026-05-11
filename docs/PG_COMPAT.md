@@ -51,7 +51,7 @@ Notes:
 - PG SQL dialect rewriting: `::` type casts, `$$dollar quoting$$`, `"double-quoted"` identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST n ROWS ONLY`, `ARRAY[…]` constructor, and `ON CONFLICT` rewrite support for the current shared-engine DML subset
 - `INSERT` / `UPDATE` / `DELETE ... RETURNING` extraction with supported follow-up reads, and explicit `0A000` errors for `COPY FROM STDIN` / `COPY TO STDOUT`
 - PG DDL compatibility: `SERIAL`/`BIGSERIAL`/`SMALLSERIAL` → auto-increment integer columns, `CREATE SCHEMA` → `CREATE DATABASE`, `CREATE INDEX CONCURRENTLY` (accepted/ignored), `CREATE INDEX IF NOT EXISTS`, `COMMENT ON` (silently accepted)
-- virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
+- virtual `pg_catalog` coverage for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity`
 - shared `information_schema.columns` introspection through `sql.exec`, including common metadata fields (`COLUMN_TYPE`, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and `EXTRA`) used by cross-dialect ORMs
 
 ## Module map
@@ -64,7 +64,7 @@ Notes:
 | `pg_session.rs` | Inline implementation | Common PG settings live on `MySqlSessionState`; `SET`, `RESET`, `SHOW`, and `current_setting(...)` use that session map |
 | `pg_parse.rs` | Inline implementation | PG SQL dialect rewriting layer (`pg_rewrite_sql` + helpers in `server.rs`): `::` type casts, dollar quoting, double-quoted identifiers, `IS [NOT] DISTINCT FROM`, `FETCH FIRST`, `ARRAY[...]`, `ON CONFLICT`, and supported `RETURNING` extraction |
 | `pg_types.rs` | Inline implementation | Common PG type OIDs, array OIDs, text encoding, and binary result encoding live in `pg_wire.rs` plus server-side inference helpers |
-| `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_tables`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity` |
+| `pg_catalog.rs` | Inline implementation | Virtual `pg_catalog.*` tables are served through the shared executor for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_proc` (stub), `pg_settings`, and `pg_stat_activity` |
 | `pg_functions.rs` | Partial | PG-specific scalar/aggregate functions now inline in `engine.rs` and `server.rs`: `||` concat, `~`/`~*` regex, `->` / `->>` JSON access, `gen_random_uuid`, `date_trunc`, `to_char`, `pg_typeof`, `string_to_array`, `array_length`, `array_upper`, `array_lower`, `clock_timestamp`, `statement_timestamp`, `transaction_timestamp`, `string_agg`, `array_agg` |
 
 ## Authentication
@@ -130,7 +130,7 @@ Current integration coverage in `crates/skeindb/tests/cluster_rpc.rs` includes:
 - simple query `SELECT 1`
 - simple query `SELECT version()`
 - startup/bootstrap query bundle covering `current_database()`, `current_schema()`, `SHOW server_version` / `server_version_num` / `standard_conforming_strings` / `max_identifier_length`, `SHOW transaction isolation level`, and `SELECT current_setting(...)`
-- simple-query `pg_catalog` round-trips for `pg_database`, `pg_namespace`, `pg_tables`, `pg_settings`, `pg_type`, `pg_stat_activity`, `pg_class`, `pg_attribute`, `pg_index`, and `pg_constraint`
+- simple-query `pg_catalog` round-trips for `pg_database`, `pg_namespace`, `pg_tables`, `pg_views`, `pg_settings`, `pg_type`, `pg_stat_activity`, `pg_class`, `pg_attribute`, `pg_index`, and `pg_constraint`
 - simple-query `RowDescription` OID checks for numeric, boolean, temporal, JSON, UUID, and text result columns
 - extended query `Parse` / `Bind` / statement+portal `Describe` / `Execute` / `Close` / `Sync` / `Flush` round-trips
 - extended-query `RowDescription` OID checks for described/executed result columns
