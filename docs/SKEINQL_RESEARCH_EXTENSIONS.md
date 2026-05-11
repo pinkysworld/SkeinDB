@@ -8,7 +8,7 @@ Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
-- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.15 runtime method map exposed through `system.capabilities`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.16 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04
@@ -53,7 +53,7 @@ Related: R08
 ## 6. transport.* — Protocol negotiation hints
 Related: R09
 
-- `transport.capabilities` — advertise supported transports (HTTP/1.1, HTTP/2, QUIC)
+- `transport.capabilities` — advertise supported transports (HTTP/1.1, HTTP/2, QUIC); the QUIC runtime has framing, prepared-query, 0-RTT write rejection, and rebind coverage, while comparative p99 benchmarking remains open
 
 ## 7. vector.* — Embeddings & ANN search
 Related: R10

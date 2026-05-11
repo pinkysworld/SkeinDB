@@ -1,8 +1,10 @@
-# SkeinQL-over-QUIC (Experimental)
+# SkeinQL-over-QUIC
 
-This document sketches the initial QUIC transport for SkeinQL (R09). It is
-intentionally small and focused on framing + stream mapping so the prototype
-can evolve without breaking the core HTTP RPC.
+Status: Hardened runtime surface with benchmark follow-up (v0.3.16)
+
+This document describes the current QUIC transport for SkeinQL (R09). It is
+intentionally small and focused on framing + stream mapping so the runtime can
+evolve without breaking the core HTTP RPC.
 
 ## Goals
 - Multiplexed queries without head-of-line blocking.
@@ -69,3 +71,15 @@ rejected until a QUIC auth envelope is defined.
 enforces a read-only allowlist for these requests to prevent replayed writes.
 Future work will add handshake-level 0-RTT enablement and stricter replay
 protection.
+
+## Test Evidence
+
+The R09 runtime surface is covered by `crates/skeindb/tests/quic_rpc.rs`:
+
+- `quic_rpc_ping_roundtrip` verifies the Quinn-backed listener and JSON-RPC framing.
+- `quic_prepared_query_roundtrip` verifies prepared-query handles over QUIC streams.
+- `quic_zero_rtt_rejects_write` verifies the read-only 0-RTT guard.
+- `quic_connection_migration_rebind` and `r09_quic_concurrent_multi_stream_rpcs` verify socket rebind and continued RPC success.
+
+The remaining R09 backlog item is comparative p99 benchmarking against HTTP/2
+and MySQL/TCP under concurrency.

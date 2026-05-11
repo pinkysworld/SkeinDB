@@ -153,7 +153,7 @@
   - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: <strong>66 done / 43 open</strong> after closing R08 incremental-view hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: <strong>71 done / 38 open</strong> after syncing the R09 QUIC transport evidence. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
@@ -168,7 +168,8 @@
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table <code>oblivious.policy.*</code> persistence, padded scan/dummy lookup enforcement, <code>oblivious.explain</code>, <code>oblivious.evaluate</code> trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
 - 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
 - 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, <code>merge.evaluate</code> conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge &amp; CRDT payloads/controls, PostgreSQL <code>pg_catalog.pg_tables</code>, MySQL <code>information_schema.table_privileges</code>, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.
-- 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted <code>view.create</code> definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only <code>view.evaluate</code> correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL <code>information_schema.views</code>, PostgreSQL <code>pg_catalog.pg_views</code>, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.</p>
+- 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted <code>view.create</code> definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only <code>view.evaluate</code> correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL <code>information_schema.views</code>, PostgreSQL <code>pg_catalog.pg_views</code>, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.
+- 2026-05-11 (v0.3.16 R09 evidence sync + catalog polish release): T290-T293 and T295 are closed with the documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed server listener, prepared-query roundtrip over QUIC streams, zero-RTT write rejection, connection rebind and multi-stream tests. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP. Compatibility also gains MySQL <code>information_schema.plugins/events/partitions/referential_constraints</code> and PostgreSQL <code>pg_roles</code> / <code>pg_user</code> / <code>pg_tablespace</code>. Counts now 71 done / 38 open.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -388,12 +389,12 @@
 </ul>
 <h3 id="phase-30-http3-quic-native-protocol-r09">Phase 30 — HTTP/3 / QUIC-native protocol (R09)<a class="headerlink" href="#phase-30-http3-quic-native-protocol-r09" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping</li>
-<li>[ ] T291: Implement server prototype with a QUIC library (feature-flag)</li>
-<li>[ ] T292: Prepared query handles over QUIC streams (read-only first)</li>
-<li>[ ] T293: 0-RTT safety rules (no writes in 0-RTT by default)</li>
+<li>[x] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping. Evidence: <code>docs/TRANSPORT_QUIC.md</code> defines length-prefixed JSON frames, one request/response per bidirectional stream, envelope metadata, and stream mapping.</li>
+<li>[x] T291: Implement server prototype with a QUIC library (feature-flag). Evidence: <code>skeindb serve --quic --quic-cert --quic-key</code>, Quinn integration, <code>transport.capabilities</code>, and <code>quic_rpc_ping_roundtrip</code>.</li>
+<li>[x] T292: Prepared query handles over QUIC streams (read-only first). Evidence: <code>quic_prepared_query_roundtrip</code> prepares a query, executes it on a new QUIC stream, and verifies result rows.</li>
+<li>[x] T293: 0-RTT safety rules (no writes in 0-RTT by default). Evidence: QUIC metadata <code>rtt:"0rtt"</code> is documented and <code>quic_zero_rtt_rejects_write</code> locks the read-only guard.</li>
 <li>[ ] T294: Bench: p99 latency under concurrency vs HTTP/2 and MySQL/TCP</li>
-<li>[ ] T295: Connection migration test harness (simulated IP change)</li>
+<li>[x] T295: Connection migration test harness (simulated IP change). Evidence: <code>quic_connection_migration_rebind</code> and <code>r09_quic_concurrent_multi_stream_rpcs</code> rebind the client UDP socket and verify continued RPC success.</li>
 </ul>
 <h3 id="phase-31-vector-embeddings-as-first-class-valueids-r10">Phase 31 — Vector embeddings as first-class ValueIDs (R10)<a class="headerlink" href="#phase-31-vector-embeddings-as-first-class-valueids-r10" title="Permanent link">¶</a></h3>
 <ul>

@@ -11273,12 +11273,25 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
     let (type_oid, type_size) = match name.to_ascii_lowercase().as_str() {
         "oid" | "datdba" | "dattablespace" | "typnamespace" | "typowner" | "typrelid"
         | "typelem" | "typarray" | "typbasetype" | "typndims" | "nspowner" | "datid"
-        | "usesysid" | "relnamespace" | "relowner" | "relam" | "reltablespace" | "reloftype"
-        | "attrelid" | "atttypid" | "attcollation" | "indexrelid" | "indrelid" | "connamespace"
-        | "conrelid" | "contypid" | "conindid" | "conparentid" | "confrelid" => (26, 4),
+        | "usesysid" | "spcowner" | "relnamespace" | "relowner" | "relam" | "reltablespace"
+        | "reloftype" | "attrelid" | "atttypid" | "attcollation" | "indexrelid" | "indrelid"
+        | "connamespace" | "conrelid" | "contypid" | "conindid" | "conparentid" | "confrelid" => {
+            (26, 4)
+        }
         "datistemplate"
         | "datallowconn"
         | "pending_restart"
+        | "rolsuper"
+        | "rolinherit"
+        | "rolcreaterole"
+        | "rolcreatedb"
+        | "rolcanlogin"
+        | "rolreplication"
+        | "rolbypassrls"
+        | "usecreatedb"
+        | "usesuper"
+        | "userepl"
+        | "usebypassrls"
         | "typbyval"
         | "typispreferred"
         | "typisdefined"
@@ -11311,8 +11324,10 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "conislocal"
         | "connoinherit" => (pg_wire::oid::BOOL, 1),
         "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
-        "relnatts" | "relchecks" | "attlen" | "attnum" | "attndims" | "atttypmod"
-        | "attinhcount" | "indnatts" | "indnkeyatts" | "coninhcount" => (pg_wire::oid::INT4, 4),
+        "rolconnlimit" | "relnatts" | "relchecks" | "attlen" | "attnum" | "attndims"
+        | "atttypmod" | "attinhcount" | "indnatts" | "indnkeyatts" | "coninhcount" => {
+            (pg_wire::oid::INT4, 4)
+        }
         "reltuples" => (pg_wire::oid::FLOAT4, 4),
         _ => return None,
     };
@@ -24167,6 +24182,78 @@ fn information_schema_select_result(
             "XA",
             "SAVEPOINTS",
         ]
+    } else if table.table.eq_ignore_ascii_case("plugins") {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "PLUGIN_NAME".to_string(),
+            Lit::Str {
+                v: "SkeinDB".to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_VERSION".to_string(),
+            Lit::Str {
+                v: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_STATUS".to_string(),
+            Lit::Str {
+                v: "ACTIVE".to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_TYPE".to_string(),
+            Lit::Str {
+                v: "STORAGE ENGINE".to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_TYPE_VERSION".to_string(),
+            Lit::Str {
+                v: "1.0".to_string(),
+            },
+        );
+        row.insert("PLUGIN_LIBRARY".to_string(), Lit::Null);
+        row.insert("PLUGIN_LIBRARY_VERSION".to_string(), Lit::Null);
+        row.insert(
+            "PLUGIN_AUTHOR".to_string(),
+            Lit::Str {
+                v: "SkeinDB".to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_DESCRIPTION".to_string(),
+            Lit::Str {
+                v: "SkeinDB compatibility storage engine".to_string(),
+            },
+        );
+        row.insert(
+            "PLUGIN_LICENSE".to_string(),
+            Lit::Str {
+                v: "Apache-2.0".to_string(),
+            },
+        );
+        row.insert(
+            "LOAD_OPTION".to_string(),
+            Lit::Str {
+                v: "ON".to_string(),
+            },
+        );
+        rows.push(row);
+        vec![
+            "PLUGIN_NAME",
+            "PLUGIN_VERSION",
+            "PLUGIN_STATUS",
+            "PLUGIN_TYPE",
+            "PLUGIN_TYPE_VERSION",
+            "PLUGIN_LIBRARY",
+            "PLUGIN_LIBRARY_VERSION",
+            "PLUGIN_AUTHOR",
+            "PLUGIN_DESCRIPTION",
+            "PLUGIN_LICENSE",
+            "LOAD_OPTION",
+        ]
     } else if table.table.eq_ignore_ascii_case("routines") {
         // Empty stub — no stored procedures/functions yet
         vec![
@@ -24195,17 +24282,113 @@ fn information_schema_select_result(
             "ACTION_TIMING",
             "CREATED",
         ]
-    } else if table.table.eq_ignore_ascii_case("views") {
-        // Empty stub — no persisted views yet
+    } else if table.table.eq_ignore_ascii_case("events") {
+        vec![
+            "EVENT_CATALOG",
+            "EVENT_SCHEMA",
+            "EVENT_NAME",
+            "DEFINER",
+            "TIME_ZONE",
+            "EVENT_BODY",
+            "EVENT_DEFINITION",
+            "EVENT_TYPE",
+            "EXECUTE_AT",
+            "INTERVAL_VALUE",
+            "INTERVAL_FIELD",
+            "SQL_MODE",
+            "STARTS",
+            "ENDS",
+            "STATUS",
+            "ON_COMPLETION",
+            "CREATED",
+            "LAST_ALTERED",
+            "LAST_EXECUTED",
+            "EVENT_COMMENT",
+            "ORIGINATOR",
+            "CHARACTER_SET_CLIENT",
+            "COLLATION_CONNECTION",
+            "DATABASE_COLLATION",
+        ]
+    } else if table.table.eq_ignore_ascii_case("partitions") {
+        for db in eng.list_databases() {
+            let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+            for t in tables {
+                let mut row = BTreeMap::new();
+                row.insert(
+                    "TABLE_CATALOG".to_string(),
+                    Lit::Str {
+                        v: "def".to_string(),
+                    },
+                );
+                row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: db.clone() });
+                row.insert("TABLE_NAME".to_string(), Lit::Str { v: t });
+                row.insert("PARTITION_NAME".to_string(), Lit::Null);
+                row.insert("SUBPARTITION_NAME".to_string(), Lit::Null);
+                row.insert("PARTITION_ORDINAL_POSITION".to_string(), Lit::Null);
+                row.insert("SUBPARTITION_ORDINAL_POSITION".to_string(), Lit::Null);
+                row.insert("PARTITION_METHOD".to_string(), Lit::Null);
+                row.insert("SUBPARTITION_METHOD".to_string(), Lit::Null);
+                row.insert("PARTITION_EXPRESSION".to_string(), Lit::Null);
+                row.insert("SUBPARTITION_EXPRESSION".to_string(), Lit::Null);
+                row.insert("PARTITION_DESCRIPTION".to_string(), Lit::Null);
+                row.insert("TABLE_ROWS".to_string(), Lit::U64 { v: 0 });
+                row.insert("DATA_LENGTH".to_string(), Lit::U64 { v: 0 });
+                row.insert("INDEX_LENGTH".to_string(), Lit::U64 { v: 0 });
+                row.insert("CREATE_TIME".to_string(), Lit::Null);
+                row.insert("UPDATE_TIME".to_string(), Lit::Null);
+                row.insert("CHECK_TIME".to_string(), Lit::Null);
+                row.insert("CHECKSUM".to_string(), Lit::Null);
+                row.insert(
+                    "PARTITION_COMMENT".to_string(),
+                    Lit::Str { v: String::new() },
+                );
+                row.insert(
+                    "NODEGROUP".to_string(),
+                    Lit::Str {
+                        v: "default".to_string(),
+                    },
+                );
+                row.insert("TABLESPACE_NAME".to_string(), Lit::Null);
+                rows.push(row);
+            }
+        }
         vec![
             "TABLE_CATALOG",
             "TABLE_SCHEMA",
             "TABLE_NAME",
-            "VIEW_DEFINITION",
-            "CHECK_OPTION",
-            "IS_UPDATABLE",
-            "DEFINER",
-            "SECURITY_TYPE",
+            "PARTITION_NAME",
+            "SUBPARTITION_NAME",
+            "PARTITION_ORDINAL_POSITION",
+            "SUBPARTITION_ORDINAL_POSITION",
+            "PARTITION_METHOD",
+            "SUBPARTITION_METHOD",
+            "PARTITION_EXPRESSION",
+            "SUBPARTITION_EXPRESSION",
+            "PARTITION_DESCRIPTION",
+            "TABLE_ROWS",
+            "DATA_LENGTH",
+            "INDEX_LENGTH",
+            "CREATE_TIME",
+            "UPDATE_TIME",
+            "CHECK_TIME",
+            "CHECKSUM",
+            "PARTITION_COMMENT",
+            "NODEGROUP",
+            "TABLESPACE_NAME",
+        ]
+    } else if table.table.eq_ignore_ascii_case("referential_constraints") {
+        vec![
+            "CONSTRAINT_CATALOG",
+            "CONSTRAINT_SCHEMA",
+            "CONSTRAINT_NAME",
+            "UNIQUE_CONSTRAINT_CATALOG",
+            "UNIQUE_CONSTRAINT_SCHEMA",
+            "UNIQUE_CONSTRAINT_NAME",
+            "MATCH_OPTION",
+            "UPDATE_RULE",
+            "DELETE_RULE",
+            "TABLE_NAME",
+            "REFERENCED_TABLE_NAME",
         ]
     } else if table.table.eq_ignore_ascii_case("processlist") {
         // Single-row stub for current connection
@@ -24768,6 +24951,86 @@ fn pg_catalog_select_result(
             rows.push(row);
         }
         vec!["oid", "nspname", "nspowner", "nspacl"]
+    } else if table.table.eq_ignore_ascii_case("pg_roles") {
+        let mut row = BTreeMap::new();
+        row.insert("oid".to_string(), Lit::U64 { v: 10 });
+        row.insert(
+            "rolname".to_string(),
+            Lit::Str {
+                v: "root".to_string(),
+            },
+        );
+        row.insert("rolsuper".to_string(), Lit::Bool { v: true });
+        row.insert("rolinherit".to_string(), Lit::Bool { v: true });
+        row.insert("rolcreaterole".to_string(), Lit::Bool { v: true });
+        row.insert("rolcreatedb".to_string(), Lit::Bool { v: true });
+        row.insert("rolcanlogin".to_string(), Lit::Bool { v: true });
+        row.insert("rolreplication".to_string(), Lit::Bool { v: false });
+        row.insert("rolconnlimit".to_string(), Lit::I64 { v: -1 });
+        row.insert("rolpassword".to_string(), Lit::Null);
+        row.insert("rolvaliduntil".to_string(), Lit::Null);
+        row.insert("rolbypassrls".to_string(), Lit::Bool { v: false });
+        row.insert("rolconfig".to_string(), Lit::Null);
+        rows.push(row);
+        vec![
+            "oid",
+            "rolname",
+            "rolsuper",
+            "rolinherit",
+            "rolcreaterole",
+            "rolcreatedb",
+            "rolcanlogin",
+            "rolreplication",
+            "rolconnlimit",
+            "rolpassword",
+            "rolvaliduntil",
+            "rolbypassrls",
+            "rolconfig",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_user") {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "usename".to_string(),
+            Lit::Str {
+                v: "root".to_string(),
+            },
+        );
+        row.insert("usesysid".to_string(), Lit::U64 { v: 10 });
+        row.insert("usecreatedb".to_string(), Lit::Bool { v: true });
+        row.insert("usesuper".to_string(), Lit::Bool { v: true });
+        row.insert("userepl".to_string(), Lit::Bool { v: false });
+        row.insert("usebypassrls".to_string(), Lit::Bool { v: false });
+        row.insert("passwd".to_string(), Lit::Null);
+        row.insert("valuntil".to_string(), Lit::Null);
+        row.insert("useconfig".to_string(), Lit::Null);
+        rows.push(row);
+        vec![
+            "usename",
+            "usesysid",
+            "usecreatedb",
+            "usesuper",
+            "userepl",
+            "usebypassrls",
+            "passwd",
+            "valuntil",
+            "useconfig",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_tablespace") {
+        for (oid, spcname) in [(1663_u64, "pg_default"), (1664_u64, "pg_global")] {
+            let mut row = BTreeMap::new();
+            row.insert("oid".to_string(), Lit::U64 { v: oid });
+            row.insert(
+                "spcname".to_string(),
+                Lit::Str {
+                    v: spcname.to_string(),
+                },
+            );
+            row.insert("spcowner".to_string(), Lit::U64 { v: 10 });
+            row.insert("spcacl".to_string(), Lit::Null);
+            row.insert("spcoptions".to_string(), Lit::Null);
+            rows.push(row);
+        }
+        vec!["oid", "spcname", "spcowner", "spcacl", "spcoptions"]
     } else if table.table.eq_ignore_ascii_case("pg_tables") {
         for db in eng.list_databases() {
             let table_names = match eng.list_tables(&db) {
@@ -28880,6 +29143,88 @@ mod tests {
         assert_eq!(privilege_rows[0][1]["v"].as_str(), Some("users"));
         assert_eq!(privilege_rows[0][2]["v"].as_str(), Some("SELECT"));
 
+        let plugins = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT plugin_name, plugin_status, plugin_type FROM information_schema.plugins WHERE plugin_name = 'SkeinDB'"
+            }),
+        )
+        .await;
+        assert!(plugins.ok);
+        let plugin_rows = plugins
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(plugin_rows.len(), 1);
+        assert_eq!(plugin_rows[0][0]["v"].as_str(), Some("SkeinDB"));
+        assert_eq!(plugin_rows[0][1]["v"].as_str(), Some("ACTIVE"));
+        assert_eq!(plugin_rows[0][2]["v"].as_str(), Some("STORAGE ENGINE"));
+
+        let partitions = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT table_schema, table_name, partition_name FROM information_schema.partitions WHERE table_schema = 'app' AND table_name = 'users'"
+            }),
+        )
+        .await;
+        assert!(partitions.ok);
+        let partition_rows = partitions
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(partition_rows.len(), 1);
+        assert_eq!(partition_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(partition_rows[0][1]["v"].as_str(), Some("users"));
+        assert_eq!(partition_rows[0][2]["t"].as_str(), Some("null"));
+
+        let events = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT event_name FROM information_schema.events WHERE event_schema = 'app'"
+            }),
+        )
+        .await;
+        assert!(events.ok);
+        let event_rows = events
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(event_rows.is_empty());
+
+        let referential_constraints = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT constraint_name FROM information_schema.referential_constraints WHERE constraint_schema = 'app'"
+            }),
+        )
+        .await;
+        assert!(referential_constraints.ok);
+        let referential_rows = referential_constraints
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(referential_rows.is_empty());
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -29012,6 +29357,74 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(namespace_rows.len(), 1);
         assert_eq!(namespace_rows[0][0]["v"].as_str(), Some("public"));
+
+        let roles = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT rolname, rolcanlogin, rolsuper FROM pg_catalog.pg_roles WHERE rolname = 'root'"
+            }),
+        )
+        .await;
+        assert!(roles.ok);
+        let role_rows = roles
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(role_rows.len(), 1);
+        assert_eq!(role_rows[0][0]["v"].as_str(), Some("root"));
+        assert_eq!(role_rows[0][1]["v"].as_bool(), Some(true));
+        assert_eq!(role_rows[0][2]["v"].as_bool(), Some(true));
+
+        let users = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT usename, usesysid, usesuper FROM pg_catalog.pg_user WHERE usename = 'root'"
+            }),
+        )
+        .await;
+        assert!(users.ok);
+        let user_rows = users
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(user_rows.len(), 1);
+        assert_eq!(user_rows[0][0]["v"].as_str(), Some("root"));
+        assert_eq!(user_rows[0][1]["v"].as_u64(), Some(10));
+        assert_eq!(user_rows[0][2]["v"].as_bool(), Some(true));
+
+        let tablespaces = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT spcname, spcowner FROM pg_catalog.pg_tablespace WHERE spcname = 'pg_default'"
+            }),
+        )
+        .await;
+        assert!(tablespaces.ok);
+        let tablespace_rows = tablespaces
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(tablespace_rows.len(), 1);
+        assert_eq!(tablespace_rows[0][0]["v"].as_str(), Some("pg_default"));
+        assert_eq!(tablespace_rows[0][1]["v"].as_u64(), Some(10));
 
         let pg_tables = call_sql_exec_http(
             &state,
@@ -38408,6 +38821,11 @@ mod tests {
         assert!(pg_catalog_result_column_override("relhasindex").is_some());
         assert!(pg_catalog_result_column_override("relhaspkey").is_some());
         assert!(pg_catalog_result_column_override("relnatts").is_some());
+        // pg_roles / pg_user / pg_tablespace columns
+        assert!(pg_catalog_result_column_override("rolcanlogin").is_some());
+        assert!(pg_catalog_result_column_override("rolconnlimit").is_some());
+        assert!(pg_catalog_result_column_override("usesuper").is_some());
+        assert!(pg_catalog_result_column_override("spcowner").is_some());
         // pg_attribute columns
         assert!(pg_catalog_result_column_override("attrelid").is_some());
         assert!(pg_catalog_result_column_override("atttypid").is_some());

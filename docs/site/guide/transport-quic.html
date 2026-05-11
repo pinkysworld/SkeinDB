@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SkeinQL-over-QUIC (Experimental) — SkeinDB Docs</title>
-<meta name="description" content="SkeinQL-over-QUIC (Experimental) — part of the SkeinDB documentation.">
+<title>SkeinQL-over-QUIC — SkeinDB Docs</title>
+<meta name="description" content="SkeinQL-over-QUIC — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -121,13 +121,14 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>SkeinQL-over-QUIC (Experimental)</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>SkeinQL-over-QUIC</span>
     </div>
     <article class="doc-article">
-      <h1 id="skeinql-over-quic-experimental">SkeinQL-over-QUIC (Experimental)<a class="headerlink" href="#skeinql-over-quic-experimental" title="Permanent link">¶</a></h1>
-<p>This document sketches the initial QUIC transport for SkeinQL (R09). It is
-intentionally small and focused on framing + stream mapping so the prototype
-can evolve without breaking the core HTTP RPC.</p>
+      <h1 id="skeinql-over-quic">SkeinQL-over-QUIC<a class="headerlink" href="#skeinql-over-quic" title="Permanent link">¶</a></h1>
+<p>Status: Hardened runtime surface with benchmark follow-up (v0.3.16)</p>
+<p>This document describes the current QUIC transport for SkeinQL (R09). It is
+intentionally small and focused on framing + stream mapping so the runtime can
+evolve without breaking the core HTTP RPC.</p>
 <h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">¶</a></h2>
 <ul>
 <li>Multiplexed queries without head-of-line blocking.</li>
@@ -188,6 +189,16 @@ rejected until a QUIC auth envelope is defined.</p>
 enforces a read-only allowlist for these requests to prevent replayed writes.
 Future work will add handshake-level 0-RTT enablement and stricter replay
 protection.</p>
+<h2 id="test-evidence">Test Evidence<a class="headerlink" href="#test-evidence" title="Permanent link">¶</a></h2>
+<p>The R09 runtime surface is covered by <code>crates/skeindb/tests/quic_rpc.rs</code>:</p>
+<ul>
+<li><code>quic_rpc_ping_roundtrip</code> verifies the Quinn-backed listener and JSON-RPC framing.</li>
+<li><code>quic_prepared_query_roundtrip</code> verifies prepared-query handles over QUIC streams.</li>
+<li><code>quic_zero_rtt_rejects_write</code> verifies the read-only 0-RTT guard.</li>
+<li><code>quic_connection_migration_rebind</code> and <code>r09_quic_concurrent_multi_stream_rpcs</code> verify socket rebind and continued RPC success.</li>
+</ul>
+<p>The remaining R09 backlog item is comparative p99 benchmarking against HTTP/2
+and MySQL/TCP under concurrency.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/TRANSPORT_QUIC.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -216,6 +227,7 @@ protection.</p>
 <li><a href="#tls-certificates">TLS / Certificates</a></li>
 <li><a href="#auth-placeholder">Auth Placeholder</a></li>
 <li><a href="#0-rtt">0-RTT</a></li>
+<li><a href="#test-evidence">Test Evidence</a></li>
 </ul>
 </div>
 

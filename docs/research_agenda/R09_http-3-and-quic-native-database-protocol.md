@@ -27,6 +27,21 @@ SkeinDB supports HTTP for administration but uses TCP for the MySQL protocol. Mo
 - **E4:** CDN cache hit rate and latency reduction for ETag-validated queries.
 - **E5:** Protocol overhead (bandwidth, CPU) compared to binary protocols.
 
+## Implementation Status
+
+Status: **Hardened runtime surface in v0.3.16; comparative benchmark still open**.
+
+SkeinDB now ships SkeinQL-over-QUIC using a Quinn-backed listener configured with
+`skeindb serve --quic --quic-cert --quic-key`. The runtime uses the documented
+length-prefixed JSON frame format, one request/response per bidirectional stream,
+and the same JSON-RPC request/response envelope as HTTP. Prepared queries are
+transport-neutral and execute over fresh QUIC streams after `query.prepare`.
+
+The test suite covers ping, prepared-query execution, Wasm and vector RPC parity,
+0-RTT write rejection, client socket rebind, and multi-stream RPC reuse in
+`crates/skeindb/tests/quic_rpc.rs`. The remaining R09 task is the comparative
+p99 latency benchmark against HTTP/2 and MySQL/TCP under concurrent load.
+
 ## Expected Contributions
 
 - First database protocol designed natively for HTTP/3 and QUIC.
@@ -44,5 +59,5 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
-- **Prototype scaffold:** `docs/TRANSPORT_QUIC.md` and `crates/skeindb/src/quic.rs` for framing/stream mapping.
+- **Runtime surface:** `docs/TRANSPORT_QUIC.md`, `crates/skeindb/src/quic.rs`, and `crates/skeindb/tests/quic_rpc.rs` for framing/stream mapping, safety, and rebind coverage.
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.

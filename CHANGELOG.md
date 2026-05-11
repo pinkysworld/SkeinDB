@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.16 - 2026-05-11
+
+- Improves SQL adoption catalogs with MySQL `information_schema.plugins`, `information_schema.events`, `information_schema.partitions`, and `information_schema.referential_constraints`, plus PostgreSQL `pg_catalog.pg_roles`, `pg_catalog.pg_user`, and `pg_catalog.pg_tablespace`.
+- Removes a stale unreachable `information_schema.views` stub left behind after the v0.3.15 live view catalog implementation.
+- Closes R09/T290-T293 and T295 with existing QUIC framing, server, prepared-query, zero-RTT write-rejection, and rebind/multi-stream test evidence; T294 remains open for comparative p99 benchmarking.
+- Updates the research backlog and True Status Matrix to **71 done / 38 open**, refreshes compatibility docs and generated docs site, and fixes duplicate favicon tags on the R19 research page.
+
 ## v0.3.15 - 2026-05-11
 
 - Closes R08/T280-T287 with persisted `view.create`, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, a deterministic correctness oracle, and benchmark-style `view.evaluate` reports.

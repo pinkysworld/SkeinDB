@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **66 done / 43 open** after closing R08 incremental-view hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **71 done / 38 open** after syncing the R09 QUIC transport evidence. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -47,6 +47,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, `forensic.query` / `forensic.verify` / `forensic.export` bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
 - 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, `merge.evaluate` conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge & CRDT payloads/controls, PostgreSQL `pg_catalog.pg_tables`, MySQL `information_schema.table_privileges`, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.
 - 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted `view.create` definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only `view.evaluate` correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL `information_schema.views`, PostgreSQL `pg_catalog.pg_views`, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.
+- 2026-05-11 (v0.3.16 R09 evidence sync + catalog polish release): T290-T293 and T295 are closed with the documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed server listener, prepared-query roundtrip over QUIC streams, zero-RTT write rejection, connection rebind and multi-stream tests. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP. Compatibility also gains MySQL `information_schema.plugins/events/partitions/referential_constraints` and PostgreSQL `pg_roles` / `pg_user` / `pg_tablespace`. Counts now 71 done / 38 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -133,12 +134,12 @@ Source of truth matrix:
 - [x] T287: SkeinAdmin “Views” page (status, refresh, explain deps). Evidence: Views panel now exposes refresh mode, evaluate iterations, `view.evaluate`, status, drop, dependency summaries, RPC templates, and static asset coverage.
 
 ### Phase 30 — HTTP/3 / QUIC-native protocol (R09)
-- [ ] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping
-- [ ] T291: Implement server prototype with a QUIC library (feature-flag)
-- [ ] T292: Prepared query handles over QUIC streams (read-only first)
-- [ ] T293: 0-RTT safety rules (no writes in 0-RTT by default)
+- [x] T290: Protocol sketch: SkeinQL-over-QUIC framing + stream mapping. Evidence: `docs/TRANSPORT_QUIC.md` defines length-prefixed JSON frames, one request/response per bidirectional stream, envelope metadata, and stream mapping.
+- [x] T291: Implement server prototype with a QUIC library (feature-flag). Evidence: `skeindb serve --quic --quic-cert --quic-key`, Quinn integration, `transport.capabilities`, and `quic_rpc_ping_roundtrip`.
+- [x] T292: Prepared query handles over QUIC streams (read-only first). Evidence: `quic_prepared_query_roundtrip` prepares a query, executes it on a new QUIC stream, and verifies result rows.
+- [x] T293: 0-RTT safety rules (no writes in 0-RTT by default). Evidence: QUIC metadata `rtt:"0rtt"` is documented and `quic_zero_rtt_rejects_write` locks the read-only guard.
 - [ ] T294: Bench: p99 latency under concurrency vs HTTP/2 and MySQL/TCP
-- [ ] T295: Connection migration test harness (simulated IP change)
+- [x] T295: Connection migration test harness (simulated IP change). Evidence: `quic_connection_migration_rebind` and `r09_quic_concurrent_multi_stream_rpcs` rebind the client UDP socket and verify continued RPC success.
 
 ### Phase 31 — Vector embeddings as first-class ValueIDs (R10)
 - [ ] T300: Add `ValueKind::Embedding` and typed literal support in SkeinQL

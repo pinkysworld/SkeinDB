@@ -45,7 +45,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R06 | Hardened | Forensic WAL query/verify/export (`forensic.*`), SkeinForensic JSON filters, boundary/checkpoint/Merkle inclusion proofs, export bundles, incident-timeline test coverage, and SkeinAdmin Forensics wiring |
 | R07 | Hardened | Merge policies, values-only Wasm execution/cancellation, `merge.evaluate`, offline queue docs, and SkeinAdmin Merge & CRDT controls (`docs/MERGE_FUNCTIONS.md`, `merge.*`) |
 | R08 | Hardened | Incremental view APIs (`view.create/drop/refresh/evaluate/status/explain_deps`), dependency metadata, auto full-refresh fallback, oracle/benchmark tests, and admin/catalog wiring |
-| R09 | Implemented | QUIC-native SkeinQL transport + `tests/quic_rpc.rs` |
+| R09 | Hardened runtime; benchmark open | SkeinQL-over-QUIC framing, Quinn listener, prepared-query streams, 0-RTT write rejection, and rebind/multi-stream tests; comparative p99 benchmark remains open |
 | R10 | Implemented (prototype) | Vector ingest/search/index status (`vector.*`) + ANN tests |
 | R11 | Implemented (prototype) | Autoparameterization analysis/classification (`ai.autoparam.*`) |
 | R12 | Hardened | Natural language translate/explain/execute flow with approval-gated verification and NL eval harness (`ai.nl.*`, `skeindb nl-eval`) |

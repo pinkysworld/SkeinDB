@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.15 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.16 runtime sync)
 Last updated: 2026-05-11
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.

@@ -41,8 +41,15 @@
 <div class="content">
 
   <div class="status-bar">
-    <span class="status-dot scaffold"></span>
-    <span class="status-text"><strong>Prototype Scaffold</strong> — See docs/TRANSPORT_QUIC.md + crates/skeindb/src/quic.rs</span>
+    <span class="status-dot implemented"></span>
+    <span class="status-text"><strong>Hardened runtime surface in v0.3.16</strong> — Framing, Quinn listener, prepared-query streams, 0-RTT write rejection, and rebind tests are covered; comparative p99 benchmarking remains open.</span>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">✅</span> v0.3.16 Runtime Surface</h2>
+    <p>SkeinDB now runs SkeinQL-over-QUIC with length-prefixed JSON frames, one request/response per bidirectional stream, explicit certificate/key configuration, and the same JSON-RPC envelope used by HTTP.</p>
+    <p>The test suite covers ping, prepared-query execution over QUIC streams, 0-RTT write rejection, connection rebind, and multi-stream RPC reuse in <code>crates/skeindb/tests/quic_rpc.rs</code>.</p>
+    <p>The remaining R09 backlog item is a comparative p99 benchmark against HTTP/2 and MySQL/TCP under concurrent load.</p>
   </div>
 
   <div class="novelty-card">
