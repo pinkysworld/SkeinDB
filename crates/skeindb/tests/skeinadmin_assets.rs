@@ -46,6 +46,49 @@ fn skeinadmin_forensics_panel_exposes_audit_controls() {
 }
 
 #[test]
+fn skeinadmin_merge_panel_exposes_r07_hardening_controls() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "Merge &amp; CRDT (R07)",
+        "mergeExpectedEtag",
+        "mergeMinCausality",
+        "mergeCurrent",
+        "mergeEvalCases",
+        "mergeEvalIterations",
+        "mergeWasmModuleId",
+        "mergeWasmFuel",
+        "btnMergeEvaluate",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin merge html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function readMergePolicy(required = false)",
+        "function readMergeModuleId()",
+        "async function mergeEvaluate()",
+        "merge.evaluate",
+        "expected_etag",
+        "min_causality",
+        "values_only: true",
+        "wire('btnMergeEvaluate', mergeEvaluate);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin merge js should contain {marker}"
+        );
+    }
+}
+
+#[test]
 fn skeinadmin_cdc_panel_exposes_subscription_controls() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let html_path = repo_root.join("web/skeinadmin/index.html");

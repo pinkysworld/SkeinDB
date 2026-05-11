@@ -39,17 +39,17 @@ use skeindb_skeinql::{
         EdgeBundleApplyParams, EdgeBundleRequestParams, EdgeBundleStatusParams,
         ForensicExportParams, ForensicQueryParams, ForensicVerifyParams,
         MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
-        MergeApplyParams, MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams,
-        MergeWasmRegisterParams, MigrationIntentReportParams, MigrationReportExportParams,
-        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousEvaluateParams,
-        ObliviousExplainParams, ObliviousPolicyGetParams, ObliviousPolicySetParams,
-        PlanCacheClearParams, PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams,
-        QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
-        SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
-        TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
-        VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
-        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams,
-        WasmPlanInspectParams, WasmPlanRunParams,
+        MergeApplyParams, MergeEvaluateParams, MergeRegisterParams, MergeSimulateParams,
+        MergeWasmDropParams, MergeWasmRegisterParams, MigrationIntentReportParams,
+        MigrationReportExportParams, MigrationRewritePreviewParams, ObjectsPullParams,
+        ObliviousEvaluateParams, ObliviousExplainParams, ObliviousPolicyGetParams,
+        ObliviousPolicySetParams, PlanCacheClearParams, PlanCacheStatusParams,
+        QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams,
+        SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
+        TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
+        VectorIndexStatusParams, VectorInsertParams, VectorSearchParams, ViewCreateParams,
+        ViewDropParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
+        WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -16524,6 +16524,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "merge.evaluate" => {
+                    let p: MergeEvaluateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.merge_evaluate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "merge.wasm.register" => {
                     let p: MergeWasmRegisterParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
@@ -24172,6 +24179,50 @@ fn information_schema_select_result(
         );
         rows.push(row);
         vec!["GRANTEE", "TABLE_CATALOG", "PRIVILEGE_TYPE", "IS_GRANTABLE"]
+    } else if table.table.eq_ignore_ascii_case("table_privileges") {
+        for db in eng.list_databases() {
+            let tables = eng.list_tables(&db).map_err(to_rpc_error)?;
+            for t in tables {
+                for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE", "REFERENCES"] {
+                    let mut row = BTreeMap::new();
+                    row.insert(
+                        "GRANTEE".to_string(),
+                        Lit::Str {
+                            v: "'root'@'localhost'".to_string(),
+                        },
+                    );
+                    row.insert(
+                        "TABLE_CATALOG".to_string(),
+                        Lit::Str {
+                            v: "def".to_string(),
+                        },
+                    );
+                    row.insert("TABLE_SCHEMA".to_string(), Lit::Str { v: db.clone() });
+                    row.insert("TABLE_NAME".to_string(), Lit::Str { v: t.clone() });
+                    row.insert(
+                        "PRIVILEGE_TYPE".to_string(),
+                        Lit::Str {
+                            v: privilege.to_string(),
+                        },
+                    );
+                    row.insert(
+                        "IS_GRANTABLE".to_string(),
+                        Lit::Str {
+                            v: "YES".to_string(),
+                        },
+                    );
+                    rows.push(row);
+                }
+            }
+        }
+        vec![
+            "GRANTEE",
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "PRIVILEGE_TYPE",
+            "IS_GRANTABLE",
+        ]
     } else {
         return Err(RpcError::new(
             "not_supported",
@@ -24620,6 +24671,62 @@ fn pg_catalog_select_result(
             rows.push(row);
         }
         vec!["oid", "nspname", "nspowner", "nspacl"]
+    } else if table.table.eq_ignore_ascii_case("pg_tables") {
+        for db in eng.list_databases() {
+            let table_names = match eng.list_tables(&db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in table_names {
+                let desc = match eng.describe_table(&db, &tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let has_pk = desc["primary_key"]
+                    .as_array()
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                let has_indexes = desc["indexes"]
+                    .as_array()
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                let mut row = BTreeMap::new();
+                row.insert(
+                    "schemaname".to_string(),
+                    Lit::Str {
+                        v: "public".to_string(),
+                    },
+                );
+                row.insert("tablename".to_string(), Lit::Str { v: tname });
+                row.insert(
+                    "tableowner".to_string(),
+                    Lit::Str {
+                        v: "root".to_string(),
+                    },
+                );
+                row.insert("tablespace".to_string(), Lit::Null);
+                row.insert(
+                    "hasindexes".to_string(),
+                    Lit::Bool {
+                        v: has_pk || has_indexes,
+                    },
+                );
+                row.insert("hasrules".to_string(), Lit::Bool { v: false });
+                row.insert("hastriggers".to_string(), Lit::Bool { v: false });
+                row.insert("rowsecurity".to_string(), Lit::Bool { v: false });
+                rows.push(row);
+            }
+        }
+        vec![
+            "schemaname",
+            "tablename",
+            "tableowner",
+            "tablespace",
+            "hasindexes",
+            "hasrules",
+            "hastriggers",
+            "rowsecurity",
+        ]
     } else if table.table.eq_ignore_ascii_case("pg_type") {
         rows = pg_catalog_builtin_type_rows();
         vec![
@@ -26400,6 +26507,9 @@ fn is_read_only_method(method: &str) -> bool {
             | "settings.encryption.status"
             | "edge.bundle.request"
             | "edge.bundle.status"
+            | "merge.simulate"
+            | "merge.evaluate"
+            | "merge.wasm.list"
             | "wasm.plan.compile"
             | "wasm.plan.inspect"
             | "wasm.plan.edge_package"
@@ -26591,6 +26701,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "merge.register",
         "merge.apply",
         "merge.simulate",
+        "merge.evaluate",
         "merge.wasm.register",
         "merge.wasm.list",
         "merge.wasm.drop",
@@ -28005,13 +28116,38 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn merge_sum_wasm_b64() -> String {
+        let bytes = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1 1)
+                (func (export "skein_alloc") (param i32) (result i32)
+                    (i32.const 0)
+                )
+                (func (export "skein_scalar") (param $ptr i32) (param $len i32) (result i64)
+                    (local $current i64)
+                    (local $incoming i64)
+                    (local.set $current (i64.load (i32.add (local.get $ptr) (i32.const 2))))
+                    (local.set $incoming (i64.load (i32.add (local.get $ptr) (i32.const 11))))
+                    (i32.store8 (i32.const 256) (i32.const 4))
+                    (i64.store (i32.const 257) (i64.add (local.get $current) (local.get $incoming)))
+                    (i64.or
+                        (i64.shl (i64.extend_i32_u (i32.const 256)) (i64.const 32))
+                        (i64.extend_i32_u (i32.const 9))
+                    )
+                )
+            )"#,
+        )
+        .unwrap();
+        BASE64_STANDARD.encode(bytes)
+    }
+
     #[test]
     fn system_capabilities_method_list_is_unique() {
         let methods = skeinql_capability_methods();
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 131);
+        assert_eq!(methods.len(), 132);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -28432,7 +28568,7 @@ mod tests {
         let state = build_state(dir.clone(), engine);
 
         let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
-        assert!(resp.ok);
+        assert!(resp.ok, "{resp:?}");
 
         let resp = call_sql_exec_http(
             &state,
@@ -28543,6 +28679,28 @@ mod tests {
         assert_eq!(meta_rows[1][7]["v"].as_str(), Some("utf8mb4_general_ci"));
         assert_eq!(meta_rows[1][10]["v"].as_str(), Some(""));
 
+        let privileges = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT table_schema, table_name, privilege_type FROM information_schema.table_privileges WHERE table_schema = 'app' AND table_name = 'users' AND privilege_type = 'SELECT'"
+            }),
+        )
+        .await;
+        assert!(privileges.ok);
+        let privilege_rows = privileges
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(privilege_rows.len(), 1);
+        assert_eq!(privilege_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(privilege_rows[0][1]["v"].as_str(), Some("users"));
+        assert_eq!(privilege_rows[0][2]["v"].as_str(), Some("SELECT"));
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -28615,6 +28773,12 @@ mod tests {
 
         let resp = call_sql_exec_http(&state, json!({"sql":"CREATE DATABASE app"})).await;
         assert!(resp.ok);
+        let resp = call_sql_exec_http(
+            &state,
+            json!({"sql":"CREATE TABLE app.users (id BIGINT UNSIGNED NOT NULL, name VARCHAR(255), PRIMARY KEY (id))"}),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
 
         let databases = call_sql_exec_http(
             &state,
@@ -28658,6 +28822,29 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(namespace_rows.len(), 1);
         assert_eq!(namespace_rows[0][0]["v"].as_str(), Some("public"));
+
+        let pg_tables = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT schemaname, tablename, hasindexes FROM pg_catalog.pg_tables WHERE schemaname = 'public' AND tablename = 'users'"
+            }),
+        )
+        .await;
+        assert!(pg_tables.ok);
+        let pg_table_rows = pg_tables
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pg_table_rows.len(), 1);
+        assert_eq!(pg_table_rows[0][0]["v"].as_str(), Some("public"));
+        assert_eq!(pg_table_rows[0][1]["v"].as_str(), Some("users"));
+        assert_eq!(pg_table_rows[0][2]["v"].as_bool(), Some(true));
 
         let settings = call_sql_exec_http(
             &state,
@@ -29618,7 +29805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_apply_wasm_policy_not_supported_rpc() -> anyhow::Result<()> {
+    async fn merge_apply_wasm_policy_executes_rpc() -> anyhow::Result<()> {
         let dir = temp_dir("merge_apply_wasm_rpc");
         let mut engine = Engine::open(&dir)?;
         engine.create_table(
@@ -29662,13 +29849,13 @@ mod tests {
             "merge.wasm.register",
             json!({
                 "module_id": "merge_sum",
-                "wasm_b64": "AA==",
+                "wasm_b64": merge_sum_wasm_b64(),
                 "capabilities": {
                     "values_only": true,
                     "deterministic": true,
-                    "max_fuel": 1000,
+                    "max_fuel": 20000,
                     "max_memory_bytes": 65536,
-                    "max_output_bytes": 4096
+                    "max_output_bytes": 64
                 }
             }),
         )
@@ -29698,10 +29885,38 @@ mod tests {
             }),
         )
         .await;
-        assert!(!resp.ok);
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["applied"].as_bool(), Some(true));
+        assert_eq!(result["merged"]["count"]["v"].as_u64(), Some(7));
+
+        let resp = call_rpc(
+            &state,
+            "merge.evaluate",
+            json!({
+                "policy": {
+                    "default": {"kind":"builtin","name":"last_write_wins"},
+                    "per_column": {"count": {"kind":"builtin","name":"sum"}}
+                },
+                "iterations": 2,
+                "cases": [{
+                    "name": "counter conflict",
+                    "current": {"count": {"t":"u64","v":7}},
+                    "incoming": {"count": {"t":"u64","v":4}},
+                    "expected_etag_match": false,
+                    "min_causality_satisfied": true,
+                    "constraint_ok": true
+                }]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["format"].as_str(), Some("skein.merge.evaluate.v1"));
+        assert_eq!(result["conflict_count"].as_u64(), Some(1));
         assert_eq!(
-            resp.error.as_ref().map(|err| err.code.as_str()),
-            Some("not_supported")
+            result["results"][0]["merged"]["count"]["v"].as_u64(),
+            Some(11)
         );
 
         std::fs::remove_dir_all(&dir).ok();

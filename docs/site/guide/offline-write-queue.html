@@ -125,10 +125,11 @@
     </div>
     <article class="doc-article">
       <h1 id="offline-write-queue-mergeapply-batches">Offline Write Queue (merge.apply batches)<a class="headerlink" href="#offline-write-queue-mergeapply-batches" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-22</p>
+<p>Status: Test-backed client interchange spec (v0.3.14)
+Last updated: 2026-05-11</p>
 <p>This document defines a client-side format for batching optimistic writes while
 offline, then replaying them using <code>merge.apply</code> when connectivity returns.</p>
+<p>The format is locked by <code>crates/skeindb-skeinql/tests/offline_queue_roundtrip.rs</code> and is exercised by the R07 merge runtime through <code>merge.apply</code>, <code>merge.simulate</code>, and <code>merge.evaluate</code>.</p>
 <h2 id="1-format-offline_queue_v1">1) Format (offline_queue_v1)<a class="headerlink" href="#1-format-offline_queue_v1" title="Permanent link">¶</a></h2>
 <p>Top-level schema:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -197,6 +198,8 @@ offline, then replaying them using <code>merge.apply</code> when connectivity re
 - non-null constraints (where applicable)
 - Wasm capability restrictions (values-only)</p>
 <p>Queue formats are advisory and do not grant elevated privileges.</p>
+<h2 id="6-evaluation">6) Evaluation<a class="headerlink" href="#6-evaluation" title="Permanent link">¶</a></h2>
+<p>Before enabling a queue policy for a client cohort, send representative current/incoming rows to <code>merge.evaluate</code>. The harness reports conflict rate, resolution success rate, and per-case merge timing without writing data, so offline policies can be checked before rollout.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/OFFLINE_WRITE_QUEUE.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -219,6 +222,7 @@ offline, then replaying them using <code>merge.apply</code> when connectivity re
 <li><a href="#3-merge-result-handling">3) Merge result handling</a></li>
 <li><a href="#4-conflict-kinds">4) Conflict kinds</a></li>
 <li><a href="#5-security">5) Security</a></li>
+<li><a href="#6-evaluation">6) Evaluation</a></li>
 </ul>
 </div>
 

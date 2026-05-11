@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-11 (v0.3.13)
+Last updated: 2026-05-11 (v0.3.14)
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -44,6 +44,7 @@ Recent UI updates:
 - **Research runtime wiring**: R01 learned ValueID lookup histograms/model reports appear in Overview via `stats.snapshot`; R14 edge bundles are now first-class Replay panel controls; R20 compaction scheduler policy/status/pause/resume are first-class Engine panel controls.
 - **Privacy panel DP evaluation**: the R04 card now exposes `dp.evaluate` with epsilon-grid, trials, seed, mechanism, and bounds controls, plus typed `dp.aggregate`, `dp.budget.*`, and `dp.audit.log` calls. The result metadata now includes per-aggregate sensitivities and `privacy_etag` validators for privacy-aware cache inspection.
 - **Privacy panel oblivious evaluation**: the R05 card now uses the runtime policy schema (`level`, `pad_to_multiple`, `target_rows`, `dummy_value_lookups`, `shuffle`), sends nested table payloads for get/set/explain, and exposes `oblivious.evaluate` for deterministic leakage and overhead reports.
+- **Merge & CRDT R07 hardening**: the Merge panel now sends typed `merge.apply`, `merge.register`, `merge.simulate`, and `merge.evaluate` payloads; exposes `expected_etag`, `min_causality`, current/incoming row editors, workload-case evaluation controls, and values-only Wasm module limits; and uses `module_id` for Wasm register/drop so the UI matches the runtime RPC schema.
 - **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.

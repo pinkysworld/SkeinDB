@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Merge Functions (Optimistic Concurrency) - Prototype — SkeinDB Docs</title>
-<meta name="description" content="Merge Functions (Optimistic Concurrency) - Prototype — part of the SkeinDB documentation.">
+<title>Merge Functions (Optimistic Concurrency) — SkeinDB Docs</title>
+<meta name="description" content="Merge Functions (Optimistic Concurrency) — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -121,76 +121,154 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>Merge Functions (Optimistic Concurrency) - Prototype</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Developer / API</span> <span>›</span> <span>Merge Functions (Optimistic Concurrency)</span>
     </div>
     <article class="doc-article">
-      <h1 id="merge-functions-optimistic-concurrency-prototype">Merge Functions (Optimistic Concurrency) - Prototype<a class="headerlink" href="#merge-functions-optimistic-concurrency-prototype" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-19</p>
-<p>This document describes the prototype merge-function support for optimistic concurrency (R07).</p>
-<h2 id="1-overview">1) Overview<a class="headerlink" href="#1-overview" title="Permanent link">¶</a></h2>
-<p>Merge functions resolve write conflicts by combining a "current" row with an "incoming" row.
-SkeinDB exposes:</p>
+      <h1 id="merge-functions-optimistic-concurrency">Merge Functions (Optimistic Concurrency)<a class="headerlink" href="#merge-functions-optimistic-concurrency" title="Permanent link">¶</a></h1>
+<p>Status: Hardened research surface (v0.3.14)
+Last updated: 2026-05-11</p>
+<p>This document describes the R07 merge-function runtime for optimistic concurrency, offline-first clients, and CRDT-style conflict resolution.</p>
+<p>SkeinDB exposes:</p>
 <ul>
-<li><code>merge.register</code> to store per-table merge policies</li>
-<li><code>merge.apply</code> to apply a merge (with optional ETag conflict detection)</li>
-<li><code>merge.simulate</code> to test merges without writes</li>
+<li><code>merge.register</code> to persist a per-table merge policy.</li>
+<li><code>merge.apply</code> to merge an incoming row into the current row, optionally guarded by <code>expected_etag</code> and <code>min_causality</code>.</li>
+<li><code>merge.simulate</code> to merge two row objects without writing.</li>
+<li><code>merge.evaluate</code> to measure conflict rate, resolution success, and per-case merge timing for example workloads.</li>
+<li><code>merge.wasm.register</code>, <code>merge.wasm.list</code>, and <code>merge.wasm.drop</code> to manage values-only Wasm merge modules.</li>
 </ul>
-<p>Merge policies are stored on disk in <code>merge_policies.json</code> (format v1).</p>
-<h2 id="2-policy-format">2) Policy format<a class="headerlink" href="#2-policy-format" title="Permanent link">¶</a></h2>
+<p>Merge policies are stored in <code>merge_policies.json</code> format v1. Wasm merge module metadata is stored in <code>merge_wasm_registry.json</code> format v1. No on-disk row/value format changes are introduced by v0.3.14.</p>
+<h2 id="1-policy-format">1) Policy Format<a class="headerlink" href="#1-policy-format" title="Permanent link">¶</a></h2>
 <p>A policy has a default merge function and optional per-column overrides:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;default&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;last_write_wins&quot;</span><span class="p">},</span>
-<span class="w">  </span><span class="nt">&quot;per_column&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">}}</span>
+<span class="w">  </span><span class="nt">&quot;per_column&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;tags&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;set_union&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;wasm&quot;</span><span class="p">,</span><span class="nt">&quot;module_id&quot;</span><span class="p">:</span><span class="s2">&quot;merge_score_sum&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
-<p>Only <code>kind: "builtin"</code> is supported in this prototype.
-Wasm-based merge functions are not implemented yet.</p>
-<h2 id="3-built-in-merge-functions">3) Built-in merge functions<a class="headerlink" href="#3-built-in-merge-functions" title="Permanent link">¶</a></h2>
+<p>Supported function kinds:</p>
 <ul>
-<li><code>last_write_wins</code> / <code>replace</code>: use incoming value</li>
-<li><code>max</code>: numeric max</li>
-<li><code>min</code>: numeric min</li>
-<li><code>sum</code>: numeric sum (cross-type -&gt; f64)</li>
-<li><code>concat</code>: string concat or JSON array concat</li>
-<li><code>set_union</code>: JSON array union (unique values)</li>
-<li><code>object_merge</code>: JSON object merge (incoming overwrites)</li>
-<li><code>reject</code>: keep current value</li>
+<li><code>builtin</code>: named built-in merge function.</li>
+<li><code>wasm</code>: registered Wasm module id. The registry entry must declare <code>values_only: true</code>.</li>
 </ul>
-<p>If a function cannot operate on the value types, SkeinDB falls back to the incoming value.</p>
-<h2 id="4-conflict-detection">4) Conflict detection<a class="headerlink" href="#4-conflict-detection" title="Permanent link">¶</a></h2>
-<p><code>merge.apply</code> accepts <code>expected_etag</code>:
-- If it matches the current row ETag, the merge is applied normally.
-- If it does not match, <code>conflict=true</code> is returned and <code>conflicts=["write_write"]</code>.
-  The merge still applies unless the policy is <code>reject</code> (default with no per-column overrides).</p>
-<p><code>merge.apply</code> also accepts <code>min_causality</code> (etag_chain_v1 token):
-- If the dependency versions are not satisfied, <code>conflict=true</code>, <code>applied=false</code>,
-  and <code>conflicts=["dependency"]</code> are returned.</p>
-<p>Constraint conflicts:
-- If the incoming row provides primary key values that do not match <code>pk</code>,
-  <code>conflict=true</code>, <code>applied=false</code>, and <code>conflicts=["constraint"]</code> are returned.
-- If the merged row would violate non-nullable columns, <code>conflict=true</code>,
-  <code>applied=false</code>, and <code>conflicts=["constraint"]</code> are returned.</p>
-<h2 id="5-limitations">5) Limitations<a class="headerlink" href="#5-limitations" title="Permanent link">¶</a></h2>
+<h2 id="2-built-in-merge-functions">2) Built-In Merge Functions<a class="headerlink" href="#2-built-in-merge-functions" title="Permanent link">¶</a></h2>
 <ul>
-<li>No Wasm execution yet (only built-ins).</li>
-<li>No cross-row merges or multi-row conflict resolution.</li>
-<li>Primary key values are immutable; mismatches are rejected.</li>
+<li><code>last_write_wins</code> / <code>replace</code>: use the incoming value.</li>
+<li><code>max</code>: numeric max.</li>
+<li><code>min</code>: numeric min.</li>
+<li><code>sum</code>: numeric sum. Mixed numeric types promote to <code>f64</code>.</li>
+<li><code>concat</code>: string concat or JSON array concat.</li>
+<li><code>set_union</code>: JSON array union by JSON value equality.</li>
+<li><code>object_merge</code>: JSON object merge where incoming keys overwrite current keys.</li>
+<li><code>reject</code>: keep the current value.</li>
 </ul>
-<h2 id="6-wasm-merge-registry-prototype">6) Wasm merge registry (prototype)<a class="headerlink" href="#6-wasm-merge-registry-prototype" title="Permanent link">¶</a></h2>
-<p>Wasm merge functions are registered separately and referenced by module id.
-The registry enforces a <strong>values-only</strong> capability model (no table access).</p>
-<p>SkeinQL methods:
-- <code>merge.wasm.register</code> — register a Wasm module + capabilities
-- <code>merge.wasm.list</code> — list registered modules
-- <code>merge.wasm.drop</code> — remove a module</p>
-<p>Wasm execution is still disabled in this prototype; registration allows policies
-to reference module ids in preparation for sandboxed execution.
-Registry metadata is persisted in <code>merge_wasm_registry.json</code> (format v1).</p>
-<h2 id="7-offline-write-queues">7) Offline write queues<a class="headerlink" href="#7-offline-write-queues" title="Permanent link">¶</a></h2>
-<p>For offline-first clients, use the queue format in <code>docs/OFFLINE_WRITE_QUEUE.md</code>
-to batch <code>merge.apply</code> operations and replay them on reconnect.</p>
+<p>If a built-in cannot operate on the provided value types, SkeinDB falls back to the incoming value.</p>
+<h2 id="3-wasm-merge-functions">3) Wasm Merge Functions<a class="headerlink" href="#3-wasm-merge-functions" title="Permanent link">¶</a></h2>
+<p>Wasm merge modules execute through the same sandbox used by <code>skeindb-core</code> scalar Wasm UDFs. R07 uses a values-only subset:</p>
+<ul>
+<li>ABI: <code>skein.wasm.udf.v1</code>.</li>
+<li>Required exports: <code>memory</code>, <code>skein_alloc(len: u32) -&gt; u32</code>, and the scalar entrypoint, normally <code>skein_scalar(ptr: u32, len: u32) -&gt; u64</code>.</li>
+<li>Input: two encoded SkeinQL typed literals, <code>[current, incoming]</code>.</li>
+<li>Output: one encoded typed literal returned as <code>ptr &lt;&lt; 32 | len</code>.</li>
+<li>Capability model: no table access, filesystem, network, clock, randomness, or side-effect hostcalls.</li>
+<li>Limits: <code>max_fuel</code>, <code>max_memory_bytes</code>, <code>max_output_bytes</code>, plus the host wall-clock deadline from the core Wasm runtime.</li>
+</ul>
+<p>A Wasm policy is rejected unless the module exists and declares <code>capabilities.values_only = true</code>. Infinite loops and other over-budget execution fail the merge operation with an explicit sandbox error rather than corrupting engine state.</p>
+<p>Example registration payload:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;method&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge.wasm.register&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;params&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;module_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge_counter_sum&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Counter sum&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;wasm_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;base64 wasm module&gt;&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;values_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;deterministic&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;max_fuel&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;max_memory_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">65536</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;max_output_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">64</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="4-conflict-detection">4) Conflict Detection<a class="headerlink" href="#4-conflict-detection" title="Permanent link">¶</a></h2>
+<p><code>merge.apply</code> accepts <code>expected_etag</code>:</p>
+<ul>
+<li>If it matches the current row ETag, the merge is applied normally.</li>
+<li>If it does not match, <code>conflict=true</code> is returned and <code>conflicts=["write_write"]</code>.</li>
+<li>The merge still applies unless the selected policy rejects or a non-write-write conflict blocks the write.</li>
+</ul>
+<p><code>merge.apply</code> also accepts <code>min_causality</code> (<code>etag_chain_v1</code> or the runtime's causal vector-clock format):</p>
+<ul>
+<li>If dependencies are satisfied, merge execution continues.</li>
+<li>If dependencies are not satisfied, <code>conflict=true</code>, <code>applied=false</code>, and <code>conflicts=["dependency"]</code>.</li>
+</ul>
+<p>Constraint conflicts:</p>
+<ul>
+<li>If the incoming row provides primary key values that do not match <code>pk</code>, the merge is rejected with <code>conflicts=["constraint"]</code>.</li>
+<li>If the merged row violates non-nullable columns, the merge is rejected with <code>conflicts=["constraint"]</code>.</li>
+</ul>
+<h2 id="5-evaluation-harness">5) Evaluation Harness<a class="headerlink" href="#5-evaluation-harness" title="Permanent link">¶</a></h2>
+<p><code>merge.evaluate</code> runs a policy against example cases without writing data. It is intended for repeatable research checks, admin-console experiments, and CI-sized safety/performance probes.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;policy&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;default&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;last_write_wins&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;per_column&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">}}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;counter conflict&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;current&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;incoming&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">4</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;expected_etag_match&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;min_causality_satisfied&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;constraint_ok&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result shape:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.merge.evaluate.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cases&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;conflict_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;resolved_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;conflict_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;resolution_success_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mean_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;p95_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1500</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;counter conflict&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;conflict&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;conflicts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;write_write&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;resolved&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;merged&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">11</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;mean_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>iterations</code> is clamped to a bounded runtime range. Empty case lists are rejected.</p>
+<h2 id="6-offline-write-queues">6) Offline Write Queues<a class="headerlink" href="#6-offline-write-queues" title="Permanent link">¶</a></h2>
+<p>For offline-first clients, use the queue format in <code>docs/OFFLINE_WRITE_QUEUE.md</code> to batch <code>merge.apply</code> operations and replay them on reconnect. Queue-level <code>min_causality</code> is inherited by items unless overridden, and each item can include <code>expected_etag</code>, a client-local dependency list, and an optional policy override.</p>
+<h2 id="7-current-limits">7) Current Limits<a class="headerlink" href="#7-current-limits" title="Permanent link">¶</a></h2>
+<ul>
+<li>Wasm merge functions are values-only scalar functions; they cannot read other rows or tables.</li>
+<li>Multi-row conflict resolution is not implemented.</li>
+<li>Primary key values remain immutable.</li>
+<li>Merge policies are experimental and should be capability-detected through <code>system.capabilities</code>.</li>
+<li>Evaluation timing is intended for relative comparisons inside one build/runtime, not cross-machine benchmark claims.</li>
+</ul>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/MERGE_FUNCTIONS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -208,13 +286,13 @@ to batch <code>merge.apply</code> operations and replay them on reconnect.</p>
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#1-overview">1) Overview</a></li>
-<li><a href="#2-policy-format">2) Policy format</a></li>
-<li><a href="#3-built-in-merge-functions">3) Built-in merge functions</a></li>
-<li><a href="#4-conflict-detection">4) Conflict detection</a></li>
-<li><a href="#5-limitations">5) Limitations</a></li>
-<li><a href="#6-wasm-merge-registry-prototype">6) Wasm merge registry (prototype)</a></li>
-<li><a href="#7-offline-write-queues">7) Offline write queues</a></li>
+<li><a href="#1-policy-format">1) Policy Format</a></li>
+<li><a href="#2-built-in-merge-functions">2) Built-In Merge Functions</a></li>
+<li><a href="#3-wasm-merge-functions">3) Wasm Merge Functions</a></li>
+<li><a href="#4-conflict-detection">4) Conflict Detection</a></li>
+<li><a href="#5-evaluation-harness">5) Evaluation Harness</a></li>
+<li><a href="#6-offline-write-queues">6) Offline Write Queues</a></li>
+<li><a href="#7-current-limits">7) Current Limits</a></li>
 </ul>
 </div>
 

@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.13 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.14 runtime sync)
 Last updated: 2026-05-11
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
@@ -1717,7 +1717,7 @@ Result:
 
 ### 10.14 merge.* (experimental)
 
-Optimistic concurrency with merge functions (prototype). See `docs/MERGE_FUNCTIONS.md`.
+Optimistic concurrency with built-in and values-only Wasm merge functions. See `docs/MERGE_FUNCTIONS.md`.
 
 #### merge.register
 Params:
@@ -1747,7 +1747,8 @@ Params:
   "pk": [{"t":"u64","v":1}],
   "incoming": {"count": {"t":"u64","v":3}},
   "expected_etag": "W/\"r:...\"",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"mydb.counters","v":12}]}
+  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"mydb.counters","v":12}]},
+  "policy": {"default":{"kind":"builtin","name":"sum"}}
 }
 ```
 
@@ -1776,21 +1777,70 @@ Result:
 {"merged":{"count":{"t":"u64","v":13}}}
 ```
 
+#### merge.evaluate
+Params:
+
+```json
+{
+  "policy": {
+    "default": {"kind":"builtin","name":"last_write_wins"},
+    "per_column": {"count":{"kind":"builtin","name":"sum"}}
+  },
+  "iterations": 10,
+  "cases": [
+    {
+      "name": "counter conflict",
+      "current": {"count":{"t":"u64","v":7}},
+      "incoming": {"count":{"t":"u64","v":4}},
+      "expected_etag_match": false,
+      "min_causality_satisfied": true,
+      "constraint_ok": true
+    }
+  ]
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.merge.evaluate.v1",
+  "cases": 1,
+  "iterations": 10,
+  "conflict_count": 1,
+  "resolved_count": 1,
+  "conflict_rate": 1.0,
+  "resolution_success_rate": 1.0,
+  "mean_merge_ns": 1200,
+  "p95_merge_ns": 1500,
+  "results": [
+    {
+      "name": "counter conflict",
+      "conflict": true,
+      "conflicts": ["write_write"],
+      "resolved": true,
+      "merged": {"count":{"t":"u64","v":11}},
+      "mean_merge_ns": 1200
+    }
+  ]
+}
+```
+
 #### merge.wasm.register
 Params:
 
 ```json
 {
   "module_id": "merge_sum",
-  "wasm_b64": "AA==",
+  "name": "sum merge",
+  "wasm_b64": "<base64 wasm module>",
   "capabilities": {
     "values_only": true,
     "deterministic": true,
     "max_fuel": 1000,
     "max_memory_bytes": 65536,
     "max_output_bytes": 4096
-  },
-  "name": "sum merge"
+  }
 }
 ```
 

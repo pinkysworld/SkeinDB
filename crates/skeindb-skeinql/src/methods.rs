@@ -1978,6 +1978,62 @@ pub struct MergeSimulateResult {
     pub merged: RowObject,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeEvaluateCase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    pub current: RowObject,
+    pub incoming: RowObject,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_etag_match: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_causality_satisfied: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint_ok: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeEvaluateParams {
+    pub policy: MergePolicySpec,
+    pub cases: Vec<MergeEvaluateCase>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeEvaluateCaseResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    pub conflict: bool,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+
+    pub resolved: bool,
+    pub merged: RowObject,
+    pub mean_merge_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeEvaluateResult {
+    pub format: String,
+    pub cases: u64,
+    pub iterations: u64,
+    pub conflict_count: u64,
+    pub resolved_count: u64,
+    pub conflict_rate: f64,
+    pub resolution_success_rate: f64,
+    pub mean_merge_ns: u64,
+    pub p95_merge_ns: u64,
+    pub results: Vec<MergeEvaluateCaseResult>,
+}
+
 // --------------------------------
 // merge.wasm.* (research / experimental)
 // --------------------------------

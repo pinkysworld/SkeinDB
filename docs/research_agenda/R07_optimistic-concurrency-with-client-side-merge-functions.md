@@ -2,6 +2,19 @@
 
 **Area:** Web-Native & Modern Applications
 
+## Runtime Status (v0.3.14)
+
+R07 is implemented as a hardened experimental runtime surface:
+
+- `merge.register`, `merge.apply`, and `merge.simulate` support built-in merge functions and policy entries that reference registered values-only Wasm modules.
+- `merge.apply` detects write-write conflicts through `expected_etag`, dependency conflicts through `min_causality`, and constraint conflicts through primary-key / non-null validation.
+- `merge.wasm.register`, `merge.wasm.list`, and `merge.wasm.drop` persist module metadata and require `capabilities.values_only = true` before policy execution.
+- Wasm merge modules execute through the core scalar Wasm sandbox with fuel, memory, output, and wall-clock cancellation limits.
+- `merge.evaluate` returns `skein.merge.evaluate.v1` reports with conflict rate, resolution success rate, mean/p95 merge timing, and per-case outcomes.
+- SkeinAdmin's Merge & CRDT panel is wired to apply/register/simulate/evaluate flows and Wasm module management.
+
+Current limits remain intentional: Wasm merge modules are scalar values-only functions, not cross-row/table readers, and the evaluation timing is a local runtime signal rather than a publication-grade benchmark.
+
 ## Problem Statement
 
 SkeinDB's ETag system handles cache validation for reads, but write conflicts remain challenging for modern applications. Offline-first architectures and collaborative editing require conflict resolution beyond simple last-write-wins. By extending SkeinQL to support client-supplied merge functions, SkeinDB could bridge web-native consistency with application-specific conflict resolution, similar to CRDTs but with more flexibility.

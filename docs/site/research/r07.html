@@ -41,8 +41,18 @@
 <div class="content">
 
   <div class="status-bar">
-    <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-dot implemented"></span>
+    <span class="status-text"><strong>Hardened runtime slice</strong> — v0.3.14 closes R07 conflict hooks, values-only Wasm execution, evaluation, offline queue, and admin wiring backlog items with tests.</span>
+  </div>
+
+  <div class="novelty-card">
+    <h2>✅ Runtime Slice</h2>
+    <ul>
+      <li><code>merge.apply</code> detects write-write, dependency, and constraint conflicts with ETag and min-causality guards</li>
+      <li><code>merge.wasm.*</code> registers values-only modules that execute through the core Wasm sandbox with fuel/time cancellation</li>
+      <li><code>merge.evaluate</code> reports <code>skein.merge.evaluate.v1</code> conflict-rate, resolution-success, and timing summaries</li>
+      <li>SkeinAdmin exposes typed apply/register/simulate/evaluate controls plus Wasm module limits in the Merge &amp; CRDT panel</li>
+    </ul>
   </div>
 
   <div class="novelty-card">

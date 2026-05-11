@@ -17,7 +17,7 @@ Runtime status and checklist status intentionally differ:
   - **R04** — Differential privacy (Laplace noise, RDP composition, budget tracking)
   - **R05** — Oblivious execution (threat model, per-table policies, padded scans, dummy lookups, explain/evaluate reports, admin wiring)
   - **R06** — Forensic WAL queries (JSON filter grammar, verifiable index summary, boundary/inclusion proofs, checkpoint anchors, export bundles, admin wiring)
-  - **R07** — Client-side merge functions (conflict resolution + merge.list test)
+  - **R07** — Client-side merge functions (conflict hooks, values-only Wasm execution, evaluation harness, admin wiring)
   - **R08** — Incremental view maintenance (dependency graphs, cascading invalidation)
   - **R09** — QUIC-native protocol (multi-stream RPCs + rebind verification test)
   - **R10** — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **51 done / 58 open** after closing R06 forensic query hardening. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **58 done / 51 open** after closing R07 merge-function hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -45,6 +45,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with `dp.aggregate` COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and `privacy_etag` cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table `oblivious.policy.*` persistence, padded scan/dummy lookup enforcement, `oblivious.explain`, `oblivious.evaluate` trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
 - 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, `forensic.query` / `forensic.verify` / `forensic.export` bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
+- 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, `merge.evaluate` conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge & CRDT payloads/controls, PostgreSQL `pg_catalog.pg_tables`, MySQL `information_schema.table_privileges`, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -112,13 +113,13 @@ Source of truth matrix:
 - [x] T266: SkeinAdmin “Forensics” page (query + verify + export). Evidence: DB/table/op/id/bundle/filter controls, `readForensicParams`, proof verify now queries then calls `forensic.verify` with returned records/start hash, export includes bundle/filter params, and static asset coverage.
 
 ### Phase 28 — Merge functions for optimistic concurrency (R07)
-- [ ] T270: Conflict model (write-write, constraint, dependency) + detection hooks
-- [ ] T271: Merge function registry (Wasm) + capability model (“values-only” access)
-- [ ] T272: SkeinQL `merge.register` / `merge.apply` + SQL compat hook (If-Match)
-- [ ] T273: Offline write queue format (client SDK spec) + merge result handling
-- [ ] T274: Safety tests: cancellation + deterministic merges
-- [ ] T275: Bench: conflict rate + resolution success on example workloads
-- [ ] T276: SkeinAdmin “Merge rules” page
+- [x] T270: Conflict model (write-write, constraint, dependency) + detection hooks. Evidence: `merge.apply` handles `expected_etag`, `min_causality`, primary-key mismatch, and non-null constraint failures; focused tests cover conflict and non-null rejection paths.
+- [x] T271: Merge function registry (Wasm) + capability model ("values-only" access). Evidence: `merge.wasm.*`, persisted `merge_wasm_registry.json` v1, `validate_merge_wasm_policy`, and executable values-only scalar Wasm merge modules.
+- [x] T272: SkeinQL `merge.register` / `merge.apply` + SQL compat hook (If-Match). Evidence: typed SkeinQL params/results, RPC dispatch/capability advertising, ETag/min-causality merge guards, and `merge_apply_wasm_policy_executes_rpc`.
+- [x] T273: Offline write queue format (client SDK spec) + merge result handling. Evidence: `docs/OFFLINE_WRITE_QUEUE.md` plus `crates/skeindb-skeinql/tests/offline_queue_roundtrip.rs`.
+- [x] T274: Safety tests: cancellation + deterministic merges. Evidence: `merge_apply_wasm_policy_cancels_non_terminating_module`, `merge_apply_wasm_policy_executes_values_only_module`, and `cluster_rpc.rs::r07_merge_conflict_resolution_deterministic`.
+- [x] T275: Bench: conflict rate + resolution success on example workloads. Evidence: read-only `merge.evaluate` returns `skein.merge.evaluate.v1` with conflict/resolution rates, mean/p95 timing, and per-case results.
+- [x] T276: SkeinAdmin "Merge rules" page. Evidence: Merge & CRDT panel now sends typed apply/register/simulate/evaluate/Wasm payloads and `skeinadmin_merge_panel_exposes_r07_hardening_controls` locks the controls.
 
 ### Phase 29 — Incremental view maintenance (R08)
 - [ ] T280: `view.create` SkeinQL method with persisted definition (SkeinIR)

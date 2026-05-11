@@ -101,7 +101,7 @@ const RESEARCH_TRACKS = [
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.evaluate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
   { id: 'R05', title: 'Oblivious Execution', desc: 'Padding, dummy lookups, leakage reports, and overhead reports for access-pattern protection.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain', 'oblivious.evaluate'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Filtered hash-chain queries with boundary, checkpoint, and Merkle inclusion proofs.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
-  { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
+  { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions with conflict hooks, offline queues, evaluation, and values-only Wasm execution.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.evaluate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native database protocol.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
   { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
@@ -207,7 +207,8 @@ const RPC_TEMPLATES = [
   { label: 'view.create', method: 'view.create', params: { view:{db:'demo',table:'active_users'}, query:{schema:'demo',table:'users',select:[{col:'id'}]} } },
   { label: 'view.status', method: 'view.status', params: { view:{db:'demo',table:'active_users'} } },
   { label: 'merge.apply', method: 'merge.apply', params: { table:{db:'demo',table:'users'}, pk:[{t:'i64',v:1}], incoming:{id:{t:'i64',v:1},name:{t:'str',v:'Ada'}} } },
-  { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { name:'merge_sum', wasm_b64:'AA==' } },
+  { label: 'merge.evaluate', method: 'merge.evaluate', params: { policy:{default:{kind:'builtin',name:'last_write_wins'},per_column:{count:{kind:'builtin',name:'sum'}}}, iterations:10, cases:[{name:'counter conflict',current:{count:{t:'u64',v:7}},incoming:{count:{t:'u64',v:4}},expected_etag_match:false,min_causality_satisfied:true,constraint_ok:true}] } },
+  { label: 'merge.wasm.register', method: 'merge.wasm.register', params: { module_id:'merge_sum', name:'Counter sum', wasm_b64:'', capabilities:{values_only:true,deterministic:true,max_fuel:20000,max_memory_bytes:65536,max_output_bytes:64} } },
   { label: 'wasm.plan.compile', method: 'wasm.plan.compile', params: { query:{body:{select:{projection:[{expr:{col:'id'}}],from:[{db:'demo',table:'users'}]}}} } },
   { label: 'wasm.plan.inspect', method: 'wasm.plan.inspect', params: { artifact_b64:'<compile-result-artifact>' } },
   { label: 'wasm.plan.edge_package', method: 'wasm.plan.edge_package', params: { artifact_b64:'<compile-result-artifact>', package_name:'demo-plan' } },
@@ -5673,44 +5674,82 @@ async function viewExplainDeps() {
 // ---------------------------------------------------------------------------
 // Merge & CRDT (R07)
 // ---------------------------------------------------------------------------
+function readOptionalJsonInput(id, label) {
+  const raw = ($(id)?.value || '').trim();
+  return raw ? parseJsonInput(raw, label) : undefined;
+}
+
+function readMergePolicy(required = false) {
+  const raw = ($('mergePolicy')?.value || '').trim();
+  if (!raw && !required) return undefined;
+  return raw ? parseJsonInput(raw, 'Policy') : { default: { kind: 'builtin', name: 'last_write_wins' }, per_column: {} };
+}
+
+function readMergeModuleId() {
+  const moduleId = ($('mergeWasmModuleId')?.value || '').trim() || ($('mergeWasmName')?.value || '').trim();
+  if (!moduleId) throw new Error('Module ID required');
+  return moduleId;
+}
+
 async function mergeApply() {
   try {
     const t = readDbTable('mergeDb','mergeTable');
     const pk = parseJsonInput($('mergePk')?.value,'PK') || [];
     const incoming = parseJsonInput($('mergeIncoming')?.value,'Incoming');
-    await call('merge.apply', cleanParams({table:t,pk,incoming}), 'mergeOut');
+    const expected_etag = ($('mergeExpectedEtag')?.value || '').trim() || undefined;
+    const min_causality = readOptionalJsonInput('mergeMinCausality', 'Min Causality');
+    const policy = readMergePolicy(false);
+    await call('merge.apply', cleanParams({table:t,pk,incoming,expected_etag,min_causality,policy}), 'mergeOut');
   } catch (e) { setOut({error:String(e)},'mergeOut'); }
 }
 
 async function mergeRegister() {
   try {
     const t = readDbTable('mergeDb','mergeTable');
-    const policy = parseJsonInput($('mergePolicy')?.value,'Policy');
+    const policy = readMergePolicy(true);
     await call('merge.register', cleanParams({table:t,policy}), 'mergeOut');
   } catch (e) { setOut({error:String(e)},'mergeOut'); }
 }
 
 async function mergeSimulate() {
   try {
-    const t = readDbTable('mergeDb','mergeTable');
-    const pk = parseJsonInput($('mergePk')?.value,'PK') || [];
+    const current = parseJsonInput($('mergeCurrent')?.value,'Current') || {};
     const incoming = parseJsonInput($('mergeIncoming')?.value,'Incoming');
-    await call('merge.simulate', cleanParams({table:t,pk,incoming}), 'mergeOut');
+    const policy = readMergePolicy(true);
+    await call('merge.simulate', cleanParams({current,incoming,policy}), 'mergeOut');
+  } catch (e) { setOut({error:String(e)},'mergeOut'); }
+}
+
+async function mergeEvaluate() {
+  try {
+    const policy = readMergePolicy(true);
+    const cases = parseJsonInput($('mergeEvalCases')?.value, 'Evaluate Cases') || [];
+    const iterations = Number($('mergeEvalIterations')?.value || 1) || 1;
+    await call('merge.evaluate', cleanParams({policy,cases,iterations}), 'mergeOut');
   } catch (e) { setOut({error:String(e)},'mergeOut'); }
 }
 
 async function mergeWasmRegister() {
   try {
-    const name = $('mergeWasmName')?.value.trim(); if (!name) throw new Error('Name required');
-    const b64 = $('mergeWasmB64')?.value.trim() || 'AA==';
-    await call('merge.wasm.register',{name,wasm_b64:b64},'mergeOut');
+    const module_id = readMergeModuleId();
+    const name = ($('mergeWasmName')?.value || '').trim() || undefined;
+    const wasm_b64 = ($('mergeWasmB64')?.value || '').trim();
+    if (!wasm_b64) throw new Error('Wasm B64 required');
+    const capabilities = {
+      values_only: true,
+      deterministic: true,
+      max_fuel: Number($('mergeWasmFuel')?.value || 0) || 0,
+      max_memory_bytes: Number($('mergeWasmMemory')?.value || 0) || 0,
+      max_output_bytes: Number($('mergeWasmOutput')?.value || 0) || 0,
+    };
+    await call('merge.wasm.register', cleanParams({module_id,name,wasm_b64,capabilities}), 'mergeOut');
   } catch (e) { setOut({error:String(e)},'mergeOut'); }
 }
 
 async function mergeWasmList() { await call('merge.wasm.list',{},'mergeOut'); }
 
 async function mergeWasmDrop() {
-  try { const name = $('mergeWasmName')?.value.trim(); if (!name) throw new Error('Name required'); await call('merge.wasm.drop',{name},'mergeOut'); } catch (e) { setOut({error:String(e)},'mergeOut'); }
+  try { await call('merge.wasm.drop',{module_id:readMergeModuleId()},'mergeOut'); } catch (e) { setOut({error:String(e)},'mergeOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -6037,7 +6076,7 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'privacy',   title: 'Privacy & DP',      purpose: 'Differential privacy aggregates and oblivious execution.', actions: 'Run DP aggregates with budget, register oblivious policies, explain padding.' },
   { panel: 'forensics', title: 'Forensics (R06)',   purpose: 'Hash-chained audit log with filtered verification and forensic proof bundles.', actions: 'Audit status, verify chain, query by DB/table/op/id/filter, proof-verify the returned slice, and export report bundles.' },
   { panel: 'views',     title: 'Views (R08)',       purpose: 'Incremental materialized views with dependency graphs.', actions: 'Create, refresh, status, drop, explain dependencies.' },
-  { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions and Wasm merge modules.', actions: 'Apply, register, simulate; manage Wasm merge registry.' },
+  { panel: 'merge',     title: 'Merge & CRDT',      purpose: 'Client-side merge functions, conflict evaluation, and values-only Wasm merge modules.', actions: 'Apply/register policies, simulate current+incoming rows, evaluate conflict workloads, manage Wasm modules.' },
   { panel: 'wasm',      title: 'Wasm Operators',    purpose: 'User-defined Wasm query plan operators.', actions: 'Compile, run, inspect plan artifacts, package for edge.' },
   { panel: 'advisor',   title: 'Index Advisor',     purpose: 'Workload-driven index recommendation and synthesis.', actions: 'Synthesize, history, apply, dismiss recommendations.' },
   { panel: 'migration', title: 'Migration',         purpose: 'Compatibility telemetry, rewrite previews, intent reports.', actions: 'Preview rewrites, export intent reports as JSON/Markdown.' },
@@ -6665,6 +6704,7 @@ wire('btnViewExplainDeps', viewExplainDeps);
 wire('btnMergeApply', mergeApply);
 wire('btnMergeRegister', mergeRegister);
 wire('btnMergeSimulate', mergeSimulate);
+wire('btnMergeEvaluate', mergeEvaluate);
 wire('btnMergeWasmRegister', mergeWasmRegister);
 wire('btnMergeWasmList', mergeWasmList);
 wire('btnMergeWasmDrop', mergeWasmDrop);

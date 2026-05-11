@@ -125,8 +125,8 @@
     </div>
     <article class="doc-article">
       <h1 id="wasm-udfs-with-capabilities-and-safe-cancellation">Wasm UDFs with Capabilities and Safe Cancellation<a class="headerlink" href="#wasm-udfs-with-capabilities-and-safe-cancellation" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-04-19</p>
+<p>Status: Draft + hardened merge-function integration
+Last updated: 2026-05-11</p>
 <p>Goal:
 Allow extensions (scalar UDFs, aggregates, table functions) in a sandboxed runtime with strict resource limits, explicit capabilities, and safe cancellation.</p>
 <p>This feature is designed to be optional and off by default in strict compatibility deployments.</p>
@@ -275,9 +275,12 @@ Reference them from catalog metadata.</p>
 - Merge functions should be executed as sandboxed Wasm code with a "values-only" capability set: they receive conflicting versions and must return the resolved value without arbitrary DB reads.
 - Wasm query operators require a stable ABI for batches; start with filter/project on columnar batches and expand gradually.
   See <code>docs/WASM_OPERATORS.md</code>.</p>
-<p>Prototype note:
-- The merge function registry (<code>merge.wasm.*</code>) stores module metadata and enforces
-  the values-only capability model, but execution remains disabled.</p>
+<p>Current R07 merge-function integration:
+- <code>merge.wasm.register</code> stores immutable module bytes through the core <code>ValueStore</code> / <code>WasmModuleCatalog</code> path and persists merge-facing registry metadata in <code>merge_wasm_registry.json</code> format v1.
+- <code>merge.apply</code>, <code>merge.simulate</code>, and <code>merge.evaluate</code> execute policy entries of the form <code>{"kind":"wasm","module_id":"..."}</code> when the registered module declares <code>capabilities.values_only = true</code>.
+- Merge modules use the scalar <code>skein.wasm.udf.v1</code> ABI (<code>memory</code>, <code>skein_alloc</code>, and normally <code>skein_scalar</code>) with two encoded typed-literal arguments: current value and incoming value.
+- The result must be one encoded typed literal. Table access, filesystem, network, clock, randomness, and side-effect hostcalls are unavailable in the merge path.
+- Core sandbox limits apply to merge execution: fuel exhaustion, memory/output limits, and wall-clock timeout surface as merge errors and do not mutate engine state.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/WASM_UDFS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

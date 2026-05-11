@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-v10-full-protocol-query-language-specification">SkeinQL v1.0 — Full Protocol &amp; Query Language Specification<a class="headerlink" href="#skeinql-v10-full-protocol-query-language-specification" title="Permanent link">¶</a></h1>
-<p>Status: Draft v1.0 (implementable; v0.3.13 runtime sync)
+<p>Status: Draft v1.0 (implementable; v0.3.14 runtime sync)
 Last updated: 2026-05-11</p>
 <p>SkeinQL is SkeinDB's native <strong>non-SQL</strong> API: a versioned, structured query and control protocol.
 It is designed to coexist with MySQL/SQL compatibility mode:</p>
@@ -1437,7 +1437,7 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 </code></pre></div>
 
 <h3 id="1014-merge-experimental">10.14 merge.* (experimental)<a class="headerlink" href="#1014-merge-experimental" title="Permanent link">¶</a></h3>
-<p>Optimistic concurrency with merge functions (prototype). See <code>docs/MERGE_FUNCTIONS.md</code>.</p>
+<p>Optimistic concurrency with built-in and values-only Wasm merge functions. See <code>docs/MERGE_FUNCTIONS.md</code>.</p>
 <h4 id="mergeregister">merge.register<a class="headerlink" href="#mergeregister" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -1460,7 +1460,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;pk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">}],</span>
 <span class="w">  </span><span class="nt">&quot;incoming&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">}},</span>
 <span class="w">  </span><span class="nt">&quot;expected_etag&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;W/\&quot;r:...\&quot;&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;min_causality&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;etag_chain_v1&quot;</span><span class="p">,</span><span class="nt">&quot;deps&quot;</span><span class="p">:[{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;mydb.counters&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">12</span><span class="p">}]}</span>
+<span class="w">  </span><span class="nt">&quot;min_causality&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;etag_chain_v1&quot;</span><span class="p">,</span><span class="nt">&quot;deps&quot;</span><span class="p">:[{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;mydb.counters&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">12</span><span class="p">}]},</span>
+<span class="w">  </span><span class="nt">&quot;policy&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;default&quot;</span><span class="p">:{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">}}</span>
 <span class="p">}</span>
 </code></pre></div>
 
@@ -1482,19 +1483,64 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;merged&quot;</span><span class="p">:{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">13</span><span class="p">}}}</span>
 </code></pre></div>
 
+<h4 id="mergeevaluate">merge.evaluate<a class="headerlink" href="#mergeevaluate" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;policy&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;default&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;last_write_wins&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;per_column&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="s2">&quot;builtin&quot;</span><span class="p">,</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;sum&quot;</span><span class="p">}}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;counter conflict&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;current&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;incoming&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">4</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;expected_etag_match&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;min_causality_satisfied&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;constraint_ok&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.merge.evaluate.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cases&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;conflict_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;resolved_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;conflict_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;resolution_success_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mean_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;p95_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1500</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;counter conflict&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;conflict&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;conflicts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;write_write&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;resolved&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;merged&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;count&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">11</span><span class="p">}},</span>
+<span class="w">      </span><span class="nt">&quot;mean_merge_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
 <h4 id="mergewasmregister">merge.wasm.register<a class="headerlink" href="#mergewasmregister" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;module_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;merge_sum&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;wasm_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;AA==&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sum merge&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;wasm_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;base64 wasm module&gt;&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;capabilities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;values_only&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;deterministic&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;max_fuel&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;max_memory_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">65536</span><span class="p">,</span>
 <span class="w">    </span><span class="nt">&quot;max_output_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4096</span>
-<span class="w">  </span><span class="p">},</span>
-<span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sum merge&quot;</span>
+<span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 

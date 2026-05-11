@@ -1464,11 +1464,16 @@
             <div class="card wide"><h2>Merge &amp; CRDT (R07)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="mergeDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="mergeTable" /></div></div>
             <div class="field"><label>PK</label><input id="mergePk" placeholder='[{"t":"i64","v":1}]' /></div>
+            <div class="row"><div class="field"><label>Expected ETag</label><input id="mergeExpectedEtag" placeholder='W/&quot;r:...&quot;' /></div><div class="field"><label>Min Causality</label><input id="mergeMinCausality" placeholder='{"format":"etag_chain_v1","deps":[]}' /></div></div>
+            <div class="field"><label>Current</label><textarea id="mergeCurrent" rows="2"></textarea></div>
             <div class="field"><label>Incoming</label><textarea id="mergeIncoming" rows="2"></textarea></div>
-            <div class="field"><label>Policy</label><textarea id="mergePolicy" rows="2" placeholder='{"strategy":"last_write_wins"}'></textarea></div>
-            <div class="actions"><button id="btnMergeApply" class="primary sm">Apply</button><button id="btnMergeRegister" class="sm">Register</button><button id="btnMergeSimulate" class="sm">Simulate</button></div>
+            <div class="field"><label>Policy</label><textarea id="mergePolicy" rows="2" placeholder='{"default":{"kind":"builtin","name":"last_write_wins"},"per_column":{"count":{"kind":"builtin","name":"sum"}}}'></textarea></div>
+            <div class="field"><label>Evaluate Cases</label><textarea id="mergeEvalCases" rows="3" placeholder='[{"name":"counter conflict","current":{"count":{"t":"u64","v":7}},"incoming":{"count":{"t":"u64","v":4}},"expected_etag_match":false,"min_causality_satisfied":true,"constraint_ok":true}]'></textarea></div>
+            <div class="row"><div class="field"><label>Iterations</label><input id="mergeEvalIterations" type="number" min="1" max="10000" value="10" /></div><div class="field"><label>Module ID</label><input id="mergeWasmModuleId" placeholder="merge_sum" /></div></div>
+            <div class="actions"><button id="btnMergeApply" class="primary sm">Apply</button><button id="btnMergeRegister" class="sm">Register</button><button id="btnMergeSimulate" class="sm">Simulate</button><button id="btnMergeEvaluate" class="sm">Evaluate</button></div>
             <h2 style="margin-top:12px">Wasm Merge</h2>
-            <div class="row"><div class="field"><label>Name</label><input id="mergeWasmName" /></div><div class="field"><label>Wasm B64</label><input id="mergeWasmB64" placeholder="AA==" /></div></div>
+            <div class="row"><div class="field"><label>Name</label><input id="mergeWasmName" /></div><div class="field"><label>Wasm B64</label><input id="mergeWasmB64" /></div></div>
+            <div class="row"><div class="field"><label>Max Fuel</label><input id="mergeWasmFuel" type="number" min="0" value="20000" /></div><div class="field"><label>Max Memory</label><input id="mergeWasmMemory" type="number" min="0" value="65536" /></div><div class="field"><label>Max Output</label><input id="mergeWasmOutput" type="number" min="0" value="64" /></div></div>
             <div class="actions"><button id="btnMergeWasmRegister" class="sm">Register</button><button id="btnMergeWasmList" class="sm">List</button><button id="btnMergeWasmDrop" class="danger sm">Drop</button></div>
             <pre id="mergeOut">Ready.</pre>
           </div></div>

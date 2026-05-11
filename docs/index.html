@@ -8,7 +8,7 @@
   <meta name="keywords" content="SkeinDB, database, MVCC, cell-interned, SkeinQL, Rust, MySQL, PostgreSQL, research, differential privacy, Wasm, QUIC">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta property="og:title" content="SkeinDB — Single-Binary Database">
-  <meta property="og:description" content="Cell-interned MVCC · 131 RPC methods · 20 research tracks (18 hardened) · MySQL corpus-backed + partial PostgreSQL · One binary">
+  <meta property="og:description" content="Cell-interned MVCC · 132 RPC methods · 20 research tracks (18 hardened) · MySQL corpus-backed + partial PostgreSQL · One binary">
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -470,13 +470,13 @@
       <span class="status-badge status-implemented">Implemented</span>
       <div class="feature-icon" style="background:rgba(16,185,129,.1);color:var(--green)">🔌</div>
       <h3>MySQL Wire Protocol</h3>
-      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with a 670+ statement compatibility corpus, window functions, user variables, prepared statements, and broad COM_QUERY coverage.</p>
+      <p>Connect with any MySQL client. SkeinDB speaks the MySQL binary protocol with 678 corpus-backed compatibility statements, window functions, user variables, prepared statements, broad COM_QUERY coverage, and <code>information_schema.table_privileges</code> probes.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-prototype">Partial</span>
       <div class="feature-icon" style="background:rgba(168,85,247,.1);color:var(--purple)">🐘</div>
       <h3>PostgreSQL Wire Protocol</h3>
-      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables, and common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code> backed by the shared engine.</p>
+      <p>Connect with early PostgreSQL clients. SkeinDB now ships a partial PG v3 baseline on port 5432: trust/SCRAM auth, SSL rejection, simple and extended queries, transaction/savepoint state, virtual <code>pg_catalog</code> tables including <code>pg_tables</code>, and common bootstrap probes like <code>SHOW server_version</code> plus <code>current_setting(...)</code> backed by the shared engine.</p>
     </div>
     <div class="feature-card">
       <span class="status-badge status-implemented">Implemented</span>

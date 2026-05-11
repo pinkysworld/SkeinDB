@@ -139,7 +139,7 @@
   - <strong>R04</strong> — Differential privacy (Laplace noise, RDP composition, budget tracking)
   - <strong>R05</strong> — Oblivious execution (threat model, per-table policies, padded scans, dummy lookups, explain/evaluate reports, admin wiring)
   - <strong>R06</strong> — Forensic WAL queries (JSON filter grammar, verifiable index summary, boundary/inclusion proofs, checkpoint anchors, export bundles, admin wiring)
-  - <strong>R07</strong> — Client-side merge functions (conflict resolution + merge.list test)
+  - <strong>R07</strong> — Client-side merge functions (conflict hooks, values-only Wasm execution, evaluation harness, admin wiring)
   - <strong>R08</strong> — Incremental view maintenance (dependency graphs, cascading invalidation)
   - <strong>R09</strong> — QUIC-native protocol (multi-stream RPCs + rebind verification test)
   - <strong>R10</strong> — HNSW vector search (M=16, ef=200, cosine similarity, multi-layer graph)
@@ -153,7 +153,7 @@
   - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: <strong>51 done / 58 open</strong> after closing R06 forensic query hardening. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: <strong>58 done / 51 open</strong> after closing R07 merge-function hardening. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
@@ -166,7 +166,8 @@
 - 2026-05-09 (v0.3.10 DP evaluation release): T246 is closed with <code>dp.evaluate</code>, exact-baseline rows, seeded epsilon-grid noisy trials, mean/p95/max absolute error, mean relative error, noisy latency, overhead-vs-exact metrics, SkeinAdmin Privacy controls, and focused engine/admin/capability tests. Counts now 31 done / 78 open.
 - 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with <code>dp.aggregate</code> COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and <code>privacy_etag</code> cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
 - 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table <code>oblivious.policy.*</code> persistence, padded scan/dummy lookup enforcement, <code>oblivious.explain</code>, <code>oblivious.evaluate</code> trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.
-- 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.</p>
+- 2026-05-11 (v0.3.13 R06 closure release): T260-T266 are closed with the SkeinForensic JSON filter grammar, chain-consistent time/table/op/actor index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots and per-record inclusion proofs, <code>forensic.query</code> / <code>forensic.verify</code> / <code>forensic.export</code> bundles, a simulated incident-timeline harness, fixed SkeinAdmin Forensics query/verify/export wiring, and focused engine/RPC/admin tests. Counts now 51 done / 58 open.
+- 2026-05-11 (v0.3.14 R07 closure release): T270-T276 are closed with write-write/dependency/constraint conflict hooks, executable values-only Wasm merge policies with fuel cancellation, <code>merge.evaluate</code> conflict-rate/resolution/timing reports, the offline queue interchange spec, fixed SkeinAdmin Merge &amp; CRDT payloads/controls, PostgreSQL <code>pg_catalog.pg_tables</code>, MySQL <code>information_schema.table_privileges</code>, and focused engine/RPC/admin/catalog tests. Counts now 58 done / 51 open.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -365,13 +366,13 @@
 </ul>
 <h3 id="phase-28-merge-functions-for-optimistic-concurrency-r07">Phase 28 — Merge functions for optimistic concurrency (R07)<a class="headerlink" href="#phase-28-merge-functions-for-optimistic-concurrency-r07" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T270: Conflict model (write-write, constraint, dependency) + detection hooks</li>
-<li>[ ] T271: Merge function registry (Wasm) + capability model (“values-only” access)</li>
-<li>[ ] T272: SkeinQL <code>merge.register</code> / <code>merge.apply</code> + SQL compat hook (If-Match)</li>
-<li>[ ] T273: Offline write queue format (client SDK spec) + merge result handling</li>
-<li>[ ] T274: Safety tests: cancellation + deterministic merges</li>
-<li>[ ] T275: Bench: conflict rate + resolution success on example workloads</li>
-<li>[ ] T276: SkeinAdmin “Merge rules” page</li>
+<li>[x] T270: Conflict model (write-write, constraint, dependency) + detection hooks. Evidence: <code>merge.apply</code> handles <code>expected_etag</code>, <code>min_causality</code>, primary-key mismatch, and non-null constraint failures; focused tests cover conflict and non-null rejection paths.</li>
+<li>[x] T271: Merge function registry (Wasm) + capability model ("values-only" access). Evidence: <code>merge.wasm.*</code>, persisted <code>merge_wasm_registry.json</code> v1, <code>validate_merge_wasm_policy</code>, and executable values-only scalar Wasm merge modules.</li>
+<li>[x] T272: SkeinQL <code>merge.register</code> / <code>merge.apply</code> + SQL compat hook (If-Match). Evidence: typed SkeinQL params/results, RPC dispatch/capability advertising, ETag/min-causality merge guards, and <code>merge_apply_wasm_policy_executes_rpc</code>.</li>
+<li>[x] T273: Offline write queue format (client SDK spec) + merge result handling. Evidence: <code>docs/OFFLINE_WRITE_QUEUE.md</code> plus <code>crates/skeindb-skeinql/tests/offline_queue_roundtrip.rs</code>.</li>
+<li>[x] T274: Safety tests: cancellation + deterministic merges. Evidence: <code>merge_apply_wasm_policy_cancels_non_terminating_module</code>, <code>merge_apply_wasm_policy_executes_values_only_module</code>, and <code>cluster_rpc.rs::r07_merge_conflict_resolution_deterministic</code>.</li>
+<li>[x] T275: Bench: conflict rate + resolution success on example workloads. Evidence: read-only <code>merge.evaluate</code> returns <code>skein.merge.evaluate.v1</code> with conflict/resolution rates, mean/p95 timing, and per-case results.</li>
+<li>[x] T276: SkeinAdmin "Merge rules" page. Evidence: Merge &amp; CRDT panel now sends typed apply/register/simulate/evaluate/Wasm payloads and <code>skeinadmin_merge_panel_exposes_r07_hardening_controls</code> locks the controls.</li>
 </ul>
 <h3 id="phase-29-incremental-view-maintenance-r08">Phase 29 — Incremental view maintenance (R08)<a class="headerlink" href="#phase-29-incremental-view-maintenance-r08" title="Permanent link">¶</a></h3>
 <ul>

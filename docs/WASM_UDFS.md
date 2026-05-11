@@ -1,7 +1,7 @@
 # Wasm UDFs with Capabilities and Safe Cancellation
 
-Status: Draft
-Last updated: 2026-04-19
+Status: Draft + hardened merge-function integration
+Last updated: 2026-05-11
 
 Goal:
 Allow extensions (scalar UDFs, aggregates, table functions) in a sandboxed runtime with strict resource limits, explicit capabilities, and safe cancellation.
@@ -201,6 +201,9 @@ Integration sketches:
 - Wasm query operators require a stable ABI for batches; start with filter/project on columnar batches and expand gradually.
   See `docs/WASM_OPERATORS.md`.
 
-Prototype note:
-- The merge function registry (`merge.wasm.*`) stores module metadata and enforces
-  the values-only capability model, but execution remains disabled.
+Current R07 merge-function integration:
+- `merge.wasm.register` stores immutable module bytes through the core `ValueStore` / `WasmModuleCatalog` path and persists merge-facing registry metadata in `merge_wasm_registry.json` format v1.
+- `merge.apply`, `merge.simulate`, and `merge.evaluate` execute policy entries of the form `{"kind":"wasm","module_id":"..."}` when the registered module declares `capabilities.values_only = true`.
+- Merge modules use the scalar `skein.wasm.udf.v1` ABI (`memory`, `skein_alloc`, and normally `skein_scalar`) with two encoded typed-literal arguments: current value and incoming value.
+- The result must be one encoded typed literal. Table access, filesystem, network, clock, randomness, and side-effect hostcalls are unavailable in the merge path.
+- Core sandbox limits apply to merge execution: fuel exhaustion, memory/output limits, and wall-clock timeout surface as merge errors and do not mutate engine state.

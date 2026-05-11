@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeindb-compatibility-mysql-postgresql-sql">SkeinDB Compatibility (MySQL / PostgreSQL / SQL)<a class="headerlink" href="#skeindb-compatibility-mysql-postgresql-sql" title="Permanent link">¶</a></h1>
-<p>Status: v0.3.13 truth sync
+<p>Status: v0.3.14 truth sync
 Last updated: 2026-05-11</p>
 <p>SkeinDB adoption strategy:
 - Speak MySQL wire protocol (port 3306) so existing MySQL apps work unchanged.
@@ -242,6 +242,7 @@ Last updated: 2026-05-11</p>
 <li><code>views</code> (empty stub)</li>
 <li><code>processlist</code> (single-row stub)</li>
 <li><code>user_privileges</code> (single-row stub)</li>
+<li><code>table_privileges</code> (per-table privilege rows for common ORM probes)</li>
 </ul>
 <hr />
 <h2 id="3-differential-testing">3) Differential testing<a class="headerlink" href="#3-differential-testing" title="Permanent link">¶</a></h2>
@@ -319,7 +320,7 @@ The implementation is still partial but substantially deeper than the first brin
 <li><strong>Wire protocol:</strong> PostgreSQL v3 frontend/backend framing, StartupMessage + SSLRequest parsing, and backend message encoding for <code>ParameterStatus</code>, <code>BackendKeyData</code>, <code>ReadyForQuery</code>, <code>RowDescription</code>, <code>DataRow</code>, <code>CommandComplete</code>, and <code>ErrorResponse</code></li>
 <li><strong>Authentication:</strong> trust mode when <code>SKEINDB_TOKEN</code> is unset; SCRAM-SHA-256 when it is set</li>
 <li><strong>Simple query flow:</strong> shared SQL execution engine behind the PG socket, including <code>SELECT 1</code>-style queries, a <code>SELECT version()</code> compatibility response, and typed <code>RowDescription</code> metadata for the current <code>BOOL</code> / <code>INT8</code> / <code>FLOAT8</code> / <code>TEXT</code> / <code>DATE</code> / <code>TIME</code> / <code>TIMESTAMP</code> / <code>JSONB</code> / <code>BYTEA</code> / <code>UUID</code> baseline when the shared engine exposes those schema or literal types</li>
-<li><strong>Virtual catalogs:</strong> shared-executor <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
+<li><strong>Virtual catalogs:</strong> shared-executor <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_tables</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
 <li><strong>PG dialect and DML:</strong> <code>::</code> casts, dollar quoting, double-quoted identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST</code>, array constructors, common <code>ON CONFLICT</code> rewrites, supported <code>RETURNING</code> extraction, and explicit unsupported-feature errors for <code>COPY</code></li>
 <li><strong>Transaction handling:</strong> PostgreSQL-style <code>ReadyForQuery</code> state (<code>I</code> / <code>T</code> / <code>E</code>), failed-transaction-block behavior, and undo-log-backed <code>SAVEPOINT</code> / <code>RELEASE SAVEPOINT</code> / <code>ROLLBACK TO SAVEPOINT</code></li>
 <li><strong>Extended query protocol:</strong> <code>Parse</code> / <code>Bind</code> / <code>Describe</code> / <code>Execute</code> / <code>Sync</code> / <code>Close</code> / <code>Flush</code>, named statements + portals, <code>$1</code> placeholders, sync-based recovery after extended-query errors, typed <code>RowDescription</code> metadata, and binary result encoding for the current common scalar OID baseline</li>

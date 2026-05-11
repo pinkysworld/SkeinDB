@@ -43,7 +43,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
 | R05 | Hardened | Oblivious policy/explain/evaluate (`oblivious.*`), padded scans, dummy lookups, trace leakage/overhead reports, and SkeinAdmin controls |
 | R06 | Hardened | Forensic WAL query/verify/export (`forensic.*`), SkeinForensic JSON filters, boundary/checkpoint/Merkle inclusion proofs, export bundles, incident-timeline test coverage, and SkeinAdmin Forensics wiring |
-| R07 | Implemented (prototype) | Merge policies + wasm merge registry (`merge.*`) + conflict tests |
+| R07 | Hardened | Merge policies, values-only Wasm execution/cancellation, `merge.evaluate`, offline queue docs, and SkeinAdmin Merge & CRDT controls (`docs/MERGE_FUNCTIONS.md`, `merge.*`) |
 | R08 | Implemented (prototype) | Incremental view APIs (`view.*`) + dependency refresh tests |
 | R09 | Implemented | QUIC-native SkeinQL transport + `tests/quic_rpc.rs` |
 | R10 | Implemented (prototype) | Vector ingest/search/index status (`vector.*`) + ANN tests |

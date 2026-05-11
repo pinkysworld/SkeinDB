@@ -8,7 +8,7 @@ Principles:
 - These methods are **not required** for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in `docs/research_agenda/`.
-- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.13 runtime method map exposed through `system.capabilities`.
+- Use `docs/SKEINQL.md` for method payload examples and `docs/API_REFERENCE.md` for the v0.3.14 runtime method map exposed through `system.capabilities`.
 
 ## 1. dp.* — Differential privacy
 Related: R04
@@ -35,10 +35,11 @@ Related: R06
 ## 4. merge.* — Optimistic writes with merge semantics
 Related: R07
 
-- `merge.register` — register a merge function (Wasm module reference)
-- `merge.apply` — apply merge to conflicting versions (server-driven)
-- `merge.simulate` — test merges without committing
-- `merge.wasm.register` / `merge.wasm.list` / `merge.wasm.drop` — manage Wasm merge modules
+- `merge.register` — register a per-table merge policy with built-in or values-only Wasm functions
+- `merge.apply` — apply a policy to an incoming row with ETag/min-causality conflict hooks
+- `merge.simulate` — test current+incoming row merges without committing
+- `merge.evaluate` — report conflict rate, resolution success, and merge timing for example workloads
+- `merge.wasm.register` / `merge.wasm.list` / `merge.wasm.drop` — manage values-only Wasm merge modules
 
 ## 5. view.* — Materialized views + incremental maintenance
 Related: R08

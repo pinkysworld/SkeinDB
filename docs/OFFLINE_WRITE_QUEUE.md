@@ -1,10 +1,12 @@
 # Offline Write Queue (merge.apply batches)
 
-Status: Draft
-Last updated: 2026-01-22
+Status: Test-backed client interchange spec (v0.3.14)
+Last updated: 2026-05-11
 
 This document defines a client-side format for batching optimistic writes while
 offline, then replaying them using `merge.apply` when connectivity returns.
+
+The format is locked by `crates/skeindb-skeinql/tests/offline_queue_roundtrip.rs` and is exercised by the R07 merge runtime through `merge.apply`, `merge.simulate`, and `merge.evaluate`.
 
 ## 1) Format (offline_queue_v1)
 
@@ -82,3 +84,7 @@ Queues are client-controlled. Servers must still enforce:
 - Wasm capability restrictions (values-only)
 
 Queue formats are advisory and do not grant elevated privileges.
+
+## 6) Evaluation
+
+Before enabling a queue policy for a client cohort, send representative current/incoming rows to `merge.evaluate`. The harness reports conflict rate, resolution success rate, and per-case merge timing without writing data, so offline policies can be checked before rollout.

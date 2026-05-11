@@ -170,7 +170,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <li>PG SQL dialect rewriting: <code>::</code> type casts, <code>$$dollar quoting$$</code>, <code>"double-quoted"</code> identifiers, <code>IS [NOT] DISTINCT FROM</code>, <code>FETCH FIRST n ROWS ONLY</code>, <code>ARRAY[…]</code> constructor, and <code>ON CONFLICT</code> rewrite support for the current shared-engine DML subset</li>
 <li><code>INSERT</code> / <code>UPDATE</code> / <code>DELETE ... RETURNING</code> extraction with supported follow-up reads, and explicit <code>0A000</code> errors for <code>COPY FROM STDIN</code> / <code>COPY TO STDOUT</code></li>
 <li>PG DDL compatibility: <code>SERIAL</code>/<code>BIGSERIAL</code>/<code>SMALLSERIAL</code> → auto-increment integer columns, <code>CREATE SCHEMA</code> → <code>CREATE DATABASE</code>, <code>CREATE INDEX CONCURRENTLY</code> (accepted/ignored), <code>CREATE INDEX IF NOT EXISTS</code>, <code>COMMENT ON</code> (silently accepted)</li>
-<li>virtual <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
+<li>virtual <code>pg_catalog</code> coverage for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_tables</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></li>
 <li>shared <code>information_schema.columns</code> introspection through <code>sql.exec</code>, including common metadata fields (<code>COLUMN_TYPE</code>, character length, numeric precision/scale, charset/collation, privileges, comments, generated expression, and <code>EXTRA</code>) used by cross-dialect ORMs</li>
 </ul>
 <h2 id="module-map">Module map<a class="headerlink" href="#module-map" title="Permanent link">¶</a></h2>
@@ -216,7 +216,7 @@ psql<span class="w"> </span><span class="s2">&quot;host=127.0.0.1 port=5432 user
 <tr>
 <td><code>pg_catalog.rs</code></td>
 <td>Inline implementation</td>
-<td>Virtual <code>pg_catalog.*</code> tables are served through the shared executor for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></td>
+<td>Virtual <code>pg_catalog.*</code> tables are served through the shared executor for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_tables</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code>, <code>pg_index</code>, <code>pg_constraint</code>, <code>pg_proc</code> (stub), <code>pg_settings</code>, and <code>pg_stat_activity</code></td>
 </tr>
 <tr>
 <td><code>pg_functions.rs</code></td>
@@ -306,7 +306,7 @@ For the common shared SQL subset, responses are encoded as:</p>
 <li>simple query <code>SELECT 1</code></li>
 <li>simple query <code>SELECT version()</code></li>
 <li>startup/bootstrap query bundle covering <code>current_database()</code>, <code>current_schema()</code>, <code>SHOW server_version</code> / <code>server_version_num</code> / <code>standard_conforming_strings</code> / <code>max_identifier_length</code>, <code>SHOW transaction isolation level</code>, and <code>SELECT current_setting(...)</code></li>
-<li>simple-query <code>pg_catalog</code> round-trips for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_settings</code>, <code>pg_type</code>, <code>pg_stat_activity</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_index</code>, and <code>pg_constraint</code></li>
+<li>simple-query <code>pg_catalog</code> round-trips for <code>pg_database</code>, <code>pg_namespace</code>, <code>pg_tables</code>, <code>pg_settings</code>, <code>pg_type</code>, <code>pg_stat_activity</code>, <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_index</code>, and <code>pg_constraint</code></li>
 <li>simple-query <code>RowDescription</code> OID checks for numeric, boolean, temporal, JSON, UUID, and text result columns</li>
 <li>extended query <code>Parse</code> / <code>Bind</code> / statement+portal <code>Describe</code> / <code>Execute</code> / <code>Close</code> / <code>Sync</code> / <code>Flush</code> round-trips</li>
 <li>extended-query <code>RowDescription</code> OID checks for described/executed result columns</li>

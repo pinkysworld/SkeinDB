@@ -19,7 +19,7 @@ use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -31,6 +31,13 @@ use sha2::{Sha224, Sha256, Sha384, Sha512};
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
     LearnedIndexReport, ValueId, ValueIdLookupDistribution, ValueStore, ValueStoreConfig,
+};
+use skeindb_core::wasm_catalog::{
+    WasmModuleCapabilities, WasmModuleCatalog, WasmModuleInstallRequest, WasmModuleKind,
+    WASM_UDF_ABI_V1,
+};
+use skeindb_core::wasm_udf::{
+    execute_scalar_udf_with_options, ScalarUdfExecutionOptions, WasmValue,
 };
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
@@ -50,31 +57,32 @@ use skeindb_skeinql::methods::{
     ForensicVerifyParams, ForensicVerifyResult, MaintenanceReplayExportParams,
     MaintenanceReplayExportResult, MaintenanceReplayImportParams, MaintenanceReplayImportResult,
     MaintenanceReplayRunParams, MaintenanceReplayRunResult, MergeApplyParams, MergeApplyResult,
-    MergeFunctionRef, MergePolicySpec, MergeRegisterParams, MergeRegisterResult,
-    MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities, MergeWasmDropParams,
-    MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo, MergeWasmRegisterParams,
-    MergeWasmRegisterResult, MigrationIntentEvidence, MigrationIntentReportParams,
-    MigrationIntentReportResult, MigrationIntentSample, MigrationIntentSuggestion,
-    MigrationReportExportParams, MigrationReportExportResult, MigrationRewritePreview,
-    MigrationRewritePreviewParams, MigrationRewritePreviewResult, ObliviousEvaluateParams,
-    ObliviousEvaluateResult, ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy,
-    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams,
-    ObliviousTracePoint, ReplayBundle, ReplayBundleChangeEvent, ReplayBundleManifest,
-    ReplayBundlePerformanceCacheVariance, ReplayBundlePerformanceCacheWarmHints,
-    ReplayBundlePerformanceHotTable, ReplayBundlePerformanceLsmState,
-    ReplayBundlePerformanceProfile, ReplayBundlePerformanceRunReport,
-    ReplayBundlePerformanceStorageVariance, ReplayBundlePerformanceTableState,
-    ReplayBundlePerformanceTimingProfile, ReplayBundlePerformanceTimingVariance,
-    ReplayBundleRowEntry, ReplayBundleTable, ReplayBundleTableChecksum, ReplayBundleTableSchema,
-    RowObject, SchemaApplyMergeParams, SchemaApplyMergeResult, SchemaChangeConflict,
-    SchemaChangeOp, SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams,
-    SchemaMergeStatusResult, SchemaProposeChangeParams, SchemaProposeChangeResult,
-    VectorIndexStatusParams, VectorIndexStatusResult, VectorInsertParams, VectorInsertResult,
-    VectorSearchMatch, VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult,
-    ViewDropParams, ViewDropResult, ViewExplainDepsParams, ViewExplainDepsResult,
-    ViewRefreshParams, ViewRefreshResult, ViewStatusParams, ViewStatusResult,
-    WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
-    WasmPlanEdgePackageResult, WasmPlanInspectParams, WasmPlanInspectResult,
+    MergeEvaluateCaseResult, MergeEvaluateParams, MergeEvaluateResult, MergeFunctionRef,
+    MergePolicySpec, MergeRegisterParams, MergeRegisterResult, MergeSimulateParams,
+    MergeSimulateResult, MergeWasmCapabilities, MergeWasmDropParams, MergeWasmDropResult,
+    MergeWasmListResult, MergeWasmModuleInfo, MergeWasmRegisterParams, MergeWasmRegisterResult,
+    MigrationIntentEvidence, MigrationIntentReportParams, MigrationIntentReportResult,
+    MigrationIntentSample, MigrationIntentSuggestion, MigrationReportExportParams,
+    MigrationReportExportResult, MigrationRewritePreview, MigrationRewritePreviewParams,
+    MigrationRewritePreviewResult, ObliviousEvaluateParams, ObliviousEvaluateResult,
+    ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams,
+    ObliviousPolicyGetResult, ObliviousPolicySetParams, ObliviousTracePoint, ReplayBundle,
+    ReplayBundleChangeEvent, ReplayBundleManifest, ReplayBundlePerformanceCacheVariance,
+    ReplayBundlePerformanceCacheWarmHints, ReplayBundlePerformanceHotTable,
+    ReplayBundlePerformanceLsmState, ReplayBundlePerformanceProfile,
+    ReplayBundlePerformanceRunReport, ReplayBundlePerformanceStorageVariance,
+    ReplayBundlePerformanceTableState, ReplayBundlePerformanceTimingProfile,
+    ReplayBundlePerformanceTimingVariance, ReplayBundleRowEntry, ReplayBundleTable,
+    ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
+    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
+    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
+    SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
+    VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
+    VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
+    ViewExplainDepsParams, ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult,
+    ViewStatusParams, ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult,
+    WasmPlanEdgePackageParams, WasmPlanEdgePackageResult, WasmPlanInspectParams,
+    WasmPlanInspectResult,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -710,6 +718,7 @@ struct MergePolicyDisk {
 }
 
 const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
+const MERGE_EVALUATE_FORMAT_V1: &str = "skein.merge.evaluate.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MergeWasmModuleEntry {
@@ -6929,9 +6938,7 @@ impl Engine {
         };
         let policy = normalize_merge_policy(policy, MergeWasmPolicy::Allow)?;
         self.validate_merge_wasm_policy(&policy)?;
-        if policy_contains_wasm(&policy) {
-            anyhow::bail!("not_supported: wasm merge execution not implemented");
-        }
+        let merge_wasm_registry = self.merge_wasm_registry.clone();
 
         let mut intern_items = Vec::new();
         let mut snapshot_rows = Vec::new();
@@ -7026,7 +7033,12 @@ impl Engine {
                             });
                         }
                     } else {
-                        merged_row = merge_rows(&RowObject::new(), &params.incoming, &policy)?;
+                        merged_row = merge_rows_with_wasm(
+                            &RowObject::new(),
+                            &params.incoming,
+                            &policy,
+                            &merge_wasm_registry,
+                        )?;
                         ensure_pk_values(schema, &params.pk, &mut merged_row)?;
                         if not_null_violation(schema, &merged_row).is_some() {
                             push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
@@ -7056,7 +7068,12 @@ impl Engine {
                         }
                     }
 
-                    merged_row = merge_rows(&entry.row, &params.incoming, &policy)?;
+                    merged_row = merge_rows_with_wasm(
+                        &entry.row,
+                        &params.incoming,
+                        &policy,
+                        &merge_wasm_registry,
+                    )?;
                     ensure_pk_values(schema, &params.pk, &mut merged_row)?;
                     if not_null_violation(schema, &merged_row).is_some() {
                         push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
@@ -7169,11 +7186,114 @@ impl Engine {
     ) -> anyhow::Result<MergeSimulateResult> {
         let policy = normalize_merge_policy(params.policy, MergeWasmPolicy::Allow)?;
         self.validate_merge_wasm_policy(&policy)?;
-        if policy_contains_wasm(&policy) {
-            anyhow::bail!("not_supported: wasm merge execution not implemented");
-        }
-        let merged = merge_rows(&params.current, &params.incoming, &policy)?;
+        let merged = merge_rows_with_wasm(
+            &params.current,
+            &params.incoming,
+            &policy,
+            &self.merge_wasm_registry,
+        )?;
         Ok(MergeSimulateResult { merged })
+    }
+
+    pub fn merge_evaluate(
+        &self,
+        params: MergeEvaluateParams,
+    ) -> anyhow::Result<MergeEvaluateResult> {
+        if params.cases.is_empty() {
+            anyhow::bail!("invalid_request: at least one merge case is required");
+        }
+        let iterations = params.iterations.unwrap_or(1).clamp(1, 10_000);
+        let policy = normalize_merge_policy(params.policy, MergeWasmPolicy::Allow)?;
+        self.validate_merge_wasm_policy(&policy)?;
+
+        let mut results = Vec::with_capacity(params.cases.len());
+        let mut durations = Vec::with_capacity(params.cases.len());
+        let mut conflict_count = 0_u64;
+        let mut resolved_count = 0_u64;
+        let mut resolved_conflict_count = 0_u64;
+
+        for case in params.cases {
+            let mut conflicts = Vec::new();
+            let mut conflict = false;
+            if case.expected_etag_match == Some(false) {
+                push_merge_conflict(&mut conflicts, &mut conflict, "write_write");
+            }
+            if case.min_causality_satisfied == Some(false) {
+                push_merge_conflict(&mut conflicts, &mut conflict, "dependency");
+            }
+            if case.constraint_ok == Some(false) {
+                push_merge_conflict(&mut conflicts, &mut conflict, "constraint");
+            }
+
+            let mut merged = RowObject::new();
+            let started = Instant::now();
+            for _ in 0..iterations {
+                merged = merge_rows_with_wasm(
+                    &case.current,
+                    &case.incoming,
+                    &policy,
+                    &self.merge_wasm_registry,
+                )?;
+            }
+            let elapsed_ns = started.elapsed().as_nanos() / u128::from(iterations);
+            let mean_merge_ns = elapsed_ns.min(u128::from(u64::MAX)) as u64;
+            durations.push(mean_merge_ns);
+
+            let resolved = !(conflicts
+                .iter()
+                .any(|c| c == "dependency" || c == "constraint")
+                || conflict && merge_policy_rejects(&policy));
+            if conflict {
+                conflict_count += 1;
+            }
+            if resolved {
+                resolved_count += 1;
+                if conflict {
+                    resolved_conflict_count += 1;
+                }
+            }
+            results.push(MergeEvaluateCaseResult {
+                name: case.name,
+                conflict,
+                conflicts,
+                resolved,
+                merged,
+                mean_merge_ns,
+            });
+        }
+
+        durations.sort_unstable();
+        let mean_merge_ns = if durations.is_empty() {
+            0
+        } else {
+            durations.iter().sum::<u64>() / durations.len() as u64
+        };
+        let p95_idx = if durations.is_empty() {
+            0
+        } else {
+            ((durations.len() - 1) * 95) / 100
+        };
+        let p95_merge_ns = durations.get(p95_idx).copied().unwrap_or(0);
+        let cases = results.len() as u64;
+        let conflict_rate = conflict_count as f64 / cases.max(1) as f64;
+        let resolution_success_rate = if conflict_count == 0 {
+            1.0
+        } else {
+            resolved_conflict_count as f64 / conflict_count as f64
+        };
+
+        Ok(MergeEvaluateResult {
+            format: MERGE_EVALUATE_FORMAT_V1.to_string(),
+            cases,
+            iterations,
+            conflict_count,
+            resolved_count,
+            conflict_rate,
+            resolution_success_rate,
+            mean_merge_ns,
+            p95_merge_ns,
+            results,
+        })
     }
 
     pub fn merge_wasm_register(
@@ -7679,8 +7799,11 @@ impl Engine {
                 if module_id.is_empty() {
                     anyhow::bail!("invalid_request: wasm merge function requires module id");
                 }
-                if !self.merge_wasm_registry.contains_key(module_id) {
+                let Some(entry) = self.merge_wasm_registry.get(module_id) else {
                     anyhow::bail!("invalid_request: merge wasm module not found");
+                };
+                if !entry.capabilities.values_only {
+                    anyhow::bail!("invalid_request: merge wasm must be values_only");
                 }
             }
         }
@@ -23288,17 +23411,11 @@ fn not_null_violation(schema: &TableSchema, row: &RowObject) -> Option<String> {
     None
 }
 
-fn policy_contains_wasm(policy: &MergePolicySpec) -> bool {
-    if policy.default.kind == "wasm" {
-        return true;
-    }
-    policy.per_column.values().any(|func| func.kind == "wasm")
-}
-
-fn merge_rows(
+fn merge_rows_with_wasm(
     current: &RowObject,
     incoming: &RowObject,
     policy: &MergePolicySpec,
+    wasm_registry: &HashMap<String, MergeWasmModuleEntry>,
 ) -> anyhow::Result<RowObject> {
     let mut keys = current
         .keys()
@@ -23315,7 +23432,7 @@ fn merge_rows(
         match (cur, inc) {
             (Some(c), Some(i)) => {
                 let func = policy.per_column.get(&key).unwrap_or(&policy.default);
-                merged.insert(key, merge_value(c, i, func)?);
+                merged.insert(key, merge_value_with_wasm(c, i, func, wasm_registry)?);
             }
             (Some(c), None) => {
                 merged.insert(key, c.clone());
@@ -23329,7 +23446,15 @@ fn merge_rows(
     Ok(merged)
 }
 
-fn merge_value(current: &Lit, incoming: &Lit, func: &MergeFunctionRef) -> anyhow::Result<Lit> {
+fn merge_value_with_wasm(
+    current: &Lit,
+    incoming: &Lit,
+    func: &MergeFunctionRef,
+    wasm_registry: &HashMap<String, MergeWasmModuleEntry>,
+) -> anyhow::Result<Lit> {
+    if func.kind == "wasm" {
+        return execute_wasm_merge_value(current, incoming, func, wasm_registry);
+    }
     let merge_fn = merge_fn_from_ref(func)?;
     let out = match merge_fn {
         MergeFn::LastWriteWins => Some(incoming.clone()),
@@ -23342,6 +23467,106 @@ fn merge_value(current: &Lit, incoming: &Lit, func: &MergeFunctionRef) -> anyhow
         MergeFn::ObjectMerge => merge_object_merge(current, incoming),
     };
     Ok(out.unwrap_or_else(|| incoming.clone()))
+}
+
+fn execute_wasm_merge_value(
+    current: &Lit,
+    incoming: &Lit,
+    func: &MergeFunctionRef,
+    wasm_registry: &HashMap<String, MergeWasmModuleEntry>,
+) -> anyhow::Result<Lit> {
+    let module_id = func.module.as_deref().unwrap_or(func.name.as_str());
+    let entry = wasm_registry
+        .get(module_id)
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: merge wasm module not found"))?;
+    if !entry.capabilities.values_only {
+        anyhow::bail!("invalid_request: merge wasm must be values_only");
+    }
+
+    let wasm_bytes = BASE64_STANDARD
+        .decode(entry.wasm_b64.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid_request: invalid wasm_b64"))?;
+    let mut value_store = ValueStore::new(ValueStoreConfig::default());
+    let mut catalog = WasmModuleCatalog::new();
+    catalog.install(
+        &mut value_store,
+        WasmModuleInstallRequest {
+            module_id: entry.module_id.clone(),
+            name: entry.name.clone(),
+            kind: WasmModuleKind::Scalar,
+            abi: WASM_UDF_ABI_V1.to_string(),
+            entrypoint: "skein_scalar".to_string(),
+            capabilities: WasmModuleCapabilities {
+                allowed_hostcalls: Vec::new(),
+                allowed_tables: Vec::new(),
+                deterministic: entry.capabilities.deterministic,
+                max_fuel: entry.capabilities.max_fuel,
+                max_memory_bytes: entry.capabilities.max_memory_bytes,
+                max_output_bytes: entry.capabilities.max_output_bytes,
+            },
+            wasm_bytes,
+            overwrite: true,
+        },
+        entry.created_at_ms,
+    )?;
+
+    let result = execute_scalar_udf_with_options(
+        &catalog,
+        &mut value_store,
+        &entry.module_id,
+        &[lit_to_wasm_value(current)?, lit_to_wasm_value(incoming)?],
+        ScalarUdfExecutionOptions {
+            wall_clock_timeout: Some(Duration::from_millis(1_000)),
+        },
+    )?;
+    wasm_value_to_lit(result.value, incoming)
+}
+
+fn lit_to_wasm_value(lit: &Lit) -> anyhow::Result<WasmValue> {
+    Ok(match lit {
+        Lit::Null => WasmValue::Null,
+        Lit::Bool { v } => WasmValue::Bool(*v),
+        Lit::I64 { v } => WasmValue::I64(*v),
+        Lit::U64 { v } => WasmValue::U64(*v),
+        Lit::F64 { v } => WasmValue::F64(*v),
+        Lit::Dec { v }
+        | Lit::Str { v }
+        | Lit::Date { iso: v }
+        | Lit::Time { iso: v }
+        | Lit::Datetime { iso: v }
+        | Lit::Uuid { v } => WasmValue::String(v.clone()),
+        Lit::Bytes { b64 } => WasmValue::Bytes(
+            BASE64_STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid_request: invalid bytes literal"))?,
+        ),
+        Lit::Json { v } => WasmValue::String(serde_json::to_string(v)?),
+        Lit::Embedding { v, .. } => WasmValue::String(serde_json::to_string(v)?),
+    })
+}
+
+fn wasm_value_to_lit(value: WasmValue, fallback: &Lit) -> anyhow::Result<Lit> {
+    Ok(match value {
+        WasmValue::Null => Lit::Null,
+        WasmValue::Bool(v) => Lit::Bool { v },
+        WasmValue::I64(v) => Lit::I64 { v },
+        WasmValue::U64(v) => Lit::U64 { v },
+        WasmValue::F64(v) => Lit::F64 { v },
+        WasmValue::Bytes(bytes) => Lit::Bytes {
+            b64: BASE64_STANDARD.encode(bytes),
+        },
+        WasmValue::String(v) => match fallback {
+            Lit::Dec { .. } => Lit::Dec { v },
+            Lit::Date { .. } => Lit::Date { iso: v },
+            Lit::Time { .. } => Lit::Time { iso: v },
+            Lit::Datetime { .. } => Lit::Datetime { iso: v },
+            Lit::Uuid { .. } => Lit::Uuid { v },
+            Lit::Json { .. } => Lit::Json {
+                v: serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)),
+            },
+            _ => Lit::Str { v },
+        },
+    })
 }
 
 fn merge_fn_from_ref(func: &MergeFunctionRef) -> anyhow::Result<MergeFn> {
@@ -34040,6 +34265,50 @@ mod tests {
         Ok(())
     }
 
+    fn merge_sum_wasm_b64() -> String {
+        let bytes = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1 1)
+                (func (export "skein_alloc") (param i32) (result i32)
+                    (i32.const 0)
+                )
+                (func (export "skein_scalar") (param $ptr i32) (param $len i32) (result i64)
+                    (local $current i64)
+                    (local $incoming i64)
+                    (local.set $current (i64.load (i32.add (local.get $ptr) (i32.const 2))))
+                    (local.set $incoming (i64.load (i32.add (local.get $ptr) (i32.const 11))))
+                    (i32.store8 (i32.const 256) (i32.const 4))
+                    (i64.store (i32.const 257) (i64.add (local.get $current) (local.get $incoming)))
+                    (i64.or
+                        (i64.shl (i64.extend_i32_u (i32.const 256)) (i64.const 32))
+                        (i64.extend_i32_u (i32.const 9))
+                    )
+                )
+            )"#,
+        )
+        .unwrap();
+        BASE64_STANDARD.encode(bytes)
+    }
+
+    fn merge_spin_wasm_b64() -> String {
+        let bytes = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1 1)
+                (func (export "skein_alloc") (param i32) (result i32)
+                    (i32.const 0)
+                )
+                (func (export "skein_scalar") (param i32 i32) (result i64)
+                    (loop $spin
+                        (br $spin)
+                    )
+                    (i64.const 0)
+                )
+            )"#,
+        )
+        .unwrap();
+        BASE64_STANDARD.encode(bytes)
+    }
+
     #[test]
     fn merge_apply_resolves_conflict() -> anyhow::Result<()> {
         let dir = temp_dir("merge_apply");
@@ -34499,7 +34768,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_apply_wasm_policy_not_supported() -> anyhow::Result<()> {
+    fn merge_apply_wasm_policy_executes_values_only_module() -> anyhow::Result<()> {
         let dir = temp_dir("merge_apply_wasm");
         let mut engine = Engine::open(&dir)?;
         engine.create_table(
@@ -34537,16 +34806,15 @@ mod tests {
             None,
         )?;
 
-        let wasm_b64 = BASE64_STANDARD.encode(b"wasm");
         engine.merge_wasm_register(MergeWasmRegisterParams {
             module_id: "merge_sum".to_string(),
-            wasm_b64,
+            wasm_b64: merge_sum_wasm_b64(),
             capabilities: MergeWasmCapabilities {
                 values_only: true,
                 deterministic: true,
-                max_fuel: 1000,
-                max_memory_bytes: 1024,
-                max_output_bytes: 4096,
+                max_fuel: 20_000,
+                max_memory_bytes: 64 * 1024,
+                max_output_bytes: 64,
             },
             name: None,
             overwrite: None,
@@ -34568,6 +34836,113 @@ mod tests {
             },
         })?;
 
+        let result = engine.merge_apply(MergeApplyParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            pk: vec![Lit::U64 { v: 1 }],
+            incoming: row(&[("count", Lit::U64 { v: 2 })]),
+            expected_etag: None,
+            min_causality: None,
+            policy: None,
+        })?;
+        assert!(result.applied);
+        assert_eq!(
+            result.merged.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(7)
+        );
+
+        let updated = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            updated.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(7)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_apply_wasm_policy_cancels_non_terminating_module() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_apply_wasm_cancel");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "counters",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "count".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                ("count", Lit::U64 { v: 5 }),
+            ])],
+            None,
+        )?;
+        engine.merge_wasm_register(MergeWasmRegisterParams {
+            module_id: "merge_spin".to_string(),
+            wasm_b64: merge_spin_wasm_b64(),
+            capabilities: MergeWasmCapabilities {
+                values_only: true,
+                deterministic: true,
+                max_fuel: 100,
+                max_memory_bytes: 64 * 1024,
+                max_output_bytes: 64,
+            },
+            name: None,
+            overwrite: None,
+        })?;
+        engine.merge_register(MergeRegisterParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            policy: MergePolicySpec {
+                default: MergeFunctionRef {
+                    kind: "wasm".to_string(),
+                    name: "merge_spin".to_string(),
+                    module: Some("merge_spin".to_string()),
+                },
+                per_column: HashMap::new(),
+            },
+        })?;
+
         let err = engine
             .merge_apply(MergeApplyParams {
                 table: BaseTableRef {
@@ -34581,8 +34956,78 @@ mod tests {
                 min_causality: None,
                 policy: None,
             })
-            .expect_err("expected not_supported");
-        assert!(err.to_string().contains("not_supported"));
+            .expect_err("expected fuel cancellation");
+        assert!(err.to_string().contains("max_fuel"));
+
+        let current = engine.data_get(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "counters".to_string(),
+                r#as: None,
+            },
+            vec![Lit::U64 { v: 1 }],
+        )?;
+        assert_eq!(
+            current.row.get("count").and_then(|lit| match lit {
+                Lit::U64 { v } => Some(*v),
+                _ => None,
+            }),
+            Some(5)
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn merge_evaluate_reports_conflict_rate_and_success() -> anyhow::Result<()> {
+        let dir = temp_dir("merge_evaluate");
+        let engine = Engine::open(&dir)?;
+        let result = engine.merge_evaluate(MergeEvaluateParams {
+            policy: MergePolicySpec {
+                default: MergeFunctionRef {
+                    kind: "builtin".to_string(),
+                    name: "last_write_wins".to_string(),
+                    module: None,
+                },
+                per_column: vec![(
+                    "count".to_string(),
+                    MergeFunctionRef {
+                        kind: "builtin".to_string(),
+                        name: "sum".to_string(),
+                        module: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            cases: vec![
+                skeindb_skeinql::methods::MergeEvaluateCase {
+                    name: Some("conflicting counter increment".to_string()),
+                    current: row(&[("count", Lit::U64 { v: 5 })]),
+                    incoming: row(&[("count", Lit::U64 { v: 3 })]),
+                    expected_etag_match: Some(false),
+                    min_causality_satisfied: Some(true),
+                    constraint_ok: Some(true),
+                },
+                skeindb_skeinql::methods::MergeEvaluateCase {
+                    name: Some("clean write".to_string()),
+                    current: row(&[("count", Lit::U64 { v: 1 })]),
+                    incoming: row(&[("count", Lit::U64 { v: 2 })]),
+                    expected_etag_match: Some(true),
+                    min_causality_satisfied: Some(true),
+                    constraint_ok: Some(true),
+                },
+            ],
+            iterations: Some(3),
+        })?;
+        assert_eq!(result.format, MERGE_EVALUATE_FORMAT_V1);
+        assert_eq!(result.cases, 2);
+        assert_eq!(result.iterations, 3);
+        assert_eq!(result.conflict_count, 1);
+        assert_eq!(result.resolved_count, 2);
+        assert_eq!(result.resolution_success_rate, 1.0);
+        assert_eq!(result.results[0].merged["count"], Lit::U64 { v: 8 });
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

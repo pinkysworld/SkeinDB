@@ -23,9 +23,10 @@ Implemented navigation areas:
 - **Settings Manager** (`settings.get` / `settings.set`, including `cluster.state.v1`)
 - **Time Travel & Replay** (`query.select as_of`, `maintenance.history.*`, `maintenance.replay.*`, edge bundle request/apply/status, bundle download/import, integrity summary)
 - **Forensics** (`maintenance.audit_status`, `maintenance.audit_verify`, filtered `forensic.query`, proof-backed verify flow, and `forensic.export` report bundles)
+- **Merge & CRDT** (`merge.apply`, `merge.register`, `merge.simulate`, `merge.evaluate`, and `merge.wasm.*` with values-only Wasm module limits)
 - **RPC Explorer** (full method-level access)
   - includes CDC cursor helpers such as `cdc.subscribe_table`, `cdc.poll`, `cdc.ack`, and `cdc.close`
-- **Research Dashboard**: all R01-R20 tracks link to a concrete panel or one-click RPC template, including R01 learned-index stats, R14 edge bundles, and R20 compaction scheduling.
+- **Research Dashboard**: all R01-R20 tracks link to a concrete panel or one-click RPC template, including R01 learned-index stats, R07 merge evaluation, R14 edge bundles, and R20 compaction scheduling.
 - **Migration Assistant** (intent + rewrite preview)
 - **NL Lab** (translate/explain/execute workflow)
 - **Help & Documentation** (quick start, panel reference, research track index, keyboard/deep-link reference, glossary, doc links, and live search)

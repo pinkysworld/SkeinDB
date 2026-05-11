@@ -131,7 +131,7 @@
 - These methods are <strong>not required</strong> for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in <code>docs/research_agenda/</code>.
-- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.13 runtime method map exposed through <code>system.capabilities</code>.</p>
+- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.14 runtime method map exposed through <code>system.capabilities</code>.</p>
 <h2 id="1-dp-differential-privacy">1. dp.* — Differential privacy<a class="headerlink" href="#1-dp-differential-privacy" title="Permanent link">¶</a></h2>
 <p>Related: R04</p>
 <ul>
@@ -157,10 +157,11 @@
 <h2 id="4-merge-optimistic-writes-with-merge-semantics">4. merge.* — Optimistic writes with merge semantics<a class="headerlink" href="#4-merge-optimistic-writes-with-merge-semantics" title="Permanent link">¶</a></h2>
 <p>Related: R07</p>
 <ul>
-<li><code>merge.register</code> — register a merge function (Wasm module reference)</li>
-<li><code>merge.apply</code> — apply merge to conflicting versions (server-driven)</li>
-<li><code>merge.simulate</code> — test merges without committing</li>
-<li><code>merge.wasm.register</code> / <code>merge.wasm.list</code> / <code>merge.wasm.drop</code> — manage Wasm merge modules</li>
+<li><code>merge.register</code> — register a per-table merge policy with built-in or values-only Wasm functions</li>
+<li><code>merge.apply</code> — apply a policy to an incoming row with ETag/min-causality conflict hooks</li>
+<li><code>merge.simulate</code> — test current+incoming row merges without committing</li>
+<li><code>merge.evaluate</code> — report conflict rate, resolution success, and merge timing for example workloads</li>
+<li><code>merge.wasm.register</code> / <code>merge.wasm.list</code> / <code>merge.wasm.drop</code> — manage values-only Wasm merge modules</li>
 </ul>
 <h2 id="5-view-materialized-views-incremental-maintenance">5. view.* — Materialized views + incremental maintenance<a class="headerlink" href="#5-view-materialized-views-incremental-maintenance" title="Permanent link">¶</a></h2>
 <p>Related: R08</p>

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.14 - 2026-05-11
+
+- Closes R07/T270-T276 with write-write/dependency/constraint conflict hooks, values-only Wasm merge policy execution, deterministic cancellation coverage, `merge.evaluate` workload reports, offline queue docs, and SkeinAdmin Merge & CRDT wiring.
+- Adds `merge.evaluate` to SkeinQL types, JSON-RPC dispatch, read-only capability handling, and `system.capabilities` for 132 advertised methods.
+- Fixes SkeinAdmin Merge payloads for apply/register/simulate/Wasm register/drop and adds expected ETag, min-causality, current-row, evaluation-case, and Wasm limit controls.
+- Improves compatibility probes with MySQL `information_schema.table_privileges` and PostgreSQL `pg_catalog.pg_tables`, backed by focused SQL catalog tests.
+- Updates the research backlog and True Status Matrix to **58 done / 51 open** while keeping R18/R19 prototype caveats intact.
+- Refreshes README, SkeinQL/API/Wasm/Merge/SkeinAdmin/compat docs, generated docs site, website status copy, and release metadata for v0.3.14.
+
 ## v0.3.13 - 2026-05-11
 
 - Closes R06/T260-T266 with the SkeinForensic JSON filter grammar, chain-consistent index summaries, boundary hashes, checkpoint anchor metadata, Merkle roots, per-record inclusion proofs, and `skein.forensic.bundle.v1` report exports.
