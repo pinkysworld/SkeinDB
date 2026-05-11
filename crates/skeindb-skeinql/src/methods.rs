@@ -1405,6 +1405,35 @@ pub struct ObliviousExplainResult {
     pub plan: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousEvaluateParams {
+    pub table: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_rows: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousTracePoint {
+    pub actual_rows: u64,
+    pub unpadded_accesses: u64,
+    pub target_rows: u64,
+    pub dummy_rows: u64,
+    pub dummy_value_lookups: u64,
+    pub observed_accesses: u64,
+    pub overhead_ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObliviousEvaluateResult {
+    pub table: BaseTableRef,
+    pub policy: ObliviousPolicy,
+    pub actual_rows: u64,
+    pub trace: Vec<ObliviousTracePoint>,
+    pub leakage: serde_json::Value,
+    pub performance: serde_json::Value,
+}
+
 // --------------------------------
 // forensic.* (research / experimental)
 // --------------------------------

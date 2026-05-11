@@ -56,9 +56,10 @@ use skeindb_skeinql::methods::{
     MergeWasmRegisterResult, MigrationIntentEvidence, MigrationIntentReportParams,
     MigrationIntentReportResult, MigrationIntentSample, MigrationIntentSuggestion,
     MigrationReportExportParams, MigrationReportExportResult, MigrationRewritePreview,
-    MigrationRewritePreviewParams, MigrationRewritePreviewResult, ObliviousExplainParams,
-    ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams, ObliviousPolicyGetResult,
-    ObliviousPolicySetParams, ReplayBundle, ReplayBundleChangeEvent, ReplayBundleManifest,
+    MigrationRewritePreviewParams, MigrationRewritePreviewResult, ObliviousEvaluateParams,
+    ObliviousEvaluateResult, ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy,
+    ObliviousPolicyGetParams, ObliviousPolicyGetResult, ObliviousPolicySetParams,
+    ObliviousTracePoint, ReplayBundle, ReplayBundleChangeEvent, ReplayBundleManifest,
     ReplayBundlePerformanceCacheVariance, ReplayBundlePerformanceCacheWarmHints,
     ReplayBundlePerformanceHotTable, ReplayBundlePerformanceLsmState,
     ReplayBundlePerformanceProfile, ReplayBundlePerformanceRunReport,
@@ -5703,6 +5704,99 @@ impl Engine {
         });
 
         Ok(ObliviousExplainResult { plan })
+    }
+
+    pub fn oblivious_evaluate(
+        &self,
+        params: ObliviousEvaluateParams,
+    ) -> anyhow::Result<ObliviousEvaluateResult> {
+        let (_, tdata) = self.get_table(&params.table)?;
+        let actual_rows = tdata.rows.iter().filter(|row| !row.deleted).count() as u64;
+        let policy = self.oblivious_policy_for(&params.table);
+        let trace_rows = if params.trace_rows.is_empty() {
+            oblivious_default_trace_rows(actual_rows, &policy)
+        } else {
+            params.trace_rows
+        };
+        if trace_rows.len() > 1024 {
+            anyhow::bail!("invalid_request: trace_rows may contain at most 1024 samples");
+        }
+
+        let mut trace = Vec::new();
+        for rows in trace_rows {
+            let padding = compute_oblivious_padding(&policy, rows);
+            let observed_accesses = padding
+                .target_rows
+                .saturating_add(padding.dummy_value_lookups);
+            let denominator = rows.max(1) as f64;
+            trace.push(ObliviousTracePoint {
+                actual_rows: rows,
+                unpadded_accesses: rows,
+                target_rows: padding.target_rows,
+                dummy_rows: padding.dummy_rows,
+                dummy_value_lookups: padding.dummy_value_lookups,
+                observed_accesses,
+                overhead_ratio: observed_accesses as f64 / denominator,
+            });
+        }
+
+        let unpadded_pairs = trace
+            .iter()
+            .map(|point| (point.actual_rows, point.unpadded_accesses))
+            .collect::<Vec<_>>();
+        let padded_pairs = trace
+            .iter()
+            .map(|point| (point.actual_rows, point.observed_accesses))
+            .collect::<Vec<_>>();
+        let unpadded_mi = empirical_mutual_information_bits(&unpadded_pairs);
+        let padded_mi = empirical_mutual_information_bits(&padded_pairs);
+
+        let samples = trace.len() as u64;
+        let mean_overhead = if trace.is_empty() {
+            0.0
+        } else {
+            trace.iter().map(|p| p.overhead_ratio).sum::<f64>() / trace.len() as f64
+        };
+        let max_overhead = trace
+            .iter()
+            .map(|p| p.overhead_ratio)
+            .fold(0.0_f64, f64::max);
+        let total_dummy_rows = trace.iter().map(|p| p.dummy_rows).sum::<u64>();
+        let total_dummy_value_lookups = trace.iter().map(|p| p.dummy_value_lookups).sum::<u64>();
+        let total_observed_accesses = trace.iter().map(|p| p.observed_accesses).sum::<u64>();
+        let unique_actual = unique_pair_values(&unpadded_pairs, true);
+        let unique_unpadded = unique_pair_values(&unpadded_pairs, false);
+        let unique_padded = unique_pair_values(&padded_pairs, false);
+
+        let leakage = serde_json::json!({
+            "samples": samples,
+            "unique_actual_rows": unique_actual,
+            "unique_unpadded_observations": unique_unpadded,
+            "unique_padded_observations": unique_padded,
+            "unpadded_mutual_information_bits": unpadded_mi,
+            "padded_mutual_information_bits": padded_mi,
+            "reduction_bits": (unpadded_mi - padded_mi).max(0.0),
+            "policy_level": policy.level.as_str(),
+        });
+        let performance = serde_json::json!({
+            "samples": samples,
+            "mean_overhead_ratio": mean_overhead,
+            "max_overhead_ratio": max_overhead,
+            "total_dummy_rows": total_dummy_rows,
+            "total_dummy_value_lookups": total_dummy_value_lookups,
+            "total_observed_accesses": total_observed_accesses,
+            "fixed_batch_scan": policy.level != "off",
+            "sort_join_strategy": if policy.level == "off" { "native" } else { "materialize_then_sort_join" },
+        });
+
+        Ok(ObliviousEvaluateResult {
+            table: params.table,
+            policy,
+            actual_rows,
+            trace,
+            leakage,
+            performance,
+        })
     }
 
     // -----------------------------
@@ -18538,7 +18632,12 @@ fn normalize_oblivious_policy(mut policy: ObliviousPolicy) -> anyhow::Result<Obl
         policy.dummy_value_lookups = None;
     }
 
-    if policy.level != "off" {
+    if policy.level == "off" {
+        policy.pad_to_multiple = None;
+        policy.target_rows = None;
+        policy.dummy_value_lookups = None;
+        policy.shuffle = None;
+    } else {
         if policy.pad_to_multiple.is_none() && policy.target_rows.is_none() {
             policy.pad_to_multiple = Some(32);
         }
@@ -18551,6 +18650,15 @@ fn normalize_oblivious_policy(mut policy: ObliviousPolicy) -> anyhow::Result<Obl
 }
 
 fn compute_oblivious_padding(policy: &ObliviousPolicy, actual_rows: u64) -> ObliviousPadding {
+    if policy.level == "off" {
+        return ObliviousPadding {
+            target_rows: actual_rows,
+            dummy_rows: 0,
+            dummy_value_lookups: 0,
+            shuffle: false,
+        };
+    }
+
     let mut target_rows = actual_rows;
 
     if let Some(multiple) = policy.pad_to_multiple {
@@ -18585,6 +18693,69 @@ fn oblivious_shuffle_seed(table: &BaseTableRef, target_rows: u64) -> u64 {
         seed |= (*b as u64) << (8 * shift);
     }
     seed
+}
+
+fn oblivious_default_trace_rows(actual_rows: u64, policy: &ObliviousPolicy) -> Vec<u64> {
+    let mut rows = vec![
+        0,
+        1,
+        actual_rows.saturating_sub(1),
+        actual_rows,
+        actual_rows.saturating_add(1),
+    ];
+    if let Some(multiple) = policy.pad_to_multiple {
+        if multiple > 1 {
+            rows.extend_from_slice(&[
+                multiple.saturating_sub(1),
+                multiple,
+                multiple.saturating_add(1),
+                multiple.saturating_mul(2).saturating_sub(1),
+                multiple.saturating_mul(2),
+            ]);
+        }
+    }
+    if let Some(target) = policy.target_rows {
+        rows.extend_from_slice(&[target.saturating_sub(1), target, target.saturating_add(1)]);
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+fn empirical_mutual_information_bits(pairs: &[(u64, u64)]) -> f64 {
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let mut joint: BTreeMap<(u64, u64), u64> = BTreeMap::new();
+    let mut actual_counts: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut observed_counts: BTreeMap<u64, u64> = BTreeMap::new();
+    for (actual, observed) in pairs.iter().copied() {
+        *joint.entry((actual, observed)).or_default() += 1;
+        *actual_counts.entry(actual).or_default() += 1;
+        *observed_counts.entry(observed).or_default() += 1;
+    }
+
+    let n = pairs.len() as f64;
+    let mut mi = 0.0;
+    for ((actual, observed), count) in joint {
+        let p_joint = count as f64 / n;
+        let p_actual = actual_counts.get(&actual).copied().unwrap_or_default() as f64 / n;
+        let p_observed = observed_counts.get(&observed).copied().unwrap_or_default() as f64 / n;
+        if p_joint > 0.0 && p_actual > 0.0 && p_observed > 0.0 {
+            mi += p_joint * (p_joint / (p_actual * p_observed)).log2();
+        }
+    }
+    mi
+}
+
+fn unique_pair_values(pairs: &[(u64, u64)], actual: bool) -> u64 {
+    let mut values = pairs
+        .iter()
+        .map(|(left, right)| if actual { *left } else { *right })
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values.dedup();
+    values.len() as u64
 }
 
 fn shuffle_rows(rows: &mut [RowCtx], seed: u64) {
@@ -33167,6 +33338,70 @@ mod tests {
         })?;
         assert_eq!(explain.plan["target_rows"].as_u64(), Some(4));
         assert_eq!(explain.plan["dummy_rows"].as_u64(), Some(1));
+
+        let evaluation = engine.oblivious_evaluate(ObliviousEvaluateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            trace_rows: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        })?;
+        assert_eq!(evaluation.trace.len(), 8);
+        assert_eq!(evaluation.trace[2].actual_rows, 3);
+        assert_eq!(evaluation.trace[2].target_rows, 4);
+        assert_eq!(evaluation.trace[2].dummy_rows, 1);
+        assert_eq!(evaluation.trace[2].dummy_value_lookups, 2);
+        assert!(
+            evaluation.leakage["padded_mutual_information_bits"]
+                .as_f64()
+                .unwrap_or_default()
+                < evaluation.leakage["unpadded_mutual_information_bits"]
+                    .as_f64()
+                    .unwrap_or_default()
+        );
+        assert!(
+            evaluation.performance["mean_overhead_ratio"]
+                .as_f64()
+                .unwrap_or_default()
+                >= 1.0
+        );
+        assert_eq!(
+            evaluation.performance["sort_join_strategy"].as_str(),
+            Some("materialize_then_sort_join")
+        );
+
+        engine.oblivious_policy_set(ObliviousPolicySetParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            policy: ObliviousPolicy {
+                level: "off".to_string(),
+                pad_to_multiple: Some(64),
+                target_rows: Some(128),
+                dummy_value_lookups: Some(8),
+                shuffle: Some(true),
+            },
+        })?;
+        let off_eval = engine.oblivious_evaluate(ObliviousEvaluateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            trace_rows: vec![3],
+        })?;
+        assert_eq!(off_eval.policy.level, "off");
+        assert_eq!(off_eval.policy.pad_to_multiple, None);
+        assert_eq!(off_eval.trace[0].target_rows, 3);
+        assert_eq!(off_eval.trace[0].dummy_rows, 0);
+        assert_eq!(off_eval.trace[0].dummy_value_lookups, 0);
+        assert_eq!(
+            off_eval.performance["sort_join_strategy"].as_str(),
+            Some("native")
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

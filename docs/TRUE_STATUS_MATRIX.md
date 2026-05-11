@@ -1,7 +1,9 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-05-09
+Last updated: 2026-05-11
 Honest claims: SkeinDB does **not** provide and does **not** claim "100% MySQL compatibility." Coverage is measured against the regression corpus at `tests/compat/corpus.sql` (1658 lines / ~700+ statements) which is exercised on every commit by [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs). The surface that *is* supported is enumerated in [docs/MYSQL_COMPAT.md](./MYSQL_COMPAT.md). Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.
+
+2026-05-11 (v0.3.12 R05 closure sync): Crate/package metadata is bumped to `0.3.12`. The research backlog is now **44 done / 65 open** after closing T250-T256. R05 now has a documented threat model and policy schema, persisted per-table `oblivious.policy.*` controls, padded scan/dummy lookup execution, `oblivious.explain`, the read-only `oblivious.evaluate` trace leakage/performance report, and SkeinAdmin Privacy controls wired to the typed runtime payloads. R18 and R19 remain prototype-level for the reasons listed below.
 
 2026-05-09 (v0.3.11 R04 closure sync): Crate/package metadata is bumped to `0.3.11`. The research backlog is now **37 done / 72 open** after closing T240-T245. R04's DP aggregate path now has evidence for COUNT/SUM/AVG `dp.aggregate` payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian noise, persisted budget-consumption audit events, and `privacy_etag` validators derived from DP privacy metadata and table versions. R18 and R19 remain prototype-level for the reasons listed below.
 
@@ -51,7 +53,7 @@ Interpretation:
 ## 1) Backlog checklist snapshot
 
 - `docs/PROJECT_BACKLOG.md`: **140 done / 0 open** (140 top-level roadmap tasks; remaining product gaps are tracked as partial-phase hardening notes and future compatibility/research work rather than unchecked core-roadmap boxes)
-- `docs/RESEARCH_BACKLOG.md`: **37 done / 72 open** (109 total)
+- `docs/RESEARCH_BACKLOG.md`: **44 done / 65 open** (109 total)
 
 Why `RESEARCH_BACKLOG` mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
@@ -95,7 +97,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R02 Adaptive row/column | Hardened | Snapshot surfaces and hybrid execution scaffolds; integration test creates table, inserts rows, triggers `system.snapshot`, verifies data readable after (`cluster_rpc.rs::r02_adaptive_storage_format_selection`). |
 | R03 Delta topology | Hardened | Delta-chain policy/skip/compaction paths + `topology_analysis()` with depth stats (avg/max/p50/p99), fanout, hot-chain detection, savings ratio. |
 | R04 Differential privacy | Hardened | `dp.*` endpoints + COUNT/SUM/AVG bounded aggregates, persisted budget/audit, privacy-aware `privacy_etag` validators, `dp.evaluate` accuracy-vs-epsilon and overhead-vs-exact reports, crypto-quality hash-based PRNG (`DpRng`), and Rényi DP composition tracking (`rdp_alphas`, `query_count`, `rdp_gaussian_cost()`, `rdp_laplace_cost()`, `rdp_to_eps_delta()`). |
-| R05 Oblivious execution | Hardened | `oblivious.policy.*`, `oblivious.explain`; integration test registers policy (pad_to=64, noise_rows=2), verifies list returns policy (`cluster_rpc.rs::r05_oblivious_padding_verification`). |
+| R05 Oblivious execution | Hardened | `oblivious.policy.*`, `oblivious.explain`, and `oblivious.evaluate`; threat-model docs, per-table policy persistence, padded scans, dummy ValueStore lookups, deterministic trace leakage metrics, overhead reports, SkeinAdmin Privacy controls, engine/RPC coverage, and `cluster_rpc.rs::r05_oblivious_padding_verification`. |
 | R06 Forensic WAL queries | Hardened | `forensic.query`, `forensic.verify`, `forensic.export`; Merkle tree root (`forensic_merkle_root()`), inclusion proofs (`forensic_merkle_proof()`), tamper detection. |
 | R07 Client-side merge funcs | Hardened | `merge.*`, `merge.wasm.*`, conflict handling paths; integration test registers merge function (last_write_wins), verifies `merge.list` returns result (`cluster_rpc.rs::r07_merge_conflict_resolution_deterministic`). |
 | R08 Incremental views | Hardened | `view.create/drop/refresh/status/explain_deps`; restricted single-table filter/project/group-by views; persisted dependency usage in `views.json` format v2; grouped incremental maintenance by touched-group recompute over persisted source rows; auto refresh falls back to full recompute when change breadth exceeds grouped/view cardinality thresholds; BFS-based cascading invalidation through view-on-view deps; `view_dependency_graph()` with `ViewDepEdge` structs; transitive dep traversal in `view_explain_deps`. |

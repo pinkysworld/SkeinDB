@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.11 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.12 runtime sync)
 Last updated: 2026-05-09
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
@@ -1609,6 +1609,35 @@ Result:
 
 ```json
 {"plan":{"table":"mydb.users","level":"basic","actual_rows":123,"target_rows":128,"dummy_rows":5}}
+```
+
+#### oblivious.evaluate
+Params:
+
+```json
+{"table":{"db":"mydb","table":"users"},"trace_rows":[1,2,31,32,33,63,64,65]}
+```
+
+Result:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "policy": {"level":"basic","pad_to_multiple":32,"dummy_value_lookups":64,"shuffle":false},
+  "actual_rows": 123,
+  "trace": [
+    {"actual_rows":31,"unpadded_accesses":31,"target_rows":32,"dummy_rows":1,"dummy_value_lookups":64,"observed_accesses":96,"overhead_ratio":3.0967741935}
+  ],
+  "leakage": {
+    "unique_actual_rows": 8,
+    "unique_unpadded_observations": 8,
+    "unique_padded_observations": 3,
+    "unpadded_mutual_information_bits": 3.0,
+    "padded_mutual_information_bits": 1.5,
+    "reduction_bits": 1.5
+  },
+  "performance": {"mean_overhead_ratio":2.4,"max_overhead_ratio":96.0,"total_dummy_rows":40,"total_dummy_value_lookups":512}
+}
 ```
 
 ### 10.13 forensic.* (experimental)

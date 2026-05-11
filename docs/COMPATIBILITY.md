@@ -1,6 +1,6 @@
 # SkeinDB Compatibility (MySQL / PostgreSQL / SQL)
 
-Status: v0.3.11 truth sync
+Status: v0.3.12 truth sync
 Last updated: 2026-05-09
 
 SkeinDB adoption strategy:

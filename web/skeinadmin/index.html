@@ -1403,8 +1403,9 @@
             </div>
             <div class="card wide"><h2>Oblivious Execution (R05)</h2>
               <div class="row"><div class="field"><label>DB</label><input id="oblDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="oblTable" /></div></div>
-              <div class="row"><div class="field"><label>Enabled</label><select id="oblEnabled"><option value="true">true</option><option value="false">false</option></select></div><div class="field"><label>Min batch</label><input id="oblMinBatch" type="number" value="64" /></div><div class="field"><label>Dummy ratio</label><input id="oblDummyRatio" type="number" step="0.05" value="0.1" /></div></div>
-              <div class="actions"><button id="btnOblGet" class="sm">Get Policy</button><button id="btnOblSet" class="primary sm">Set Policy</button><button id="btnOblExplain" class="sm">Explain</button></div>
+              <div class="row"><div class="field"><label>Level</label><select id="oblLevel"><option value="off">off</option><option value="basic">basic</option><option value="strong">strong</option></select></div><div class="field"><label>Pad multiple</label><input id="oblPadMultiple" type="number" value="64" /></div><div class="field"><label>Target rows</label><input id="oblTargetRows" type="number" placeholder="optional" /></div><div class="field"><label>Dummy lookups</label><input id="oblDummyLookups" type="number" value="64" /></div><div class="field"><label>Shuffle</label><select id="oblShuffle"><option value="false">false</option><option value="true">true</option></select></div></div>
+              <div class="row"><div class="field"><label>Trace rows</label><input id="oblTraceRows" value="1,2,8,16,32,64,65" /></div></div>
+              <div class="actions"><button id="btnOblGet" class="sm">Get Policy</button><button id="btnOblSet" class="primary sm">Set Policy</button><button id="btnOblExplain" class="sm">Explain</button><button id="btnOblEvaluate" class="secondary sm">Evaluate Leakage</button></div>
               <pre id="oblOut">Ready.</pre>
             </div>
           </div>

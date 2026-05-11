@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Oblivious Execution (Prototype) — SkeinDB Docs</title>
-<meta name="description" content="Oblivious Execution (Prototype) — part of the SkeinDB documentation.">
+<title>Oblivious Execution — SkeinDB Docs</title>
+<meta name="description" content="Oblivious Execution — part of the SkeinDB documentation.">
 <link rel="icon" type="image/svg+xml" href="../favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/docs.css">
@@ -121,24 +121,37 @@
 
   <main class="content">
     <div class="breadcrumbs">
-      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Oblivious Execution (Prototype)</span>
+      <a href="index.html">Docs</a> <span>›</span> <span>Internals</span> <span>›</span> <span>Oblivious Execution</span>
     </div>
     <article class="doc-article">
-      <h1 id="oblivious-execution-prototype">Oblivious Execution (Prototype)<a class="headerlink" href="#oblivious-execution-prototype" title="Permanent link">¶</a></h1>
-<p>Status: Draft
-Last updated: 2026-01-19</p>
-<p>This document describes the <strong>prototype</strong> oblivious execution controls implemented
-for the R05 research agenda item. The goal is to reduce access-pattern leakage
-in multi-tenant deployments by adding deterministic padding and dummy work,
+      <h1 id="oblivious-execution">Oblivious Execution<a class="headerlink" href="#oblivious-execution" title="Permanent link">¶</a></h1>
+<p>Status: Hardened research surface (v0.3.12)
+Last updated: 2026-05-11</p>
+<p>This document describes the R05 oblivious execution controls. The goal is to
+reduce coarse access-pattern leakage in multi-tenant deployments by adding
+deterministic padding, optional scan-order shuffling, and dummy ValueStore work
 without changing query results.</p>
-<h2 id="1-policy-levels">1) Policy levels<a class="headerlink" href="#1-policy-levels" title="Permanent link">¶</a></h2>
+<p>This is not a full ORAM implementation. It is a measurable research-mode
+mitigation for operators who need stable batch envelopes and evidence about the
+leakage/performance trade-off.</p>
+<h2 id="1-threat-model">1) Threat model<a class="headerlink" href="#1-threat-model" title="Permanent link">¶</a></h2>
+<p>The R05 surface targets observers who can see coarse execution traces such as
+scan batch sizes, total ValueStore lookup counts, and repeated per-table access
+patterns. It does not hide query text, result sizes returned to the client,
+timing side channels from arbitrary user-defined code, network metadata, or
+physical storage access at an ORAM level.</p>
+<p>Policies are scoped per table. Operators should apply them to tables where row
+cardinality or predicate selectivity is sensitive, then use <code>oblivious.evaluate</code>
+to compare the unpadded trace to the padded trace before enabling the policy in
+production-like workloads.</p>
+<h2 id="2-policy-levels">2) Policy levels<a class="headerlink" href="#2-policy-levels" title="Permanent link">¶</a></h2>
 <p>Policies are set per table via <code>oblivious.policy.set</code>:</p>
 <ul>
 <li><code>off</code>: no padding or dummy access.</li>
-<li><code>basic</code>: padding only (scan count padding, optional shuffle).</li>
+<li><code>basic</code>: scan count padding plus optional deterministic shuffle.</li>
 <li><code>strong</code>: padding plus extra dummy ValueStore lookups.</li>
 </ul>
-<h2 id="2-policy-fields">2) Policy fields<a class="headerlink" href="#2-policy-fields" title="Permanent link">¶</a></h2>
+<h2 id="3-policy-fields">3) Policy fields<a class="headerlink" href="#3-policy-fields" title="Permanent link">¶</a></h2>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;level&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;basic&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;pad_to_multiple&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span>
@@ -155,16 +168,52 @@ without changing query results.</p>
 <li><code>shuffle</code>: optional shuffle of scan order (results are unchanged; ordering is
   only guaranteed when <code>ORDER BY</code> is used).</li>
 </ul>
-<h2 id="3-runtime-behavior">3) Runtime behavior<a class="headerlink" href="#3-runtime-behavior" title="Permanent link">¶</a></h2>
-<p>The prototype:
-- executes real scans and returns real rows unchanged.
-- performs additional dummy ValueStore lookups proportional to padding.
-- uses deterministic seeds based on table name for repeatable padding.</p>
-<p>This is <strong>not</strong> a full ORAM implementation; it is a research scaffold intended
-to exercise policy flow and accounting.</p>
-<h2 id="4-on-disk-storage">4) On-disk storage<a class="headerlink" href="#4-on-disk-storage" title="Permanent link">¶</a></h2>
+<h2 id="4-runtime-behavior">4) Runtime behavior<a class="headerlink" href="#4-runtime-behavior" title="Permanent link">¶</a></h2>
+<ul>
+<li>Real scans return only real rows. Padding never changes the row set.</li>
+<li>The scan primitive computes a padded target row count from the configured
+  policy and performs dummy ValueStore lookups when needed.</li>
+<li>Optional shuffle uses deterministic seeds based on table identity and padded
+  target size, so repeated evaluation is stable.</li>
+<li>The limited sort/join research strategy is reported as
+  <code>materialize_then_sort_join</code> for padded policies: operators should materialize
+  fixed-size inputs first, then run the normal ordered operator over the padded
+  envelope.</li>
+</ul>
+<h2 id="5-evaluation-harness">5) Evaluation harness<a class="headerlink" href="#5-evaluation-harness" title="Permanent link">¶</a></h2>
+<p><code>oblivious.evaluate</code> returns trace-based leakage and performance evidence for a
+table policy. The caller supplies optional <code>trace_rows</code>; if omitted, SkeinDB
+generates boundary samples around the current row count, padding multiple, and
+target row count.</p>
+<p>Example request:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;trace_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">31</span><span class="p">,</span><span class="w"> </span><span class="mi">32</span><span class="p">,</span><span class="w"> </span><span class="mi">33</span><span class="p">,</span><span class="w"> </span><span class="mi">63</span><span class="p">,</span><span class="w"> </span><span class="mi">64</span><span class="p">,</span><span class="w"> </span><span class="mi">65</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The result includes:</p>
+<ul>
+<li><code>trace</code>: one point per sampled row count with <code>target_rows</code>, <code>dummy_rows</code>,
+  <code>dummy_value_lookups</code>, <code>observed_accesses</code>, and <code>overhead_ratio</code>.</li>
+<li><code>leakage</code>: empirical mutual-information-style metrics comparing actual rows
+  to unpadded and padded observations, plus the number of distinct observed
+  access counts.</li>
+<li><code>performance</code>: mean/max overhead ratio, total dummy rows, total dummy lookups,
+  and the selected padded operator strategy.</li>
+</ul>
+<p>The harness is deterministic and read-only. It does not persist reports.</p>
+<h2 id="6-admin-console">6) Admin console<a class="headerlink" href="#6-admin-console" title="Permanent link">¶</a></h2>
+<p>SkeinAdmin exposes R05 controls in the Privacy panel. Operators can get/set the
+per-table policy, explain the active padding plan, and run the leakage/overhead
+evaluation from the same card. The panel sends the typed runtime payloads:
+<code>{table:{...}, policy:{level,pad_to_multiple,target_rows,dummy_value_lookups,shuffle}}</code>
+for <code>oblivious.policy.set</code> and <code>{table:{...}, trace_rows:[...]}</code> for
+<code>oblivious.evaluate</code>.</p>
+<h2 id="7-on-disk-storage">7) On-disk storage<a class="headerlink" href="#7-on-disk-storage" title="Permanent link">¶</a></h2>
 <p>Policies are persisted to <code>oblivious_policies.json</code> (format v1). See
-<code>docs/ON_DISK_FORMAT.md</code> for file placement.</p>
+<code>docs/ON_DISK_FORMAT.md</code> for file placement. v0.3.12 does not change the policy
+format version.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/OBLIVIOUS_EXECUTION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -182,10 +231,13 @@ to exercise policy flow and accounting.</p>
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#1-policy-levels">1) Policy levels</a></li>
-<li><a href="#2-policy-fields">2) Policy fields</a></li>
-<li><a href="#3-runtime-behavior">3) Runtime behavior</a></li>
-<li><a href="#4-on-disk-storage">4) On-disk storage</a></li>
+<li><a href="#1-threat-model">1) Threat model</a></li>
+<li><a href="#2-policy-levels">2) Policy levels</a></li>
+<li><a href="#3-policy-fields">3) Policy fields</a></li>
+<li><a href="#4-runtime-behavior">4) Runtime behavior</a></li>
+<li><a href="#5-evaluation-harness">5) Evaluation harness</a></li>
+<li><a href="#6-admin-console">6) Admin console</a></li>
+<li><a href="#7-on-disk-storage">7) On-disk storage</a></li>
 </ul>
 </div>
 

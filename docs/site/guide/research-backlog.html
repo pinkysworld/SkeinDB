@@ -129,7 +129,7 @@
 <p>Notes:
 - These items are <strong>research-oriented</strong>: the goal is to make each direction implementable and measurable.
 - Tasks are designed to be <strong>optional</strong> and do not block core MySQL compatibility.</p>
-<h2 id="reality-sync-2026-05-09">Reality sync (2026-05-09)<a class="headerlink" href="#reality-sync-2026-05-09" title="Permanent link">¶</a></h2>
+<h2 id="reality-sync-2026-05-11">Reality sync (2026-05-11)<a class="headerlink" href="#reality-sync-2026-05-11" title="Permanent link">¶</a></h2>
 <p>Runtime status and checklist status intentionally differ:
 - Runtime: all R01-R20 tracks have prototype coverage in code/method surfaces/tests.
 - <strong>18 tracks are now hardened</strong> with real algorithms and dedicated tests:
@@ -137,7 +137,7 @@
   - <strong>R02</strong> — Adaptive row/column storage (snapshot + readback integration test)
   - <strong>R03</strong> — Delta topology analysis (hot-chain detection, topology reports)
   - <strong>R04</strong> — Differential privacy (Laplace noise, RDP composition, budget tracking)
-  - <strong>R05</strong> — Oblivious execution (policy registration + padding verification test)
+  - <strong>R05</strong> — Oblivious execution (threat model, per-table policies, padded scans, dummy lookups, explain/evaluate reports, admin wiring)
   - <strong>R06</strong> — Forensic Merkle proofs (SHA-256 hash chains, inclusion verification)
   - <strong>R07</strong> — Client-side merge functions (conflict resolution + merge.list test)
   - <strong>R08</strong> — Incremental view maintenance (dependency graphs, cascading invalidation)
@@ -153,7 +153,7 @@
   - <strong>R20</strong> — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: <strong>37 done / 72 open</strong> after closing the remaining R04 differential-privacy aggregate hardening items. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: <strong>44 done / 65 open</strong> after closing R05 oblivious execution hardening. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable <code>ValueStore::lookup_distribution()</code> histograms and <code>stats.snapshot.storage.value_lookup</code> evidence.
 - 2026-04-26: T231 is closed with <code>ValueStore::learned_index_report()</code> exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, <code>ValueStore::benchmark()</code> probe quantiles, and distribution-shift fallback tests.
@@ -164,7 +164,8 @@
 - 2026-05-09 (v0.3.8 admin help-center release): No research-track closures. SkeinAdmin gains a dedicated <strong>Help &amp; Docs</strong> panel (quick start, panel reference, R01-R20 index with hardness pills, keyboard shortcuts, glossary, doc links, live search), locked by <code>skeinadmin_help_panel_exposes_comprehensive_documentation_center</code>. Counts unchanged at 29 done / 80 open.
 - 2026-05-09 (v0.3.9 replay CI release): T189 is closed with <code>skeindb replay run --json --out</code>, <code>skeindb replay compare</code>, thresholded p95/p99/span/storage/cache-hot-table checks, JSON comparison reports, and focused CLI tests. Counts now 30 done / 79 open; R18 remains prototype until T188 timing injection and cache/LSM reconstruction fidelity land.
 - 2026-05-09 (v0.3.10 DP evaluation release): T246 is closed with <code>dp.evaluate</code>, exact-baseline rows, seeded epsilon-grid noisy trials, mean/p95/max absolute error, mean relative error, noisy latency, overhead-vs-exact metrics, SkeinAdmin Privacy controls, and focused engine/admin/capability tests. Counts now 31 done / 78 open.
-- 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with <code>dp.aggregate</code> COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and <code>privacy_etag</code> cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.</p>
+- 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with <code>dp.aggregate</code> COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and <code>privacy_etag</code> cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
+- 2026-05-11 (v0.3.12 R05 closure release): T250-T256 are closed with the R05 threat model and policy schema docs, per-table <code>oblivious.policy.*</code> persistence, padded scan/dummy lookup enforcement, <code>oblivious.explain</code>, <code>oblivious.evaluate</code> trace leakage/performance reports, fixed SkeinAdmin R05 policy/evaluate controls, and focused engine/RPC/admin/integration tests. Counts now 44 done / 65 open.</p>
 <p>Source of truth matrix:
 - <code>docs/TRUE_STATUS_MATRIX.md</code></p>
 <h2 id="mapping-table-proposal-repo">Mapping table (proposal → repo)<a class="headerlink" href="#mapping-table-proposal-repo" title="Permanent link">¶</a></h2>
@@ -343,13 +344,13 @@
 </ul>
 <h3 id="phase-26-oblivious-query-execution-r05">Phase 26 — Oblivious query execution (R05)<a class="headerlink" href="#phase-26-oblivious-query-execution-r05" title="Permanent link">¶</a></h3>
 <ul>
-<li>[ ] T250: Threat model doc + “obliviousness levels” policy schema</li>
-<li>[ ] T251: ValueStore lookup padding + dummy reads (table/column policy)</li>
-<li>[ ] T252: Oblivious scan primitive (fixed-size batches, padding)</li>
-<li>[ ] T253: Oblivious sort/join primitive (limited scope, research mode)</li>
-<li>[ ] T254: Leakage evaluation harness (trace-based, mutual information metrics)</li>
-<li>[ ] T255: Performance overhead report generator</li>
-<li>[ ] T256: Admin UI settings for per-table obliviousness levels</li>
+<li>[x] T250: Threat model doc + “obliviousness levels” policy schema. Evidence: <code>docs/OBLIVIOUS_EXECUTION.md</code>, <code>ObliviousPolicy</code>, <code>oblivious.policy.set</code>, <code>normalize_oblivious_policy</code>, and persisted <code>ObliviousPolicyDisk</code> v1.</li>
+<li>[x] T251: ValueStore lookup padding + dummy reads (table/column policy). Evidence: <code>oblivious_padding_for</code>, <code>oblivious_dummy_lookups</code>, <code>compute_oblivious_padding</code>, and <code>oblivious_scan_keeps_results</code>.</li>
+<li>[x] T252: Oblivious scan primitive (fixed-size batches, padding). Evidence: <code>scan_table</code> applies deterministic padding/shuffle before returning real rows unchanged, locked by <code>oblivious_policy_explain_padding</code> and <code>oblivious_scan_keeps_results</code>.</li>
+<li>[x] T253: Oblivious sort/join primitive (limited scope, research mode). Evidence: <code>oblivious.explain</code> / <code>oblivious.evaluate</code> report <code>materialize_then_sort_join</code> for padded policies and expose target/dummy access envelopes for fixed-size inputs.</li>
+<li>[x] T254: Leakage evaluation harness (trace-based, mutual information metrics). Evidence: <code>oblivious.evaluate</code>, <code>ObliviousEvaluateResult</code>, empirical mutual-information metrics, and engine/RPC assertions comparing padded vs unpadded traces.</li>
+<li>[x] T255: Performance overhead report generator. Evidence: <code>oblivious.evaluate</code> performance payload with mean/max overhead ratio, total dummy rows/lookups, total observed accesses, and integration coverage in <code>r05_oblivious_padding_verification</code>.</li>
+<li>[x] T256: Admin UI settings for per-table obliviousness levels. Evidence: SkeinAdmin Privacy R05 controls for level/pad/target/dummy/shuffle/trace rows, <code>oblEvaluate()</code>, and <code>skeinadmin_privacy_panel_exposes_dp_evaluation_harness</code> asset coverage.</li>
 </ul>
 <h3 id="phase-27-forensic-query-language-r06">Phase 27 — Forensic query language (R06)<a class="headerlink" href="#phase-27-forensic-query-language-r06" title="Permanent link">¶</a></h3>
 <ul>
@@ -507,7 +508,7 @@
     <div class="toc-title">On this page</div>
     <div class="toc">
 <ul>
-<li><a href="#reality-sync-2026-05-09">Reality sync (2026-05-09)</a></li>
+<li><a href="#reality-sync-2026-05-11">Reality sync (2026-05-11)</a></li>
 <li><a href="#mapping-table-proposal-repo">Mapping table (proposal → repo)</a></li>
 <li><a href="#task-definitions-new-additions">Task definitions (new additions)</a><ul>
 <li><a href="#phase-24-learned-indexes-for-valueid-lookup-r01">Phase 24 — Learned indexes for ValueID lookup (R01)</a></li>

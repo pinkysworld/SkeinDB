@@ -41,8 +41,20 @@
 <div class="content">
 
   <div class="status-bar">
-    <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-dot implemented"></span>
+    <span class="status-text"><strong>Hardened runtime slice</strong> — v0.3.12 closes the R05 threat-model, padded execution, leakage evaluation, overhead reporting, and admin wiring backlog items with tests.</span>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">⚙️</span> Runtime Surface</h2>
+    <div class="integration">
+      <div class="int-chip">oblivious.policy.set</div>
+      <div class="int-chip">oblivious.policy.get</div>
+      <div class="int-chip">oblivious.explain</div>
+      <div class="int-chip">oblivious.evaluate</div>
+      <div class="int-chip">SkeinAdmin Privacy</div>
+    </div>
+    <p>Policies are persisted per table with <code>off</code>, <code>basic</code>, and <code>strong</code> levels. Runtime scans compute padded target rows, run dummy ValueStore lookups, optionally shuffle scan order deterministically, and return only real rows. The evaluator compares unpadded and padded observations with mutual-information-style metrics and mean/max overhead ratios.</p>
   </div>
 
   <div class="novelty-card">

@@ -248,6 +248,15 @@ fn skeinadmin_privacy_panel_exposes_dp_evaluation_harness() {
         "dpBoundsMin",
         "dpBoundsMax",
         "Evaluate Accuracy",
+        "Oblivious Execution (R05)",
+        "oblLevel",
+        "oblPadMultiple",
+        "oblTargetRows",
+        "oblDummyLookups",
+        "oblShuffle",
+        "oblTraceRows",
+        "btnOblEvaluate",
+        "Evaluate Leakage",
     ] {
         assert!(
             html.contains(marker),
@@ -261,6 +270,11 @@ fn skeinadmin_privacy_panel_exposes_dp_evaluation_harness() {
         "dp.evaluate",
         "aggregates: [readDpAggregateSpec()]",
         "wire('btnDpEvaluate', dpEvaluate);",
+        "async function oblEvaluate()",
+        "oblivious.evaluate",
+        "await call('oblivious.policy.set',{table:t,policy},'oblOut');",
+        "await call('oblivious.explain',{table:t},'oblOut');",
+        "wire('btnOblEvaluate', oblEvaluate);",
     ] {
         assert!(
             js.contains(marker),

@@ -2,6 +2,18 @@
 
 **Area:** Security & Privacy
 
+## Runtime Status (v0.3.12)
+
+R05 is hardened as a research-mode access-pattern mitigation. SkeinDB now ships:
+
+- Per-table `oblivious.policy.set` / `oblivious.policy.get` controls with `off`, `basic`, and `strong` levels.
+- Padded scan envelopes with optional deterministic shuffle and dummy ValueStore lookups.
+- `oblivious.explain` for active policy plans.
+- `oblivious.evaluate` for deterministic trace leakage metrics and overhead reports.
+- SkeinAdmin Privacy controls for policy editing, explain, and leakage evaluation.
+
+See `docs/OBLIVIOUS_EXECUTION.md` for the threat model and method details.
+
 ## Problem Statement
 
 SkeinDB targets shared hosting and single-binary deployments where multiple tenants may share infrastructure. Even with proper access controls, access pattern leakage can reveal sensitive information across tenants. Traditional oblivious RAM techniques are expensive, but SkeinDB's architecture (ValueStore with content-addressed lookup, LSM organization) may enable more efficient oblivious execution strategies tailored to database workloads.

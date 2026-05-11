@@ -4768,6 +4768,19 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let base = server.base_url();
 
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "ddl",
+            "method": "sql.exec",
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r05_test (id INT PRIMARY KEY)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
+
     // Register an oblivious policy
     let resp = client
         .post(format!("{base}/api/v1/rpc"))
@@ -4777,7 +4790,7 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
             "params": {
                 "table": { "db": "test", "table": "r05_test" },
                 "policy": {
-                    "level": "padded",
+                    "level": "basic",
                     "pad_to_multiple": 64,
                     "target_rows": 2
                 }
@@ -4786,6 +4799,8 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
         .send()
         .await?;
     assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
 
     // Get policies
     let resp = client
@@ -4802,6 +4817,28 @@ async fn r05_oblivious_padding_verification() -> anyhow::Result<()> {
     assert!(
         body.get("result").is_some(),
         "oblivious.policy.get should return result"
+    );
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "oblivious.evaluate",
+            "params": {
+                "table": { "db": "test", "table": "r05_test" },
+                "trace_rows": [1, 2, 63, 64, 65]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        body["result"]["leakage"]["padded_mutual_information_bits"]
+            .as_f64()
+            .unwrap_or_default()
+            >= 0.0
     );
 
     Ok(())

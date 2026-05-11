@@ -96,6 +96,7 @@ x-skeinql-methods:
   - oblivious.policy.set
   - oblivious.policy.get
   - oblivious.explain
+  - oblivious.evaluate
   - forensic.query
   - forensic.verify
   - forensic.export

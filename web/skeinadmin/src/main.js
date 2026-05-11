@@ -99,7 +99,7 @@ const RESEARCH_TRACKS = [
   { id: 'R02', title: 'Adaptive Row-Column Hybrid', desc: 'Dynamic row/column execution selection.', methods: ['system.capabilities', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R03', title: 'Delta-Chain Topology', desc: 'Linear, tree, skip-list delta chains for versioned values.', methods: ['stats.snapshot', 'settings.get'], panel: 'engine', status: 'hardened' },
   { id: 'R04', title: 'Differential Privacy', desc: 'DP aggregates with calibrated Laplace noise.', methods: ['dp.aggregate', 'dp.evaluate', 'dp.budget.get', 'dp.budget.set', 'dp.audit.log'], panel: 'privacy', status: 'hardened' },
-  { id: 'R05', title: 'Oblivious Execution', desc: 'Padding and dummy-row injection to hide access patterns.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain'], panel: 'privacy', status: 'hardened' },
+  { id: 'R05', title: 'Oblivious Execution', desc: 'Padding, dummy lookups, leakage reports, and overhead reports for access-pattern protection.', methods: ['oblivious.policy.get', 'oblivious.policy.set', 'oblivious.explain', 'oblivious.evaluate'], panel: 'privacy', status: 'hardened' },
   { id: 'R06', title: 'Forensic Audit', desc: 'Hash-chained WAL with integrity verification.', methods: ['maintenance.audit_status', 'maintenance.audit_verify', 'forensic.verify', 'forensic.query', 'forensic.export'], panel: 'forensics', status: 'hardened' },
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions: LWW, max-wins, union, Wasm.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
@@ -197,7 +197,8 @@ const RPC_TEMPLATES = [
   { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
   { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'count'}], epsilon:1.0, mechanism:'laplace', seed:42 } },
   { label: 'dp.evaluate', method: 'dp.evaluate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'sum',column:'value',bounds:{min:0,max:100}}], epsilons:[0.25,0.5,1,2], trials:25, mechanism:'laplace', seed:42 } },
-  { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { db:'demo', table:'events' } },
+  { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { table:{db:'demo', table:'events'} } },
+  { label: 'oblivious.evaluate', method: 'oblivious.evaluate', params: { table:{db:'demo', table:'events'}, trace_rows:[1,2,8,16,32,64] } },
   { label: 'maintenance.audit_status', method: 'maintenance.audit_status', params: {} },
   { label: 'maintenance.audit_verify', method: 'maintenance.audit_verify', params: {} },
   { label: 'forensic.verify', method: 'forensic.verify', params: { from_id:0, limit:100 } },
@@ -5503,21 +5504,40 @@ async function dpAudit() {
 }
 
 async function oblGet() {
-  try { const t = readDbTable('oblDb','oblTable'); await call('oblivious.policy.get',{db:t.db,table:t.table},'oblOut'); } catch (e) { setOut({error:String(e)},'oblOut'); }
+  try { const t = readDbTable('oblDb','oblTable'); await call('oblivious.policy.get',{table:t},'oblOut'); } catch (e) { setOut({error:String(e)},'oblOut'); }
 }
 
 async function oblSet() {
   try {
     const t = readDbTable('oblDb','oblTable');
-    const enabled = $('oblEnabled')?.value === 'true';
-    const minBatch = parseInt($('oblMinBatch')?.value,10) || 64;
-    const dummyRatio = parseFloat($('oblDummyRatio')?.value) || 0.1;
-    await call('oblivious.policy.set',{db:t.db,table:t.table,enabled,min_batch_size:minBatch,dummy_ratio:dummyRatio},'oblOut');
+    const level = $('oblLevel')?.value || 'basic';
+    const pad = parseInt($('oblPadMultiple')?.value, 10);
+    const target = parseInt($('oblTargetRows')?.value, 10);
+    const dummy = parseInt($('oblDummyLookups')?.value, 10);
+    const policy = {
+      level,
+      pad_to_multiple: Number.isFinite(pad) && pad > 0 ? pad : undefined,
+      target_rows: Number.isFinite(target) && target > 0 ? target : undefined,
+      dummy_value_lookups: Number.isFinite(dummy) && dummy > 0 ? dummy : undefined,
+      shuffle: $('oblShuffle')?.value === 'true'
+    };
+    await call('oblivious.policy.set',{table:t,policy},'oblOut');
   } catch (e) { setOut({error:String(e)},'oblOut'); }
 }
 
 async function oblExplain() {
-  try { const t = readDbTable('oblDb','oblTable'); await call('oblivious.explain',{db:t.db,table:t.table},'oblOut'); } catch (e) { setOut({error:String(e)},'oblOut'); }
+  try { const t = readDbTable('oblDb','oblTable'); await call('oblivious.explain',{table:t},'oblOut'); } catch (e) { setOut({error:String(e)},'oblOut'); }
+}
+
+async function oblEvaluate() {
+  try {
+    const t = readDbTable('oblDb','oblTable');
+    const traceRows = ($('oblTraceRows')?.value || '')
+      .split(',')
+      .map(v => parseInt(v.trim(), 10))
+      .filter(v => Number.isFinite(v) && v >= 0);
+    await call('oblivious.evaluate',{table:t,trace_rows:traceRows},'oblOut');
+  } catch (e) { setOut({error:String(e)},'oblOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -6556,6 +6576,7 @@ wire('btnDpAudit', dpAudit);
 wire('btnOblGet', oblGet);
 wire('btnOblSet', oblSet);
 wire('btnOblExplain', oblExplain);
+wire('btnOblEvaluate', oblEvaluate);
 
 // CDC
 wire('btnCdcSubscribe', cdcSubscribe);

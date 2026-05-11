@@ -41,7 +41,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R02 | Implemented (prototype) | Hybrid row+column snapshot surfaces (`docs/COLUMN_SNAPSHOTS.md`, engine snapshot paths) |
 | R03 | Hardened | Delta-chained values, periodic snapshots, skip patches, compaction restructuring, topology reports, and delta benchmarks (`docs/DELTA_VALUES.md`, `valuestore` delta tests) |
 | R04 | Implemented | Differential privacy RPC family (`dp.*`) + budget tests |
-| R05 | Implemented (prototype) | Oblivious execution policy/explain (`oblivious.*`) + server tests |
+| R05 | Hardened | Oblivious policy/explain/evaluate (`oblivious.*`), padded scans, dummy lookups, trace leakage/overhead reports, and SkeinAdmin controls |
 | R06 | Implemented (prototype) | Forensic WAL query/verify/export (`forensic.*`) + tamper checks |
 | R07 | Implemented (prototype) | Merge policies + wasm merge registry (`merge.*`) + conflict tests |
 | R08 | Implemented (prototype) | Incremental view APIs (`view.*`) + dependency refresh tests |

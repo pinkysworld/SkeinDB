@@ -41,10 +41,10 @@ use skeindb_skeinql::{
         MaintenanceReplayExportParams, MaintenanceReplayImportParams, MaintenanceReplayRunParams,
         MergeApplyParams, MergeRegisterParams, MergeSimulateParams, MergeWasmDropParams,
         MergeWasmRegisterParams, MigrationIntentReportParams, MigrationReportExportParams,
-        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousExplainParams,
-        ObliviousPolicyGetParams, ObliviousPolicySetParams, PlanCacheClearParams,
-        PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams,
-        SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
+        MigrationRewritePreviewParams, ObjectsPullParams, ObliviousEvaluateParams,
+        ObliviousExplainParams, ObliviousPolicyGetParams, ObliviousPolicySetParams,
+        PlanCacheClearParams, PlanCacheStatusParams, QueryExecutePreparedParams, QueryPatchParams,
+        QueryPrepareParams, SchemaApplyMergeParams, SchemaColumnInfo, SchemaMergeStatusParams,
         SchemaProposeChangeParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
         TelemetryMigrationHintsParams, VectorIndexStatusParams, VectorInsertParams,
         VectorSearchParams, ViewCreateParams, ViewDropParams, ViewExplainDepsParams,
@@ -15874,6 +15874,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "oblivious.evaluate" => {
+                    let p: ObliviousEvaluateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.oblivious_evaluate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
 
                 // --------------------
                 // forensic.* (research)
@@ -26249,6 +26256,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "query.subscribe"
             | "oblivious.policy.get"
             | "oblivious.explain"
+            | "oblivious.evaluate"
             | "forensic.query"
             | "forensic.verify"
             | "forensic.export"
@@ -26424,6 +26432,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "oblivious.policy.set",
         "oblivious.policy.get",
         "oblivious.explain",
+        "oblivious.evaluate",
         "forensic.query",
         "forensic.verify",
         "forensic.export",
@@ -27870,7 +27879,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 130);
+        assert_eq!(methods.len(), 131);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -28999,6 +29008,31 @@ mod tests {
         assert!(resp.ok);
         let plan = resp.result.expect("missing result")["plan"].clone();
         assert_eq!(plan.get("level").and_then(|v| v.as_str()), Some("basic"));
+
+        let resp = call_rpc(
+            &state,
+            "oblivious.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "trace_rows": [1,2,3,4,5,6,7,8]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("missing result");
+        assert_eq!(result["trace"].as_array().map(|arr| arr.len()), Some(8));
+        assert!(
+            result["leakage"]["padded_mutual_information_bits"]
+                .as_f64()
+                .unwrap_or_default()
+                < result["leakage"]["unpadded_mutual_information_bits"]
+                    .as_f64()
+                    .unwrap_or_default()
+        );
+        assert_eq!(
+            result["performance"]["sort_join_strategy"].as_str(),
+            Some("materialize_then_sort_join")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
-Last updated: 2026-05-09
-Runtime baseline: v0.3.11, SkeinQL 1.0, 130 advertised RPC methods
+Last updated: 2026-05-11
+Runtime baseline: v0.3.12, SkeinQL 1.0, 131 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
@@ -72,7 +72,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `objects.*` | `objects.need`, `objects.missing`, `objects.fetch`, `objects.pull` | Experimental | ValueID object transfer for shard moves and replication. |
 | `settings.encryption.*` | status, mode, key registration, active key, rotation | Experimental | Envelope/key-management controls. |
 | `dp.*` | aggregate, evaluate, budget, audit log | Experimental | Differential privacy COUNT/SUM/AVG aggregates, privacy ETags, budget accounting, audit, and accuracy-vs-epsilon evaluation. |
-| `oblivious.*` | policy get/set, explain | Experimental | Padding/shuffle access-pattern controls. |
+| `oblivious.*` | policy get/set, explain, evaluate | Experimental | Padding/shuffle access-pattern controls plus trace-based leakage and overhead reports. |
 | `forensic.*` | query, verify, export | Experimental | Hash-chain audit and proof surfaces. |
 | `merge.*` | register, apply, simulate, Wasm registry | Experimental | Optimistic conflict resolution and merge policies. |
 | `view.*` | create, drop, refresh, status, explain deps | Experimental | Incremental/full/auto materialized views. |
@@ -88,7 +88,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 
 ## Current advertised method set
 
-The runtime advertises this set through `system.capabilities.methods` in v0.3.11:
+The runtime advertises this set through `system.capabilities.methods` in v0.3.12:
 
 ```text
 system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,
@@ -108,7 +108,7 @@ cdc.subscribe_table, cdc.subscribe_query, cdc.poll, cdc.ack, cdc.close,
 vector.insert, vector.search, vector.index.status,
 ai.autoparam.classify, ai.autoparam.analyze, ai.nl.translate, ai.nl.explain, ai.nl.execute,
 dp.aggregate, dp.evaluate, dp.budget.set, dp.budget.get, dp.audit.log,
-oblivious.policy.set, oblivious.policy.get, oblivious.explain,
+oblivious.policy.set, oblivious.policy.get, oblivious.explain, oblivious.evaluate,
 forensic.query, forensic.verify, forensic.export,
 maintenance.audit_status, maintenance.audit_verify, maintenance.compaction.status,
 maintenance.compaction.set_policy, maintenance.compaction.pause, maintenance.compaction.resume,

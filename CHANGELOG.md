@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.12 - 2026-05-11
+
+- Closes R05/T250-T256 with a documented oblivious-execution threat model, per-table policy schema, padded scan/dummy ValueStore lookup execution, explain output, and deterministic leakage/overhead evaluation reports.
+- Adds `oblivious.evaluate`, typed SkeinQL result structs, JSON-RPC dispatch, capability advertising, and focused engine/RPC/integration coverage for padded-vs-unpadded trace metrics.
+- Fixes SkeinAdmin's R05 Privacy card to use the runtime policy shape and nested table payloads, adds trace-row controls, and exposes the leakage evaluator from the UI.
+- Updates the research backlog and True Status Matrix to **44 done / 65 open** while keeping R18/R19 prototype caveats intact.
+- Refreshes README, SkeinQL/API/SkeinAdmin/oblivious docs, the R05 research page, generated docs site, website status copy, and release metadata for v0.3.12.
+
 ## v0.3.11 - 2026-05-09
 
 - Closes R04/T240-T245 with test-backed DP aggregate hardening: COUNT/SUM/AVG `dp.aggregate` payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, privacy-aware `privacy_etag` validators, and persisted budget-consumption audit events.
