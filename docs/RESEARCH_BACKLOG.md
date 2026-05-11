@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **31 done / 78 open** after closing the R04 differential-privacy evaluation harness. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **37 done / 72 open** after closing the remaining R04 differential-privacy aggregate hardening items. Native Wasm codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -42,6 +42,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-09 (v0.3.8 admin help-center release): No research-track closures. SkeinAdmin gains a dedicated **Help & Docs** panel (quick start, panel reference, R01-R20 index with hardness pills, keyboard shortcuts, glossary, doc links, live search), locked by `skeinadmin_help_panel_exposes_comprehensive_documentation_center`. Counts unchanged at 29 done / 80 open.
 - 2026-05-09 (v0.3.9 replay CI release): T189 is closed with `skeindb replay run --json --out`, `skeindb replay compare`, thresholded p95/p99/span/storage/cache-hot-table checks, JSON comparison reports, and focused CLI tests. Counts now 30 done / 79 open; R18 remains prototype until T188 timing injection and cache/LSM reconstruction fidelity land.
 - 2026-05-09 (v0.3.10 DP evaluation release): T246 is closed with `dp.evaluate`, exact-baseline rows, seeded epsilon-grid noisy trials, mean/p95/max absolute error, mean relative error, noisy latency, overhead-vs-exact metrics, SkeinAdmin Privacy controls, and focused engine/admin/capability tests. Counts now 31 done / 78 open.
+- 2026-05-09 (v0.3.11 R04 closure release): T240-T245 are closed with `dp.aggregate` COUNT/SUM/AVG payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, DP audit persistence, and `privacy_etag` cache validators tied to DP metadata plus table versions. Counts now 37 done / 72 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -82,12 +83,12 @@ Source of truth matrix:
 - [x] T235: Distribution shift tests + graceful degradation. Evidence: `ValueIdLookupDistribution::model_shift_l1`, `learned_index_falls_back_for_new_keys`, and `distribution_shift_triggers_refresh`.
 
 ### Phase 25 — Differential privacy aggregates (R04)
-- [ ] T240: Add SkeinQL aggregate nodes (COUNT/SUM/AVG) with explicit DP parameters (experimental)
-- [ ] T241: Sensitivity analysis for single-table aggregates (bounded domains)
-- [ ] T242: Privacy budget manager (per user/role) + persistence
-- [ ] T243: Noise mechanisms (Laplace / Gaussian policy) + deterministic tests (seeded RNG)
-- [ ] T244: Privacy-aware caching rules (ETag includes privacy metadata)
-- [ ] T245: Audit log entries for DP queries (budget consumption)
+- [x] T240: Add SkeinQL aggregate nodes (COUNT/SUM/AVG) with explicit DP parameters (experimental). Evidence: `dp.aggregate`, `DpAggregateSpec`, COUNT/SUM/AVG result columns, explicit epsilon/delta/mechanism/principal/seed fields, and `dp_budget_consumption_and_exhaustion` / `dp_aggregate_deterministic_noise` tests.
+- [x] T241: Sensitivity analysis for single-table aggregates (bounded domains). Evidence: `resolve_dp_aggregates`, bounded `DpBounds` range sensitivities for SUM/AVG/percentile, count sensitivity 1.0, privacy metadata per aggregate, and focused assertions in `dp_budget_consumption_and_exhaustion`.
+- [x] T242: Privacy budget manager (per user/role) + persistence. Evidence: `dp.budget.set`, `dp.budget.get`, `DpBudgetDisk` v2 persistence in `dp_budgets.json`, refresh-window resets, RDP query counts, and restart assertions in `dp_budget_consumption_and_exhaustion`.
+- [x] T243: Noise mechanisms (Laplace / Gaussian policy) + deterministic tests (seeded RNG). Evidence: `DpRng`, `dp_laplace_noise`, `dp_gaussian_noise`, mechanism validation, seeded deterministic Laplace/Gaussian coverage, and `r04_dp_rng_deterministic_and_uniform` / `r04_dp_laplace_noise_has_correct_scale` / `dp_aggregate_deterministic_noise` tests.
+- [x] T244: Privacy-aware caching rules (ETag includes privacy metadata). Evidence: `privacy_etag` in `dp.aggregate` privacy output, derived from a v1 DP validator payload containing table version, query fingerprint, epsilon/delta, mechanism, principal, seed, and budget metadata; locked by `dp_budget_consumption_and_exhaustion`.
+- [x] T245: Audit log entries for DP queries (budget consumption). Evidence: `DpAuditEvent`, `dp.audit.log`, persisted `dp_audit.json`, budget remaining epsilon/delta in events, usage summaries in `dp.budget.get`, and restart assertions in `dp_budget_consumption_and_exhaustion`.
 - [x] T246: Evaluation harness: accuracy vs epsilon, overhead vs baseline. Evidence: `dp.evaluate`, `DpEvaluateParams` / `DpEvaluateResult`, exact baseline rows, seeded epsilon-grid trials, mean/p95/max absolute error, mean relative error, noisy latency, overhead-vs-exact metrics, SkeinAdmin Privacy controls, and `dp_evaluate_reports_accuracy_and_overhead` / `skeinadmin_privacy_panel_exposes_dp_evaluation_harness` tests.
 
 ### Phase 26 — Oblivious query execution (R05)

@@ -5381,6 +5381,7 @@ impl Engine {
             }
         }
 
+        let table_version = self.get_table(&params.table)?.0.table_version;
         let (resolved, mut groups, rows_examined, rows_matched) =
             self.dp_collect_aggregate_groups(&params)?;
 
@@ -5459,11 +5460,21 @@ impl Engine {
             self.persist_dp_best_effort();
         }
 
+        let privacy_etag = dp_privacy_etag(
+            &params,
+            &mechanism,
+            table_version,
+            &query_fingerprint,
+            budget_json.as_ref(),
+        );
+
         let privacy = serde_json::json!({
             "epsilon": params.epsilon,
             "delta": delta,
             "mechanism": mechanism,
             "query_fingerprint": query_fingerprint,
+            "privacy_etag": privacy_etag,
+            "table_version": table_version,
             "groups": group_count,
             "rows_examined": rows_examined,
             "rows_matched": rows_matched,
@@ -18083,6 +18094,28 @@ fn dp_query_fingerprint(params: &DpAggregateParams, mechanism: &str) -> anyhow::
         "mechanism": mechanism
     });
     Ok(fingerprint_json(&canonical))
+}
+
+fn dp_privacy_etag(
+    params: &DpAggregateParams,
+    mechanism: &str,
+    table_version: u64,
+    query_fingerprint: &str,
+    budget: Option<&serde_json::Value>,
+) -> String {
+    let canonical = serde_json::json!({
+        "format": "skein.dp.privacy-etag.v1",
+        "table": params.table,
+        "table_version": table_version,
+        "query_fingerprint": query_fingerprint,
+        "epsilon": params.epsilon,
+        "delta": params.delta.unwrap_or(0.0),
+        "mechanism": mechanism,
+        "principal": params.principal,
+        "seed": params.seed,
+        "budget": budget,
+    });
+    format!("W/\"dp:{}\"", fingerprint_json(&canonical))
 }
 
 fn dp_agg_op_name(op: &DpAggOp) -> &'static str {
@@ -32702,7 +32735,7 @@ mod tests {
             refresh_window_ms: None,
         })?;
 
-        let _ = engine.dp_aggregate(DpAggregateParams {
+        let result = engine.dp_aggregate(DpAggregateParams {
             table: BaseTableRef {
                 db: "app".to_string(),
                 table: "events".to_string(),
@@ -32726,6 +32759,16 @@ mod tests {
                     }),
                     r#as: None,
                 },
+                DpAggregateSpec {
+                    op: "avg".to_string(),
+                    column: Some("value".to_string()),
+                    percentile: None,
+                    bounds: Some(DpBounds {
+                        min: 0.0,
+                        max: 10.0,
+                    }),
+                    r#as: None,
+                },
             ],
             r#where: None,
             group_by: Vec::new(),
@@ -32736,6 +32779,24 @@ mod tests {
             seed: Some(11),
         })?;
 
+        assert_eq!(result.columns, vec!["count", "sum_value", "avg_value"]);
+        let privacy = result.privacy.as_ref().expect("dp privacy metadata");
+        assert!(privacy["privacy_etag"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("W/\"dp:"));
+        assert!(privacy["table_version"].as_u64().unwrap_or_default() > 0);
+        let aggregates = privacy["aggregates"]
+            .as_array()
+            .expect("aggregate privacy specs");
+        assert_eq!(aggregates.len(), 3);
+        assert_eq!(aggregates[0]["op"].as_str(), Some("count"));
+        assert_eq!(aggregates[1]["op"].as_str(), Some("sum"));
+        assert_eq!(aggregates[2]["op"].as_str(), Some("avg"));
+        assert_eq!(aggregates[0]["sensitivity"].as_f64(), Some(1.0));
+        assert_eq!(aggregates[1]["sensitivity"].as_f64(), Some(10.0));
+        assert_eq!(aggregates[2]["sensitivity"].as_f64(), Some(10.0));
+
         let budgets = engine.dp_budget_get(DpBudgetGetParams {
             principal: Some("analyst".to_string()),
             include_usage: Some(false),
@@ -32744,6 +32805,35 @@ mod tests {
             .as_f64()
             .unwrap_or_default();
         assert!((consumed - 0.6).abs() < 1e-6);
+
+        let audit = engine.dp_audit_log(DpAuditLogParams {
+            principal: Some("analyst".to_string()),
+            from_id: None,
+            limit: Some(10),
+        })?;
+        assert_eq!(audit.events.len(), 1);
+        assert_eq!(audit.events[0]["principal"].as_str(), Some("analyst"));
+        assert_eq!(audit.events[0]["mechanism"].as_str(), Some("laplace"));
+        assert_eq!(audit.events[0]["aggregates"].as_array().unwrap().len(), 3);
+
+        drop(engine);
+        let mut engine = Engine::open(&dir)?;
+        let persisted = engine.dp_budget_get(DpBudgetGetParams {
+            principal: Some("analyst".to_string()),
+            include_usage: Some(true),
+        })?;
+        assert_eq!(persisted.budgets.len(), 1);
+        let persisted_consumed = persisted.budgets[0]["consumed_epsilon"]
+            .as_f64()
+            .unwrap_or_default();
+        assert!((persisted_consumed - 0.6).abs() < 1e-6);
+        assert_eq!(persisted.usage.unwrap().len(), 1);
+        let persisted_audit = engine.dp_audit_log(DpAuditLogParams {
+            principal: Some("analyst".to_string()),
+            from_id: Some(1),
+            limit: Some(10),
+        })?;
+        assert_eq!(persisted_audit.events.len(), 1);
 
         let err = engine
             .dp_aggregate(DpAggregateParams {
@@ -32865,6 +32955,66 @@ mod tests {
             Lit::F64 { v } => assert!((v - expected_sum).abs() < 1e-6),
             _ => panic!("expected sum as f64"),
         }
+
+        let gaussian = DpAggregateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "metrics".to_string(),
+                r#as: None,
+            },
+            aggregates: vec![DpAggregateSpec {
+                op: "avg".to_string(),
+                column: Some("score".to_string()),
+                percentile: None,
+                bounds: Some(DpBounds {
+                    min: 0.0,
+                    max: 10.0,
+                }),
+                r#as: None,
+            }],
+            r#where: None,
+            group_by: Vec::new(),
+            epsilon: 1.0,
+            delta: Some(1e-6),
+            mechanism: Some("gaussian".to_string()),
+            principal: None,
+            seed: Some(456),
+        };
+        let gaussian_one = engine.dp_aggregate(gaussian.clone())?;
+        let gaussian_two = engine.dp_aggregate(gaussian)?;
+        assert_eq!(gaussian_one.rows, gaussian_two.rows);
+        assert_eq!(
+            gaussian_one
+                .privacy
+                .as_ref()
+                .and_then(|privacy| privacy["mechanism"].as_str()),
+            Some("gaussian")
+        );
+
+        let err = engine
+            .dp_aggregate(DpAggregateParams {
+                table: BaseTableRef {
+                    db: "app".to_string(),
+                    table: "metrics".to_string(),
+                    r#as: None,
+                },
+                aggregates: vec![DpAggregateSpec {
+                    op: "count".to_string(),
+                    column: None,
+                    percentile: None,
+                    bounds: None,
+                    r#as: None,
+                }],
+                r#where: None,
+                group_by: Vec::new(),
+                epsilon: 1.0,
+                delta: None,
+                mechanism: Some("gaussian".to_string()),
+                principal: None,
+                seed: Some(456),
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "invalid_request: gaussian requires delta");
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

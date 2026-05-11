@@ -131,14 +131,14 @@
 - These methods are <strong>not required</strong> for MySQL compatibility.
 - They should be implemented behind feature flags and exposed only when enabled.
 - For each family, the canonical research description is in <code>docs/research_agenda/</code>.
-- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.10 runtime method map exposed through <code>system.capabilities</code>.</p>
+- Use <code>docs/SKEINQL.md</code> for method payload examples and <code>docs/API_REFERENCE.md</code> for the v0.3.11 runtime method map exposed through <code>system.capabilities</code>.</p>
 <h2 id="1-dp-differential-privacy">1. dp.* — Differential privacy<a class="headerlink" href="#1-dp-differential-privacy" title="Permanent link">¶</a></h2>
 <p>Related: R04</p>
 <ul>
-<li><code>dp.aggregate</code> — aggregates with DP parameters (epsilon, delta, mechanism)</li>
+<li><code>dp.aggregate</code> — COUNT/SUM/AVG aggregates with explicit DP parameters, bounded sensitivities, and <code>privacy_etag</code> validators</li>
 <li><code>dp.evaluate</code> — seeded accuracy-vs-epsilon and overhead-vs-exact report for bounded DP aggregate plans</li>
-<li><code>dp.budget.get</code> / <code>dp.budget.set</code> — budget tracking and policies</li>
-<li><code>dp.audit.log</code> — budget consumption events</li>
+<li><code>dp.budget.get</code> / <code>dp.budget.set</code> — persisted per-principal budget tracking and policies</li>
+<li><code>dp.audit.log</code> — persisted budget consumption events</li>
 </ul>
 <h2 id="2-oblivious-oblivious-execution-policies">2. oblivious.* — Oblivious execution policies<a class="headerlink" href="#2-oblivious-oblivious-execution-policies" title="Permanent link">¶</a></h2>
 <p>Related: R05</p>

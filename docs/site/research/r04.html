@@ -42,7 +42,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Hardened runtime slice</strong> — v0.3.11 closes the R04 aggregate, budget, noise, cache-validator, audit, and evaluation backlog items with tests.</span>
   </div>
 
   <div class="novelty-card">
@@ -67,11 +67,11 @@
     </div>
     <div class="phase">
       <h3>Phase 3 — Noise Mechanisms</h3>
-      <p>Calibrated noise addition: Laplace mechanism for numeric aggregates, exponential mechanism for categorical selections. Support both global and local differential privacy models.</p>
+      <p>Calibrated noise addition: seeded Laplace and Gaussian mechanisms for bounded numeric aggregates, with deterministic CI coverage and Rényi-DP composition tracking.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Cache Integration</h3>
-      <p>ETag semantics extended with privacy metadata — a cached result's ETag encodes both data freshness and privacy cost, enabling privacy-aware HTTP caching without double-spending budget.</p>
+      <p>ETag semantics extended with privacy metadata: <code>dp.aggregate</code> returns <code>privacy_etag</code> validators derived from table version, query fingerprint, epsilon/delta, mechanism, principal, seed, and budget metadata.</p>
     </div>
   </div>
 

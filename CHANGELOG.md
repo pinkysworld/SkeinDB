@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.11 - 2026-05-09
+
+- Closes R04/T240-T245 with test-backed DP aggregate hardening: COUNT/SUM/AVG `dp.aggregate` payloads, bounded sensitivity metadata, per-principal persisted budgets, seeded Laplace/Gaussian mechanisms, privacy-aware `privacy_etag` validators, and persisted budget-consumption audit events.
+- Adds a focused runtime regression that verifies DP aggregate sensitivities, privacy ETags, budget persistence, audit persistence, and deterministic Gaussian behavior.
+- Updates the research backlog and True Status Matrix to **37 done / 72 open** while keeping R18/R19 prototype caveats intact.
+- Refreshes README, SkeinQL/API/SkeinAdmin docs, the R04 research page, generated docs site, website status copy, and release metadata for v0.3.11.
+
 ## v0.3.10 - 2026-05-09
 
 - Adds `dp.evaluate`, a deterministic differential-privacy evaluation harness that reports exact baselines, accuracy-vs-epsilon error metrics, noisy-query latency, and overhead-vs-exact timings for seeded DP aggregate trials.

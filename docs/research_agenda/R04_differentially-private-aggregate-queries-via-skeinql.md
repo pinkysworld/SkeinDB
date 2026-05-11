@@ -19,6 +19,10 @@ Organizations increasingly need to query sensitive data while protecting individ
 - Phase 3 - Noise Mechanisms: Integrate calibrated noise addition (Laplace for numeric, exponential mechanism for categorical) into query execution. Support both global and local DP models.
 - Phase 4 - Cache Integration: Extend ETag semantics to include privacy metadata. A cached result's ETag encodes both data freshness and privacy cost, enabling privacy-aware cache validation.
 
+## Runtime status (v0.3.11)
+
+The first hardened SkeinDB slice now implements `dp.aggregate` for COUNT/SUM/AVG with explicit bounds and DP parameters, persisted per-principal budgets, seeded Laplace/Gaussian mechanisms, budget-consumption audit events, and `privacy_etag` validators derived from DP metadata plus table versions. The evaluation harness lives in `dp.evaluate`.
+
 ## Evaluation Plan
 
 - **E1:** Accuracy of sensitivity analysis compared to ground truth on benchmark queries.

@@ -1,6 +1,6 @@
 # SkeinQL v1.0 — Full Protocol & Query Language Specification
 
-Status: Draft v1.0 (implementable; v0.3.10 runtime sync)
+Status: Draft v1.0 (implementable; v0.3.11 runtime sync)
 Last updated: 2026-05-09
 
 SkeinQL is SkeinDB's native **non-SQL** API: a versioned, structured query and control protocol.
@@ -1171,10 +1171,21 @@ Result:
     "delta": 0.000001,
     "mechanism": "laplace",
     "query_fingerprint": "abcd1234",
+    "privacy_etag": "W/\"dp:abcd1234\"",
+    "table_version": 7,
+    "rows_examined": 1200,
+    "rows_matched": 410,
+    "aggregates": [
+      {"op":"count","sensitivity":1.0,"epsilon":0.3333333333333333,"delta":0.0000003333333333333333},
+      {"op":"sum","column":"amount","bounds":{"min":0,"max":1000},"sensitivity":1000.0,"epsilon":0.3333333333333333,"delta":0.0000003333333333333333},
+      {"op":"avg","column":"amount","bounds":{"min":0,"max":1000},"sensitivity":1000.0,"epsilon":0.3333333333333333,"delta":0.0000003333333333333333}
+    ],
     "budget": {"principal":"analyst","remaining_epsilon":9.0,"remaining_delta":0.000999}
   }
 }
 ```
+
+The `privacy_etag` is a weak validator for privacy-aware caches. It is derived from a v1 DP validator payload that includes the table version, canonical DP query fingerprint, epsilon/delta, mechanism, principal, seed, and post-query budget metadata when a principal budget is consumed.
 
 #### dp.evaluate
 

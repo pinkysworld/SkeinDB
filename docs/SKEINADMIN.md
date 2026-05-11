@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-09 (v0.3.10)
+Last updated: 2026-05-09 (v0.3.11)
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -42,7 +42,7 @@ Recent UI updates:
 - **v0.3.4 polish**: live wiring for the previously-stubbed Overview cards (Top Tables / Slow Query Log / Active Sessions / Index Health) via `information_schema.tables`, `stats.slow_queries`, and `stats.snapshot`; Security panel response-shape fixes for create/list/top-queries flows; auto-refresh on Overview/Security tab switches; Active Sessions labels aligned with `stats.snapshot` (`Sessions` / `Open Txns` / `Avg Latency`).
 - **Overview dashboard** now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage & deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC & compaction (versions, delta chains, L0 files, stall rate), query & cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
 - **Research runtime wiring**: R01 learned ValueID lookup histograms/model reports appear in Overview via `stats.snapshot`; R14 edge bundles are now first-class Replay panel controls; R20 compaction scheduler policy/status/pause/resume are first-class Engine panel controls.
-- **Privacy panel DP evaluation**: the R04 card now exposes `dp.evaluate` with epsilon-grid, trials, seed, mechanism, and bounds controls, plus typed `dp.aggregate`, `dp.budget.*`, and `dp.audit.log` calls.
+- **Privacy panel DP evaluation**: the R04 card now exposes `dp.evaluate` with epsilon-grid, trials, seed, mechanism, and bounds controls, plus typed `dp.aggregate`, `dp.budget.*`, and `dp.audit.log` calls. The result metadata now includes per-aggregate sensitivities and `privacy_etag` validators for privacy-aware cache inspection.
 - **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.

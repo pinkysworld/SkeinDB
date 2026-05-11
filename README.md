@@ -4,7 +4,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-05-09 (v0.3.10).
+Last updated: 2026-05-09 (v0.3.11).
 
 **SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
@@ -18,7 +18,7 @@ What sets SkeinDB apart is what's already working under the hood:
 - **Tamper-evident audit WAL.** A BLAKE3-256 hash chain plus checkpoint anchors plus Merkle inclusion proofs — verify the entire log with one RPC.
 - **Dedup-preserving encryption.** Two AEAD modes (`ENC_RANDOM` and the convergent `ENC_MLE_DB`), key registration / rotation / re-encryption progress reporting, and a redacted in-memory audit ring — all driven from the SkeinAdmin Encryption panel.
 - **Vector search** with an HNSW graph index (`vector.insert`, `vector.search`).
-- **Differential privacy** with Rényi-DP composition tracking (`dp.*`).
+- **Differential privacy** with COUNT/SUM/AVG aggregates, persisted budgets/audit, privacy ETags, seeded Laplace/Gaussian noise, and Rényi-DP composition tracking (`dp.*`).
 - **Change Data Capture** over both polling and SSE, with bounded retention and `Last-Event-ID` reconnect semantics.
 - **Replay bundles** export schema + retained row versions + change-event metadata into a deterministic, checksum-verified workspace you can run anywhere.
 - **CAS-aware replication.** Replicas pull only the ValueIDs they're missing, with hash-verified `objects.fetch` and live hit-rate / saved-bytes reporting.

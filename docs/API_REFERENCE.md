@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
 Last updated: 2026-05-09
-Runtime baseline: v0.3.10, SkeinQL 1.0, 130 advertised RPC methods
+Runtime baseline: v0.3.11, SkeinQL 1.0, 130 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
@@ -71,7 +71,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `cluster.*` | status, node lifecycle, shard create/move/rebalance, replica promote, replication stats | Experimental | Single-binary cluster control plane. |
 | `objects.*` | `objects.need`, `objects.missing`, `objects.fetch`, `objects.pull` | Experimental | ValueID object transfer for shard moves and replication. |
 | `settings.encryption.*` | status, mode, key registration, active key, rotation | Experimental | Envelope/key-management controls. |
-| `dp.*` | aggregate, evaluate, budget, audit log | Experimental | Differential privacy budget accounting and accuracy-vs-epsilon evaluation. |
+| `dp.*` | aggregate, evaluate, budget, audit log | Experimental | Differential privacy COUNT/SUM/AVG aggregates, privacy ETags, budget accounting, audit, and accuracy-vs-epsilon evaluation. |
 | `oblivious.*` | policy get/set, explain | Experimental | Padding/shuffle access-pattern controls. |
 | `forensic.*` | query, verify, export | Experimental | Hash-chain audit and proof surfaces. |
 | `merge.*` | register, apply, simulate, Wasm registry | Experimental | Optimistic conflict resolution and merge policies. |
@@ -88,7 +88,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 
 ## Current advertised method set
 
-The runtime advertises this set through `system.capabilities.methods` in v0.3.10:
+The runtime advertises this set through `system.capabilities.methods` in v0.3.11:
 
 ```text
 system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,
