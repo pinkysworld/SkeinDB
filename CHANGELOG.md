@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.17 - 2026-05-13
+
+- Improves SQL compatibility catalogs with MySQL `information_schema.check_constraints`, `information_schema.parameters`, and `information_schema.tablespaces` probes.
+- Expands PostgreSQL virtual catalogs with `pg_catalog.pg_authid`, `pg_group`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, and `pg_stat_database`, including RowDescription overrides for the new OID/bool/int/float catalog columns.
+- Updates compatibility docs, website copy, in-app help notes, generated docs site, and package metadata for the v0.3.17 catalog-polish release. Research backlog counts stay **71 done / 38 open**.
+
 ## v0.3.16 - 2026-05-11
 
 - Improves SQL adoption catalogs with MySQL `information_schema.plugins`, `information_schema.events`, `information_schema.partitions`, and `information_schema.referential_constraints`, plus PostgreSQL `pg_catalog.pg_roles`, `pg_catalog.pg_user`, and `pg_catalog.pg_tablespace`.

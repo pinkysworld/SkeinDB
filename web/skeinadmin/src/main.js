@@ -122,7 +122,7 @@ const RESEARCH_TRACKS = [
 // ---------------------------------------------------------------------------
 const FEATURE_CENTER = [
   { title: 'Easy Viewer', desc: 'Click-first controls for daily operations.', panel: 'easy' },
-  { title: 'SQL Compat', desc: 'MySQL-compatible SQL layer with window functions.', panel: 'workspace' },
+  { title: 'SQL Compat', desc: 'MySQL and PostgreSQL compatibility catalogs, window functions, and client bootstrap probes.', panel: 'workspace' },
   { title: 'SkeinQL', desc: 'Native structured query API.', panel: 'workspace' },
   { title: 'Prepared Queries', desc: 'Prepare once, execute repeatedly, and expose GET + CDC hooks.', panel: 'workspace' },
   { title: 'Transactions', desc: 'Open, commit, and roll back explicit tx handles.', panel: 'workspace' },

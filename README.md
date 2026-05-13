@@ -4,7 +4,7 @@
 [![Sponsor](https://img.shields.io/badge/%E2%9D%A4-Sponsor-ea4aaa)](https://github.com/sponsors/pinkysworld)
 [![Commercial](https://img.shields.io/badge/commercial-options-6366f1)](COMMERCIAL.md)
 
-Last updated: 2026-05-11 (v0.3.16).
+Last updated: 2026-05-13 (v0.3.17).
 
 **SkeinDB is one binary, three protocols, and a stack of features that real production databases usually charge extra for.**
 
@@ -44,7 +44,7 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 - **One executable** runs the HTTP API, SkeinAdmin, the MySQL listener, and the optional PostgreSQL listener — no sidecars, no proxy, no separate console process.
 - **MySQL compatibility** is the most mature adoption path. The 1600-line compatibility corpus covers DML, joins, aggregates, window functions, JSON functions, CTEs, UNION, GROUP BY, prepared statements, and more — and runs end-to-end on every commit.
 - **WordPress-class workloads** are a first-class target: installer/admin query shapes are covered, and a live WordPress smoke test runs against the listener.
-- **PostgreSQL v3** wire baseline with SCRAM-SHA-256 auth, simple + extended query protocol, virtual `pg_catalog` including `pg_tables`, `pg_views`, `pg_roles`, `pg_user`, and `pg_tablespace`, transaction/savepoint state, and SQLSTATE-mapped errors.
+- **PostgreSQL v3** wire baseline with SCRAM-SHA-256 auth, simple + extended query protocol, virtual `pg_catalog` including table/view, role/user, index, tablespace, sequence/statistics, and database-stat probes, transaction/savepoint state, and SQLSTATE-mapped errors.
 - **SkeinAdmin** is a real embedded control panel: schema browsing, SQL workspaces, Easy Viewer with inline edit + WYSIWYG schema design, dashboards with live storage/dedup/MVCC/cache cards, settings + token/user management, telemetry, privacy controls, index-advisor workflows, CDC, time-travel, replay, encryption, and forensic query/proof export workflows.
 - **SkeinQL** is the preferred native API: typed JSON-RPC over HTTP and QUIC.
 - **Row persistence** defaults to segment-backed `.rseg` storage.
@@ -65,7 +65,7 @@ We're honest about the gaps too — see [What's still partial](#whats-still-part
 
 - **MySQL:** broad compatibility layer with prepared statements, wide `COM_QUERY` coverage, compatibility shims for real application workloads, and corpus-backed regression coverage.
 - **WordPress:** install/admin-style compatibility is far enough along to be used as a live smoke target, including Users and Site Health query coverage.
-- **PostgreSQL:** partial PG v3 baseline with trust/SCRAM-SHA-256 auth, managed DB-user passwords, SSL rejection, startup probes, simple + extended query protocol, virtual `pg_catalog` including `pg_tables`, `pg_views`, `pg_roles`, `pg_user`, and `pg_tablespace`, SQLSTATE-mapped errors, and failed-transaction blocking.
+- **PostgreSQL:** partial PG v3 baseline with trust/SCRAM-SHA-256 auth, managed DB-user passwords, SSL rejection, startup probes, simple + extended query protocol, virtual `pg_catalog` including table/view, role/user, index, tablespace, sequence/statistics, and database-stat probes, SQLSTATE-mapped errors, and failed-transaction blocking.
 - **Merge/CRDT:** R07 is hardened with `merge.apply`, `merge.simulate`, `merge.evaluate`, values-only Wasm merge execution, fuel/time cancellation coverage, offline queue docs, and a SkeinAdmin Merge & CRDT panel wired to the typed runtime payloads.
 - **Views:** R08 is closed with `view.create/drop/refresh/evaluate/status/explain_deps`, deterministic incremental-vs-full oracle reports, benchmark timings, MySQL/PG view catalog rows, and a SkeinAdmin Views panel for refresh mode, evaluation, status, and dependencies.
 - **Admin/UI:** SkeinAdmin is no longer a placeholder; it is an active part of the product surface. Easy Viewer now ships a **WYSIWYG schema editor** (Easy Viewer → Design tab) that diffs your in-browser edits against the live table and emits a `ALTER TABLE` plan you can preview before applying.

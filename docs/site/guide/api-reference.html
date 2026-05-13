@@ -126,7 +126,7 @@
     <article class="doc-article">
       <h1 id="skeindb-api-reference">SkeinDB API Reference<a class="headerlink" href="#skeindb-api-reference" title="Permanent link">¶</a></h1>
 <p>Last updated: 2026-05-11
-Runtime baseline: v0.3.16, SkeinQL 1.0, 133 advertised RPC methods</p>
+Runtime baseline: v0.3.17, SkeinQL 1.0, 133 advertised RPC methods</p>
 <p>This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in <code>SKEINQL.md</code>; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.</p>
 <h2 id="transport-endpoints">Transport endpoints<a class="headerlink" href="#transport-endpoints" title="Permanent link">¶</a></h2>
 <table>
@@ -405,7 +405,7 @@ Runtime baseline: v0.3.16, SkeinQL 1.0, 133 advertised RPC methods</p>
 </tbody>
 </table>
 <h2 id="current-advertised-method-set">Current advertised method set<a class="headerlink" href="#current-advertised-method-set" title="Permanent link">¶</a></h2>
-<p>The runtime advertises this set through <code>system.capabilities.methods</code> in v0.3.16:</p>
+<p>The runtime advertises this set through <code>system.capabilities.methods</code> in v0.3.17:</p>
 <div class="codehilite"><pre><span></span><code>system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,
 tx.begin, tx.commit, tx.rollback,
 stats.snapshot, stats.top_queries, stats.slow_queries, stats.coalescing,

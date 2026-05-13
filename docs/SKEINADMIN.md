@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-11 (v0.3.16)
+Last updated: 2026-05-13 (v0.3.17)
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -47,6 +47,7 @@ Recent UI updates:
 - **Merge & CRDT R07 hardening**: the Merge panel now sends typed `merge.apply`, `merge.register`, `merge.simulate`, and `merge.evaluate` payloads; exposes `expected_etag`, `min_causality`, current/incoming row editors, workload-case evaluation controls, and values-only Wasm module limits; and uses `module_id` for Wasm register/drop so the UI matches the runtime RPC schema.
 - **Views R08 hardening**: the Views panel now exposes refresh mode selection, `view.evaluate` iterations, status/dependency summaries, and typed `view.create`, `view.refresh`, `view.evaluate`, `view.status`, `view.drop`, and `view.explain_deps` calls for incremental-vs-full correctness review.
 - **v0.3.16 help/status sync**: the in-app research index now describes R09 as hardened for QUIC framing, prepared-query streams, 0-RTT write rejection, and rebind coverage while keeping comparative p99 benchmarking listed as follow-up work.
+- **v0.3.17 compatibility polish**: compatibility help/status text now reflects the broader MySQL `information_schema` constraint/parameter/tablespace probes and PostgreSQL role/index/stat catalog probes.
 - **Engine Config panel** for toggling engine features via simple checkboxes: deduplication, compression, encryption, MVCC, delta chains, time travel, auto compaction, energy-aware scheduling, query cache, coalescing, autoparameterization, audit WAL, differential privacy, oblivious execution, replication, CDC, QUIC transport. Load/save/reset with `settings.set`.
 - Connect/disconnect and profile workflows are shared across admin and console routes.
 - Admin topbar includes a guarded **Shutdown** action (`system.shutdown`) for graceful server stop.

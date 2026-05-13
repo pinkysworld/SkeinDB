@@ -11273,11 +11273,10 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
     let (type_oid, type_size) = match name.to_ascii_lowercase().as_str() {
         "oid" | "datdba" | "dattablespace" | "typnamespace" | "typowner" | "typrelid"
         | "typelem" | "typarray" | "typbasetype" | "typndims" | "nspowner" | "datid"
-        | "usesysid" | "spcowner" | "relnamespace" | "relowner" | "relam" | "reltablespace"
-        | "reloftype" | "attrelid" | "atttypid" | "attcollation" | "indexrelid" | "indrelid"
-        | "connamespace" | "conrelid" | "contypid" | "conindid" | "conparentid" | "confrelid" => {
-            (26, 4)
-        }
+        | "usesysid" | "grosysid" | "spcowner" | "relnamespace" | "relowner" | "relam"
+        | "reltablespace" | "reloftype" | "attrelid" | "atttypid" | "attcollation"
+        | "indexrelid" | "indrelid" | "connamespace" | "conrelid" | "contypid" | "conindid"
+        | "conparentid" | "confrelid" => (26, 4),
         "datistemplate"
         | "datallowconn"
         | "pending_restart"
@@ -11292,6 +11291,10 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "usesuper"
         | "userepl"
         | "usebypassrls"
+        | "hasindexes"
+        | "ispopulated"
+        | "cycle"
+        | "inherited"
         | "typbyval"
         | "typispreferred"
         | "typisdefined"
@@ -11324,10 +11327,15 @@ fn pg_catalog_result_column_override(name: &str) -> Option<pg_wire::PgColumn> {
         | "conislocal"
         | "connoinherit" => (pg_wire::oid::BOOL, 1),
         "setting" | "boot_val" | "reset_val" => (pg_wire::oid::TEXT, -1),
-        "rolconnlimit" | "relnatts" | "relchecks" | "attlen" | "attnum" | "attndims"
-        | "atttypmod" | "attinhcount" | "indnatts" | "indnkeyatts" | "coninhcount" => {
-            (pg_wire::oid::INT4, 4)
-        }
+        "rolconnlimit" | "numbackends" | "avg_width" | "relnatts" | "relchecks" | "attlen"
+        | "attnum" | "attndims" | "atttypmod" | "attinhcount" | "indnatts" | "indnkeyatts"
+        | "coninhcount" => (pg_wire::oid::INT4, 4),
+        "null_frac" | "n_distinct" | "correlation" => (pg_wire::oid::FLOAT4, 4),
+        "blk_read_time"
+        | "blk_write_time"
+        | "session_time"
+        | "active_time"
+        | "idle_in_transaction_time" => (pg_wire::oid::FLOAT8, 8),
         "reltuples" => (pg_wire::oid::FLOAT4, 4),
         _ => return None,
     };
@@ -24390,6 +24398,75 @@ fn information_schema_select_result(
             "TABLE_NAME",
             "REFERENCED_TABLE_NAME",
         ]
+    } else if table.table.eq_ignore_ascii_case("check_constraints") {
+        vec![
+            "CONSTRAINT_CATALOG",
+            "CONSTRAINT_SCHEMA",
+            "CONSTRAINT_NAME",
+            "CHECK_CLAUSE",
+        ]
+    } else if table.table.eq_ignore_ascii_case("parameters") {
+        vec![
+            "SPECIFIC_CATALOG",
+            "SPECIFIC_SCHEMA",
+            "SPECIFIC_NAME",
+            "ORDINAL_POSITION",
+            "PARAMETER_MODE",
+            "PARAMETER_NAME",
+            "DATA_TYPE",
+            "CHARACTER_MAXIMUM_LENGTH",
+            "CHARACTER_OCTET_LENGTH",
+            "NUMERIC_PRECISION",
+            "NUMERIC_SCALE",
+            "DATETIME_PRECISION",
+            "CHARACTER_SET_NAME",
+            "COLLATION_NAME",
+            "DTD_IDENTIFIER",
+            "ROUTINE_TYPE",
+        ]
+    } else if table.table.eq_ignore_ascii_case("tablespaces") {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "TABLESPACE_NAME".to_string(),
+            Lit::Str {
+                v: "skeindb_default".to_string(),
+            },
+        );
+        row.insert(
+            "ENGINE".to_string(),
+            Lit::Str {
+                v: "SkeinDB".to_string(),
+            },
+        );
+        row.insert(
+            "TABLESPACE_TYPE".to_string(),
+            Lit::Str {
+                v: "General".to_string(),
+            },
+        );
+        row.insert("LOGFILE_GROUP_NAME".to_string(), Lit::Null);
+        row.insert("EXTENT_SIZE".to_string(), Lit::Null);
+        row.insert("AUTOEXTEND_SIZE".to_string(), Lit::Null);
+        row.insert("MAXIMUM_SIZE".to_string(), Lit::Null);
+        row.insert("NODEGROUP_ID".to_string(), Lit::Null);
+        row.insert(
+            "TABLESPACE_COMMENT".to_string(),
+            Lit::Str {
+                v: "Default SkeinDB compatibility tablespace".to_string(),
+            },
+        );
+        rows.push(row);
+        vec![
+            "TABLESPACE_NAME",
+            "ENGINE",
+            "TABLESPACE_TYPE",
+            "LOGFILE_GROUP_NAME",
+            "EXTENT_SIZE",
+            "AUTOEXTEND_SIZE",
+            "MAXIMUM_SIZE",
+            "NODEGROUP_ID",
+            "TABLESPACE_COMMENT",
+        ]
     } else if table.table.eq_ignore_ascii_case("processlist") {
         // Single-row stub for current connection
         let mut row = BTreeMap::new();
@@ -24987,6 +25064,40 @@ fn pg_catalog_select_result(
             "rolbypassrls",
             "rolconfig",
         ]
+    } else if table.table.eq_ignore_ascii_case("pg_authid") {
+        let mut row = BTreeMap::new();
+        row.insert("oid".to_string(), Lit::U64 { v: 10 });
+        row.insert(
+            "rolname".to_string(),
+            Lit::Str {
+                v: "root".to_string(),
+            },
+        );
+        row.insert("rolsuper".to_string(), Lit::Bool { v: true });
+        row.insert("rolinherit".to_string(), Lit::Bool { v: true });
+        row.insert("rolcreaterole".to_string(), Lit::Bool { v: true });
+        row.insert("rolcreatedb".to_string(), Lit::Bool { v: true });
+        row.insert("rolcanlogin".to_string(), Lit::Bool { v: true });
+        row.insert("rolreplication".to_string(), Lit::Bool { v: false });
+        row.insert("rolbypassrls".to_string(), Lit::Bool { v: false });
+        row.insert("rolconnlimit".to_string(), Lit::I64 { v: -1 });
+        row.insert("rolpassword".to_string(), Lit::Null);
+        row.insert("rolvaliduntil".to_string(), Lit::Null);
+        rows.push(row);
+        vec![
+            "oid",
+            "rolname",
+            "rolsuper",
+            "rolinherit",
+            "rolcreaterole",
+            "rolcreatedb",
+            "rolcanlogin",
+            "rolreplication",
+            "rolbypassrls",
+            "rolconnlimit",
+            "rolpassword",
+            "rolvaliduntil",
+        ]
     } else if table.table.eq_ignore_ascii_case("pg_user") {
         let mut row = BTreeMap::new();
         row.insert(
@@ -25015,6 +25126,8 @@ fn pg_catalog_select_result(
             "valuntil",
             "useconfig",
         ]
+    } else if table.table.eq_ignore_ascii_case("pg_group") {
+        vec!["groname", "grosysid", "grolist"]
     } else if table.table.eq_ignore_ascii_case("pg_tablespace") {
         for (oid, spcname) in [(1663_u64, "pg_default"), (1664_u64, "pg_global")] {
             let mut row = BTreeMap::new();
@@ -25086,6 +25199,147 @@ fn pg_catalog_select_result(
             "hasrules",
             "hastriggers",
             "rowsecurity",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_indexes") {
+        for db in eng.list_databases() {
+            let table_names = match eng.list_tables(&db) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            for tname in table_names {
+                let desc = match eng.describe_table(&db, &tname) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let primary_key: Vec<String> = desc["primary_key"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !primary_key.is_empty() {
+                    let indexname = format!("{tname}_pkey");
+                    let mut row = BTreeMap::new();
+                    row.insert(
+                        "schemaname".to_string(),
+                        Lit::Str {
+                            v: "public".to_string(),
+                        },
+                    );
+                    row.insert("tablename".to_string(), Lit::Str { v: tname.clone() });
+                    row.insert(
+                        "indexname".to_string(),
+                        Lit::Str {
+                            v: indexname.clone(),
+                        },
+                    );
+                    row.insert("tablespace".to_string(), Lit::Null);
+                    row.insert(
+                        "indexdef".to_string(),
+                        Lit::Str {
+                            v: format!(
+                                "CREATE UNIQUE INDEX {indexname} ON public.{tname} USING btree ({})",
+                                primary_key.join(", ")
+                            ),
+                        },
+                    );
+                    rows.push(row);
+                }
+                if let Some(indexes) = desc["indexes"].as_array() {
+                    for idx_val in indexes {
+                        let idx_name = idx_val
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unnamed");
+                        let idx_cols: Vec<String> = idx_val
+                            .get("columns")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let is_unique = idx_val
+                            .get("unique")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let mut row = BTreeMap::new();
+                        row.insert(
+                            "schemaname".to_string(),
+                            Lit::Str {
+                                v: "public".to_string(),
+                            },
+                        );
+                        row.insert("tablename".to_string(), Lit::Str { v: tname.clone() });
+                        row.insert(
+                            "indexname".to_string(),
+                            Lit::Str {
+                                v: idx_name.to_string(),
+                            },
+                        );
+                        row.insert("tablespace".to_string(), Lit::Null);
+                        row.insert(
+                            "indexdef".to_string(),
+                            Lit::Str {
+                                v: format!(
+                                    "CREATE {}INDEX {idx_name} ON public.{tname} USING btree ({})",
+                                    if is_unique { "UNIQUE " } else { "" },
+                                    idx_cols.join(", ")
+                                ),
+                            },
+                        );
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        vec![
+            "schemaname",
+            "tablename",
+            "indexname",
+            "tablespace",
+            "indexdef",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_matviews") {
+        vec![
+            "schemaname",
+            "matviewname",
+            "matviewowner",
+            "tablespace",
+            "hasindexes",
+            "ispopulated",
+            "definition",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_sequences") {
+        vec![
+            "schemaname",
+            "sequencename",
+            "sequenceowner",
+            "data_type",
+            "start_value",
+            "min_value",
+            "max_value",
+            "increment_by",
+            "cycle",
+            "cache_size",
+            "last_value",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_stats") {
+        vec![
+            "schemaname",
+            "tablename",
+            "attname",
+            "inherited",
+            "null_frac",
+            "avg_width",
+            "n_distinct",
+            "most_common_vals",
+            "most_common_freqs",
+            "histogram_bounds",
+            "correlation",
         ]
     } else if table.table.eq_ignore_ascii_case("pg_views") {
         for view in eng.list_views() {
@@ -25300,6 +25554,72 @@ fn pg_catalog_select_result(
             "backend_xmin",
             "query",
             "backend_type",
+        ]
+    } else if table.table.eq_ignore_ascii_case("pg_stat_database") {
+        let mut row = BTreeMap::new();
+        row.insert(
+            "datid".to_string(),
+            Lit::U64 {
+                v: pg_catalog_database_oid(&current_db),
+            },
+        );
+        row.insert("datname".to_string(), Lit::Str { v: current_db });
+        row.insert("numbackends".to_string(), Lit::I64 { v: 1 });
+        row.insert("xact_commit".to_string(), Lit::I64 { v: 0 });
+        row.insert("xact_rollback".to_string(), Lit::I64 { v: 0 });
+        row.insert("blks_read".to_string(), Lit::I64 { v: 0 });
+        row.insert("blks_hit".to_string(), Lit::I64 { v: 0 });
+        row.insert("tup_returned".to_string(), Lit::I64 { v: 0 });
+        row.insert("tup_fetched".to_string(), Lit::I64 { v: 0 });
+        row.insert("tup_inserted".to_string(), Lit::I64 { v: 0 });
+        row.insert("tup_updated".to_string(), Lit::I64 { v: 0 });
+        row.insert("tup_deleted".to_string(), Lit::I64 { v: 0 });
+        row.insert("conflicts".to_string(), Lit::I64 { v: 0 });
+        row.insert("temp_files".to_string(), Lit::I64 { v: 0 });
+        row.insert("temp_bytes".to_string(), Lit::I64 { v: 0 });
+        row.insert("deadlocks".to_string(), Lit::I64 { v: 0 });
+        row.insert("checksum_failures".to_string(), Lit::I64 { v: 0 });
+        row.insert("checksum_last_failure".to_string(), Lit::Null);
+        row.insert("blk_read_time".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("blk_write_time".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("session_time".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("active_time".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("idle_in_transaction_time".to_string(), Lit::F64 { v: 0.0 });
+        row.insert("sessions".to_string(), Lit::I64 { v: 1 });
+        row.insert("sessions_abandoned".to_string(), Lit::I64 { v: 0 });
+        row.insert("sessions_fatal".to_string(), Lit::I64 { v: 0 });
+        row.insert("sessions_killed".to_string(), Lit::I64 { v: 0 });
+        row.insert("stats_reset".to_string(), Lit::Null);
+        rows.push(row);
+        vec![
+            "datid",
+            "datname",
+            "numbackends",
+            "xact_commit",
+            "xact_rollback",
+            "blks_read",
+            "blks_hit",
+            "tup_returned",
+            "tup_fetched",
+            "tup_inserted",
+            "tup_updated",
+            "tup_deleted",
+            "conflicts",
+            "temp_files",
+            "temp_bytes",
+            "deadlocks",
+            "checksum_failures",
+            "checksum_last_failure",
+            "blk_read_time",
+            "blk_write_time",
+            "session_time",
+            "active_time",
+            "idle_in_transaction_time",
+            "sessions",
+            "sessions_abandoned",
+            "sessions_fatal",
+            "sessions_killed",
+            "stats_reset",
         ]
     } else if table.table.eq_ignore_ascii_case("pg_proc") {
         vec![
@@ -29225,6 +29545,65 @@ mod tests {
             .unwrap_or_default();
         assert!(referential_rows.is_empty());
 
+        let check_constraints = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema = 'app'"
+            }),
+        )
+        .await;
+        assert!(check_constraints.ok);
+        let check_rows = check_constraints
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(check_rows.is_empty());
+
+        let parameters = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT parameter_name FROM information_schema.parameters WHERE specific_schema = 'app'"
+            }),
+        )
+        .await;
+        assert!(parameters.ok);
+        let parameter_rows = parameters
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(parameter_rows.is_empty());
+
+        let tablespaces = call_sql_exec_http(
+            &state,
+            json!({
+                "sql":"SELECT tablespace_name, engine FROM information_schema.tablespaces WHERE engine = 'SkeinDB'"
+            }),
+        )
+        .await;
+        assert!(tablespaces.ok);
+        let tablespace_rows = tablespaces
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(tablespace_rows.len(), 1);
+        assert_eq!(tablespace_rows[0][0]["v"].as_str(), Some("skeindb_default"));
+        assert_eq!(tablespace_rows[0][1]["v"].as_str(), Some("SkeinDB"));
+
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
     }
@@ -29381,6 +29760,29 @@ mod tests {
         assert_eq!(role_rows[0][1]["v"].as_bool(), Some(true));
         assert_eq!(role_rows[0][2]["v"].as_bool(), Some(true));
 
+        let authid = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT rolname, rolcanlogin, rolsuper FROM pg_catalog.pg_authid WHERE rolname = 'root'"
+            }),
+        )
+        .await;
+        assert!(authid.ok);
+        let authid_rows = authid
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(authid_rows.len(), 1);
+        assert_eq!(authid_rows[0][0]["v"].as_str(), Some("root"));
+        assert_eq!(authid_rows[0][1]["v"].as_bool(), Some(true));
+        assert_eq!(authid_rows[0][2]["v"].as_bool(), Some(true));
+
         let users = call_sql_exec_http(
             &state,
             json!({
@@ -29403,6 +29805,26 @@ mod tests {
         assert_eq!(user_rows[0][0]["v"].as_str(), Some("root"));
         assert_eq!(user_rows[0][1]["v"].as_u64(), Some(10));
         assert_eq!(user_rows[0][2]["v"].as_bool(), Some(true));
+
+        let groups = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT groname FROM pg_catalog.pg_group WHERE groname = 'root'"
+            }),
+        )
+        .await;
+        assert!(groups.ok);
+        let group_rows = groups
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(group_rows.is_empty());
 
         let tablespaces = call_sql_exec_http(
             &state,
@@ -29448,6 +29870,48 @@ mod tests {
         assert_eq!(pg_table_rows[0][0]["v"].as_str(), Some("public"));
         assert_eq!(pg_table_rows[0][1]["v"].as_str(), Some("users"));
         assert_eq!(pg_table_rows[0][2]["v"].as_bool(), Some(true));
+
+        let pg_indexes = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT schemaname, tablename, indexname FROM pg_catalog.pg_indexes WHERE schemaname = 'public' AND tablename = 'users'"
+            }),
+        )
+        .await;
+        assert!(pg_indexes.ok);
+        let pg_index_rows = pg_indexes
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pg_index_rows.len(), 1);
+        assert_eq!(pg_index_rows[0][0]["v"].as_str(), Some("public"));
+        assert_eq!(pg_index_rows[0][1]["v"].as_str(), Some("users"));
+        assert_eq!(pg_index_rows[0][2]["v"].as_str(), Some("users_pkey"));
+
+        for sql in [
+            "SELECT matviewname FROM pg_catalog.pg_matviews WHERE schemaname = 'public'",
+            "SELECT sequencename FROM pg_catalog.pg_sequences WHERE schemaname = 'public'",
+            "SELECT attname FROM pg_catalog.pg_stats WHERE schemaname = 'public' AND tablename = 'users'",
+        ] {
+            let resp = call_sql_exec_http(&state, json!({"default_db":"app", "sql": sql})).await;
+            assert!(resp.ok, "expected success for {sql}");
+            let rows = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("result"))
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.get("rows"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            assert!(rows.is_empty(), "expected empty rows for {sql}");
+        }
 
         let pg_views = call_sql_exec_http(
             &state,
@@ -29539,6 +30003,28 @@ mod tests {
         assert_eq!(activity_rows[0][0]["v"].as_str(), Some("app"));
         assert_eq!(activity_rows[0][1]["v"].as_str(), Some("root"));
         assert_eq!(activity_rows[0][2]["v"].as_str(), Some("active"));
+
+        let database_stats = call_sql_exec_http(
+            &state,
+            json!({
+                "default_db":"app",
+                "sql":"SELECT datname, numbackends FROM pg_catalog.pg_stat_database WHERE datname = 'app'"
+            }),
+        )
+        .await;
+        assert!(database_stats.ok);
+        let database_stat_rows = database_stats
+            .result
+            .as_ref()
+            .and_then(|v| v.get("result"))
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.get("rows"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(database_stat_rows.len(), 1);
+        assert_eq!(database_stat_rows[0][0]["v"].as_str(), Some("app"));
+        assert_eq!(database_stat_rows[0][1]["v"].as_i64(), Some(1));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -38821,11 +39307,16 @@ mod tests {
         assert!(pg_catalog_result_column_override("relhasindex").is_some());
         assert!(pg_catalog_result_column_override("relhaspkey").is_some());
         assert!(pg_catalog_result_column_override("relnatts").is_some());
-        // pg_roles / pg_user / pg_tablespace columns
+        // pg_roles / pg_authid / pg_user / pg_group / pg_tablespace / pg_stat* columns
         assert!(pg_catalog_result_column_override("rolcanlogin").is_some());
         assert!(pg_catalog_result_column_override("rolconnlimit").is_some());
         assert!(pg_catalog_result_column_override("usesuper").is_some());
+        assert!(pg_catalog_result_column_override("grosysid").is_some());
         assert!(pg_catalog_result_column_override("spcowner").is_some());
+        assert!(pg_catalog_result_column_override("hasindexes").is_some());
+        assert!(pg_catalog_result_column_override("numbackends").is_some());
+        assert!(pg_catalog_result_column_override("null_frac").is_some());
+        assert!(pg_catalog_result_column_override("blk_read_time").is_some());
         // pg_attribute columns
         assert!(pg_catalog_result_column_override("attrelid").is_some());
         assert!(pg_catalog_result_column_override("atttypid").is_some());
