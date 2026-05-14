@@ -33319,6 +33319,28 @@ mod tests {
     }
 
     #[test]
+    fn embedding_value_id_combines_lsh_bucket_and_content_hash() -> anyhow::Result<()> {
+        let lit = Lit::Embedding {
+            dims: 3,
+            v: vec![0.25, -0.5, 0.75],
+            model: Some("text-embed-v1".to_string()),
+        };
+        let item = value_store_item(&lit).expect("embedding value-store item");
+        assert_eq!(item.kind, ValueKind::Embedding);
+
+        let bytes = embedding_bytes(3, &[0.25, -0.5, 0.75], Some("text-embed-v1"))
+            .expect("embedding bytes");
+        let bucket = embedding_lsh_bucket(&[0.25, -0.5, 0.75]);
+        let hash = value_id(&bytes);
+
+        assert_eq!(item.bytes, bytes);
+        assert_eq!(u64::from_le_bytes(item.id[0..8].try_into()?), bucket);
+        assert_eq!(&item.id[8..16], &hash[0..8]);
+        assert_eq!(item.id, embedding_value_id(bucket, &item.bytes));
+        Ok(())
+    }
+
+    #[test]
     fn vector_benchmark_reports_recall_and_latency() -> anyhow::Result<()> {
         let dir = temp_dir("vector_benchmark");
         let mut engine = Engine::open(&dir)?;

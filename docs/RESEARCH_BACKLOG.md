@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **72 done / 37 open** after adding the R10 vector benchmark harness. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
+- Checklist count: **77 done / 32 open** after reconciling the implemented R10 vector runtime and SkeinAdmin playground. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, embedding dependency tracking, the R10 example RAG app, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -50,6 +50,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-11 (v0.3.16 R09 evidence sync + catalog polish release): T290-T293 and T295 are closed with the documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed server listener, prepared-query roundtrip over QUIC streams, zero-RTT write rejection, connection rebind and multi-stream tests. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP. Compatibility also gains MySQL `information_schema.plugins/events/partitions/referential_constraints` and PostgreSQL `pg_roles` / `pg_user` / `pg_tablespace`. Counts now 71 done / 38 open.
 - 2026-05-13 (v0.3.17 catalog compatibility polish release): No research-checkbox change. MySQL compatibility gains `information_schema.check_constraints`, `parameters`, and `tablespaces`; PostgreSQL compatibility gains `pg_authid`, `pg_group`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, and `pg_stat_database`, with focused shared-executor tests. Counts remain 71 done / 38 open.
 - 2026-05-14 (R10 vector benchmark sync): T305 is closed with `vector.benchmark`, which compares exact brute-force top-k results against the HNSW-backed vector search path, reports nanosecond latency percentiles, and computes recall@k. SkeinAdmin's Vector panel now exposes the benchmark and sends the typed `vector.insert` / `vector.search` / `vector.index.status` payload shapes. Counts now 72 done / 37 open.
+- 2026-05-14 (R10 vector runtime reconciliation): T300-T303 and T307 are closed with existing runtime evidence plus focused tests: typed `Lit::Embedding` roundtrips, `ValueKind::Embedding` ValueStore items with LSH bucket + content-hash ValueIDs, HNSW search, LSH prefilter candidates, vector ORDER BY similarity, live QUIC vector RPC coverage, and a dedicated SkeinAdmin vector playground asset test. Counts now 77 done / 32 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -144,14 +145,14 @@ Source of truth matrix:
 - [x] T295: Connection migration test harness (simulated IP change). Evidence: `quic_connection_migration_rebind` and `r09_quic_concurrent_multi_stream_rpcs` rebind the client UDP socket and verify continued RPC success.
 
 ### Phase 31 — Vector embeddings as first-class ValueIDs (R10)
-- [ ] T300: Add `ValueKind::Embedding` and typed literal support in SkeinQL
-- [ ] T301: LSH bucket + content hash ValueID scheme (exact + approximate id)
-- [ ] T302: ANN search operator (bucket filter + distance refine) (baseline)
-- [ ] T303: Hybrid query: filter predicates + ANN order-by
+- [x] T300: Add `ValueKind::Embedding` and typed literal support in SkeinQL. Evidence: `ValueKind::Embedding`, `Lit::Embedding { dims, v, model }`, `embedding_literal_roundtrip`, and embedding persistence through `value_store_item`.
+- [x] T301: LSH bucket + content hash ValueID scheme (exact + approximate id). Evidence: `embedding_lsh_bucket`, `embedding_value_id`, `value_store_item` using `ValueKind::Embedding`, and `embedding_value_id_combines_lsh_bucket_and_content_hash`.
+- [x] T302: ANN search operator (bucket filter + distance refine) (baseline). Evidence: `vector.search`, HNSW `HnswIndex`, LSH fallback/refinement, `r10_hnsw_index_basic`, `vector_prefilter_candidates_match_bucket`, and `quic_vector_search_roundtrip`.
+- [x] T303: Hybrid query: filter predicates + ANN order-by. Evidence: vector filters in `vector.search`, `vector.cosine` / `vector.dot` / `vector.l2` order expressions, and `query_select_orders_by_vector_similarity`.
 - [ ] T304: Dependency tracking for embedding-derived queries (invalidate on source change)
 - [x] T305: Bench harness: recall/latency vs baseline index. Evidence: `vector.benchmark`, `VectorBenchmarkResult` latency percentiles, exact-vs-HNSW recall@k, `vector_benchmark_reports_recall_and_latency`, and `quic_vector_search_roundtrip` live RPC coverage.
 - [ ] T306: Example app: small RAG retrieval pipeline
-- [ ] T307: SkeinAdmin “Embeddings” page (index status + query playground)
+- [x] T307: SkeinAdmin “Embeddings” page (index status + query playground). Evidence: the Vector Search panel exposes DB/table/column/vector/PK/filter controls plus Search/Benchmark/Insert/Index Status actions, and `skeinadmin_vectors_panel_exposes_embedding_query_playground` locks the UI wiring.
 
 ### Phase 32 — Natural language to SkeinQL with verification (R12)
 - [x] T310: NL→SkeinQL prompt+schema packaging format (offline first). Evidence: `AiNlPromptPackage`, `build_nl_prompt`, `ai.nl.translate`, and `ai_nl_translate_packages_schema` / `ai_nl_translate_explain_execute_roundtrip`.

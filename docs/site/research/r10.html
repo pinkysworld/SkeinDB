@@ -54,6 +54,7 @@
       <li>Unified storage where structured data and embeddings share the same ValueStore infrastructure</li>
       <li>Hybrid query execution combining SQL predicates with approximate nearest neighbor search</li>
       <li>Built-in <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles</li>
+      <li>SkeinAdmin vector playground for search, benchmark, insert, and index-status workflows</li>
       <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation</li>
     </ul>
   </div>
@@ -66,7 +67,7 @@
     </div>
     <div class="phase">
       <h3>Phase 2 — Unified Storage</h3>
-      <p>Extend ValueStore for embedding-type values: automatic LSH computation on insert, approximate nearest neighbor via LSH bucket filtering, and exact distance refinement.</p>
+      <p>Extend ValueStore for embedding-type values: typed <code>Lit::Embedding</code> payloads, <code>ValueKind::Embedding</code> objects, automatic LSH computation on insert, approximate nearest neighbor via HNSW or LSH bucket filtering, and exact distance refinement.</p>
     </div>
     <div class="phase">
       <h3>Phase 3 — Hybrid Queries</h3>

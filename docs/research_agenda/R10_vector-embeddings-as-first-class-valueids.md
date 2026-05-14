@@ -29,9 +29,11 @@ SkeinDB's content-addressed ValueStore could naturally extend to vector embeddin
 
 ## Current Runtime Evidence
 
-- `vector.insert`, `vector.search`, and `vector.index.status` provide the current embedding insert, HNSW/LSH-backed search, and index-inspection surface.
-- `vector.benchmark` now supplies the first built-in E1 harness: it compares exact brute-force top-k results with the indexed search path, reports nanosecond latency percentiles, and computes recall@k for one or more query embeddings.
-- SkeinAdmin's Vector panel can run the benchmark from the same typed payloads used by client applications.
+- `Lit::Embedding` and `ValueKind::Embedding` provide typed SkeinQL literals and ValueStore-backed embedding objects.
+- Embedding ValueIDs combine a deterministic LSH bucket prefix with a content-hash suffix, so exact identity and approximate locality are both represented in the identifier.
+- `vector.insert`, `vector.search`, and `vector.index.status` provide the current embedding insert, HNSW/LSH-backed search, and index-inspection surface, including hybrid filter/order-by usage through vector scoring expressions.
+- `vector.benchmark` supplies the first built-in E1 harness: it compares exact brute-force top-k results with the indexed search path, reports nanosecond latency percentiles, and computes recall@k for one or more query embeddings.
+- SkeinAdmin's Vector panel can run search, benchmark, insert, and index-status calls from the same typed payloads used by client applications.
 
 ## Expected Contributions
 

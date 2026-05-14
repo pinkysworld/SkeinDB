@@ -188,6 +188,57 @@ fn skeinadmin_replay_panel_exposes_time_travel_and_integrity_controls() {
 }
 
 #[test]
+fn skeinadmin_vectors_panel_exposes_embedding_query_playground() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "data-panel=\"vectors\"",
+        "Vector Search (R10)",
+        "vecDb",
+        "vecTable",
+        "vecCol",
+        "vecQuery",
+        "vecPk",
+        "vecPrefilter",
+        "btnVecSearch",
+        "btnVecBenchmark",
+        "btnVecInsert",
+        "btnVecIndexStatus",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin vectors html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function readVectorLiteral()",
+        "function readVectorPk()",
+        "async function vecSearch()",
+        "async function vecBenchmark()",
+        "async function vecInsert()",
+        "async function vecIndexStatus()",
+        "vector.search",
+        "vector.benchmark",
+        "vector.insert",
+        "vector.index.status",
+        "filter:",
+        "rows: [{ pk: readVectorPk(), embedding: readVectorLiteral() }]",
+        "wire('btnVecBenchmark', vecBenchmark);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin vectors js should contain {marker}"
+        );
+    }
+}
+
+#[test]
 fn skeinadmin_easy_design_tab_exposes_wysiwyg_schema_editor() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let html_path = repo_root.join("web/skeinadmin/index.html");
