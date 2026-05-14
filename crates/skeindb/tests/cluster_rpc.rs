@@ -468,6 +468,7 @@ async fn admin_embeds_live_console_surface() -> anyhow::Result<()> {
     assert!(html.contains("easyCreatePreview"));
     assert!(html.contains("btnUserRevoke"));
     assert!(html.contains("btnClusterLeaveNode"));
+    assert!(html.contains("btnVecBenchmark"));
     assert!(body.contains("advisor.index_synthesize"));
     assert!(body.contains("advisor.apply_index"));
     assert!(body.contains("settings.list"));
@@ -475,6 +476,7 @@ async fn admin_embeds_live_console_surface() -> anyhow::Result<()> {
     assert!(body.contains("admin.user.revoke"));
     assert!(body.contains("telemetry.compat_summary"));
     assert!(body.contains("telemetry.workload_features"));
+    assert!(body.contains("vector.benchmark"));
     assert!(body.contains("vector.index.status"));
     assert!(body.contains("dp.audit.log"));
     assert!(body.contains("researchSettingsLoad"));

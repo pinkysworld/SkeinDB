@@ -17,7 +17,7 @@ What sets SkeinDB apart is what's already working under the hood:
 - **MVCC time-travel reads.** Run `SELECT ... AS OF '2026-04-01T00:00:00Z'` or set `@@skein.as_of` and read the database as it was at any retained timestamp, with history retention/GC controllable at runtime.
 - **Tamper-evident audit WAL.** A BLAKE3-256 hash chain plus checkpoint anchors, filtered forensic queries, boundary hashes, and Merkle inclusion proofs — verify the chain or export a proof bundle with one RPC.
 - **Dedup-preserving encryption.** Two AEAD modes (`ENC_RANDOM` and the convergent `ENC_MLE_DB`), key registration / rotation / re-encryption progress reporting, and a redacted in-memory audit ring — all driven from the SkeinAdmin Encryption panel.
-- **Vector search** with an HNSW graph index (`vector.insert`, `vector.search`).
+- **Vector search** with an HNSW graph index and exact-vs-indexed recall/latency reports (`vector.insert`, `vector.search`, `vector.benchmark`).
 - **Differential privacy** with COUNT/SUM/AVG aggregates, persisted budgets/audit, privacy ETags, seeded Laplace/Gaussian noise, and Rényi-DP composition tracking (`dp.*`).
 - **Oblivious execution controls** with per-table policies, padded scans, dummy ValueStore lookups, explain plans, and trace-based leakage/overhead reports (`oblivious.*`).
 - **Optimistic merge functions** with ETag/min-causality conflict hooks, built-in CRDT-style policies, values-only Wasm merge modules, cancellation safety, and `merge.evaluate` workload reports.

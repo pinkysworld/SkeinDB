@@ -1358,6 +1358,45 @@ Hybrid query example (filter + vector order):
 Notes:
 - ORDER BY with `vector.*` and `limit` may use an LSH bucket prefilter (approximate; can miss true top-k).
 
+#### vector.benchmark
+Compare exact brute-force top-k search against the indexed vector path and report latency percentiles plus recall@k.
+
+Params:
+
+```json
+{
+  "table": {"db":"mydb","table":"docs"},
+  "column": "embedding",
+  "queries": [
+    {"t":"embedding","dims":3,"v":[0.1,0.2,0.3],"model":"text-embed-v1"}
+  ],
+  "k": 10,
+  "metric": "cosine",
+  "use_index": true
+}
+```
+
+Result:
+
+```json
+{
+  "table": {"db":"mydb","table":"docs"},
+  "column": "embedding",
+  "metric": "cosine",
+  "k": 10,
+  "queries": 1,
+  "vectors": 1200,
+  "exact": {"strategy":"brute_force","total_matches":10,"latency":{"min_ns":300000,"p50_ns":310000,"p95_ns":350000,"p99_ns":350000,"max_ns":350000,"mean_ns":320000.0}},
+  "indexed": {"strategy":"hnsw","total_matches":10,"latency":{"min_ns":40000,"p50_ns":42000,"p95_ns":48000,"p99_ns":48000,"max_ns":48000,"mean_ns":43333.3}},
+  "recall_at_k": 0.9
+}
+```
+
+Notes:
+- `queries` must contain at least one embedding literal.
+- `use_index=false` returns only the exact baseline; otherwise the indexed path uses the same HNSW-backed search surface as `vector.search` with LSH bucketing disabled.
+- Latency fields are nanoseconds (`min_ns`, `p50_ns`, `p95_ns`, `p99_ns`, `max_ns`, `mean_ns`).
+
 #### vector.index.status
 Return LSH bucket statistics for the embedding column.
 

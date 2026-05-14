@@ -104,7 +104,7 @@ const RESEARCH_TRACKS = [
   { id: 'R07', title: 'Merge & CRDT', desc: 'Client-side merge functions with conflict hooks, offline queues, evaluation, and values-only Wasm execution.', methods: ['merge.apply', 'merge.register', 'merge.simulate', 'merge.evaluate', 'merge.wasm.register', 'merge.wasm.list', 'merge.wasm.drop'], panel: 'merge', status: 'hardened' },
   { id: 'R08', title: 'Incremental Views', desc: 'Dependency-graph-driven materialized view maintenance.', methods: ['view.create', 'view.refresh', 'view.evaluate', 'view.status', 'view.drop', 'view.explain_deps'], panel: 'views', status: 'hardened' },
   { id: 'R09', title: 'QUIC Transport', desc: 'HTTP/3 and QUIC-native protocol with prepared-query streams, 0-RTT write rejection, and rebind coverage; comparative p99 benchmarking remains open.', methods: ['transport.capabilities'], panel: 'cluster', status: 'hardened' },
-  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search.', methods: ['vector.search', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
+  { id: 'R10', title: 'Vector Embeddings', desc: 'First-class vector columns with kNN search and recall/latency benchmarking.', methods: ['vector.search', 'vector.benchmark', 'vector.insert', 'vector.index.status'], panel: 'vectors', status: 'hardened' },
   { id: 'R11', title: 'Autoparameterization', desc: 'LLM-assisted SQL parameterization.', methods: ['ai.autoparam.analyze', 'ai.autoparam.classify'], panel: 'nl', status: 'hardened' },
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'hardened' },
   { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch', 'query.select'], panel: 'workspace', status: 'hardened' },
@@ -194,7 +194,8 @@ const RPC_TEMPLATES = [
   { label: 'tx.begin', method: 'tx.begin', params: { read_only:false } },
   { label: 'tx.commit', method: 'tx.commit', params: { tx_id:'tx_demo' } },
   { label: 'tx.rollback', method: 'tx.rollback', params: { tx_id:'tx_demo' } },
-  { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, query:{dims:3,v:[0.1,0.2,0.3]}, k:5 } },
+  { label: 'vector.search', method: 'vector.search', params: { table:{db:'demo',table:'items'}, column:'embedding', query:{t:'embedding',dims:3,v:[0.1,0.2,0.3]}, k:5 } },
+  { label: 'vector.benchmark', method: 'vector.benchmark', params: { table:{db:'demo',table:'items'}, column:'embedding', queries:[{t:'embedding',dims:3,v:[0.1,0.2,0.3]}], k:5 } },
   { label: 'dp.aggregate', method: 'dp.aggregate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'count'}], epsilon:1.0, mechanism:'laplace', seed:42 } },
   { label: 'dp.evaluate', method: 'dp.evaluate', params: { table:{db:'demo',table:'events'}, aggregates:[{op:'sum',column:'value',bounds:{min:0,max:100}}], epsilons:[0.25,0.5,1,2], trials:25, mechanism:'laplace', seed:42 } },
   { label: 'oblivious.policy.get', method: 'oblivious.policy.get', params: { table:{db:'demo', table:'events'} } },
@@ -5404,31 +5405,55 @@ async function researchSettingsSave() {
 // ---------------------------------------------------------------------------
 // Vectors (R10)
 // ---------------------------------------------------------------------------
+function readVectorLiteral() {
+  const raw = $('vecQuery')?.value.trim();
+  if (!raw) throw new Error('Vector required');
+  const v = raw.split(',').map((part) => Number(part.trim()));
+  if (!v.length || v.some((n) => !Number.isFinite(n))) throw new Error('Vector must contain comma-separated numbers');
+  return { t: 'embedding', dims: v.length, v };
+}
+
+function readVectorColumn() {
+  return $('vecCol')?.value.trim() || 'embedding';
+}
+
+function readVectorPk() {
+  const raw = $('vecPk')?.value.trim();
+  const pk = raw ? parseJsonInput(raw, 'PK JSON') : [{ t: 'u64', v: 1 }];
+  if (!Array.isArray(pk)) throw new Error('PK JSON must be an array of typed literals');
+  return pk;
+}
+
 async function vecSearch() {
   try {
     const t = readDbTable('vecDb','vecTable');
-    const raw = $('vecQuery')?.value.trim(); if (!raw) throw new Error('Query vector required');
-    const v = raw.split(',').map(Number);
+    const query = readVectorLiteral();
     const k = parseInt($('vecK')?.value,10) || 5;
-    const col = $('vecCol')?.value.trim();
+    const col = readVectorColumn();
     const prefilter = $('vecPrefilter')?.value.trim();
-    const params = cleanParams({ table: t, query: { dims: v.length, v }, k, column: col || undefined, prefilter: prefilter ? parseJsonInput(prefilter,'Prefilter') : undefined });
+    const params = cleanParams({ table: t, query, k, column: col, filter: prefilter ? parseJsonInput(prefilter,'Filter JSON') : undefined });
     await call('vector.search', params, 'vecOut');
+  } catch (e) { setOut({error:String(e)},'vecOut'); }
+}
+
+async function vecBenchmark() {
+  try {
+    const t = readDbTable('vecDb','vecTable');
+    const query = readVectorLiteral();
+    const k = parseInt($('vecK')?.value,10) || 5;
+    await call('vector.benchmark', { table: t, column: readVectorColumn(), queries: [query], k, metric: 'cosine' }, 'vecOut');
   } catch (e) { setOut({error:String(e)},'vecOut'); }
 }
 
 async function vecInsert() {
   try {
     const t = readDbTable('vecDb','vecTable');
-    const raw = $('vecQuery')?.value.trim(); if (!raw) throw new Error('Vector required');
-    const v = raw.split(',').map(Number);
-    const col = $('vecCol')?.value.trim() || 'embedding';
-    await call('vector.insert', { table: t, column: col, vector: { dims: v.length, v } }, 'vecOut');
+    await call('vector.insert', { table: t, column: readVectorColumn(), rows: [{ pk: readVectorPk(), embedding: readVectorLiteral() }], upsert: true }, 'vecOut');
   } catch (e) { setOut({error:String(e)},'vecOut'); }
 }
 
 async function vecIndexStatus() {
-  try { const t = readDbTable('vecDb','vecTable'); await call('vector.index.status',{table:t},'vecOut'); } catch (e) { setOut({error:String(e)},'vecOut'); }
+  try { const t = readDbTable('vecDb','vecTable'); await call('vector.index.status',{table:t,column:readVectorColumn()},'vecOut'); } catch (e) { setOut({error:String(e)},'vecOut'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -6648,6 +6673,7 @@ wire('btnImportData', importData);
 
 // Vectors
 wire('btnVecSearch', vecSearch);
+wire('btnVecBenchmark', vecBenchmark);
 wire('btnVecInsert', vecInsert);
 wire('btnVecIndexStatus', vecIndexStatus);
 

@@ -822,6 +822,26 @@ async fn quic_vector_search_roundtrip() -> anyhow::Result<()> {
     let pk = matches[0]["pk"].as_array().cloned().unwrap_or_default();
     assert_eq!(pk[0]["v"].as_u64(), Some(1));
 
+    let resp = client
+        .rpc(
+            "vector.benchmark",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "queries": [{"t":"embedding","dims":3,"v":[1.0,0.0,0.0]}],
+                "k": 1,
+                "metric": "cosine"
+            }),
+        )
+        .await
+        .context("vector test benchmark embeddings")?;
+    assert!(resp.ok);
+    let result = resp.result.expect("missing benchmark result");
+    assert_eq!(result["vectors"].as_u64(), Some(2));
+    assert_eq!(result["exact"]["total_matches"].as_u64(), Some(1));
+    assert_eq!(result["indexed"]["total_matches"].as_u64(), Some(1));
+    assert_eq!(result["recall_at_k"].as_f64(), Some(1.0));
+
     Ok(())
 }
 

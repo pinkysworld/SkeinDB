@@ -125,7 +125,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-research-extensions-experimental">SkeinQL Research Extensions (Experimental)<a class="headerlink" href="#skeinql-research-extensions-experimental" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-05-11</p>
+<p>Last updated: 2026-05-14</p>
 <p>This document lists <strong>experimental</strong> SkeinQL method families that support the <strong>20-proposal research agenda</strong>.</p>
 <p>Principles:
 - These methods are <strong>not required</strong> for MySQL compatibility.
@@ -181,7 +181,8 @@
 <p>Related: R10</p>
 <ul>
 <li><code>vector.insert</code> — store embedding values (ValueKind::Embedding)</li>
-<li><code>vector.search</code> — ANN query (LSH buckets + refine)</li>
+<li><code>vector.search</code> — ANN query (HNSW when available, with LSH bucket filtering as the prototype fallback)</li>
+<li><code>vector.benchmark</code> — exact brute-force vs indexed top-k recall and latency report for embedding columns</li>
 <li><code>vector.index.status</code> — index health and coverage</li>
 </ul>
 <h2 id="8-ai-ai-assisted-query-workflows">8. ai.* — AI-assisted query workflows<a class="headerlink" href="#8-ai-ai-assisted-query-workflows" title="Permanent link">¶</a></h2>

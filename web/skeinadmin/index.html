@@ -1379,8 +1379,9 @@
             <div class="card wide"><h2>Vector Search (R10)</h2>
             <div class="row"><div class="field"><label>DB</label><input id="vecDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="vecTable" placeholder="items" /></div><div class="field"><label>Column</label><input id="vecCol" placeholder="embedding" /></div></div>
             <div class="field"><label>Query (comma floats)</label><input id="vecQuery" placeholder="0.1, 0.2, 0.3" /></div>
-            <div class="row"><div class="field"><label>k</label><input id="vecK" type="number" value="5" /></div><div class="field"><label>Prefilter</label><input id="vecPrefilter" /></div></div>
-            <div class="actions"><button id="btnVecSearch" class="primary sm">Search</button><button id="btnVecInsert" class="sm">Insert</button><button id="btnVecIndexStatus" class="sm">Index Status</button></div>
+            <div class="row"><div class="field"><label>k</label><input id="vecK" type="number" value="5" /></div><div class="field"><label>PK JSON</label><input id="vecPk" value='[{"t":"u64","v":1}]' /></div></div>
+            <div class="field"><label>Filter JSON</label><input id="vecPrefilter" /></div>
+            <div class="actions"><button id="btnVecSearch" class="primary sm">Search</button><button id="btnVecBenchmark" class="sm">Benchmark</button><button id="btnVecInsert" class="sm">Insert</button><button id="btnVecIndexStatus" class="sm">Index Status</button></div>
             <pre id="vecOut">Ready.</pre>
           </div></div>
         </section>

@@ -1,7 +1,7 @@
 # SkeinDB API Reference
 
-Last updated: 2026-05-11
-Runtime baseline: v0.3.17, SkeinQL 1.0, 133 advertised RPC methods
+Last updated: 2026-05-14
+Runtime baseline: v0.3.17 plus current main, SkeinQL 1.0, 134 advertised RPC methods
 
 This page is the practical API map for clients that talk to SkeinDB directly. The normative language and data model live in `SKEINQL.md`; this reference summarizes endpoints, method families, stability, result formats, and client behavior that should stay consistent across HTTP, QUIC, and embedded admin calls.
 
@@ -76,7 +76,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `forensic.*` | query, verify, export | Experimental | Hash-chain audit, filtered forensic query, inclusion/boundary proof, and export bundle surfaces. |
 | `merge.*` | register, apply, simulate, evaluate, Wasm registry | Experimental | Optimistic conflict resolution, values-only Wasm merge policies, and conflict workload evaluation. |
 | `view.*` | create, drop, refresh, evaluate, status, explain deps | Experimental | Incremental/full/auto materialized views plus an incremental-vs-full oracle/benchmark report. |
-| `vector.*` | insert, search, index status | Experimental | Embedding storage and ANN search. |
+| `vector.*` | insert, search, benchmark, index status | Experimental | Embedding storage, ANN search, and exact-vs-indexed recall/latency measurement. |
 | `ai.*` | autoparam classification/analysis, NL translate/explain/execute | Experimental | Verification-gated natural-language workflows. |
 | `advisor.*` | synthesize, apply, dismiss, history | Experimental | Dependency-driven index suggestions and lifecycle. |
 | `migration.*` | intent report, rewrite preview, report export | Experimental | Migration intent detection and reporting. |
@@ -88,7 +88,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 
 ## Current advertised method set
 
-The runtime advertises this set through `system.capabilities.methods` in v0.3.17:
+The runtime advertises this set through `system.capabilities.methods` on current main:
 
 ```text
 system.ping, system.version, system.shutdown, system.capabilities, transport.capabilities,
@@ -105,7 +105,7 @@ schema.merge_status, schema.apply_merge,
 sql.exec, data.get, data.insert, data.update, data.delete,
 query.prepare, query.execute_prepared, query.select, query.patch, query.subscribe,
 cdc.subscribe_table, cdc.subscribe_query, cdc.poll, cdc.ack, cdc.close,
-vector.insert, vector.search, vector.index.status,
+vector.insert, vector.search, vector.benchmark, vector.index.status,
 ai.autoparam.classify, ai.autoparam.analyze, ai.nl.translate, ai.nl.explain, ai.nl.execute,
 dp.aggregate, dp.evaluate, dp.budget.set, dp.budget.get, dp.audit.log,
 oblivious.policy.set, oblivious.policy.get, oblivious.explain, oblivious.evaluate,

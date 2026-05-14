@@ -47,10 +47,10 @@ use skeindb_skeinql::{
         QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams,
         SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
         TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
-        VectorIndexStatusParams, VectorInsertParams, VectorSearchParams, ViewCreateParams,
-        ViewDropParams, ViewEvaluateParams, ViewExplainDepsParams, ViewRefreshParams,
-        ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams,
-        WasmPlanRunParams,
+        VectorBenchmarkParams, VectorIndexStatusParams, VectorInsertParams, VectorSearchParams,
+        ViewCreateParams, ViewDropParams, ViewEvaluateParams, ViewExplainDepsParams,
+        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams,
+        WasmPlanInspectParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
@@ -14509,6 +14509,7 @@ fn classify_query_workload(method: &str, params: Option<&Value>) -> QueryWorkloa
         | "query.patch"
         | "query.subscribe"
         | "vector.search"
+        | "vector.benchmark"
         | "cluster.route_query" => QueryWorkloadKind::RangeRead,
         "sql.exec" => {
             if sql_exec_is_read_only(params) {
@@ -15846,6 +15847,13 @@ pub(crate) async fn handle_rpc(
                     let p: VectorSearchParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
                     let r = eng.vector_search(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "vector.benchmark" => {
+                    let p: VectorBenchmarkParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.vector_benchmark(p).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -27188,6 +27196,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "migration.report_export"
             | "data.get"
             | "vector.search"
+            | "vector.benchmark"
             | "vector.index.status"
             | "ai.autoparam.classify"
             | "ai.autoparam.analyze"
@@ -27361,6 +27370,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "data.delete",
         "vector.insert",
         "vector.search",
+        "vector.benchmark",
         "vector.index.status",
         "ai.autoparam.classify",
         "ai.autoparam.analyze",
@@ -28854,7 +28864,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 133);
+        assert_eq!(methods.len(), 134);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -28873,6 +28883,7 @@ mod tests {
         assert!(html.contains("settingsKeyList"));
         assert!(html.contains("btnClusterLeaveNode"));
         assert!(html.contains("btnUserRevoke"));
+        assert!(html.contains("btnVecBenchmark"));
         assert!(html.contains("data-panel=\"security\""));
         assert!(html.contains("btnShutdown"));
         assert!(!html.to_lowercase().contains("phpmyadmin"));
@@ -28889,6 +28900,7 @@ mod tests {
         assert!(js.contains("advisor.apply_index"));
         assert!(js.contains("telemetry.compat_summary"));
         assert!(js.contains("telemetry.workload_features"));
+        assert!(js.contains("vector.benchmark"));
         assert!(js.contains("vector.index.status"));
         assert!(js.contains("dp.audit.log"));
         assert!(js.contains("security:"));

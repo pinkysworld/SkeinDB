@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R10 — Vector Embeddings as First-Class ValueIDs · SkeinDB</title>
-  <meta name="description" content="LSH-extended ValueID scheme for unified structured data and vector embedding storage. SkeinDB Research Track R10.">
+  <meta name="description" content="First-class vector embeddings with HNSW search and exact-vs-indexed recall benchmarking. SkeinDB Research Track R10.">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Hardened Runtime</strong> — Vector insert/search/status plus recall and latency benchmarking are available through SkeinQL.</span>
   </div>
 
   <div class="novelty-card">
@@ -53,6 +53,7 @@
       <li><strong>LSH-extended ValueID scheme</strong> for approximate content addressing in a unified storage model</li>
       <li>Unified storage where structured data and embeddings share the same ValueStore infrastructure</li>
       <li>Hybrid query execution combining SQL predicates with approximate nearest neighbor search</li>
+      <li>Built-in <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles</li>
       <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation</li>
     </ul>
   </div>
@@ -70,6 +71,10 @@
     <div class="phase">
       <h3>Phase 3 — Hybrid Queries</h3>
       <p>SkeinQL extensions combining SQL predicates with vector similarity: <code>SELECT * FROM docs WHERE category = 'tech' ORDER BY embedding &lt;-&gt; query_vector LIMIT 10</code>.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3b — Benchmark Harness</h3>
+      <p><code>vector.benchmark</code> runs exact brute-force top-k next to the indexed vector path, returning recall@k and nanosecond latency percentiles for repeatable evaluation.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Dependency Tracking</h3>

@@ -1,6 +1,6 @@
 # SkeinQL Research Extensions (Experimental)
 
-Last updated: 2026-05-11
+Last updated: 2026-05-14
 
 This document lists **experimental** SkeinQL method families that support the **20-proposal research agenda**.
 
@@ -59,7 +59,8 @@ Related: R09
 Related: R10
 
 - `vector.insert` — store embedding values (ValueKind::Embedding)
-- `vector.search` — ANN query (LSH buckets + refine)
+- `vector.search` — ANN query (HNSW when available, with LSH bucket filtering as the prototype fallback)
+- `vector.benchmark` — exact brute-force vs indexed top-k recall and latency report for embedding columns
 - `vector.index.status` — index health and coverage
 
 ## 8. ai.* — AI-assisted query workflows

@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **71 done / 38 open** after syncing the R09 QUIC transport evidence. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
+- Checklist count: **72 done / 37 open** after adding the R10 vector benchmark harness. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -49,6 +49,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-11 (v0.3.15 R08 closure release): T280-T287 are closed with persisted `view.create` definitions, column-granular dependency metadata, restricted filter/project/group-by incremental maintenance, auto full-refresh fallback, read-only `view.evaluate` correctness/benchmark reports, fixed SkeinAdmin Views refresh/evaluate controls, MySQL `information_schema.views`, PostgreSQL `pg_catalog.pg_views`, and focused engine/RPC/admin/catalog tests. Counts now 66 done / 43 open.
 - 2026-05-11 (v0.3.16 R09 evidence sync + catalog polish release): T290-T293 and T295 are closed with the documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed server listener, prepared-query roundtrip over QUIC streams, zero-RTT write rejection, connection rebind and multi-stream tests. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP. Compatibility also gains MySQL `information_schema.plugins/events/partitions/referential_constraints` and PostgreSQL `pg_roles` / `pg_user` / `pg_tablespace`. Counts now 71 done / 38 open.
 - 2026-05-13 (v0.3.17 catalog compatibility polish release): No research-checkbox change. MySQL compatibility gains `information_schema.check_constraints`, `parameters`, and `tablespaces`; PostgreSQL compatibility gains `pg_authid`, `pg_group`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, and `pg_stat_database`, with focused shared-executor tests. Counts remain 71 done / 38 open.
+- 2026-05-14 (R10 vector benchmark sync): T305 is closed with `vector.benchmark`, which compares exact brute-force top-k results against the HNSW-backed vector search path, reports nanosecond latency percentiles, and computes recall@k. SkeinAdmin's Vector panel now exposes the benchmark and sends the typed `vector.insert` / `vector.search` / `vector.index.status` payload shapes. Counts now 72 done / 37 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -148,7 +149,7 @@ Source of truth matrix:
 - [ ] T302: ANN search operator (bucket filter + distance refine) (baseline)
 - [ ] T303: Hybrid query: filter predicates + ANN order-by
 - [ ] T304: Dependency tracking for embedding-derived queries (invalidate on source change)
-- [ ] T305: Bench harness: recall/latency vs baseline index
+- [x] T305: Bench harness: recall/latency vs baseline index. Evidence: `vector.benchmark`, `VectorBenchmarkResult` latency percentiles, exact-vs-HNSW recall@k, `vector_benchmark_reports_recall_and_latency`, and `quic_vector_search_roundtrip` live RPC coverage.
 - [ ] T306: Example app: small RAG retrieval pipeline
 - [ ] T307: SkeinAdmin “Embeddings” page (index status + query playground)
 

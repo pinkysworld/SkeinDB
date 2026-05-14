@@ -1148,6 +1148,39 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 
 <p>Notes:
 - ORDER BY with <code>vector.*</code> and <code>limit</code> may use an LSH bucket prefilter (approximate; can miss true top-k).</p>
+<h4 id="vectorbenchmark">vector.benchmark<a class="headerlink" href="#vectorbenchmark" title="Permanent link">¶</a></h4>
+<p>Compare exact brute-force top-k search against the indexed vector path and report latency percentiles plus recall@k.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;docs&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;embedding&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;queries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;embedding&quot;</span><span class="p">,</span><span class="nt">&quot;dims&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:[</span><span class="mf">0.1</span><span class="p">,</span><span class="mf">0.2</span><span class="p">,</span><span class="mf">0.3</span><span class="p">],</span><span class="nt">&quot;model&quot;</span><span class="p">:</span><span class="s2">&quot;text-embed-v1&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;k&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;metric&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cosine&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;use_index&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;docs&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;embedding&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;metric&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cosine&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;k&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;queries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vectors&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;exact&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;strategy&quot;</span><span class="p">:</span><span class="s2">&quot;brute_force&quot;</span><span class="p">,</span><span class="nt">&quot;total_matches&quot;</span><span class="p">:</span><span class="mi">10</span><span class="p">,</span><span class="nt">&quot;latency&quot;</span><span class="p">:{</span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="mi">300000</span><span class="p">,</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="mi">310000</span><span class="p">,</span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="mi">350000</span><span class="p">,</span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="mi">350000</span><span class="p">,</span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="mi">350000</span><span class="p">,</span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="mf">320000.0</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;indexed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;strategy&quot;</span><span class="p">:</span><span class="s2">&quot;hnsw&quot;</span><span class="p">,</span><span class="nt">&quot;total_matches&quot;</span><span class="p">:</span><span class="mi">10</span><span class="p">,</span><span class="nt">&quot;latency&quot;</span><span class="p">:{</span><span class="nt">&quot;min_ns&quot;</span><span class="p">:</span><span class="mi">40000</span><span class="p">,</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="mi">42000</span><span class="p">,</span><span class="nt">&quot;p95_ns&quot;</span><span class="p">:</span><span class="mi">48000</span><span class="p">,</span><span class="nt">&quot;p99_ns&quot;</span><span class="p">:</span><span class="mi">48000</span><span class="p">,</span><span class="nt">&quot;max_ns&quot;</span><span class="p">:</span><span class="mi">48000</span><span class="p">,</span><span class="nt">&quot;mean_ns&quot;</span><span class="p">:</span><span class="mf">43333.3</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;recall_at_k&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.9</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Notes:
+- <code>queries</code> must contain at least one embedding literal.
+- <code>use_index=false</code> returns only the exact baseline; otherwise the indexed path uses the same HNSW-backed search surface as <code>vector.search</code> with LSH bucketing disabled.
+- Latency fields are nanoseconds (<code>min_ns</code>, <code>p50_ns</code>, <code>p95_ns</code>, <code>p99_ns</code>, <code>max_ns</code>, <code>mean_ns</code>).</p>
 <h4 id="vectorindexstatus">vector.index.status<a class="headerlink" href="#vectorindexstatus" title="Permanent link">¶</a></h4>
 <p>Return LSH bucket statistics for the embedding column.</p>
 <p>Params:</p>

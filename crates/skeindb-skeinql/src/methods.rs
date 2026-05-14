@@ -611,6 +611,56 @@ pub struct VectorSearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorBenchmarkParams {
+    pub table: BaseTableRef,
+    pub column: String,
+    pub queries: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_index: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorBenchmarkLatencyStats {
+    pub min_ns: u64,
+    pub p50_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub max_ns: u64,
+    pub mean_ns: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorBenchmarkRunStats {
+    pub strategy: String,
+    pub total_matches: u64,
+    pub latency: VectorBenchmarkLatencyStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorBenchmarkResult {
+    pub table: BaseTableRef,
+    pub column: String,
+    pub metric: String,
+    pub k: u64,
+    pub queries: u64,
+    pub vectors: u64,
+    pub exact: VectorBenchmarkRunStats,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed: Option<VectorBenchmarkRunStats>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_at_k: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorIndexStatusParams {
     pub table: BaseTableRef,
     pub column: String,

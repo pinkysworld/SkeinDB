@@ -76,12 +76,13 @@ use skeindb_skeinql::methods::{
     ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
     SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
     SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
-    SchemaProposeChangeResult, VectorIndexStatusParams, VectorIndexStatusResult,
-    VectorInsertParams, VectorInsertResult, VectorSearchMatch, VectorSearchParams,
-    VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams, ViewDropResult,
-    ViewEvaluateParams, ViewEvaluateResult, ViewExplainDepsParams, ViewExplainDepsResult,
-    ViewRefreshParams, ViewRefreshResult, ViewStatusParams, ViewStatusResult,
-    WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
+    SchemaProposeChangeResult, VectorBenchmarkLatencyStats, VectorBenchmarkParams,
+    VectorBenchmarkResult, VectorBenchmarkRunStats, VectorIndexStatusParams,
+    VectorIndexStatusResult, VectorInsertParams, VectorInsertResult, VectorSearchMatch,
+    VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams,
+    ViewDropResult, ViewEvaluateParams, ViewEvaluateResult, ViewExplainDepsParams,
+    ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult, ViewStatusParams,
+    ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
     WasmPlanEdgePackageResult, WasmPlanInspectParams, WasmPlanInspectResult,
 };
 use skeindb_skeinql::types::{
@@ -4636,6 +4637,150 @@ impl Engine {
         }
 
         Ok(VectorSearchResult { matches })
+    }
+
+    pub fn vector_benchmark(
+        &self,
+        params: VectorBenchmarkParams,
+    ) -> anyhow::Result<VectorBenchmarkResult> {
+        if params.queries.is_empty() {
+            anyhow::bail!("invalid_request: at least one query embedding is required");
+        }
+
+        let metric = parse_vector_metric(params.metric.as_deref())?;
+        let k = params.k.unwrap_or(10).clamp(1, 1000) as usize;
+        let use_index = params.use_index.unwrap_or(true);
+
+        let mut exact_latencies = Vec::new();
+        let mut indexed_latencies = Vec::new();
+        let mut exact_matches_total = 0u64;
+        let mut indexed_matches_total = 0u64;
+        let mut vectors = 0u64;
+        let mut recall_sum = 0.0f64;
+        let mut recall_count = 0u64;
+
+        for query in &params.queries {
+            let exact_start = Instant::now();
+            let (exact_matches, scanned) =
+                self.vector_exact_search(&params.table, &params.column, query, metric, k)?;
+            exact_latencies.push(elapsed_ns(exact_start));
+            exact_matches_total += exact_matches.len() as u64;
+            vectors = vectors.max(scanned);
+
+            if use_index {
+                let indexed_start = Instant::now();
+                let indexed = self.vector_search(VectorSearchParams {
+                    table: params.table.clone(),
+                    column: params.column.clone(),
+                    query: query.clone(),
+                    k: Some(k as u64),
+                    metric: params.metric.clone(),
+                    filter: None,
+                    include_row: Some(false),
+                    use_lsh: Some(false),
+                })?;
+                indexed_latencies.push(elapsed_ns(indexed_start));
+                indexed_matches_total += indexed.matches.len() as u64;
+                recall_sum += vector_recall_at_k(&exact_matches, &indexed.matches, k);
+                recall_count += 1;
+            }
+        }
+
+        Ok(VectorBenchmarkResult {
+            table: params.table,
+            column: params.column,
+            metric: vector_metric_name(metric).to_string(),
+            k: k as u64,
+            queries: params.queries.len() as u64,
+            vectors,
+            exact: VectorBenchmarkRunStats {
+                strategy: "brute_force".to_string(),
+                total_matches: exact_matches_total,
+                latency: vector_latency_stats(exact_latencies),
+            },
+            indexed: if use_index {
+                Some(VectorBenchmarkRunStats {
+                    strategy: "hnsw".to_string(),
+                    total_matches: indexed_matches_total,
+                    latency: vector_latency_stats(indexed_latencies),
+                })
+            } else {
+                None
+            },
+            recall_at_k: if recall_count == 0 {
+                None
+            } else {
+                Some(recall_sum / recall_count as f64)
+            },
+        })
+    }
+
+    fn vector_exact_search(
+        &self,
+        table: &BaseTableRef,
+        column: &str,
+        query: &Lit,
+        metric: VectorMetric,
+        k: usize,
+    ) -> anyhow::Result<(Vec<VectorSearchMatch>, u64)> {
+        let (schema, tdata) = self.get_table(table)?;
+        if schema.primary_key.is_empty() {
+            anyhow::bail!("invalid_request: table has no primary key");
+        }
+        let col = schema
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown column {column}"))?;
+        if col.r#type.kind != "embedding" {
+            anyhow::bail!("invalid_request: column {column} is not embedding");
+        }
+
+        let (dims, query_vec, query_model) = embedding_ref(query)?;
+        let mut scanned = 0u64;
+        let mut matches = Vec::new();
+        for entry in tdata.rows.iter() {
+            if entry.deleted {
+                continue;
+            }
+            let Some(lit) = entry.row.get(column) else {
+                continue;
+            };
+            let (row_dims, row_vec, row_model) = match embedding_ref(lit) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if row_dims != dims {
+                anyhow::bail!("invalid_request: embedding dims mismatch");
+            }
+            if let Some(model) = query_model {
+                if row_model != Some(model) {
+                    continue;
+                }
+            }
+            scanned += 1;
+            let score = vector_score(metric, query_vec, row_vec)?;
+            let pk = extract_pk(schema, &entry.row)?;
+            let embedding_id = embedding_id_for_lit(lit)?;
+            matches.push(VectorSearchMatch {
+                pk,
+                score,
+                embedding_id: hex16(&embedding_id),
+                row: None,
+            });
+        }
+
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| pk_key(&a.pk).cmp(&pk_key(&b.pk)))
+        });
+        if matches.len() > k {
+            matches.truncate(k);
+        }
+
+        Ok((matches, scanned))
     }
 
     /// Rebuild (or build) the HNSW index for a given table+column.
@@ -21834,6 +21979,64 @@ fn parse_vector_metric(metric: Option<&str>) -> anyhow::Result<VectorMetric> {
     }
 }
 
+fn vector_metric_name(metric: VectorMetric) -> &'static str {
+    match metric {
+        VectorMetric::Cosine => "cosine",
+        VectorMetric::Dot => "dot",
+        VectorMetric::L2 => "l2",
+    }
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn vector_latency_stats(mut latencies: Vec<u64>) -> VectorBenchmarkLatencyStats {
+    if latencies.is_empty() {
+        return VectorBenchmarkLatencyStats {
+            min_ns: 0,
+            p50_ns: 0,
+            p95_ns: 0,
+            p99_ns: 0,
+            max_ns: 0,
+            mean_ns: 0.0,
+        };
+    }
+    latencies.sort_unstable();
+    let len = latencies.len();
+    let percentile = |pct: usize| -> u64 {
+        let idx = ((len * pct).div_ceil(100)).saturating_sub(1).min(len - 1);
+        latencies[idx]
+    };
+    let sum: u128 = latencies.iter().map(|v| *v as u128).sum();
+    VectorBenchmarkLatencyStats {
+        min_ns: latencies[0],
+        p50_ns: percentile(50),
+        p95_ns: percentile(95),
+        p99_ns: percentile(99),
+        max_ns: latencies[len - 1],
+        mean_ns: sum as f64 / len as f64,
+    }
+}
+
+fn vector_recall_at_k(exact: &[VectorSearchMatch], indexed: &[VectorSearchMatch], k: usize) -> f64 {
+    let exact_limit = exact.len().min(k);
+    if exact_limit == 0 {
+        return 1.0;
+    }
+    let exact_pks: HashSet<String> = exact
+        .iter()
+        .take(exact_limit)
+        .map(|m| pk_key(&m.pk))
+        .collect();
+    let hits = indexed
+        .iter()
+        .take(k)
+        .filter(|m| exact_pks.contains(&pk_key(&m.pk)))
+        .count();
+    hits as f64 / exact_limit as f64
+}
+
 fn vector_score(metric: VectorMetric, a: &[f32], b: &[f32]) -> anyhow::Result<f64> {
     if a.len() != b.len() {
         anyhow::bail!("invalid_request: embedding dims mismatch");
@@ -33110,6 +33313,94 @@ mod tests {
             }
         }
         assert_eq!(candidates, expected);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn vector_benchmark_reports_recall_and_latency() -> anyhow::Result<()> {
+        let dir = temp_dir("vector_benchmark");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "docs",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "embedding".to_string(),
+                    r#type: type_desc("embedding"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "docs".to_string(),
+            r#as: None,
+        };
+        engine.vector_insert(VectorInsertParams {
+            table: table.clone(),
+            column: "embedding".to_string(),
+            rows: vec![
+                skeindb_skeinql::methods::VectorInsertRow {
+                    pk: vec![Lit::U64 { v: 1 }],
+                    embedding: Lit::Embedding {
+                        dims: 3,
+                        v: vec![1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                },
+                skeindb_skeinql::methods::VectorInsertRow {
+                    pk: vec![Lit::U64 { v: 2 }],
+                    embedding: Lit::Embedding {
+                        dims: 3,
+                        v: vec![0.8, 0.1, 0.0],
+                        model: None,
+                    },
+                },
+                skeindb_skeinql::methods::VectorInsertRow {
+                    pk: vec![Lit::U64 { v: 3 }],
+                    embedding: Lit::Embedding {
+                        dims: 3,
+                        v: vec![-1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                },
+            ],
+            upsert: false,
+        })?;
+
+        let result = engine.vector_benchmark(VectorBenchmarkParams {
+            table,
+            column: "embedding".to_string(),
+            queries: vec![Lit::Embedding {
+                dims: 3,
+                v: vec![1.0, 0.0, 0.0],
+                model: None,
+            }],
+            k: Some(1),
+            metric: Some("cosine".to_string()),
+            use_index: Some(true),
+        })?;
+
+        assert_eq!(result.metric, "cosine");
+        assert_eq!(result.queries, 1);
+        assert_eq!(result.vectors, 3);
+        assert_eq!(result.exact.total_matches, 1);
+        let indexed = result.indexed.expect("indexed benchmark stats");
+        assert_eq!(indexed.total_matches, 1);
+        assert_eq!(result.recall_at_k, Some(1.0));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

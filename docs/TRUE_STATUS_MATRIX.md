@@ -1,7 +1,9 @@
 # SkeinDB True Status Matrix
 
-Last updated: 2026-05-13
+Last updated: 2026-05-14
 Honest claims: SkeinDB does **not** provide and does **not** claim "100% MySQL compatibility." Coverage is measured against the regression corpus at `tests/compat/corpus.sql` (1658 lines / ~700+ statements) which is exercised on every commit by [`cluster_rpc::compat_corpus_statements`](../crates/skeindb/tests/cluster_rpc.rs). The surface that *is* supported is enumerated in [docs/MYSQL_COMPAT.md](./MYSQL_COMPAT.md). Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.
+
+2026-05-14 (R10 vector benchmark sync): The research backlog is now **72 done / 37 open** after closing T305. `vector.benchmark` compares exact brute-force top-k results against the HNSW-backed vector search path, reports nanosecond latency percentiles, and computes recall@k; SkeinAdmin's Vector panel now exposes the benchmark and sends typed vector RPC payloads. `system.capabilities` now advertises 134 unique methods.
 
 2026-05-13 (v0.3.17 catalog compatibility polish): Crate/package metadata is bumped to `0.3.17`. The research backlog count remains **71 done / 38 open**; this release does not close a research checkbox. The SQL compatibility surface gains MySQL `information_schema.check_constraints`, `parameters`, and `tablespaces`, plus PostgreSQL `pg_catalog.pg_authid`, `pg_group`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, and `pg_stat_database`, with focused shared-executor tests and PostgreSQL RowDescription overrides for the new OID/bool/int/float catalog columns. `system.capabilities` remains at 133 unique methods.
 
@@ -63,7 +65,7 @@ Interpretation:
 ## 1) Backlog checklist snapshot
 
 - `docs/PROJECT_BACKLOG.md`: **140 done / 0 open** (140 top-level roadmap tasks; remaining product gaps are tracked as partial-phase hardening notes and future compatibility/research work rather than unchecked core-roadmap boxes)
-- `docs/RESEARCH_BACKLOG.md`: **71 done / 38 open** (109 total)
+- `docs/RESEARCH_BACKLOG.md`: **72 done / 37 open** (109 total)
 
 Why `RESEARCH_BACKLOG` mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.
@@ -112,7 +114,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 | R07 Client-side merge funcs | Hardened | `merge.register`, `merge.apply`, `merge.simulate`, `merge.evaluate`, and `merge.wasm.*`; write-write/dependency/constraint conflict hooks, values-only Wasm execution through the core sandbox, fuel/time cancellation coverage, offline queue spec, and SkeinAdmin Merge & CRDT controls. Evidence: `merge_apply_wasm_policy_executes_values_only_module`, `merge_apply_wasm_policy_cancels_non_terminating_module`, `merge_evaluate_reports_conflict_rate_and_success`, `merge_apply_wasm_policy_executes_rpc`, `skeinadmin_merge_panel_exposes_r07_hardening_controls`, and `cluster_rpc.rs::r07_merge_conflict_resolution_deterministic`. |
 | R08 Incremental views | Hardened | `view.create/drop/refresh/evaluate/status/explain_deps`; restricted single-table filter/project/group-by views; persisted dependency usage in `views.json` format v2; grouped incremental maintenance by touched-group recompute over persisted source rows; auto refresh falls back to full recompute when change breadth exceeds grouped/view cardinality thresholds; `view.evaluate` compares cloned incremental refresh against full recompute and reports timing/speedup; BFS-based cascading invalidation through view-on-view deps; `view_dependency_graph()` with `ViewDepEdge` structs; transitive dep traversal in `view_explain_deps`; SkeinAdmin Views evaluation controls and MySQL/PG view catalog probes. |
 | R09 QUIC-native protocol | Hardened runtime; benchmark open | QUIC transport + integration tests (`crates/skeindb/tests/quic_rpc.rs`); documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed listener, prepared-query execution over QUIC streams, 0-RTT write rejection, multi-stream RPCs, and rebind verification. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP. |
-| R10 Vector embeddings | Hardened | `vector.insert/search/index.status`; HNSW graph index (M=16, M_max0=32, ef_construction=64) with insert/search/prune; automatic index rebuild on insert; cosine/dot/L2 metrics; falls back to brute-force when filter is active. |
+| R10 Vector embeddings | Hardened | `vector.insert/search/benchmark/index.status`; HNSW graph index (M=16, M_max0=32, ef_construction=64) with insert/search/prune; automatic index rebuild on insert; cosine/dot/L2 metrics; falls back to brute-force when filter is active; `vector.benchmark` reports exact-vs-indexed recall@k and latency percentiles. |
 | R11 LLM/autoparam | Hardened | `ai.autoparam.classify/analyze`; integration test classifies 2 literals from real SQL query and verifies labels count, then analyzes full SQL and verifies normalized_sql/fingerprint/literals extraction (`cluster_rpc.rs::r11_llm_autoparam_classify_and_analyze`). |
 | R12 NL -> SkeinQL | Hardened | `ai.nl.translate/explain/execute`, schema-aware prompt packages, dependency-backed explanations, preview rows, approval-token-gated execution, `skeindb nl-eval`, and engine/RPC/eval coverage. |
 | R13 Causal ETag consistency | Hardened | ETag/min-causality controls; V2 vector-clock format (`CAUSALITY_FORMAT_V2`); `merge_causality_tokens()` (component-wise max); `causality_dominates()` (partial order); `ensure_min_causality()` accepts V1+V2. |
