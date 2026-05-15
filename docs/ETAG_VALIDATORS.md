@@ -170,6 +170,7 @@ Current runtime format (`vector_clock_v2`):
 - `deps` is a dependency list similar to `deps.tables` in query results.
 - `query.select`, `query.execute_prepared`, and `vector.search` emit `vector_clock_v2` causality tokens in responses.
 - Requests may still send legacy `etag_chain_v1` tokens while older clients are migrated; `ensure_min_causality()` accepts both formats.
+- Replicated write fanout reuses the same token format through `x-skeindb-replication-causality`, and replicas merge the applied watermark into `cluster.status.replication.causality` and `stats.snapshot.cluster.replication.causality`.
 - A request with `cache.min_causality` is rejected if any overlapping dependency has a lower version.
 - `If-None-Match` can be combined with `min_causality`: if the ETag matches and the dependency floor is satisfied, the server returns `not_modified:true`; if the causality floor is ahead of current dependencies, the request fails with `precondition_failed`.
 - Servers may advertise support via `system.capabilities.causal_etags`.

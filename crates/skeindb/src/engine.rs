@@ -10196,6 +10196,32 @@ impl Engine {
         self.schema_versions.insert(key.clone(), version.max(1));
     }
 
+    pub fn causality_for_relation(&self, db: &str, table: &str) -> anyhow::Result<CausalityToken> {
+        let dep = if let Ok(schema) = self.get_schema(db, table) {
+            CausalityDependency {
+                table: format!("{db}.{table}"),
+                v: Some(schema.table_version),
+                view: None,
+                change_seq: None,
+                stale: None,
+            }
+        } else if let Some(view) = self.views.get(&TableKey {
+            db: db.to_string(),
+            table: table.to_string(),
+        }) {
+            CausalityDependency {
+                table: format!("{db}.{table}"),
+                v: None,
+                view: Some(true),
+                change_seq: Some(view.last_change_seq),
+                stale: Some(view.stale),
+            }
+        } else {
+            anyhow::bail!("table not found: {db}.{table}");
+        };
+        Ok(build_causality_token(&[dep]))
+    }
+
     fn dependencies_for_query(&self, query: &Query) -> anyhow::Result<Vec<CausalityDependency>> {
         let mut tables = Vec::new();
         let mut seen = HashSet::new();

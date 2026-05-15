@@ -244,6 +244,7 @@ See: <code>docs/research_agenda/R13_causal-consistency-via-etag-chains.md</code>
 - <code>deps</code> is a dependency list similar to <code>deps.tables</code> in query results.
 - <code>query.select</code>, <code>query.execute_prepared</code>, and <code>vector.search</code> emit <code>vector_clock_v2</code> causality tokens in responses.
 - Requests may still send legacy <code>etag_chain_v1</code> tokens while older clients are migrated; <code>ensure_min_causality()</code> accepts both formats.
+- Replicated write fanout reuses the same token format through <code>x-skeindb-replication-causality</code>, and replicas merge the applied watermark into <code>cluster.status.replication.causality</code> and <code>stats.snapshot.cluster.replication.causality</code>.
 - A request with <code>cache.min_causality</code> is rejected if any overlapping dependency has a lower version.
 - <code>If-None-Match</code> can be combined with <code>min_causality</code>: if the ETag matches and the dependency floor is satisfied, the server returns <code>not_modified:true</code>; if the causality floor is ahead of current dependencies, the request fails with <code>precondition_failed</code>.
 - Servers may advertise support via <code>system.capabilities.causal_etags</code>.</p>

@@ -68,7 +68,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `sql.*` | `sql.exec` | Compatibility | SQL facade used by MySQL/PG/admin workflows. |
 | `cdc.*` | `cdc.subscribe_table`, `cdc.subscribe_query`, `cdc.poll`, `cdc.ack`, `cdc.close` | Core | Poll and SSE share event payloads. |
 | `stats.*` | `stats.snapshot`, `stats.top_queries`, `stats.slow_queries`, `stats.coalescing` | Core | Live operational telemetry. |
-| `cluster.*` | status, node lifecycle, shard create/move/rebalance, replica promote, replication stats | Experimental | Single-binary cluster control plane. |
+| `cluster.*` | status, node lifecycle, shard create/move/rebalance, replica promote, replication stats | Experimental | Single-binary cluster control plane with replication counters and causal watermarks. |
 | `objects.*` | `objects.need`, `objects.missing`, `objects.fetch`, `objects.pull` | Experimental | ValueID object transfer for shard moves and replication. |
 | `settings.encryption.*` | status, mode, key registration, active key, rotation | Experimental | Envelope/key-management controls. |
 | `dp.*` | aggregate, evaluate, budget, audit log | Experimental | Differential privacy COUNT/SUM/AVG aggregates, privacy ETags, budget accounting, audit, and accuracy-vs-epsilon evaluation. |

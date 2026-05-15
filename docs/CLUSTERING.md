@@ -162,7 +162,8 @@ Replication transport implemented:
 - primary node enforces write ownership per shard/global primary
 - successful write RPCs are fanned out to replica nodes over HTTP RPC
 - replica applies replicated writes using `x-skeindb-replication: 1`
-- replication counters are exposed in `cluster.status` and `stats.snapshot.cluster`
+- replicated table/view writes also carry `x-skeindb-replication-causality` so replicas can retain the upstream dependency watermark without imposing a global total order
+- replication counters plus the merged applied causality watermark are exposed in `cluster.status` and `stats.snapshot.cluster`
 - graceful shutdown (`Ctrl+C`, `SIGTERM`, or `system.shutdown`) marks the local node offline and sends best-effort `cluster.node.leave` notifications to online peers
 
 ---

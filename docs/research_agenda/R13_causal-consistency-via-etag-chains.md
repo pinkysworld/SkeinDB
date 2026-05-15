@@ -32,8 +32,9 @@ SkeinDB's ETags currently reflect 'has this data changed?' but could encode caus
 - `query.select` and `query.execute_prepared` emit `causality` alongside `etag`, `deps`, and `not_modified`, and both accept `min_causality` on requests.
 - Response tokens use the `vector_clock_v2` shape: `{"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]}`.
 - The runtime still accepts legacy `etag_chain_v1` tokens on input while clients migrate, via `ensure_min_causality()` compatibility handling.
+- Replicated writes now fan out the same dependency token through `x-skeindb-replication-causality`, and replicas expose the merged applied watermark through `cluster.status.replication.causality` and `stats.snapshot.cluster.replication.causality`.
 - Cache validation and causality interact in tests: matching `if_none_match` + satisfied `min_causality` returns `not_modified`, and an ahead-of-time token is rejected with `precondition_failed`.
-- Evidence: `r13_vector_clock_causality`, `query_select_min_causality_enforced`, and `query_execute_prepared_honors_causal_cache_validators`.
+- Evidence: `r13_vector_clock_causality`, `query_select_min_causality_enforced`, `query_execute_prepared_honors_causal_cache_validators`, `replicated_writes_include_causality_header`, and `cluster_replication_ships_schema_and_rows`.
 
 ## Expected Contributions
 

@@ -150,6 +150,22 @@ async fn cluster_replication_ships_schema_and_rows() -> anyhow::Result<()> {
         .await?;
     assert!(resp.ok);
 
+    let resp = primary_client
+        .rpc(
+            "query.select",
+            json!({
+                "query": select_query("app", "users", &["id", "name"])
+            }),
+        )
+        .await?;
+    assert!(resp.ok);
+    let primary_causality = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("causality"))
+        .cloned()
+        .ok_or_else(|| anyhow!("missing primary causality token"))?;
+
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut replicated = false;
     while Instant::now() < deadline {
@@ -181,6 +197,26 @@ async fn cluster_replication_ships_schema_and_rows() -> anyhow::Result<()> {
     }
 
     assert!(replicated, "replica did not receive replicated row");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut replicated_causality = None;
+    while Instant::now() < deadline {
+        let resp = replica_client.rpc("cluster.status", json!({})).await?;
+        if resp.ok {
+            let token = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("replication"))
+                .and_then(|v| v.get("causality"))
+                .cloned();
+            if token.as_ref() == Some(&primary_causality) {
+                replicated_causality = token;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(replicated_causality, Some(primary_causality.clone()));
 
     let resp = primary_client
         .rpc(
@@ -6691,7 +6727,7 @@ fn wait_for_health(port: u16) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/health", port);
     // CI and heavily loaded dev machines can take longer to bring up the embedded
     // HTTP server process; keep this generous to avoid flaky startup failures.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let out = std::process::Command::new("curl")
             .arg("-sSf")

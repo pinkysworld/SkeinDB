@@ -247,7 +247,8 @@ Cross-shard transactions are a future extension.</p>
 - primary node enforces write ownership per shard/global primary
 - successful write RPCs are fanned out to replica nodes over HTTP RPC
 - replica applies replicated writes using <code>x-skeindb-replication: 1</code>
-- replication counters are exposed in <code>cluster.status</code> and <code>stats.snapshot.cluster</code>
+- replicated table/view writes also carry <code>x-skeindb-replication-causality</code> so replicas can retain the upstream dependency watermark without imposing a global total order
+- replication counters plus the merged applied causality watermark are exposed in <code>cluster.status</code> and <code>stats.snapshot.cluster</code>
 - graceful shutdown (<code>Ctrl+C</code>, <code>SIGTERM</code>, or <code>system.shutdown</code>) marks the local node offline and sends best-effort <code>cluster.node.leave</code> notifications to online peers</p>
 <hr />
 <h2 id="6-ui-requirements-skeinadmin">6) UI requirements (SkeinAdmin)<a class="headerlink" href="#6-ui-requirements-skeinadmin" title="Permanent link">¶</a></h2>

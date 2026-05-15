@@ -2036,7 +2036,7 @@ unchanged.</p>
 - admin: <code>admin.users.*</code>, <code>admin.roles.*</code>
 - cluster: <code>cluster.status</code>, <code>cluster.nodes</code>, <code>cluster.join_token.create</code>, <code>cluster.node.join</code>, <code>cluster.node.remove</code>, <code>cluster.node.leave</code>, <code>cluster.replica.promote</code>, <code>cluster.shard.create</code>, <code>cluster.shard.move</code>, <code>cluster.shard.rebalance</code></p>
 <h4 id="clusterstatus-experimental">cluster.status (experimental)<a class="headerlink" href="#clusterstatus-experimental" title="Permanent link">¶</a></h4>
-<p>Return control-plane state, nodes, shards, and replication counters.</p>
+<p>Return control-plane state, nodes, shards, and replication counters or causal replication watermarks.</p>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{}</span>
 </code></pre></div>
@@ -2050,11 +2050,18 @@ unchanged.</p>
 <span class="w">  </span><span class="nt">&quot;local_role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;primary&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;nodes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
 <span class="w">  </span><span class="nt">&quot;shards&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
-<span class="w">  </span><span class="nt">&quot;replication&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;shipped_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;applied_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;failed_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;last_updated_ms&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;replication&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;shipped_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;applied_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;failed_ops&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;last_updated_ms&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;causality&quot;</span><span class="p">:{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;vector_clock_v2&quot;</span><span class="p">,</span><span class="nt">&quot;deps&quot;</span><span class="p">:[{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;app.users&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">}]}</span>
+<span class="w">  </span><span class="p">},</span>
 <span class="w">  </span><span class="nt">&quot;methods&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;cluster.status&quot;</span><span class="p">,</span><span class="s2">&quot;cluster.nodes&quot;</span><span class="p">,</span><span class="s2">&quot;cluster.join_token.create&quot;</span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 
+<p><code>replication.causality</code> is present after a node applies replicated writes that carry an upstream watermark via <code>x-skeindb-replication-causality</code>.</p>
 <h4 id="clusternodejoin-experimental">cluster.node.join (experimental)<a class="headerlink" href="#clusternodejoin-experimental" title="Permanent link">¶</a></h4>
 <p>Join a node to the cluster using a short-lived token.</p>
 <p>Params:</p>

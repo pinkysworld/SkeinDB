@@ -53,9 +53,9 @@ use skeindb_skeinql::{
         WasmPlanInspectParams, WasmPlanRunParams,
     },
     types::{
-        BaseTableRef, CaseExpr, CaseWhen, CastExpr, Expr, JoinRef, JoinTableRef, JoinType,
-        LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody, QueryCache, ResultFormat,
-        SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
+        BaseTableRef, CaseExpr, CaseWhen, CastExpr, CausalityDependency, CausalityToken, Expr,
+        JoinRef, JoinTableRef, JoinType, LimitClause, Lit, OrderBy, OrderDir, Query, QueryBody,
+        QueryCache, ResultFormat, SelectBody, SelectItem, TableRef, TypeDesc, WireHints,
     },
     RpcError, RpcId, RpcRequest, RpcResponse, SKEINQL_VERSION,
 };
@@ -74,6 +74,7 @@ use tokio::{
 use tower_http::cors::{Any, CorsLayer};
 
 const REPLICATION_HEADER: &str = "x-skeindb-replication";
+const REPLICATION_CAUSALITY_HEADER: &str = "x-skeindb-replication-causality";
 const CLUSTER_STATE_KEY: &str = "cluster.state.v1";
 const CLUSTER_DEFAULT_JOIN_TTL_MS: u64 = 10 * 60 * 1000;
 const CDC_SSE_BATCH_LIMIT: u64 = 64;
@@ -199,6 +200,7 @@ pub(crate) struct AppState {
     local_rpc_url: String,
     settings: Arc<Mutex<serde_json::Map<String, Value>>>,
     cluster: Arc<Mutex<ClusterStateModel>>,
+    replication_causality: Arc<Mutex<Option<CausalityToken>>>,
     counters: Arc<Mutex<Counters>>,
     txns: Arc<Mutex<HashMap<String, TxSession>>>,
 
@@ -13391,6 +13393,7 @@ pub async fn serve(opts: ServeOpts) -> anyhow::Result<()> {
             local_node_id,
             local_rpc_url,
         ))),
+        replication_causality: Arc::new(Mutex::new(None)),
         counters: Arc::new(Mutex::new(Counters::default())),
         txns: Arc::new(Mutex::new(HashMap::new())),
         engine: Arc::new(RwLock::new(engine)),
@@ -14839,6 +14842,12 @@ pub(crate) async fn handle_rpc(
         .and_then(|map| map.get(REPLICATION_HEADER).and_then(|v| v.to_str().ok()))
         .map(|v| v == "1")
         .unwrap_or(false);
+    let replication_causality = headers
+        .and_then(|map| {
+            map.get(REPLICATION_CAUSALITY_HEADER)
+                .and_then(|v| v.to_str().ok())
+        })
+        .and_then(decode_replication_causality_header);
     if policy.read_only && !is_read_only_method(&method) && !sql_read_only {
         if req.id.is_none() {
             observe_rpc_call(
@@ -16786,6 +16795,10 @@ pub(crate) async fn handle_rpc(
         }
     }
 
+    if result.is_ok() && is_replication_request {
+        note_applied_replication(state, replication_causality);
+    }
+
     let status = if req.id.is_none() {
         StatusCode::NO_CONTENT
     } else {
@@ -16937,7 +16950,7 @@ fn enforce_cluster_write_guard(
         return Ok(());
     }
     let (db, table) = write_target_from_params(method, params);
-    let cluster = state.cluster.lock().unwrap();
+    let cluster = state.cluster.lock().unwrap().clone();
     if !cluster.enabled {
         return Ok(());
     }
@@ -16981,6 +16994,10 @@ async fn replicate_write_to_cluster(
         return Ok(());
     }
 
+    let causality_header = replication_causality_for_write(state, method, &params)
+        .await
+        .and_then(|token| encode_replication_causality_header(&token));
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
@@ -17001,6 +17018,9 @@ async fn replicate_write_to_cluster(
             .header(header::CONTENT_TYPE.as_str(), "application/json")
             .header(REPLICATION_HEADER, "1")
             .json(&payload);
+        if let Some(causality) = causality_header.as_ref() {
+            req = req.header(REPLICATION_CAUSALITY_HEADER, causality);
+        }
         if let Some(token) = auth_token.as_ref() {
             req = req.bearer_auth(token);
         }
@@ -17037,6 +17057,104 @@ async fn replicate_write_to_cluster(
     Ok(())
 }
 
+async fn replication_causality_for_write(
+    state: &AppState,
+    method: &str,
+    params: &Value,
+) -> Option<CausalityToken> {
+    let (db, table) = write_target_from_params(method, Some(params));
+    let (Some(db), Some(table)) = (db, table) else {
+        return None;
+    };
+    let engine = state.engine.read().await;
+    engine.causality_for_relation(&db, &table).ok()
+}
+
+fn encode_replication_causality_header(token: &CausalityToken) -> Option<String> {
+    use base64::Engine as _;
+
+    let bytes = serde_json::to_vec(token).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn decode_replication_causality_header(value: &str) -> Option<CausalityToken> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn merge_cluster_causality(a: &CausalityToken, b: &CausalityToken) -> CausalityToken {
+    let mut merged: BTreeMap<(String, bool), CausalityDependency> = BTreeMap::new();
+    for dep in a.deps.iter().chain(b.deps.iter()) {
+        let is_view = dep.view.unwrap_or(false) || dep.change_seq.is_some();
+        let key = (dep.table.clone(), is_view);
+        match merged.get_mut(&key) {
+            Some(current) if is_view => {
+                if dep.change_seq.unwrap_or(0) > current.change_seq.unwrap_or(0) {
+                    *current = dep.clone();
+                }
+            }
+            Some(current) => {
+                if dep.v.unwrap_or(0) > current.v.unwrap_or(0) {
+                    *current = dep.clone();
+                }
+            }
+            None => {
+                merged.insert(key, dep.clone());
+            }
+        }
+    }
+
+    let mut deps: Vec<_> = merged.into_values().collect();
+    deps.sort_by(|left, right| {
+        (left.table.clone(), left.view.unwrap_or(false))
+            .cmp(&(right.table.clone(), right.view.unwrap_or(false)))
+    });
+
+    CausalityToken {
+        format: if a.format == "vector_clock_v2" || b.format == "vector_clock_v2" {
+            "vector_clock_v2".to_string()
+        } else {
+            a.format.clone()
+        },
+        deps,
+    }
+}
+
+fn note_applied_replication(state: &AppState, causality: Option<CausalityToken>) {
+    {
+        let mut cluster = state.cluster.lock().unwrap();
+        cluster.replication.applied_ops = cluster.replication.applied_ops.saturating_add(1);
+        cluster.replication.last_updated_ms = now_unix_ms_u64();
+    }
+
+    if let Some(token) = causality {
+        let mut current = state.replication_causality.lock().unwrap();
+        *current = Some(match current.as_ref() {
+            Some(existing) => merge_cluster_causality(existing, &token),
+            None => token,
+        });
+    }
+
+    persist_cluster_state(state).ok();
+}
+
+fn cluster_replication_status_json(state: &AppState) -> Value {
+    let replication = state.cluster.lock().unwrap().replication.clone();
+    let causality = state.replication_causality.lock().unwrap().clone();
+    let mut value = serde_json::to_value(replication).unwrap_or_else(|_| serde_json::json!({}));
+    if let (Some(obj), Some(token)) = (value.as_object_mut(), causality) {
+        obj.insert(
+            "causality".to_string(),
+            serde_json::to_value(token).unwrap_or(Value::Null),
+        );
+    }
+    value
+}
+
 fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
     let cluster = state.cluster.lock().unwrap().clone();
     let methods = vec![
@@ -17059,13 +17177,13 @@ fn cluster_status(state: &AppState) -> Result<Value, RpcError> {
         "local_role": cluster.local_role(),
         "nodes": cluster.nodes,
         "shards": cluster.shards,
-        "replication": cluster.replication,
+        "replication": cluster_replication_status_json(state),
         "methods": methods,
     }))
 }
 
 fn cluster_nodes(state: &AppState, params: Option<ClusterNodesParams>) -> Result<Value, RpcError> {
-    let cluster = state.cluster.lock().unwrap();
+    let cluster = state.cluster.lock().unwrap().clone();
     let role = params.and_then(|p| p.role);
     let nodes: Vec<_> = cluster
         .nodes
@@ -28547,7 +28665,7 @@ async fn stats_snapshot(state: &AppState) -> Value {
     };
     let compaction_runtime = collect_compaction_runtime(state, now_ms, true);
     let compaction = compaction_runtime_json(&compaction_runtime);
-    let cluster = state.cluster.lock().unwrap();
+    let cluster = state.cluster.lock().unwrap().clone();
     let (
         total_rpc,
         fingerprint_count,
@@ -28637,7 +28755,7 @@ async fn stats_snapshot(state: &AppState) -> Value {
             "primary_node_id": cluster.primary_node_id,
             "nodes": cluster.nodes.len(),
             "shards": cluster.shards.len(),
-            "replication": cluster.replication,
+            "replication": cluster_replication_status_json(state),
             "replication_objects": replication_objects
         }
     })
@@ -29048,6 +29166,7 @@ mod tests {
                 local_node_id,
                 local_rpc_url,
             ))),
+            replication_causality: Arc::new(Mutex::new(None)),
             counters: Arc::new(Mutex::new(Counters::default())),
             txns: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(RwLock::new(engine)),
@@ -37915,6 +38034,102 @@ mod tests {
             seen_header.lock().unwrap().as_slice(),
             &[Some("1".to_string())]
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replicated_writes_include_causality_header() -> anyhow::Result<()> {
+        let dir = temp_dir("replication_causality_header");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "schema.create_database", json!({"db":"app"})).await;
+        assert!(resp.ok);
+        let resp = call_rpc(
+            &state,
+            "schema.create_table",
+            json!({
+                "db":"app",
+                "table":"users",
+                "columns":[
+                    {"name":"id","type":{"kind":"u64"},"nullable":false},
+                    {"name":"name","type":{"kind":"str"},"nullable":false}
+                ],
+                "primary_key":["id"]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+
+        let seen_causality: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let causality_ref = seen_causality.clone();
+        let app = Router::new().route(
+            "/api/v1/rpc",
+            post(move |headers: HeaderMap, Json(_payload): Json<Value>| {
+                let causality_ref = causality_ref.clone();
+                async move {
+                    let causality = headers
+                        .get(REPLICATION_CAUSALITY_HEADER)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.to_string());
+                    causality_ref.lock().unwrap().push(causality);
+                    Json(serde_json::json!({
+                        "skeinql": SKEINQL_VERSION,
+                        "ok": true,
+                        "result": {"ok": true}
+                    }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let peer_addr = listener.local_addr()?;
+        let mock = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        {
+            let mut cluster = state.cluster.lock().unwrap();
+            cluster.enabled = true;
+            cluster.nodes.push(ClusterNode {
+                node_id: "peer-a".to_string(),
+                rpc_url: format!("http://{}", peer_addr),
+                role: "replica".to_string(),
+                status: "online".to_string(),
+                joined_at_ms: now_unix_ms_u64(),
+                last_seen_ms: now_unix_ms_u64(),
+            });
+        }
+
+        let resp = call_rpc(
+            &state,
+            "data.insert",
+            json!({
+                "into": {"db":"app", "table":"users"},
+                "rows": [{"id": {"t":"u64","v": 1}, "name": {"t":"str","v":"Nora"}}]
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        mock.abort();
+
+        let header = seen_causality
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing replication causality header"))?;
+        let token = decode_replication_causality_header(&header)
+            .ok_or_else(|| anyhow::anyhow!("invalid replication causality header"))?;
+        assert_eq!(token.format, "vector_clock_v2");
+        assert!(token
+            .deps
+            .iter()
+            .any(|dep| dep.table == "app.users" && dep.v.is_some()));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R13 — Causal Consistency via ETag Chains · SkeinDB</title>
-  <meta name="description" content="Causal cache validators with vector_clock_v2 tokens, min_causality propagation, and prepared-query cache interaction tests. SkeinDB Research Track R13.">
+  <meta name="description" content="Causal cache validators with vector_clock_v2 tokens, replication-causality fanout, and prepared-query cache interaction tests. SkeinDB Research Track R13.">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
@@ -37,14 +37,14 @@
   </a>
   <div class="hero-badge">R13 · Consistency &amp; Distribution</div>
   <h1>Causal Consistency via ETag Chains</h1>
-  <p class="abstract">SkeinDB's query validators now pair ordinary ETags with `vector_clock_v2` causality tokens so clients can demand reads that are at least as fresh as earlier observations. The runtime combines `if_none_match` with `min_causality`, emits dependency-backed response tokens, and preserves backward compatibility for older `etag_chain_v1` request payloads while replication propagation remains future work.</p>
+  <p class="abstract">SkeinDB's query validators now pair ordinary ETags with `vector_clock_v2` causality tokens so clients can demand reads that are at least as fresh as earlier observations. The runtime combines `if_none_match` with `min_causality`, emits dependency-backed response tokens, preserves backward compatibility for older `etag_chain_v1` request payloads, and now propagates the same watermark across replicated writes.</p>
 </section>
 
 <div class="content">
 
   <div class="status-bar">
     <span class="status-dot shipped"></span>
-    <span class="status-text"><strong>Hardened Runtime</strong> — `vector_clock_v2` causal validators, propagation rules, and cache interaction tests are live; replication propagation remains open.</span>
+    <span class="status-text"><strong>Hardened Runtime</strong> — `vector_clock_v2` causal validators, replication-causality fanout, and cache interaction tests are live.</span>
   </div>
 
   <div class="novelty-card">
@@ -52,6 +52,7 @@
     <ul>
       <li><strong>`vector_clock_v2` causal token format</strong> encoding dependency versions that travel alongside ordinary query ETags</li>
       <li>`query.select`, `query.execute_prepared`, `merge.apply`, and `vector.search` all accept `min_causality` and emit response `causality` tokens</li>
+      <li>Replicated writes carry `x-skeindb-replication-causality`, and replicas expose the merged watermark through `cluster.status` and `stats.snapshot.cluster.replication`</li>
       <li>Prepared-query cache validation combines `if_none_match` and `min_causality`, returning `not_modified` only when both the ETag and dependency floor are satisfied</li>
       <li>Legacy `etag_chain_v1` request tokens remain accepted while clients migrate to the current runtime format</li>
     </ul>
@@ -69,7 +70,7 @@
     </div>
     <div class="phase">
       <h3>Phase 3 — Cluster Integration</h3>
-      <p>Replication-side propagation of causal metadata is the remaining open checklist item. The local runtime already tracks dependency versions and enforces them on read paths, but inter-node metadata propagation is still future work.</p>
+      <p>Cluster replication now forwards `x-skeindb-replication-causality` alongside replicated writes, and replicas merge the applied watermark into `cluster.status.replication.causality` plus `stats.snapshot.cluster.replication.causality` without imposing a global total order.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Caching Interaction</h3>

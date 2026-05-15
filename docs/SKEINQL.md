@@ -2456,7 +2456,7 @@ Control-plane method families for operations and adoption:
 - cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.node.leave`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`
 
 #### cluster.status (experimental)
-Return control-plane state, nodes, shards, and replication counters.
+Return control-plane state, nodes, shards, and replication counters or causal replication watermarks.
 
 Params:
 
@@ -2475,10 +2475,18 @@ Result (example):
   "local_role": "primary",
   "nodes": [],
   "shards": [],
-  "replication": {"shipped_ops":0,"applied_ops":0,"failed_ops":0,"last_updated_ms":0},
+  "replication": {
+    "shipped_ops":0,
+    "applied_ops":0,
+    "failed_ops":0,
+    "last_updated_ms":0,
+    "causality":{"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]}
+  },
   "methods": ["cluster.status","cluster.nodes","cluster.join_token.create"]
 }
 ```
+
+`replication.causality` is present after a node applies replicated writes that carry an upstream watermark via `x-skeindb-replication-causality`.
 
 #### cluster.node.join (experimental)
 Join a node to the cluster using a short-lived token.
