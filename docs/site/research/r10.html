@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R10 — Vector Embeddings as First-Class ValueIDs · SkeinDB</title>
-  <meta name="description" content="First-class vector embeddings with HNSW search and exact-vs-indexed recall benchmarking. SkeinDB Research Track R10.">
+  <meta name="description" content="First-class vector embeddings with HNSW search, exact-vs-indexed recall benchmarking, and a small RAG retrieval sample. SkeinDB Research Track R10.">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Hardened Runtime</strong> — Vector insert/search/status plus recall and latency benchmarking are available through SkeinQL.</span>
+    <span class="status-text"><strong>Hardened Runtime</strong> — Vector insert/search/status, recall and latency benchmarking, and a small RAG retrieval example are available through SkeinQL.</span>
   </div>
 
   <div class="novelty-card">
@@ -55,6 +55,7 @@
       <li>Hybrid query execution combining SQL predicates with approximate nearest neighbor search</li>
       <li>Built-in <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles</li>
       <li>SkeinAdmin vector playground for search, benchmark, insert, and index-status workflows</li>
+      <li>Credential-free RAG sample app that seeds embeddings, retrieves rows with <code>vector.search</code>, and assembles grounded context</li>
       <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation</li>
     </ul>
   </div>
@@ -76,6 +77,10 @@
     <div class="phase">
       <h3>Phase 3b — Benchmark Harness</h3>
       <p><code>vector.benchmark</code> runs exact brute-force top-k next to the indexed vector path, returning recall@k and nanosecond latency percentiles for repeatable evaluation.</p>
+    </div>
+    <div class="phase">
+      <h3>Phase 3c — RAG Retrieval Example</h3>
+      <p><code>samples/vector_rag_pipeline.py</code> demonstrates deterministic embeddings, <code>vector.insert</code>, <code>vector.search</code> with returned rows, and prompt assembly for retrieval-augmented generation without external model credentials.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Dependency Tracking</h3>

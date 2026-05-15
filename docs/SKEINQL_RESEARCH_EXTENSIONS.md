@@ -63,6 +63,8 @@ Related: R10
 - `vector.benchmark` — exact brute-force vs indexed top-k recall and latency report for embedding columns
 - `vector.index.status` — index health and coverage
 
+See [Vector RAG retrieval](tutorials/vector-rag.md) for a credential-free sample application that uses `vector.insert` and `vector.search` to assemble grounded context.
+
 ## 8. ai.* — AI-assisted query workflows
 Related: R11, R12
 

@@ -54,6 +54,7 @@ NAV: list[Section] = [
       DocPage("postgresql-in-5-min",    "tutorials/postgresql-in-5-min.md",  "PostgreSQL in 5 minutes",      "Tutorials"),
         DocPage("admin-tour",             "tutorials/admin-tour.md",           "Admin console tour",           "Tutorials"),
       DocPage("monitoring-and-metrics", "tutorials/monitoring-and-metrics.md","Monitoring and metrics",       "Tutorials"),
+      DocPage("vector-rag",             "tutorials/vector-rag.md",           "Vector RAG retrieval",         "Tutorials"),
       DocPage("cdc-with-sse",           "tutorials/cdc-with-sse.md",         "CDC with SSE",                 "Tutorials"),
       DocPage("encryption-and-key-rotation", "tutorials/encryption-and-key-rotation.md", "Encryption and key rotation", "Tutorials"),
       DocPage("replay-bundles-and-integrity", "tutorials/replay-bundles-and-integrity.md", "Replay bundles and integrity", "Tutorials"),

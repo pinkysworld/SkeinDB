@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vector RAG retrieval — SkeinDB Docs</title>
+<meta name="description" content="Vector RAG retrieval — part of the SkeinDB documentation.">
+<link rel="icon" type="image/svg+xml" href="../favicon.svg">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="nav-logo" href="../index.html">SkeinDB</a>
+    <div class="nav-links">
+      <a href="../index.html#features">Features</a>
+      <a href="../index.html#architecture">Architecture</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="../pricing.html">Pricing</a>
+      <a href="../licensing.html">Licensing</a>
+      <a href="../contact.html">Contact</a>
+      <a href="https://github.com/sponsors/pinkysworld" target="_blank" rel="noopener" class="nav-sponsor">❤ Sponsor</a>
+      <a href="index.html" class="nav-docs-cta active">Docs</a>
+    </div>
+    <a class="nav-gh" href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </div>
+</nav>
+
+<div class="research-rail">
+  <div class="research-rail-inner">
+    <span class="research-rail-label">Research</span>
+    <a href="../index.html#paper">Overview</a>
+    <a href="../index.html#research">Tracks</a>
+    <a href="research-agenda.html">Agenda</a>
+  </div>
+</div>
+
+<div class="docs-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-search">
+      <input type="search" id="docsSearch" placeholder="Search docs (Ctrl+K)" autocomplete="off">
+    </div>
+    <nav class="sidebar-nav">
+      <div class="group-title">🚀 &nbsp;Tutorials</div>
+<ul>
+<li><a href="index.html">Documentation home</a></li>
+<li><a href="quickstart.html">Quickstart — 5 minutes</a></li>
+<li><a href="first-query.html">Your first query (SkeinQL)</a></li>
+<li><a href="mysql-in-5-min.html">MySQL in 5 minutes</a></li>
+<li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+<li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="vector-rag.html" class="active">Vector RAG retrieval</a></li>
+<li><a href="cdc-with-sse.html">CDC with SSE</a></li>
+<li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
+<li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
+<li><a href="setting-up-cluster.html">Setting up a 3-node cluster</a></li>
+</ul>
+<div class="group-title">📖 &nbsp;User Guide</div>
+<ul>
+<li><a href="getting-started.html">Getting Started</a></li>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="mysql-compat.html">MySQL compatibility</a></li>
+<li><a href="pg-compat.html">PostgreSQL compatibility</a></li>
+<li><a href="compatibility.html">Compatibility telemetry</a></li>
+<li><a href="offline-write-queue.html">Offline write queue</a></li>
+<li><a href="query-patch.html">Query patch protocol</a></li>
+<li><a href="query-coalescing.html">Query coalescing</a></li>
+</ul>
+<div class="group-title">🛠 &nbsp;Admin Guide</div>
+<ul>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="skeinadmin.html">SkeinAdmin (web console)</a></li>
+<li><a href="clustering.html">Clustering</a></li>
+<li><a href="observability.html">Observability</a></li>
+<li><a href="performance.html">Performance</a></li>
+<li><a href="release-packaging.html">Release packaging</a></li>
+<li><a href="audit-wal.html">Audit WAL</a></li>
+<li><a href="time-travel-replay.html">Time-travel &amp; replay</a></li>
+<li><a href="compaction-scheduler.html">Compaction scheduler</a></li>
+<li><a href="index-advisor.html">Index advisor</a></li>
+<li><a href="telemetry-and-migration.html">Telemetry &amp; migration</a></li>
+</ul>
+<div class="group-title">⚡ &nbsp;Developer / API</div>
+<ul>
+<li><a href="api-reference.html">API reference</a></li>
+<li><a href="skeinir.html">SkeinIR</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="wasm-udfs.html">Wasm UDFs</a></li>
+<li><a href="wasm-operators.html">Wasm query operators</a></li>
+<li><a href="merge-functions.html">Merge functions (CRDT)</a></li>
+<li><a href="cdc-changefeed.html">CDC changefeed</a></li>
+<li><a href="etag-validators.html">ETag validators</a></li>
+<li><a href="autoparameterization.html">Autoparameterization</a></li>
+</ul>
+<div class="group-title">🧬 &nbsp;Internals &amp; Architecture</div>
+<ul>
+<li><a href="on-disk-format.html">On-disk format</a></li>
+<li><a href="delta-values.html">Delta-chained values</a></li>
+<li><a href="column-snapshots.html">Column snapshots</a></li>
+<li><a href="convergent-encryption.html">Convergent encryption</a></li>
+<li><a href="incremental-views.html">Incremental views</a></li>
+<li><a href="learned-indexes.html">Learned indexes</a></li>
+<li><a href="oblivious-execution.html">Oblivious execution</a></li>
+<li><a href="traffic-reduction.html">Traffic reduction</a></li>
+<li><a href="transport-quic.html">QUIC transport</a></li>
+<li><a href="cas-replication.html">CAS replication</a></li>
+</ul>
+<div class="group-title">📐 &nbsp;Research &amp; Project</div>
+<ul>
+<li><a href="research-agenda.html">Research agenda</a></li>
+<li><a href="research-backlog.html">Research backlog</a></li>
+<li><a href="true-status-matrix.html">True status matrix</a></li>
+<li><a href="project-backlog.html">Project backlog</a></li>
+</ul>
+    </nav>
+  </aside>
+
+  <main class="content">
+    <div class="breadcrumbs">
+      <a href="index.html">Docs</a> <span>›</span> <span>Tutorials</span> <span>›</span> <span>Vector RAG retrieval</span>
+    </div>
+    <article class="doc-article">
+      <h1 id="vector-rag-retrieval">Vector RAG retrieval<a class="headerlink" href="#vector-rag-retrieval" title="Permanent link">¶</a></h1>
+<p>This tutorial builds a tiny retrieval-augmented generation pipeline on SkeinDB's native vector RPCs. It uses the sample app at <a href="https://github.com/pinkysworld/SkeinDB/blob/main/samples/vector_rag_pipeline.py"><code>samples/vector_rag_pipeline.py</code></a>, deterministic toy embeddings, and no external model or API key.</p>
+<p>Prerequisite: <a href="quickstart.html">Quickstart</a> completed and <code>skeindb</code> running on <code>http://127.0.0.1:8080</code>.</p>
+<h2 id="1-start-skeindb">1. Start SkeinDB<a class="headerlink" href="#1-start-skeindb" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>serve<span class="w"> </span>--data<span class="w"> </span>./data<span class="w"> </span>--http<span class="w"> </span><span class="m">8080</span><span class="w"> </span>--mysql<span class="w"> </span><span class="m">3306</span>
+</code></pre></div>
+
+<p>The sample talks to <code>POST /api/v1/rpc</code>, the same SkeinQL endpoint used by the other tutorials.</p>
+<h2 id="2-check-the-sample-locally">2. Check the sample locally<a class="headerlink" href="#2-check-the-sample-locally" title="Permanent link">¶</a></h2>
+<p>The sample has a local self-test path that exercises the deterministic embedding and prompt assembly without contacting a server:</p>
+<div class="codehilite"><pre><span></span><code>python3<span class="w"> </span>samples/vector_rag_pipeline.py<span class="w"> </span>--self-test
+</code></pre></div>
+
+<p>Expected output is a small JSON object with <code>"ok": true</code> and <code>"dims": 8</code>.</p>
+<h2 id="3-run-the-retrieval-pipeline">3. Run the retrieval pipeline<a class="headerlink" href="#3-run-the-retrieval-pipeline" title="Permanent link">¶</a></h2>
+<div class="codehilite"><pre><span></span><code>python3<span class="w"> </span>samples/vector_rag_pipeline.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--url<span class="w"> </span>http://127.0.0.1:8080<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--question<span class="w"> </span><span class="s2">&quot;How can I evaluate vector retrieval in SkeinDB?&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--k<span class="w"> </span><span class="m">2</span>
+</code></pre></div>
+
+<p>The script performs this flow:</p>
+<ol>
+<li>Creates a <code>rag.chunks</code> table with <code>id</code>, <code>title</code>, <code>body</code>, and an <code>embedding</code> column.</li>
+<li>Inserts three short document chunks through <code>data.insert</code>.</li>
+<li>Upserts deterministic embedding literals with <code>vector.insert</code>.</li>
+<li>Searches the nearest chunks with <code>vector.search</code> and <code>include_row: true</code>.</li>
+<li>Prints a grounded prompt containing the question and retrieved context.</li>
+</ol>
+<p>The generated prompt is intentionally the handoff point, not a built-in LLM call. Applications can send it to their own generation model, store it for audit, or keep the retrieval stage separate for evaluation.</p>
+<h2 id="4-inspect-the-vector-index">4. Inspect the vector index<a class="headerlink" href="#4-inspect-the-vector-index" title="Permanent link">¶</a></h2>
+<p>After the sample runs, inspect the embedding column statistics:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;skeinql&quot;:&quot;1.0&quot;,</span>
+<span class="s1">    &quot;id&quot;:&quot;rag-status&quot;,</span>
+<span class="s1">    &quot;method&quot;:&quot;vector.index.status&quot;,</span>
+<span class="s1">    &quot;params&quot;:{&quot;table&quot;:{&quot;db&quot;:&quot;rag&quot;,&quot;table&quot;:&quot;chunks&quot;},&quot;column&quot;:&quot;embedding&quot;}</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>For this tiny dataset the index is deliberately small, but the response proves that the embedding column is registered and searchable.</p>
+<h2 id="5-evaluate-retrieval-quality">5. Evaluate retrieval quality<a class="headerlink" href="#5-evaluate-retrieval-quality" title="Permanent link">¶</a></h2>
+<p>Use <code>vector.benchmark</code> with the same deterministic query embedding to compare exact and indexed results:</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span>-XPOST<span class="w"> </span>http://127.0.0.1:8080/api/v1/rpc<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;skeinql&quot;:&quot;1.0&quot;,</span>
+<span class="s1">    &quot;id&quot;:&quot;rag-benchmark&quot;,</span>
+<span class="s1">    &quot;method&quot;:&quot;vector.benchmark&quot;,</span>
+<span class="s1">    &quot;params&quot;:{</span>
+<span class="s1">      &quot;table&quot;:{&quot;db&quot;:&quot;rag&quot;,&quot;table&quot;:&quot;chunks&quot;},</span>
+<span class="s1">      &quot;column&quot;:&quot;embedding&quot;,</span>
+<span class="s1">      &quot;queries&quot;:[{&quot;t&quot;:&quot;embedding&quot;,&quot;dims&quot;:8,&quot;v&quot;:[0.57735,0.0,0.288675,0.288675,0.288675,0.288675,0.0,0.57735],&quot;model&quot;:&quot;toy-hash-v1&quot;}],</span>
+<span class="s1">      &quot;k&quot;:2,</span>
+<span class="s1">      &quot;metric&quot;:&quot;cosine&quot;</span>
+<span class="s1">    }</span>
+<span class="s1">  }&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq
+</code></pre></div>
+
+<p>In production code, generate embeddings with the model used by your application and keep the <code>model</code> label stable. The sample's <code>toy-hash-v1</code> vectors are only there to make the walkthrough deterministic and credential-free.</p>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">¶</a></h2>
+<ul>
+<li><a href="skeinql.html">SkeinQL reference</a></li>
+<li><a href="skeinql-research.html">SkeinQL research extensions</a></li>
+<li><a href="admin-tour.html">Admin console tour</a></li>
+</ul>
+      <hr>
+      <p class="edit-link">
+        <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/tutorials/vector-rag.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/pinkysworld/SkeinDB/blob/main/docs/tutorials/vector-rag.md" target="_blank" rel="noopener">View source</a>
+      </p>
+    </article>
+    <div class="prev-next">
+<a class="prev" href="monitoring-and-metrics.html"><span>← Previous</span>Monitoring and metrics</a>
+<a class="next" href="cdc-with-sse.html"><span>Next →</span>CDC with SSE</a>
+</div>
+  </main>
+
+  <aside class="toc" id="toc">
+    <div class="toc-title">On this page</div>
+    <div class="toc">
+<ul>
+<li><a href="#1-start-skeindb">1. Start SkeinDB</a></li>
+<li><a href="#2-check-the-sample-locally">2. Check the sample locally</a></li>
+<li><a href="#3-run-the-retrieval-pipeline">3. Run the retrieval pipeline</a></li>
+<li><a href="#4-inspect-the-vector-index">4. Inspect the vector index</a></li>
+<li><a href="#5-evaluate-retrieval-quality">5. Evaluate retrieval quality</a></li>
+<li><a href="#next">Next</a></li>
+</ul>
+</div>
+
+  </aside>
+</div>
+
+<footer class="docs-footer">
+  <p>SkeinDB &mdash; Apache-2.0 &mdash; <a href="../index.html">Home</a> &middot; <a href="../pricing.html">Pricing</a> &middot; <a href="../contact.html">Contact</a> &middot; <a href="https://github.com/pinkysworld/SkeinDB" target="_blank" rel="noopener">GitHub</a></p>
+</footer>
+
+<script src="assets/docs.js"></script>
+</body>
+</html>

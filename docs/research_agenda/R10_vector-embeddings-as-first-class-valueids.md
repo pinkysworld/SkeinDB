@@ -34,6 +34,7 @@ SkeinDB's content-addressed ValueStore could naturally extend to vector embeddin
 - `vector.insert`, `vector.search`, and `vector.index.status` provide the current embedding insert, HNSW/LSH-backed search, and index-inspection surface, including hybrid filter/order-by usage through vector scoring expressions.
 - `vector.benchmark` supplies the first built-in E1 harness: it compares exact brute-force top-k results with the indexed search path, reports nanosecond latency percentiles, and computes recall@k for one or more query embeddings.
 - SkeinAdmin's Vector panel can run search, benchmark, insert, and index-status calls from the same typed payloads used by client applications.
+- `samples/vector_rag_pipeline.py` and the Vector RAG retrieval tutorial demonstrate the end-to-end application path: deterministic embeddings, `vector.insert`, `vector.search` with `include_row`, and grounded prompt assembly without external credentials.
 
 ## Expected Contributions
 

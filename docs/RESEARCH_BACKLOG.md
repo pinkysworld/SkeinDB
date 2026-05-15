@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **77 done / 32 open** after reconciling the implemented R10 vector runtime and SkeinAdmin playground. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, embedding dependency tracking, the R10 example RAG app, and geo-routing bundle windows remain open.
+- Checklist count: **78 done / 31 open** after adding the R10 vector RAG sample application and tutorial. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, embedding dependency tracking, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -51,6 +51,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-13 (v0.3.17 catalog compatibility polish release): No research-checkbox change. MySQL compatibility gains `information_schema.check_constraints`, `parameters`, and `tablespaces`; PostgreSQL compatibility gains `pg_authid`, `pg_group`, `pg_indexes`, `pg_matviews`, `pg_sequences`, `pg_stats`, and `pg_stat_database`, with focused shared-executor tests. Counts remain 71 done / 38 open.
 - 2026-05-14 (R10 vector benchmark sync): T305 is closed with `vector.benchmark`, which compares exact brute-force top-k results against the HNSW-backed vector search path, reports nanosecond latency percentiles, and computes recall@k. SkeinAdmin's Vector panel now exposes the benchmark and sends the typed `vector.insert` / `vector.search` / `vector.index.status` payload shapes. Counts now 72 done / 37 open.
 - 2026-05-14 (R10 vector runtime reconciliation): T300-T303 and T307 are closed with existing runtime evidence plus focused tests: typed `Lit::Embedding` roundtrips, `ValueKind::Embedding` ValueStore items with LSH bucket + content-hash ValueIDs, HNSW search, LSH prefilter candidates, vector ORDER BY similarity, live QUIC vector RPC coverage, and a dedicated SkeinAdmin vector playground asset test. Counts now 77 done / 32 open.
+- 2026-05-15 (R10 vector RAG example): T306 is closed with `samples/vector_rag_pipeline.py`, a credential-free deterministic retrieval pipeline that creates a `rag.chunks` table, inserts rows, upserts embeddings with `vector.insert`, retrieves context with `vector.search`, and assembles a grounded prompt. The new `docs/tutorials/vector-rag.md` guide and generated docs page are covered by sample/docs asset tests. Counts now 78 done / 31 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -151,7 +152,7 @@ Source of truth matrix:
 - [x] T303: Hybrid query: filter predicates + ANN order-by. Evidence: vector filters in `vector.search`, `vector.cosine` / `vector.dot` / `vector.l2` order expressions, and `query_select_orders_by_vector_similarity`.
 - [ ] T304: Dependency tracking for embedding-derived queries (invalidate on source change)
 - [x] T305: Bench harness: recall/latency vs baseline index. Evidence: `vector.benchmark`, `VectorBenchmarkResult` latency percentiles, exact-vs-HNSW recall@k, `vector_benchmark_reports_recall_and_latency`, and `quic_vector_search_roundtrip` live RPC coverage.
-- [ ] T306: Example app: small RAG retrieval pipeline
+- [x] T306: Example app: small RAG retrieval pipeline. Evidence: `samples/vector_rag_pipeline.py` seeds deterministic chunks, uses `vector.insert` / `vector.search`, assembles a grounded prompt, and exposes a no-server `--self-test`; `docs/tutorials/vector-rag.md`, the generated docs guide page, and `sample_assets.rs` / `docs_site_assets.rs` lock the tutorial and sample flow.
 - [x] T307: SkeinAdmin “Embeddings” page (index status + query playground). Evidence: the Vector Search panel exposes DB/table/column/vector/PK/filter controls plus Search/Benchmark/Insert/Index Status actions, and `skeinadmin_vectors_panel_exposes_embedding_query_playground` locks the UI wiring.
 
 ### Phase 32 — Natural language to SkeinQL with verification (R12)

@@ -551,7 +551,7 @@ If a server uses a different hash (e.g., BLAKE3), it MUST specify it in `system.
 
 ## 10) Method catalog (v1)
 
-This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 129 unique methods through `system.capabilities`; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.
+This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 134 unique methods through `system.capabilities`; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.
 
 ### 10.0 Reading the catalog
 

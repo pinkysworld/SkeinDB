@@ -54,6 +54,7 @@
 <li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
 <li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="vector-rag.html">Vector RAG retrieval</a></li>
 <li><a href="cdc-with-sse.html">CDC with SSE</a></li>
 <li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
 <li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
@@ -125,8 +126,9 @@
     </div>
     <article class="doc-article">
       <h1 id="skeindb-true-status-matrix">SkeinDB True Status Matrix<a class="headerlink" href="#skeindb-true-status-matrix" title="Permanent link">¶</a></h1>
-<p>Last updated: 2026-05-14
+<p>Last updated: 2026-05-15
 Honest claims: SkeinDB does <strong>not</strong> provide and does <strong>not</strong> claim "100% MySQL compatibility." Coverage is measured against the regression corpus at <code>tests/compat/corpus.sql</code> (1658 lines / ~700+ statements) which is exercised on every commit by <a href="../crates/skeindb/tests/cluster_rpc.rs"><code>cluster_rpc::compat_corpus_statements</code></a>. The surface that <em>is</em> supported is enumerated in <a href="mysql-compat.html">docs/MYSQL_COMPAT.md</a>. Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.</p>
+<p>2026-05-15 (R10 vector RAG example): The research backlog is now <strong>78 done / 31 open</strong> after closing T306. R10 now includes a credential-free sample app and tutorial that seed deterministic chunks, upsert embeddings with <code>vector.insert</code>, retrieve rows with <code>vector.search</code>, and assemble a grounded prompt; T304 embedding dependency invalidation remains the only open R10 checkbox.</p>
 <p>2026-05-14 (R10 vector runtime reconciliation): The research backlog is now <strong>77 done / 32 open</strong> after closing T300-T303 and T307 with runtime/test evidence. R10 now has checked-off typed embedding literals and <code>ValueKind::Embedding</code> storage, LSH bucket + content-hash embedding ValueIDs, ANN search with HNSW plus LSH fallback/refinement, hybrid vector ORDER BY/filter coverage, and a dedicated SkeinAdmin vector playground test. T304 embedding dependency invalidation and T306 the small RAG example app remain open.</p>
 <p>2026-05-14 (R10 vector benchmark sync): The research backlog is now <strong>72 done / 37 open</strong> after closing T305. <code>vector.benchmark</code> compares exact brute-force top-k results against the HNSW-backed vector search path, reports nanosecond latency percentiles, and computes recall@k; SkeinAdmin's Vector panel now exposes the benchmark and sends typed vector RPC payloads. <code>system.capabilities</code> now advertises 134 unique methods.</p>
 <p>2026-05-13 (v0.3.17 catalog compatibility polish): Crate/package metadata is bumped to <code>0.3.17</code>. The research backlog count remains <strong>71 done / 38 open</strong>; this release does not close a research checkbox. The SQL compatibility surface gains MySQL <code>information_schema.check_constraints</code>, <code>parameters</code>, and <code>tablespaces</code>, plus PostgreSQL <code>pg_catalog.pg_authid</code>, <code>pg_group</code>, <code>pg_indexes</code>, <code>pg_matviews</code>, <code>pg_sequences</code>, <code>pg_stats</code>, and <code>pg_stat_database</code>, with focused shared-executor tests and PostgreSQL RowDescription overrides for the new OID/bool/int/float catalog columns. <code>system.capabilities</code> remains at 133 unique methods.</p>
@@ -162,7 +164,7 @@ Honest claims: SkeinDB does <strong>not</strong> provide and does <strong>not</s
 <h2 id="1-backlog-checklist-snapshot">1) Backlog checklist snapshot<a class="headerlink" href="#1-backlog-checklist-snapshot" title="Permanent link">¶</a></h2>
 <ul>
 <li><code>docs/PROJECT_BACKLOG.md</code>: <strong>140 done / 0 open</strong> (140 top-level roadmap tasks; remaining product gaps are tracked as partial-phase hardening notes and future compatibility/research work rather than unchecked core-roadmap boxes)</li>
-<li><code>docs/RESEARCH_BACKLOG.md</code>: <strong>77 done / 32 open</strong> (109 total)</li>
+<li><code>docs/RESEARCH_BACKLOG.md</code>: <strong>78 done / 31 open</strong> (109 total)</li>
 </ul>
 <p>Why <code>RESEARCH_BACKLOG</code> mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.</p>
@@ -366,7 +368,7 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 <tr>
 <td>R10 Vector embeddings</td>
 <td>Hardened</td>
-<td><code>ValueKind::Embedding</code> + <code>Lit::Embedding</code>; LSH bucket + content-hash embedding ValueIDs; <code>vector.insert/search/benchmark/index.status</code>; HNSW graph index (M=16, M_max0=32, ef_construction=64) with insert/search/prune; automatic index rebuild on insert; cosine/dot/L2 metrics; vector ORDER BY/filter support; SkeinAdmin vector playground; <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles.</td>
+<td><code>ValueKind::Embedding</code> + <code>Lit::Embedding</code>; LSH bucket + content-hash embedding ValueIDs; <code>vector.insert/search/benchmark/index.status</code>; HNSW graph index (M=16, M_max0=32, ef_construction=64) with insert/search/prune; automatic index rebuild on insert; cosine/dot/L2 metrics; vector ORDER BY/filter support; SkeinAdmin vector playground; <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles; <code>samples/vector_rag_pipeline.py</code> and the Vector RAG retrieval tutorial demonstrate an end-to-end retrieval pipeline.</td>
 </tr>
 <tr>
 <td>R11 LLM/autoparam</td>

@@ -54,6 +54,7 @@
 <li><a href="postgresql-in-5-min.html">PostgreSQL in 5 minutes</a></li>
 <li><a href="admin-tour.html">Admin console tour</a></li>
 <li><a href="monitoring-and-metrics.html">Monitoring and metrics</a></li>
+<li><a href="vector-rag.html">Vector RAG retrieval</a></li>
 <li><a href="cdc-with-sse.html">CDC with SSE</a></li>
 <li><a href="encryption-and-key-rotation.html">Encryption and key rotation</a></li>
 <li><a href="replay-bundles-and-integrity.html">Replay bundles and integrity</a></li>
@@ -526,7 +527,7 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <p>If a server uses a different hash (e.g., BLAKE3), it MUST specify it in <code>system.capabilities</code>.</p>
 <hr />
 <h2 id="10-method-catalog-v1">10) Method catalog (v1)<a class="headerlink" href="#10-method-catalog-v1" title="Permanent link">¶</a></h2>
-<p>This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 129 unique methods through <code>system.capabilities</code>; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.</p>
+<p>This section defines SkeinQL methods and their request/response shapes. The current runtime advertises 134 unique methods through <code>system.capabilities</code>; clients should feature-detect against that list instead of assuming every experimental family is enabled in every deployment.</p>
 <h3 id="100-reading-the-catalog">10.0 Reading the catalog<a class="headerlink" href="#100-reading-the-catalog" title="Permanent link">¶</a></h3>
 <p>Method stability levels used below:</p>
 <ul>
