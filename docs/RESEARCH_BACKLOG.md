@@ -31,7 +31,7 @@ Runtime status and checklist status intentionally differ:
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **79 done / 30 open** after adding vector-search dependency validators and source-change invalidation. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, and geo-routing bundle windows remain open.
+- Checklist count: **82 done / 27 open** after formalizing the R13 causal validator format, propagation rules, and cache interaction coverage. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, QUIC comparative p99 benchmarking, replication causality propagation, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -53,6 +53,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-14 (R10 vector runtime reconciliation): T300-T303 and T307 are closed with existing runtime evidence plus focused tests: typed `Lit::Embedding` roundtrips, `ValueKind::Embedding` ValueStore items with LSH bucket + content-hash ValueIDs, HNSW search, LSH prefilter candidates, vector ORDER BY similarity, live QUIC vector RPC coverage, and a dedicated SkeinAdmin vector playground asset test. Counts now 77 done / 32 open.
 - 2026-05-15 (R10 vector RAG example): T306 is closed with `samples/vector_rag_pipeline.py`, a credential-free deterministic retrieval pipeline that creates a `rag.chunks` table, inserts rows, upserts embeddings with `vector.insert`, retrieves context with `vector.search`, and assembles a grounded prompt. The new `docs/tutorials/vector-rag.md` guide and generated docs page are covered by sample/docs asset tests. Counts now 78 done / 31 open.
 - 2026-05-15 (R10 vector dependency invalidation): T304 is closed with `vector.search.cache` support, source-table dependency metadata, V2 causality tokens, vector-search ETags, `cache.if_none_match` `not_modified` responses, stale HNSW invalidation on ordinary data writes, and `vector.insert` prepared-query SSE notifications. Evidence: `vector_search_cache_metadata_tracks_source_table_changes` and `vector_search_cache_invalidates_after_vector_insert_rpc`. Counts now 79 done / 30 open.
+- 2026-05-15 (R13 causal validator sync): T064, T065, and T067 are closed with the documented `vector_clock_v2` causal token format, request/response propagation rules for `query.select` and `query.execute_prepared`, legacy `etag_chain_v1` request compatibility, and end-to-end cache interaction coverage. Evidence: `r13_vector_clock_causality`, `query_select_min_causality_enforced`, and `query_execute_prepared_honors_causal_cache_validators`. Counts now 82 done / 27 open.
 
 Source of truth matrix:
 - `docs/TRUE_STATUS_MATRIX.md`
@@ -179,10 +180,10 @@ Source of truth matrix:
 The following additions extend existing phases in `docs/PROJECT_BACKLOG.md`.
 
 ### Extend Phase 6 — Causal ETag chains (R13)
-- [ ] T064: Define causal ETag format (compressed dependencies / vector-clock hybrid)
-- [ ] T065: `min_causality` request field + response causality propagation rules
+- [x] T064: Define causal ETag format (compressed dependencies / vector-clock hybrid). Evidence: the runtime emits `vector_clock_v2` tokens, `CAUSALITY_FORMAT_V2` is covered by `r13_vector_clock_causality`, and the wire format is documented in `docs/ETAG_VALIDATORS.md` / `docs/SKEINQL.md`.
+- [x] T065: `min_causality` request field + response causality propagation rules. Evidence: `query.select`, `query.execute_prepared`, `merge.apply`, and `vector.search` accept `min_causality` and return `causality`; covered by `query_select_min_causality_enforced` and `query_execute_prepared_honors_causal_cache_validators`.
 - [ ] T066: Replication propagates causality metadata (no total order required)
-- [ ] T067: Cache interaction tests (If-None-Match with causal validators)
+- [x] T067: Cache interaction tests (If-None-Match with causal validators). Evidence: `query_select_min_causality_enforced` and `query_execute_prepared_honors_causal_cache_validators` verify `if_none_match` + `min_causality` on satisfied and unsatisfied dependency floors.
 
 ### Extend Phase 7 — Delta topology optimization (R03)
 - [x] T073: Implement periodic full snapshots for deltas (K-depth policy). Evidence: `DeltaPolicy.snapshot_interval`, `ValueStore::put_with_delta`, and `delta_snapshot_interval_enforces_raw`.

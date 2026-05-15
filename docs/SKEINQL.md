@@ -466,7 +466,7 @@ The `cache` block on query execution is the protocol-level interface:
 "cache": {
   "want_etag": true,
   "if_none_match": "W/\"abc\"",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]},
   "mode": "weak",
   "persist": false
 }
@@ -476,6 +476,7 @@ Rules:
 - If `want_etag:true`, the server MUST compute an ETag for the result.
 - If `if_none_match` matches, the server SHOULD avoid full execution and return `not_modified:true` with no rows.
 - If `min_causality` is provided, the server MUST ensure the result is causally consistent with that token.
+- Responses emit `causality` tokens in the current `vector_clock_v2` format; the runtime still accepts legacy `etag_chain_v1` request tokens for compatibility.
 
 ---
 
@@ -856,7 +857,7 @@ Params:
   "cache": {
     "want_etag": true,
     "if_none_match": null,
-    "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]},
+    "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]},
     "persist": false
   },
   "wire": {"format": "rows_json"},
@@ -873,7 +874,7 @@ Result:
   "not_modified": false,
   "data": { ...ResultSet... },
   "deps": {"tables":[{"table":"app.users","v":3}]},
-  "causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]},
+  "causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]},
   "wire": null
 }
 ```
@@ -966,7 +967,7 @@ Params:
   "query_id": "q_...",
   "args": [ {"t":"u64","v":1} ],
   "if_none_match": "W/\"q:...\"",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]},
   "result_format": "rows_json",
   "wire": { "format": "skeinpack_v1", "known_valueids": ["v1","v2"] }
 }
@@ -1602,7 +1603,7 @@ Params:
     "body": {"select": {"projection":[{"expr":{"col":"id"}}],"from":[{"db":"app","table":"users"}]}}
   },
   "approval_token": "b8e4...",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]},
   "result_format": "objects_json"
 }
 ```
@@ -1615,7 +1616,7 @@ Result (same shape as `query.select`):
   "not_modified": false,
   "data": [{"id":{"t":"u64","v":1}}],
   "deps": {"tables":[{"table":"app.users","v":3}]},
-  "causality": {"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]}
+  "causality": {"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]}
 }
 ```
 
@@ -1807,7 +1808,7 @@ Params:
   "pk": [{"t":"u64","v":1}],
   "incoming": {"count": {"t":"u64","v":3}},
   "expected_etag": "W/\"r:...\"",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"mydb.counters","v":12}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"mydb.counters","v":12}]},
   "policy": {"default":{"kind":"builtin","name":"sum"}}
 }
 ```

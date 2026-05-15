@@ -79,7 +79,7 @@ Related: R11, R12
 Related: R13
 
 - `query.select` / `query.execute_prepared` accept `cache.min_causality`
-- query results include `causality` tokens (etag_chain_v1)
+- query results include `causality` tokens (`vector_clock_v2`; legacy `etag_chain_v1` remains accepted on input)
 - `causal.session.begin` / `causal.session.end` (future)
 
 ## 10. edge.* — Replay bundles as edge replication primitive

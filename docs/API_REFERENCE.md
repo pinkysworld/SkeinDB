@@ -52,7 +52,7 @@ Clients should treat `id` as opaque, send `skeinql:"1.0"`, and use `system.capab
 | `skeinpack_v1` | Traffic reduction with known ValueIDs | Dictionary-backed wire object returned under `wire`. |
 | `wasm_batch_v1` | Wasm operator batches | `format:"skein.wasm.batch.v1"` plus column metadata and packed rows. |
 
-Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modified`. Use `min_causality` with `etag_chain_v1` tokens when a client must observe at least the writes from an earlier read.
+Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modified`. Use `min_causality` with `vector_clock_v2` tokens when a client must observe at least the writes from an earlier read; the runtime still accepts legacy `etag_chain_v1` tokens on input for compatibility.
 
 ## Method families
 

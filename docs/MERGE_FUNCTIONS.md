@@ -89,7 +89,7 @@ Example registration payload:
 - If it does not match, `conflict=true` is returned and `conflicts=["write_write"]`.
 - The merge still applies unless the selected policy rejects or a non-write-write conflict blocks the write.
 
-`merge.apply` also accepts `min_causality` (`etag_chain_v1` or the runtime's causal vector-clock format):
+`merge.apply` also accepts `min_causality` (`vector_clock_v2`; legacy `etag_chain_v1` is still accepted on input):
 
 - If dependencies are satisfied, merge execution continues.
 - If dependencies are not satisfied, `conflict=true`, `applied=false`, and `conflicts=["dependency"]`.

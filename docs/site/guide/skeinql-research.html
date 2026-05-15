@@ -201,7 +201,7 @@
 <p>Related: R13</p>
 <ul>
 <li><code>query.select</code> / <code>query.execute_prepared</code> accept <code>cache.min_causality</code></li>
-<li>query results include <code>causality</code> tokens (etag_chain_v1)</li>
+<li>query results include <code>causality</code> tokens (<code>vector_clock_v2</code>; legacy <code>etag_chain_v1</code> remains accepted on input)</li>
 <li><code>causal.session.begin</code> / <code>causal.session.end</code> (future)</li>
 </ul>
 <h2 id="10-edge-replay-bundles-as-edge-replication-primitive">10. edge.* — Replay bundles as edge replication primitive<a class="headerlink" href="#10-edge-replay-bundles-as-edge-replication-primitive" title="Permanent link">¶</a></h2>

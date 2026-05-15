@@ -412,6 +412,160 @@ async fn prepared_query_get_endpoint_honors_etag_validators() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn query_execute_prepared_honors_causal_cache_validators() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("query_execute_prepared_causality")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "users",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "name", "type": {"kind": "str"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 1}, "name": {"t": "str", "v": "Ada"}}]
+            }),
+        )
+        .await?;
+
+    let prepare = client
+        .rpc(
+            "query.prepare",
+            json!({"query": select_query("app", "users", &["id", "name"])}),
+        )
+        .await?;
+    assert!(prepare.ok);
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+
+    let first = client
+        .rpc(
+            "query.execute_prepared",
+            json!({
+                "query_id": query_id,
+                "args": []
+            }),
+        )
+        .await?;
+    assert!(first.ok);
+    let first_result = first
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing result"))?;
+    let first_etag = first_result["etag"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing etag"))?
+        .to_string();
+    let first_causality = first_result["causality"].clone();
+    assert_eq!(first_causality["format"].as_str(), Some("vector_clock_v2"));
+    assert_eq!(first_result["not_modified"].as_bool(), Some(false));
+    assert_eq!(
+        first_result["data"]["rows"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    let cached = client
+        .rpc(
+            "query.execute_prepared",
+            json!({
+                "query_id": query_id,
+                "args": [],
+                "if_none_match": first_etag,
+                "min_causality": first_causality.clone()
+            }),
+        )
+        .await?;
+    assert!(cached.ok);
+    let cached_result = cached
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing cached result"))?;
+    assert_eq!(cached_result["not_modified"].as_bool(), Some(true));
+    assert!(cached_result["data"].is_null());
+    assert_eq!(
+        cached_result["causality"]["format"].as_str(),
+        Some("vector_clock_v2")
+    );
+
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "users"},
+                "rows": [{"id": {"t": "u64", "v": 2}, "name": {"t": "str", "v": "Grace"}}]
+            }),
+        )
+        .await?;
+
+    let changed = client
+        .rpc(
+            "query.execute_prepared",
+            json!({
+                "query_id": query_id,
+                "args": [],
+                "if_none_match": cached_result["etag"].clone(),
+                "min_causality": first_causality.clone()
+            }),
+        )
+        .await?;
+    assert!(changed.ok);
+    let changed_result = changed
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing changed result"))?;
+    assert_eq!(changed_result["not_modified"].as_bool(), Some(false));
+    assert_eq!(
+        changed_result["data"]["rows"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_ne!(changed_result["etag"].as_str(), Some(first_etag.as_str()));
+
+    let mut future_causality = changed_result["causality"].clone();
+    let next_version = future_causality["deps"][0]["v"].as_u64().unwrap_or(0) + 1;
+    future_causality["deps"][0]["v"] = serde_json::Value::from(next_version);
+
+    let rejected = client
+        .rpc(
+            "query.execute_prepared",
+            json!({
+                "query_id": query_id,
+                "args": [],
+                "if_none_match": changed_result["etag"].clone(),
+                "min_causality": future_causality
+            }),
+        )
+        .await?;
+    assert!(!rejected.ok);
+    assert_eq!(
+        rejected.error.as_ref().map(|value| value.code.as_str()),
+        Some("precondition_failed")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn tx_rpc_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("tx_rpc_roundtrip")?;

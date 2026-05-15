@@ -17,7 +17,7 @@ Top-level schema:
   "format": "offline_queue_v1",
   "client_id": "client-123",
   "created_at_ms": 1730000000000,
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.counters","v":12}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.counters","v":12}]},
   "items": [ ... ]
 }
 ```
@@ -31,7 +31,7 @@ Item schema:
   "pk": [{"t":"u64","v":1}],
   "incoming": {"count":{"t":"u64","v":2}},
   "expected_etag": "W/\"r:...\"",
-  "min_causality": {"format":"etag_chain_v1","deps":[{"table":"app.counters","v":12}]},
+  "min_causality": {"format":"vector_clock_v2","deps":[{"table":"app.counters","v":12}]},
   "policy": {"default":{"kind":"builtin","name":"sum"}},
   "depends_on": ["op-0"]
 }

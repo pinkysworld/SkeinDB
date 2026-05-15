@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R13 — Causal Consistency via ETag Chains · SkeinDB</title>
-  <meta name="description" content="Novel ETag format encoding causal dependencies via HTTP caching semantics. SkeinDB Research Track R13.">
+  <meta name="description" content="Causal cache validators with vector_clock_v2 tokens, min_causality propagation, and prepared-query cache interaction tests. SkeinDB Research Track R13.">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
@@ -37,23 +37,23 @@
   </a>
   <div class="hero-badge">R13 · Consistency &amp; Distribution</div>
   <h1>Causal Consistency via ETag Chains</h1>
-  <p class="abstract">SkeinDB's ETags currently reflect "has this data changed?" but could encode causal dependencies. In distributed deployments, clients need session consistency — results consistent with everything they've seen — without full serializability overhead. By extending ETags to encode causal dependencies, SkeinDB provides causal consistency guarantees using existing web infrastructure.</p>
+  <p class="abstract">SkeinDB's query validators now pair ordinary ETags with `vector_clock_v2` causality tokens so clients can demand reads that are at least as fresh as earlier observations. The runtime combines `if_none_match` with `min_causality`, emits dependency-backed response tokens, and preserves backward compatibility for older `etag_chain_v1` request payloads while replication propagation remains future work.</p>
 </section>
 
 <div class="content">
 
   <div class="status-bar">
-    <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-dot shipped"></span>
+    <span class="status-text"><strong>Hardened Runtime</strong> — `vector_clock_v2` causal validators, propagation rules, and cache interaction tests are live; replication propagation remains open.</span>
   </div>
 
   <div class="novelty-card">
     <h2>🔬 What's Novel</h2>
     <ul>
-      <li><strong>Novel ETag format</strong> encoding causal dependencies that propagates through HTTP infrastructure</li>
-      <li>Integration of causal consistency with standard HTTP caching semantics</li>
-      <li>Practical causal consistency for web applications without specialized infrastructure</li>
-      <li>Analysis of caching-consistency interactions in geo-distributed databases</li>
+      <li><strong>`vector_clock_v2` causal token format</strong> encoding dependency versions that travel alongside ordinary query ETags</li>
+      <li>`query.select`, `query.execute_prepared`, `merge.apply`, and `vector.search` all accept `min_causality` and emit response `causality` tokens</li>
+      <li>Prepared-query cache validation combines `if_none_match` and `min_causality`, returning `not_modified` only when both the ETag and dependency floor are satisfied</li>
+      <li>Legacy `etag_chain_v1` request tokens remain accepted while clients migrate to the current runtime format</li>
     </ul>
   </div>
 
@@ -61,19 +61,19 @@
     <h2><span class="icon">🔧</span> Technical Approach</h2>
     <div class="phase">
       <h3>Phase 1 — Causal ETag Design</h3>
-      <p>Evaluate encoding options: compressed vector clocks, dependency set hashes, and hybrid version-dependency encoding. Select format compatible with HTTP ETag header constraints.</p>
+      <p>The current runtime uses a hybrid dependency clock: <code>{"format":"vector_clock_v2","deps":[...]}</code>. Responses emit the v2 format, while request parsing still accepts legacy <code>etag_chain_v1</code> tokens for compatibility.</p>
     </div>
     <div class="phase">
       <h3>Phase 2 — Consistency Protocol</h3>
-      <p>Queries include "minimum causality" ETag; responses include "result causality" ETag. Clients propagate causality through operations automatically via HTTP headers.</p>
+      <p><code>query.select</code> and <code>query.execute_prepared</code> accept <code>min_causality</code> and emit response <code>causality</code> tokens. Matching <code>if_none_match</code> validators return <code>not_modified</code> only when the requested dependency floor is also satisfied.</p>
     </div>
     <div class="phase">
       <h3>Phase 3 — Cluster Integration</h3>
-      <p>Replication protocol preserving causal ordering without requiring total order. Nodes track causal dependencies and serve reads consistent with client-observed history.</p>
+      <p>Replication-side propagation of causal metadata is the remaining open checklist item. The local runtime already tracks dependency versions and enforces them on read paths, but inter-node metadata propagation is still future work.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Caching Interaction</h3>
-      <p>Analyze interaction with HTTP caching layers. Design cache validation protocols that preserve causal guarantees even when responses are served from CDN or browser cache.</p>
+      <p>Cache interaction coverage is live: focused tests verify satisfied and rejected combinations of <code>if_none_match</code> and <code>min_causality</code> for prepared queries, alongside the existing query-select validator coverage.</p>
     </div>
   </div>
 

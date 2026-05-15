@@ -203,7 +203,7 @@ Last updated: 2026-05-11</p>
 <li>If it does not match, <code>conflict=true</code> is returned and <code>conflicts=["write_write"]</code>.</li>
 <li>The merge still applies unless the selected policy rejects or a non-write-write conflict blocks the write.</li>
 </ul>
-<p><code>merge.apply</code> also accepts <code>min_causality</code> (<code>etag_chain_v1</code> or the runtime's causal vector-clock format):</p>
+<p><code>merge.apply</code> also accepts <code>min_causality</code> (<code>vector_clock_v2</code>; legacy <code>etag_chain_v1</code> is still accepted on input):</p>
 <ul>
 <li>If dependencies are satisfied, merge execution continues.</li>
 <li>If dependencies are not satisfied, <code>conflict=true</code>, <code>applied=false</code>, and <code>conflicts=["dependency"]</code>.</li>

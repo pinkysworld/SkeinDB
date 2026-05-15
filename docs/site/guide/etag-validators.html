@@ -238,11 +238,14 @@ See: <code>docs/research_agenda/R13_causal-consistency-via-etag-chains.md</code>
 - Each response includes a “causality token” alongside ETags.
 - Clients propagate <code>min_causality</code> on subsequent requests.
 - The server ensures returned results are consistent with all operations causally visible to that token.</p>
-<p>Current prototype (etag_chain_v1):
+<p>Current runtime format (<code>vector_clock_v2</code>):
 - Token format:
-  - <code>{"format":"etag_chain_v1","deps":[{"table":"app.users","v":3}]}</code>
+  - <code>{"format":"vector_clock_v2","deps":[{"table":"app.users","v":3}]}</code>
 - <code>deps</code> is a dependency list similar to <code>deps.tables</code> in query results.
+- <code>query.select</code>, <code>query.execute_prepared</code>, and <code>vector.search</code> emit <code>vector_clock_v2</code> causality tokens in responses.
+- Requests may still send legacy <code>etag_chain_v1</code> tokens while older clients are migrated; <code>ensure_min_causality()</code> accepts both formats.
 - A request with <code>cache.min_causality</code> is rejected if any overlapping dependency has a lower version.
+- <code>If-None-Match</code> can be combined with <code>min_causality</code>: if the ETag matches and the dependency floor is satisfied, the server returns <code>not_modified:true</code>; if the causality floor is ahead of current dependencies, the request fails with <code>precondition_failed</code>.
 - Servers may advertise support via <code>system.capabilities.causal_etags</code>.</p>
 <p>Implementation notes:
 - Full vector clocks may be too large; consider compressed dependency sets or hybrid schemes.

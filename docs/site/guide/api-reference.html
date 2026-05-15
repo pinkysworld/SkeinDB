@@ -229,7 +229,7 @@ Runtime baseline: v0.3.17 plus current main, SkeinQL 1.0, 134 advertised RPC met
 </tr>
 </tbody>
 </table>
-<p>Cache-aware query methods can return <code>etag</code>, <code>deps</code>, <code>causality</code>, and <code>not_modified</code>. Use <code>min_causality</code> with <code>etag_chain_v1</code> tokens when a client must observe at least the writes from an earlier read.</p>
+<p>Cache-aware query methods can return <code>etag</code>, <code>deps</code>, <code>causality</code>, and <code>not_modified</code>. Use <code>min_causality</code> with <code>vector_clock_v2</code> tokens when a client must observe at least the writes from an earlier read; the runtime still accepts legacy <code>etag_chain_v1</code> tokens on input for compatibility.</p>
 <h2 id="method-families">Method families<a class="headerlink" href="#method-families" title="Permanent link">¶</a></h2>
 <table>
 <thead>
