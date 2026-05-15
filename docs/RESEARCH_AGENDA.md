@@ -31,7 +31,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
-## Implementation status snapshot (2026-05-11)
+## Implementation status snapshot (2026-05-15)
 
 All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
 
@@ -51,7 +51,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R12 | Hardened | Natural language translate/explain/execute flow with approval-gated verification and NL eval harness (`ai.nl.*`, `skeindb nl-eval`) |
 | R13 | Implemented (prototype) | ETag validators + min-causality controls (`query.select` + `If-None-Match`) |
 | R14 | Implemented (prototype) | Replay bundle/time-travel export surfaces (`docs/TIME_TRAVEL_REPLAY.md`) |
-| R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, merge/apply APIs) |
+| R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, merge/apply APIs, MVCC row schema-version tags) |
 | R16 | Implemented (prototype) | Index advisor synthesis/apply/history (`advisor.*`) |
 | R17 | Hardened | Compatibility intent inference, rewrite preview, and JSON/Markdown report export (`migration.*`) |
 | R18 | Implemented (prototype) | Reproducible replay/report tooling (`docs/TIME_TRAVEL_REPLAY.md`) |

@@ -590,6 +590,7 @@ Format:
         }
       },
       "version": 2,
+      "schema_version": 4,
       "deleted": false
     }
   ]
@@ -602,8 +603,10 @@ Rules:
   produce net byte savings for that table snapshot.
 - The first occurrence of a ValueID in a table file should include `lit` seed data.
 - Later duplicates may omit `lit` and reference only `id`.
+- `schema_version` records the table schema version active when that row version was written.
 - Unknown `format_version` values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
+- v2 table-row payloads without `schema_version` remain readable and are normalized from `schema_versions.json` when loaded.
 
 ### 11.7 tables/<db>/<table>.rseg (prototype segment container v1)
 
@@ -612,7 +615,7 @@ SkeinDB can also persist table rows in a compact framed container with extension
 Header:
 - `magic[8]`: `SKNSEGR1`
 - `segment_format_version` (`u32 LE`): currently `1`
-- `table_format_version` (`u32 LE`): currently `2` (same row payload schema as `.json`)
+- `table_format_version` (`u32 LE`): currently `3` (same row payload schema as `.json`)
 - `row_count` (`u64 LE`)
 
 Body:
@@ -628,6 +631,7 @@ Behavior:
 
 Compatibility notes:
 - Unsupported segment header versions are ignored by fallback readers.
+- v2 row payloads remain readable; missing `schema_version` fields are normalized from the per-table schema-version map on load.
 - If both files are missing or unreadable, the table loads as empty.
 
 ### 11.8 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)

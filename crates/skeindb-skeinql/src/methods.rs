@@ -1728,6 +1728,9 @@ pub struct ReplayBundleRowEntry {
     pub version: u64,
 
     #[serde(default)]
+    pub schema_version: u64,
+
+    #[serde(default)]
     pub deleted: bool,
 
     #[serde(default)]

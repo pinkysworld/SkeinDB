@@ -142,6 +142,10 @@ pub struct RowEntry {
     /// Monotonic row version. Incremented on update.
     pub version: u64,
 
+    /// Table schema version active when this row version was written.
+    #[serde(default)]
+    pub schema_version: u64,
+
     /// Soft delete marker.
     #[serde(default)]
     pub deleted: bool,
@@ -151,7 +155,7 @@ pub struct RowEntry {
     pub commit_ts_ms: u64,
 }
 
-const TABLE_ROWS_FORMAT_VERSION: u32 = 2;
+const TABLE_ROWS_FORMAT_VERSION: u32 = 3;
 const TABLE_ROW_VALUE_REF_KEY: &str = "$skein_ref";
 const TABLE_ROWS_SEGMENT_MAGIC: [u8; 8] = *b"SKNSEGR1";
 const TABLE_ROWS_SEGMENT_FORMAT_VERSION: u32 = 1;
@@ -168,6 +172,8 @@ struct TableRowsDisk {
 struct RowEntryDisk {
     row: BTreeMap<String, serde_json::Value>,
     version: u64,
+    #[serde(default)]
+    schema_version: u64,
     #[serde(default)]
     deleted: bool,
     #[serde(default)]
@@ -1481,6 +1487,7 @@ impl Engine {
         engine.load_merge_wasm_registry_best_effort();
         engine.load_views_best_effort();
         engine.load_schema_versions_best_effort();
+        engine.normalize_loaded_row_schema_versions_best_effort();
         engine.load_schema_changes_best_effort();
         engine.load_schema_flags_best_effort();
         engine.load_advisor_best_effort();
@@ -2135,9 +2142,10 @@ impl Engine {
             };
 
             let change = self.schema_changes[idx].clone();
+            let applied_schema_version = next_version.saturating_add(1);
             let (schema, tdata) = self.get_table_mut(&params.table)?;
             for op in change.changes.iter() {
-                apply_schema_change(schema, tdata, op)?;
+                apply_schema_change(schema, tdata, op, applied_schema_version)?;
             }
             bump_table_version(schema);
             self.persist_table(&params.table.db, &params.table.table)?;
@@ -2246,6 +2254,11 @@ impl Engine {
             anyhow::bail!("invalid_request: column name must not be empty");
         }
 
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
         let mut renamed_flag = None;
         {
             let (schema, tdata) = self.get_table_mut(table)?;
@@ -2315,6 +2328,8 @@ impl Engine {
                 }
             }
 
+            stamp_rows_schema_version(&mut tdata.rows, next_version);
+
             schema.columns[col_idx] = ColumnSchema {
                 name: target_name.clone(),
                 r#type: column.r#type.clone(),
@@ -2370,11 +2385,6 @@ impl Engine {
             );
         }
 
-        let key = TableKey {
-            db: table.db.clone(),
-            table: table.table.clone(),
-        };
-        let next_version = self.schema_version_for(&key).saturating_add(1);
         self.set_schema_version(&key, next_version);
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
@@ -2416,6 +2426,11 @@ impl Engine {
             anyhow::bail!("invalid_request: column name must not be empty");
         }
 
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let next_version = self.schema_version_for(&key).saturating_add(1);
         let removed_flag_column = {
             let (schema, tdata) = self.get_table_mut(table)?;
             let Some(col_idx) = schema
@@ -2447,6 +2462,7 @@ impl Engine {
             for entry in tdata.rows.iter_mut() {
                 entry.row.remove(&existing_name);
             }
+            stamp_rows_schema_version(&mut tdata.rows, next_version);
 
             tdata.pk_index.clear();
             for (idx, entry) in tdata.rows.iter().enumerate() {
@@ -2472,11 +2488,6 @@ impl Engine {
             &removed_flag_column,
         );
 
-        let key = TableKey {
-            db: table.db.clone(),
-            table: table.table.clone(),
-        };
-        let next_version = self.schema_version_for(&key).saturating_add(1);
         self.set_schema_version(&key, next_version);
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
@@ -2607,6 +2618,11 @@ impl Engine {
         let mut change_pks: Vec<Vec<Lit>> = Vec::new();
         let mut intern_items: Vec<ValueStoreItem> = Vec::new();
         let mut snapshot_rows: Vec<RowObject> = Vec::new();
+        let table_key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let row_schema_version = self.schema_version_for(&table_key);
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
@@ -2643,6 +2659,7 @@ impl Engine {
                 tdata.rows.push(RowEntry {
                     row: row.clone(),
                     version,
+                    schema_version: row_schema_version,
                     deleted: false,
                     commit_ts_ms: now_millis(),
                 });
@@ -2735,6 +2752,7 @@ impl Engine {
             db: table.db.clone(),
             table: table.table.clone(),
         };
+        let row_schema_version = self.schema_version_for(&key);
         let predicate_plan = {
             let (schema, _) = self.get_table(table)?;
             compile_interned_predicate_for_table(self, &key, schema, predicate, args)
@@ -2795,6 +2813,7 @@ impl Engine {
                     tdata.pk_index.insert(new_pk_key, idx);
                 }
                 tdata.rows[idx].version = next_row_version(schema);
+                tdata.rows[idx].schema_version = row_schema_version;
                 tdata.rows[idx].commit_ts_ms = now_millis();
                 affected += 1;
 
@@ -2862,6 +2881,7 @@ impl Engine {
             db: table.db.clone(),
             table: table.table.clone(),
         };
+        let row_schema_version = self.schema_version_for(&key);
         let predicate_plan = {
             let (schema, _) = self.get_table(table)?;
             compile_interned_predicate_for_table(self, &key, schema, predicate, args)
@@ -2889,6 +2909,7 @@ impl Engine {
                 let entry = &mut tdata.rows[idx];
                 entry.deleted = true;
                 entry.version = next_row_version(schema);
+                entry.schema_version = row_schema_version;
                 entry.commit_ts_ms = now_millis();
                 affected += 1;
                 let pk = extract_pk(schema, &row_before_delete).ok();
@@ -4368,6 +4389,11 @@ impl Engine {
         let mut intern_items = Vec::new();
         let mut snapshot_rows = Vec::new();
         let mut last_insert_id = 0u64;
+        let table_key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let row_schema_version = self.schema_version_for(&table_key);
 
         {
             let (schema, tdata) = self.get_table_mut(&params.table)?;
@@ -4404,6 +4430,7 @@ impl Engine {
                         .row
                         .insert(params.column.clone(), row.embedding.clone());
                     entry.version = next_row_version(schema);
+                    entry.schema_version = row_schema_version;
                     entry.commit_ts_ms = now_millis();
                     updated += 1;
                     change_ops.push((row.pk.clone(), "update"));
@@ -4420,6 +4447,7 @@ impl Engine {
                     tdata.rows.push(RowEntry {
                         row: new_row.clone(),
                         version,
+                        schema_version: row_schema_version,
                         deleted: false,
                         commit_ts_ms: now_millis(),
                     });
@@ -6932,6 +6960,7 @@ impl Engine {
                     .map(|row| RowEntry {
                         row: row.row.clone(),
                         version: row.version,
+                        schema_version: row.schema_version.max(1),
                         deleted: row.deleted,
                         commit_ts_ms: row.commit_ts_ms,
                     })
@@ -7200,6 +7229,11 @@ impl Engine {
         let mut conflicts = Vec::new();
         let mut etag = None;
         let mut op = None;
+        let table_key = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let row_schema_version = self.schema_version_for(&table_key);
 
         {
             let (schema, tdata) = self.get_table_mut(&params.table)?;
@@ -7305,6 +7339,7 @@ impl Engine {
                         entry.row = merged_row.clone();
                         entry.deleted = false;
                         entry.version = next_row_version(schema);
+                        entry.schema_version = row_schema_version;
                         bump_table_version(schema);
                         applied = true;
                         etag = Some(row_etag(&entry.row, entry.version));
@@ -7350,6 +7385,7 @@ impl Engine {
 
                     entry.row = merged_row.clone();
                     entry.version = next_row_version(schema);
+                    entry.schema_version = row_schema_version;
                     bump_table_version(schema);
                     applied = true;
                     etag = Some(row_etag(&entry.row, entry.version));
@@ -7391,6 +7427,7 @@ impl Engine {
                     tdata.rows.push(RowEntry {
                         row,
                         version,
+                        schema_version: row_schema_version,
                         deleted: false,
                         commit_ts_ms: now_millis(),
                     });
@@ -9960,6 +9997,14 @@ impl Engine {
         self.schema_versions = versions;
         if touched {
             self.persist_schema_versions_best_effort();
+        }
+    }
+
+    fn normalize_loaded_row_schema_versions_best_effort(&mut self) {
+        let schema_versions = self.schema_versions.clone();
+        for (key, tdata) in self.tables.iter_mut() {
+            let schema_version = schema_versions.get(key).copied().unwrap_or(1).max(1);
+            stamp_rows_schema_version_if_missing(&mut tdata.rows, schema_version);
         }
     }
 
@@ -20729,6 +20774,7 @@ fn replay_bundle_table_from_engine(
             .map(|entry| ReplayBundleRowEntry {
                 row: entry.row.clone(),
                 version: entry.version,
+                schema_version: entry.schema_version,
                 deleted: entry.deleted,
                 commit_ts_ms: entry.commit_ts_ms,
             })
@@ -21804,6 +21850,7 @@ fn encode_row_entry_disk(
     RowEntryDisk {
         row,
         version: entry.version,
+        schema_version: entry.schema_version,
         deleted: entry.deleted,
         commit_ts_ms: entry.commit_ts_ms,
     }
@@ -21912,7 +21959,7 @@ fn plan_value_refs_for_rows(rows: &[RowEntry]) -> HashSet<ValueId> {
 }
 
 fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> {
-    if disk.format_version != TABLE_ROWS_FORMAT_VERSION {
+    if disk.format_version != 2 && disk.format_version != TABLE_ROWS_FORMAT_VERSION {
         anyhow::bail!("unsupported table format version: {}", disk.format_version);
     }
 
@@ -21957,6 +22004,7 @@ fn decode_table_rows_disk(disk: TableRowsDisk) -> anyhow::Result<Vec<RowEntry>> 
         rows.push(RowEntry {
             row: decoded,
             version: row.version,
+            schema_version: row.schema_version,
             deleted: row.deleted,
             commit_ts_ms: row.commit_ts_ms,
         });
@@ -24182,10 +24230,27 @@ fn next_row_version(schema: &TableSchema) -> u64 {
     schema.table_version.saturating_add(1)
 }
 
+fn stamp_rows_schema_version(rows: &mut [RowEntry], schema_version: u64) {
+    let schema_version = schema_version.max(1);
+    for entry in rows.iter_mut() {
+        entry.schema_version = schema_version;
+    }
+}
+
+fn stamp_rows_schema_version_if_missing(rows: &mut [RowEntry], schema_version: u64) {
+    let schema_version = schema_version.max(1);
+    for entry in rows.iter_mut() {
+        if entry.schema_version == 0 {
+            entry.schema_version = schema_version;
+        }
+    }
+}
+
 fn apply_schema_change(
     schema: &mut TableSchema,
     tdata: &mut TableData,
     change: &SchemaChangeOp,
+    schema_version: u64,
 ) -> anyhow::Result<()> {
     match change {
         SchemaChangeOp::AddColumn {
@@ -24207,6 +24272,7 @@ fn apply_schema_change(
                     .row
                     .entry(name.clone())
                     .or_insert_with(|| default_value.clone());
+                entry.schema_version = schema_version.max(1);
             }
             if *auto_increment {
                 let mut next_id = 1u64;
@@ -40228,18 +40294,21 @@ mod tests {
         let entry_live = RowEntry {
             row: RowObject::new(),
             version: 1,
+            schema_version: 1,
             deleted: false,
             commit_ts_ms: 100,
         };
         let entry_deleted = RowEntry {
             row: RowObject::new(),
             version: 2,
+            schema_version: 1,
             deleted: true,
             commit_ts_ms: 200,
         };
         let entry_pre_tt = RowEntry {
             row: RowObject::new(),
             version: 1,
+            schema_version: 1,
             deleted: false,
             commit_ts_ms: 0,
         };
@@ -40261,6 +40330,122 @@ mod tests {
         // Pre-time-travel row (commit_ts_ms == 0): always visible if not deleted.
         assert!(row_visible_at(&entry_pre_tt, Some(50)));
         assert!(row_visible_at(&entry_pre_tt, Some(0)));
+    }
+
+    #[test]
+    fn schema_version_tags_row_entries_and_normalizes_legacy_rows() -> anyhow::Result<()> {
+        let dir = temp_dir("row_schema_version_tags");
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "items".to_string(),
+            r#as: None,
+        };
+
+        {
+            let mut engine = Engine::open(&dir)?;
+            engine.create_table(
+                &table.db,
+                &table.table,
+                vec![ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("int"),
+                    nullable: false,
+                    auto_increment: false,
+                }],
+                vec!["id".to_string()],
+                false,
+                None,
+            )?;
+
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: 1 })])], None)?;
+            let change = engine.schema_propose_change(SchemaProposeChangeParams {
+                table: table.clone(),
+                base_version: 1,
+                changes: vec![SchemaChangeOp::AddColumn {
+                    name: "title".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: true,
+                    auto_increment: false,
+                    default: None,
+                }],
+                message: None,
+            })?;
+            let applied = engine.schema_apply_merge(SchemaApplyMergeParams {
+                table: table.clone(),
+                change_ids: Some(vec![change.change_id]),
+            })?;
+            assert_eq!(applied.new_version, 2);
+
+            {
+                let (_, tdata) = engine.get_table(&table)?;
+                assert_eq!(tdata.rows.len(), 1);
+                assert_eq!(tdata.rows[0].schema_version, 2);
+                assert!(matches!(tdata.rows[0].row.get("title"), Some(Lit::Null)));
+            }
+
+            engine.data_insert(
+                &table,
+                vec![row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "second".to_string(),
+                        },
+                    ),
+                ])],
+                None,
+            )?;
+
+            {
+                let (_, tdata) = engine.get_table(&table)?;
+                assert_eq!(tdata.rows.len(), 2);
+                assert!(tdata.rows.iter().all(|entry| entry.schema_version == 2));
+            }
+
+            let json_path = engine.table_path(&table.db, &table.table);
+            let segment_path = engine.table_segment_path(&table.db, &table.table);
+            let legacy_rows = serde_json::json!({
+                "format_version": 2,
+                "rows": [
+                    {
+                        "row": serde_json::to_value(row(&[
+                            ("id", Lit::U64 { v: 1 }),
+                            ("title", Lit::Null),
+                        ]))?,
+                        "version": 1,
+                        "deleted": false,
+                        "commit_ts_ms": 11
+                    },
+                    {
+                        "row": serde_json::to_value(row(&[
+                            ("id", Lit::U64 { v: 2 }),
+                            (
+                                "title",
+                                Lit::Str {
+                                    v: "second".to_string(),
+                                },
+                            ),
+                        ]))?,
+                        "version": 2,
+                        "deleted": false,
+                        "commit_ts_ms": 12
+                    }
+                ]
+            });
+            save_json(&json_path, &legacy_rows)?;
+            remove_file_if_exists(&segment_path)?;
+        }
+
+        let reopened = Engine::open(&dir)?;
+        let (_, tdata) = reopened.get_table(&table)?;
+        assert_eq!(tdata.rows.len(), 2);
+        assert!(tdata.rows.iter().all(|entry| entry.schema_version == 2));
+        assert_eq!(tdata.rows[0].commit_ts_ms, 11);
+        assert_eq!(tdata.rows[1].commit_ts_ms, 12);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -40976,6 +41161,7 @@ mod tests {
             .map(|idx| RowEntry {
                 row: row(&[("id", Lit::U64 { v: idx as u64 })]),
                 version: 1,
+                schema_version: 1,
                 deleted: false,
                 commit_ts_ms: 0,
             })
@@ -41113,6 +41299,7 @@ mod tests {
             tdata.rows.push(RowEntry {
                 row: row(&[("id", Lit::U64 { v: 99 })]),
                 version: 1,
+                schema_version: 1,
                 deleted: true,
                 commit_ts_ms: 0,
             });

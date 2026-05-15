@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Prototype Runtime Evidence</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md; MVCC row entries now persist <code>schema_version</code>.</span>
   </div>
 
   <div class="novelty-card">
@@ -61,7 +61,7 @@
     <h2><span class="icon">🔧</span> Technical Approach</h2>
     <div class="phase">
       <h3>Phase 1 — Schema Versioning</h3>
-      <p>Extend MVCC metadata to include schema version. Each row is tagged with the schema version it was written under, enabling multiple schema versions to coexist in storage.</p>
+      <p>Extend MVCC metadata to include schema version. SkeinDB's prototype now persists <code>schema_version</code> on table row versions, stamps rewritten rows during schema merges, and normalizes legacy row payloads on load so future query-time adaptation has row-level schema lineage to consult.</p>
     </div>
     <div class="phase">
       <h3>Phase 2 — Concurrent Evolution</h3>

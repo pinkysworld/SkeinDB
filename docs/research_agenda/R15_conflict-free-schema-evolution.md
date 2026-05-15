@@ -42,6 +42,7 @@ Schema changes are notoriously difficult in distributed databases, often requiri
 
 This section is an *adaptation* of the research direction into SkeinDB’s architecture and backlog.
 
+- **Prototype status (2026-05-15):** MVCC row entries now persist `schema_version` alongside row/data version metadata in table `.json` / `.rseg` payloads, `schema.apply_merge` stamps rewritten rows with the applied schema version, and legacy v2 row payloads normalize from `schema_versions.json` on load. Focused evidence lives in `engine::tests::schema_version_tags_row_entries_and_normalizes_legacy_rows`.
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
