@@ -5535,6 +5535,206 @@ async fn t062_prepared_get_etag_roundtrip() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn vector_search_cache_invalidates_after_vector_insert_rpc() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("vector_search_cache_invalidation")?;
+    let client = RpcHttpClient::new(server.base_url());
+    let http = reqwest::Client::new();
+
+    client
+        .rpc("schema.create_database", json!({"db": "app"}))
+        .await?;
+    client
+        .rpc(
+            "schema.create_table",
+            json!({
+                "db": "app",
+                "table": "docs",
+                "columns": [
+                    {"name": "id", "type": {"kind": "u64"}, "nullable": false},
+                    {"name": "title", "type": {"kind": "str"}, "nullable": false},
+                    {"name": "embedding", "type": {"kind": "embedding"}, "nullable": false}
+                ],
+                "primary_key": ["id"]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "data.insert",
+            json!({
+                "into": {"db": "app", "table": "docs"},
+                "rows": [
+                    {
+                        "id": {"t": "u64", "v": 1},
+                        "title": {"t": "str", "v": "alpha"},
+                        "embedding": {"t": "embedding", "dims": 3, "v": [1.0, 0.0, 0.0]}
+                    },
+                    {
+                        "id": {"t": "u64", "v": 2},
+                        "title": {"t": "str", "v": "beta"},
+                        "embedding": {"t": "embedding", "dims": 3, "v": [0.0, 1.0, 0.0]}
+                    }
+                ]
+            }),
+        )
+        .await?;
+    client
+        .rpc(
+            "vector.insert",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "rows": [
+                    {"pk": [{"t": "u64", "v": 1}], "embedding": {"t": "embedding", "dims": 3, "v": [1.0, 0.0, 0.0]}},
+                    {"pk": [{"t": "u64", "v": 2}], "embedding": {"t": "embedding", "dims": 3, "v": [0.0, 1.0, 0.0]}}
+                ],
+                "upsert": true
+            }),
+        )
+        .await?;
+
+    let prepare = client
+        .rpc(
+            "query.prepare",
+            json!({
+                "query": {
+                    "body": {
+                        "select": {
+                            "from": [{"db": "app", "table": "docs"}],
+                            "projection": [
+                                {"expr": {"col": "id"}},
+                                {"expr": {"col": "title"}}
+                            ]
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+    let query_id = prepare
+        .result
+        .as_ref()
+        .and_then(|value| value.get("query_id"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query_id"))?
+        .to_string();
+    let subscribe = client
+        .rpc("query.subscribe", json!({"query_id": query_id}))
+        .await?;
+    let sse_url = subscribe
+        .result
+        .as_ref()
+        .and_then(|value| value.get("sse_url"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing query sse_url"))?;
+    let mut stream = http
+        .get(format!("{}{}", server.base_url(), sse_url))
+        .send()
+        .await?;
+    assert!(stream.status().is_success());
+
+    let first = client
+        .rpc(
+            "vector.search",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "query": {"t": "embedding", "dims": 3, "v": [1.0, 0.0, 0.0]},
+                "k": 1,
+                "metric": "cosine",
+                "include_row": true,
+                "use_lsh": false,
+                "cache": {"want_etag": true}
+            }),
+        )
+        .await?;
+    assert!(first.ok);
+    let first_result = first
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing result"))?;
+    assert_eq!(first_result["not_modified"].as_bool(), Some(false));
+    assert_eq!(
+        first_result["deps"]["vector"]["source"].as_str(),
+        Some("table_version")
+    );
+    assert_eq!(
+        first_result["deps"]["vector"]["column"].as_str(),
+        Some("embedding")
+    );
+    let first_etag = first_result["etag"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing vector.search etag"))?
+        .to_string();
+
+    let cached = client
+        .rpc(
+            "vector.search",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "query": {"t": "embedding", "dims": 3, "v": [1.0, 0.0, 0.0]},
+                "k": 1,
+                "metric": "cosine",
+                "include_row": true,
+                "use_lsh": false,
+                "cache": {"want_etag": true, "if_none_match": first_etag}
+            }),
+        )
+        .await?;
+    let cached_result = cached
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing cached result"))?;
+    assert_eq!(cached_result["not_modified"].as_bool(), Some(true));
+    assert_eq!(cached_result["matches"].as_array().map(Vec::len), Some(0));
+
+    client
+        .rpc(
+            "vector.insert",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "rows": [
+                    {"pk": [{"t": "u64", "v": 1}], "embedding": {"t": "embedding", "dims": 3, "v": [0.2, 1.0, 0.0]}}
+                ],
+                "upsert": true
+            }),
+        )
+        .await?;
+    let event = read_sse_event(&mut stream).await?;
+    let event_data: serde_json::Value = serde_json::from_str(&event.data)?;
+    assert_eq!(event_data["query_id"].as_str(), Some(query_id.as_str()));
+    assert_eq!(event_data["table"].as_str(), Some("app.docs"));
+    assert_eq!(event_data["changed"].as_bool(), Some(true));
+
+    let changed = client
+        .rpc(
+            "vector.search",
+            json!({
+                "table": {"db": "app", "table": "docs"},
+                "column": "embedding",
+                "query": {"t": "embedding", "dims": 3, "v": [1.0, 0.0, 0.0]},
+                "k": 1,
+                "metric": "cosine",
+                "include_row": true,
+                "use_lsh": false,
+                "cache": {"want_etag": true, "if_none_match": first_etag}
+            }),
+        )
+        .await?;
+    let changed_result = changed
+        .result
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing changed result"))?;
+    assert_eq!(changed_result["not_modified"].as_bool(), Some(false));
+    assert_ne!(changed_result["etag"].as_str(), Some(first_etag.as_str()));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cdc_query_subscription_invalidates_prepared_query() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("cdc_query_subscription")?;

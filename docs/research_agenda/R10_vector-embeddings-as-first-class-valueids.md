@@ -32,6 +32,8 @@ SkeinDB's content-addressed ValueStore could naturally extend to vector embeddin
 - `Lit::Embedding` and `ValueKind::Embedding` provide typed SkeinQL literals and ValueStore-backed embedding objects.
 - Embedding ValueIDs combine a deterministic LSH bucket prefix with a content-hash suffix, so exact identity and approximate locality are both represented in the identifier.
 - `vector.insert`, `vector.search`, and `vector.index.status` provide the current embedding insert, HNSW/LSH-backed search, and index-inspection surface, including hybrid filter/order-by usage through vector scoring expressions.
+- `vector.search.cache` returns table-version dependency metadata, V2 causality tokens, and vector-search ETags; `cache.if_none_match` can return `not_modified=true`, and source-row changes through `data.*` or `vector.insert` invalidate embedding-derived results.
+- HNSW graph entries are tagged with the table version that built them, and ordinary source-row writes invalidate stale graph indexes so vector searches fall back to a current scan instead of using outdated embedding topology.
 - `vector.benchmark` supplies the first built-in E1 harness: it compares exact brute-force top-k results with the indexed search path, reports nanosecond latency percentiles, and computes recall@k for one or more query embeddings.
 - SkeinAdmin's Vector panel can run search, benchmark, insert, and index-status calls from the same typed payloads used by client applications.
 - `samples/vector_rag_pipeline.py` and the Vector RAG retrieval tutorial demonstrate the end-to-end application path: deterministic embeddings, `vector.insert`, `vector.search` with `include_row`, and grounded prompt assembly without external credentials.

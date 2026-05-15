@@ -59,7 +59,7 @@ Related: R09
 Related: R10
 
 - `vector.insert` — store embedding values (ValueKind::Embedding)
-- `vector.search` — ANN query (HNSW when available, with LSH bucket filtering as the prototype fallback)
+- `vector.search` — ANN query (HNSW when available, with LSH bucket filtering as the prototype fallback) with cache validators, table-version dependency metadata, V2 causality tokens, and source-change invalidation
 - `vector.benchmark` — exact brute-force vs indexed top-k recall and latency report for embedding columns
 - `vector.index.status` — index health and coverage
 

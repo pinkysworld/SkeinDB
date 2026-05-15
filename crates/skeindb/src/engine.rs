@@ -2679,6 +2679,10 @@ impl Engine {
             self.persist_snapshots_best_effort();
         }
 
+        if affected > 0 {
+            self.invalidate_hnsw_indexes_for_table(table);
+        }
+
         for pk in change_pks {
             self.emit_change(&table.db, &table.table, "insert", Some(pk));
         }
@@ -2822,6 +2826,10 @@ impl Engine {
             self.persist_snapshots_best_effort();
         }
 
+        if affected > 0 {
+            self.invalidate_hnsw_indexes_for_table(table);
+        }
+
         for pk in change_pks {
             self.emit_change(&table.db, &table.table, "update", pk);
         }
@@ -2907,6 +2915,10 @@ impl Engine {
 
         if self.apply_snapshot_deletes(table, &snapshot_pks) {
             self.persist_snapshots_best_effort();
+        }
+
+        if affected > 0 {
+            self.invalidate_hnsw_indexes_for_table(table);
         }
 
         if affected > 0 {
@@ -4476,6 +4488,7 @@ impl Engine {
         let k = params.k.unwrap_or(10).min(1000) as usize;
         let use_lsh = params.use_lsh.unwrap_or(true);
 
+        let mut filter_columns = Vec::new();
         if let Some(filter) = params.filter.as_ref() {
             let mut refs = Vec::new();
             let mut has_subquery = false;
@@ -4486,9 +4499,71 @@ impl Engine {
             if refs.iter().any(|(_, col)| col == &params.column) {
                 anyhow::bail!("invalid_request: filter cannot reference embedding column");
             }
+            filter_columns = refs.into_iter().map(|(_, col)| col).collect();
+            filter_columns.sort();
+            filter_columns.dedup();
         }
 
         let include_row = params.include_row.unwrap_or(false);
+        let deps = vec![CausalityDependency {
+            table: format!("{}.{}", params.table.db, params.table.table),
+            v: Some(schema.table_version),
+            view: None,
+            change_seq: None,
+            stale: None,
+        }];
+        if let Some(min) = params
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.min_causality.as_ref())
+        {
+            ensure_min_causality(min, &deps)?;
+        }
+        let causality = Some(build_causality_token(&deps));
+        let deps_json = Some(vector_search_deps_json(
+            &params,
+            &deps,
+            &filter_columns,
+            metric,
+            k as u64,
+            use_lsh,
+            include_row,
+        ));
+        let want_etag = params
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.want_etag)
+            .unwrap_or(true);
+        let etag = if want_etag {
+            Some(build_vector_search_etag(
+                &params,
+                &deps,
+                &filter_columns,
+                metric,
+                k as u64,
+                use_lsh,
+                include_row,
+            ))
+        } else {
+            None
+        };
+        if let (Some(tag), Some(inm)) = (
+            etag.as_deref(),
+            params
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.if_none_match.as_deref()),
+        ) {
+            if tag == inm {
+                return Ok(VectorSearchResult {
+                    matches: Vec::new(),
+                    etag: Some(tag.to_string()),
+                    not_modified: true,
+                    deps: deps_json,
+                    causality,
+                });
+            }
+        }
 
         // Try HNSW index for fast approximate search (when no filter is set).
         let hnsw_key = HnswIndexKey {
@@ -4500,7 +4575,8 @@ impl Engine {
         };
         if params.filter.is_none() && !use_lsh {
             if let Some(hnsw) = self.hnsw_indexes.get(&hnsw_key) {
-                if hnsw.count > 0 && hnsw.dims == dims {
+                if hnsw.count > 0 && hnsw.dims == dims && hnsw.built_version == schema.table_version
+                {
                     let column = params.column.clone();
                     let all_vectors = |row_idx: usize| -> Option<Vec<f32>> {
                         let entry = tdata.rows.get(row_idx)?;
@@ -4560,7 +4636,13 @@ impl Engine {
                     if matches.len() > k {
                         matches.truncate(k);
                     }
-                    return Ok(VectorSearchResult { matches });
+                    return Ok(VectorSearchResult {
+                        matches,
+                        etag,
+                        not_modified: false,
+                        deps: deps_json,
+                        causality,
+                    });
                 }
             }
         }
@@ -4636,7 +4718,13 @@ impl Engine {
             matches.truncate(k);
         }
 
-        Ok(VectorSearchResult { matches })
+        Ok(VectorSearchResult {
+            matches,
+            etag,
+            not_modified: false,
+            deps: deps_json,
+            causality,
+        })
     }
 
     pub fn vector_benchmark(
@@ -4678,6 +4766,7 @@ impl Engine {
                     filter: None,
                     include_row: Some(false),
                     use_lsh: Some(false),
+                    cache: None,
                 })?;
                 indexed_latencies.push(elapsed_ns(indexed_start));
                 indexed_matches_total += indexed.matches.len() as u64;
@@ -4815,7 +4904,7 @@ impl Engine {
 
         let dims = vectors[0].2;
         let metric = VectorMetric::Cosine; // default metric for index
-        let mut hnsw = HnswIndex::new(dims, metric);
+        let mut hnsw = HnswIndex::new(dims, metric, schema.table_version);
 
         // Collect all vectors for the closure.
         let all_vecs: Vec<(usize, Vec<f32>)> = vectors
@@ -4839,6 +4928,15 @@ impl Engine {
             column: column.to_string(),
         };
         self.hnsw_indexes.insert(key, hnsw);
+    }
+
+    fn invalidate_hnsw_indexes_for_table(&mut self, table: &BaseTableRef) {
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        self.hnsw_indexes
+            .retain(|index_key, _| index_key.table != key);
     }
 
     pub fn vector_index_status(
@@ -20443,6 +20541,57 @@ fn build_query_etag(query: &Query, args: &[Lit], deps: &[CausalityDependency]) -
     format!("W/\"q:{}\"", hex16(&id))
 }
 
+fn vector_search_deps_json(
+    params: &VectorSearchParams,
+    deps: &[CausalityDependency],
+    filter_columns: &[String],
+    metric: VectorMetric,
+    k: u64,
+    use_lsh: bool,
+    include_row: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tables": deps,
+        "vector": {
+            "table": format!("{}.{}", params.table.db, params.table.table),
+            "column": &params.column,
+            "filter_columns": filter_columns,
+            "include_row": include_row,
+            "k": k,
+            "metric": vector_metric_name(metric),
+            "use_lsh": use_lsh,
+            "source": "table_version"
+        }
+    })
+}
+
+fn build_vector_search_etag(
+    params: &VectorSearchParams,
+    deps: &[CausalityDependency],
+    filter_columns: &[String],
+    metric: VectorMetric,
+    k: u64,
+    use_lsh: bool,
+    include_row: bool,
+) -> String {
+    let signature = serde_json::json!({
+        "method": "vector.search",
+        "table": &params.table,
+        "column": &params.column,
+        "query": &params.query,
+        "filter": &params.filter,
+        "filter_columns": filter_columns,
+        "include_row": include_row,
+        "k": k,
+        "metric": vector_metric_name(metric),
+        "use_lsh": use_lsh,
+        "deps": deps,
+    });
+    let bytes = serde_json::to_vec(&signature).unwrap_or_default();
+    let id = value_id(&bytes);
+    format!("W/\"v:{}\"", hex16(&id))
+}
+
 fn bloom_maybe_contains(bits: &[u8], m_bits: u64, k: u32, salt: Option<&str>, key: &[u8]) -> bool {
     if m_bits == 0 || k == 0 {
         return false;
@@ -22101,6 +22250,8 @@ struct HnswNode {
 /// HNSW graph index for approximate nearest neighbor search.
 #[derive(Debug)]
 struct HnswIndex {
+    /// Table version this graph was built from.
+    built_version: u64,
     nodes: Vec<HnswNode>,
     /// Entry point node index (top layer).
     entry_point: Option<usize>,
@@ -22123,10 +22274,11 @@ struct HnswIndex {
 }
 
 impl HnswIndex {
-    fn new(dims: u32, metric: VectorMetric) -> Self {
+    fn new(dims: u32, metric: VectorMetric, built_version: u64) -> Self {
         let m = 16;
         let m_max0 = 32;
         Self {
+            built_version,
             nodes: Vec::new(),
             entry_point: None,
             max_layer: 0,
@@ -33429,6 +33581,213 @@ mod tests {
     }
 
     #[test]
+    fn vector_search_cache_metadata_tracks_source_table_changes() -> anyhow::Result<()> {
+        let dir = temp_dir("vector_search_cache_deps");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "docs",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "title".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "embedding".to_string(),
+                    r#type: type_desc("embedding"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "docs".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &table,
+            vec![
+                row(&[
+                    ("id", Lit::U64 { v: 1 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "alpha".to_string(),
+                        },
+                    ),
+                    (
+                        "embedding",
+                        Lit::Embedding {
+                            dims: 3,
+                            v: vec![1.0, 0.0, 0.0],
+                            model: None,
+                        },
+                    ),
+                ]),
+                row(&[
+                    ("id", Lit::U64 { v: 2 }),
+                    (
+                        "title",
+                        Lit::Str {
+                            v: "beta".to_string(),
+                        },
+                    ),
+                    (
+                        "embedding",
+                        Lit::Embedding {
+                            dims: 3,
+                            v: vec![0.0, 1.0, 0.0],
+                            model: None,
+                        },
+                    ),
+                ]),
+            ],
+            None,
+        )?;
+        engine.vector_insert(VectorInsertParams {
+            table: table.clone(),
+            column: "embedding".to_string(),
+            rows: vec![
+                skeindb_skeinql::methods::VectorInsertRow {
+                    pk: vec![Lit::U64 { v: 1 }],
+                    embedding: Lit::Embedding {
+                        dims: 3,
+                        v: vec![1.0, 0.0, 0.0],
+                        model: None,
+                    },
+                },
+                skeindb_skeinql::methods::VectorInsertRow {
+                    pk: vec![Lit::U64 { v: 2 }],
+                    embedding: Lit::Embedding {
+                        dims: 3,
+                        v: vec![0.0, 1.0, 0.0],
+                        model: None,
+                    },
+                },
+            ],
+            upsert: true,
+        })?;
+        assert_eq!(engine.hnsw_indexes.len(), 1);
+
+        let query_embedding = Lit::Embedding {
+            dims: 3,
+            v: vec![1.0, 0.0, 0.0],
+            model: None,
+        };
+        let search_params = |cache| VectorSearchParams {
+            table: table.clone(),
+            column: "embedding".to_string(),
+            query: query_embedding.clone(),
+            k: Some(1),
+            metric: Some("cosine".to_string()),
+            filter: None,
+            include_row: Some(true),
+            use_lsh: Some(false),
+            cache,
+        };
+
+        let first =
+            engine.vector_search(search_params(Some(skeindb_skeinql::types::QueryCache {
+                want_etag: Some(true),
+                if_none_match: None,
+                min_causality: None,
+                mode: None,
+                persist: None,
+            })))?;
+        assert!(!first.not_modified);
+        assert_eq!(first.matches.len(), 1);
+        let first_etag = first.etag.clone().expect("vector.search etag");
+        let first_deps = first.deps.as_ref().expect("vector.search deps");
+        assert_eq!(first_deps["vector"]["table"], "app.docs");
+        assert_eq!(first_deps["vector"]["column"], "embedding");
+        assert_eq!(first_deps["vector"]["source"], "table_version");
+        assert_eq!(first_deps["tables"][0]["table"], "app.docs");
+        let first_table_version = first_deps["tables"][0]["v"]
+            .as_u64()
+            .expect("source table version");
+
+        let cached =
+            engine.vector_search(search_params(Some(skeindb_skeinql::types::QueryCache {
+                want_etag: Some(true),
+                if_none_match: Some(first_etag.clone()),
+                min_causality: first.causality.clone(),
+                mode: None,
+                persist: None,
+            })))?;
+        assert!(cached.not_modified);
+        assert!(cached.matches.is_empty());
+        assert_eq!(cached.etag.as_deref(), Some(first_etag.as_str()));
+
+        let mut updates = RowObject::new();
+        updates.insert(
+            "title".to_string(),
+            Lit::Str {
+                v: "alpha refreshed".to_string(),
+            },
+        );
+        engine.data_update(
+            &table,
+            &eq_expr(
+                Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                },
+            ),
+            &updates,
+            None,
+            None,
+            &[],
+        )?;
+        assert!(engine.hnsw_indexes.is_empty());
+
+        let changed =
+            engine.vector_search(search_params(Some(skeindb_skeinql::types::QueryCache {
+                want_etag: Some(true),
+                if_none_match: Some(first_etag.clone()),
+                min_causality: None,
+                mode: None,
+                persist: None,
+            })))?;
+        assert!(!changed.not_modified);
+        assert_ne!(changed.etag.as_deref(), Some(first_etag.as_str()));
+        let changed_deps = changed.deps.as_ref().expect("changed deps");
+        assert!(
+            changed_deps["tables"][0]["v"]
+                .as_u64()
+                .expect("changed source table version")
+                > first_table_version
+        );
+        assert_eq!(
+            changed.matches[0]
+                .row
+                .as_ref()
+                .and_then(|row| row.get("title")),
+            Some(&Lit::Str {
+                v: "alpha refreshed".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn sql_autoparam_extract_normalizes() -> anyhow::Result<()> {
         let extract =
             sql_autoparam_extract("SELECT * FROM users WHERE status = 'active' AND id = 42");
@@ -37545,7 +37904,7 @@ mod tests {
     #[test]
     fn r10_hnsw_index_basic() {
         // Test HNSW index construction and search.
-        let mut hnsw = HnswIndex::new(3, VectorMetric::Cosine);
+        let mut hnsw = HnswIndex::new(3, VectorMetric::Cosine, 1);
         let vectors: Vec<Vec<f32>> = vec![
             vec![1.0, 0.0, 0.0],
             vec![0.0, 1.0, 0.0],

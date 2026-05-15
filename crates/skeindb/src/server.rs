@@ -15838,8 +15838,12 @@ pub(crate) async fn handle_rpc(
                 // --------------------
                 "vector.insert" => {
                     let p: VectorInsertParams = parse_params(params.clone())?;
+                    let table_key = format!("{}.{}", p.table.db, p.table.table);
                     let mut eng = state.engine.write().await;
                     let r = eng.vector_insert(p).map_err(to_rpc_error)?;
+                    if r.inserted + r.updated > 0 {
+                        let _ = state.etag_notify.send(table_key);
+                    }
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }

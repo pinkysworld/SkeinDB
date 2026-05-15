@@ -593,6 +593,9 @@ pub struct VectorSearchParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_lsh: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<QueryCache>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -608,6 +611,18 @@ pub struct VectorSearchMatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorSearchResult {
     pub matches: Vec<VectorSearchMatch>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+
+    #[serde(default)]
+    pub not_modified: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deps: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causality: Option<CausalityToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

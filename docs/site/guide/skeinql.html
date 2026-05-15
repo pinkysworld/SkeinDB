@@ -1117,7 +1117,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;metric&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cosine&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;filter&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;eq&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;status&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;lit&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;public&quot;</span><span class="p">}}},</span>
 <span class="w">  </span><span class="nt">&quot;include_row&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;use_lsh&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="nt">&quot;use_lsh&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;want_etag&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;if_none_match&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;W/\&quot;v:&lt;hex&gt;\&quot;&quot;</span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
@@ -1130,14 +1131,34 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">      </span><span class="nt">&quot;embedding_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;vid_hex&gt;&quot;</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;id&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">},</span><span class="nt">&quot;status&quot;</span><span class="p">:{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;str&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="s2">&quot;public&quot;</span><span class="p">}}</span>
 <span class="w">    </span><span class="p">}</span>
-<span class="w">  </span><span class="p">]</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;etag&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;W/\&quot;v:&lt;hex&gt;\&quot;&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;not_modified&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;deps&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;tables&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;mydb.docs&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">42</span><span class="p">}],</span>
+<span class="w">    </span><span class="nt">&quot;vector&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;mydb.docs&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="s2">&quot;embedding&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;filter_columns&quot;</span><span class="p">:[</span><span class="s2">&quot;status&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;include_row&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;k&quot;</span><span class="p">:</span><span class="mi">10</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;metric&quot;</span><span class="p">:</span><span class="s2">&quot;cosine&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;use_lsh&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;source&quot;</span><span class="p">:</span><span class="s2">&quot;table_version&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;causality&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="s2">&quot;vector_clock_v2&quot;</span><span class="p">,</span><span class="nt">&quot;deps&quot;</span><span class="p">:[{</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;mydb.docs&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">42</span><span class="p">}]}</span>
 <span class="p">}</span>
 </code></pre></div>
 
 <p>Notes:
 - <code>metric</code> supports <code>cosine</code>, <code>dot</code>, and <code>l2</code>. Scores are similarity values (higher is better).
 - <code>filter</code> cannot reference the embedding column.
-- <code>use_lsh=true</code> restricts candidates to the query bucket (prototype behavior).</p>
+- <code>use_lsh=true</code> restricts candidates to the query bucket (prototype behavior).
+- <code>cache.want_etag</code> defaults to <code>true</code>; when <code>cache.if_none_match</code> equals the current vector-search ETag, the response sets <code>not_modified=true</code> and returns an empty <code>matches</code> array with fresh dependency metadata.
+- Vector-search ETags include the query vector, metric, <code>k</code>, filter signature, row-inclusion mode, LSH mode, and the source table version. They change after <code>data.insert</code>, <code>data.update</code>, <code>data.delete</code>, or <code>vector.insert</code> mutates the table.
+- <code>cache.min_causality</code> accepts the same V2 causal token shape as query reads and rejects a vector search when the source table is older than the requested dependency floor.
+- HNSW graphs are version-tagged and ordinary source-row writes invalidate stale graph entries, so <code>vector.search</code> falls back to a current brute-force/LSH scan instead of serving an embedding-derived query from an outdated index.</p>
 <p>Hybrid query example (filter + vector order):</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;body&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;select&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;projection&quot;</span><span class="p">:[{</span><span class="nt">&quot;expr&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;id&quot;</span><span class="p">}}],</span><span class="nt">&quot;from&quot;</span><span class="p">:[{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;docs&quot;</span><span class="p">}],</span>

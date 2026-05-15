@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>R10 — Vector Embeddings as First-Class ValueIDs · SkeinDB</title>
-  <meta name="description" content="First-class vector embeddings with HNSW search, exact-vs-indexed recall benchmarking, and a small RAG retrieval sample. SkeinDB Research Track R10.">
+  <meta name="description" content="First-class vector embeddings with HNSW search, dependency-aware cache validators, recall benchmarking, and a small RAG retrieval sample. SkeinDB Research Track R10.">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Hardened Runtime</strong> — Vector insert/search/status, recall and latency benchmarking, and a small RAG retrieval example are available through SkeinQL.</span>
+    <span class="status-text"><strong>Hardened Runtime</strong> — Vector insert/search/status, dependency-aware cache validators, recall and latency benchmarking, and a small RAG retrieval example are available through SkeinQL.</span>
   </div>
 
   <div class="novelty-card">
@@ -56,7 +56,8 @@
       <li>Built-in <code>vector.benchmark</code> reports exact-vs-indexed recall@k and latency percentiles</li>
       <li>SkeinAdmin vector playground for search, benchmark, insert, and index-status workflows</li>
       <li>Credential-free RAG sample app that seeds embeddings, retrieves rows with <code>vector.search</code>, and assembles grounded context</li>
-      <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation</li>
+      <li><code>vector.search.cache</code> returns table-version dependencies, V2 causality tokens, ETags, and <code>not_modified</code> responses</li>
+      <li>Dependency tracking extended to embedding-derived data for automatic cache invalidation after <code>data.*</code> or <code>vector.insert</code> writes</li>
     </ul>
   </div>
 
@@ -84,7 +85,7 @@
     </div>
     <div class="phase">
       <h3>Phase 4 — Dependency Tracking</h3>
-      <p>Extend dependency tracking to embedding relationships. If document D has embedding E, queries on E are invalidated when D changes — ensuring embedding freshness automatically.</p>
+      <p>Embedding-derived searches now report source-table dependencies, V2 causality tokens, and vector-search ETags. If document D has embedding E, queries on E are invalidated when D changes through <code>data.*</code> or <code>vector.insert</code>; stale HNSW graphs are dropped before search so freshness wins over outdated topology.</p>
     </div>
   </div>
 

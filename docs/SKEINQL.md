@@ -1320,7 +1320,8 @@ Params:
   "metric": "cosine",
   "filter": {"op":"eq","a":{"col":"status"},"b":{"lit":{"t":"str","v":"public"}}},
   "include_row": true,
-  "use_lsh": true
+  "use_lsh": true,
+  "cache": {"want_etag": true, "if_none_match": "W/\"v:<hex>\""}
 }
 ```
 
@@ -1335,7 +1336,23 @@ Result:
       "embedding_id": "<vid_hex>",
       "row": {"id":{"t":"u64","v":1},"status":{"t":"str","v":"public"}}
     }
-  ]
+  ],
+  "etag": "W/\"v:<hex>\"",
+  "not_modified": false,
+  "deps": {
+    "tables": [{"table":"mydb.docs","v":42}],
+    "vector": {
+      "table":"mydb.docs",
+      "column":"embedding",
+      "filter_columns":["status"],
+      "include_row":true,
+      "k":10,
+      "metric":"cosine",
+      "use_lsh":true,
+      "source":"table_version"
+    }
+  },
+  "causality": {"format":"vector_clock_v2","deps":[{"table":"mydb.docs","v":42}]}
 }
 ```
 
@@ -1343,6 +1360,10 @@ Notes:
 - `metric` supports `cosine`, `dot`, and `l2`. Scores are similarity values (higher is better).
 - `filter` cannot reference the embedding column.
 - `use_lsh=true` restricts candidates to the query bucket (prototype behavior).
+- `cache.want_etag` defaults to `true`; when `cache.if_none_match` equals the current vector-search ETag, the response sets `not_modified=true` and returns an empty `matches` array with fresh dependency metadata.
+- Vector-search ETags include the query vector, metric, `k`, filter signature, row-inclusion mode, LSH mode, and the source table version. They change after `data.insert`, `data.update`, `data.delete`, or `vector.insert` mutates the table.
+- `cache.min_causality` accepts the same V2 causal token shape as query reads and rejects a vector search when the source table is older than the requested dependency floor.
+- HNSW graphs are version-tagged and ordinary source-row writes invalidate stale graph entries, so `vector.search` falls back to a current brute-force/LSH scan instead of serving an embedding-derived query from an outdated index.
 
 Hybrid query example (filter + vector order):
 
