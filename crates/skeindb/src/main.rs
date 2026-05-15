@@ -14,6 +14,7 @@ mod nl_eval;
 mod pg_wire;
 mod quic;
 mod server;
+mod transport_bench;
 
 #[derive(Debug)]
 struct AuditVerifyReport {
@@ -547,6 +548,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn transport_bench_parses_flags() {
+        let cli = Cli::try_parse_from([
+            "skeindb",
+            "transport-bench",
+            "--http-url",
+            "http://127.0.0.1:8080",
+            "--mysql-port",
+            "3306",
+            "--quic-port",
+            "4433",
+            "--quic-cert",
+            "./cert.pem",
+            "--quic-server-name",
+            "localhost",
+            "--concurrency",
+            "6",
+            "--requests",
+            "24",
+            "--sql",
+            "SELECT 1 AS one",
+            "--json",
+        ])
+        .expect("parse transport-bench");
+
+        match cli.command {
+            Commands::TransportBench {
+                http_url,
+                mysql_port,
+                quic_port,
+                quic_cert,
+                quic_server_name,
+                concurrency,
+                requests,
+                sql,
+                json,
+            } => {
+                assert_eq!(http_url, "http://127.0.0.1:8080");
+                assert_eq!(mysql_port, 3306);
+                assert_eq!(quic_port, 4433);
+                assert_eq!(quic_cert, PathBuf::from("./cert.pem"));
+                assert_eq!(quic_server_name, "localhost");
+                assert_eq!(concurrency, 6);
+                assert_eq!(requests, 24);
+                assert_eq!(sql, "SELECT 1 AS one");
+                assert!(json);
+            }
+            _ => panic!("expected transport-bench command"),
+        }
+    }
+
     fn replay_result_with_perf(
         bundle_id: &str,
         p95_delta: i64,
@@ -867,6 +919,45 @@ enum Commands {
         #[arg(long)]
         limit: Option<usize>,
     },
+
+    /// Benchmark QUIC vs HTTP/2 and MySQL/TCP under concurrent SQL load.
+    TransportBench {
+        /// Base HTTP URL for the running SkeinQL server, e.g. http://127.0.0.1:8080
+        #[arg(long)]
+        http_url: String,
+
+        /// MySQL listener port on the same host as --http-url
+        #[arg(long)]
+        mysql_port: u16,
+
+        /// QUIC listener port on the same host as --http-url
+        #[arg(long)]
+        quic_port: u16,
+
+        /// QUIC server certificate PEM used to trust the listener
+        #[arg(long)]
+        quic_cert: PathBuf,
+
+        /// TLS server name to present to the QUIC listener
+        #[arg(long, default_value = "localhost")]
+        quic_server_name: String,
+
+        /// Number of concurrent workers or streams per transport
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+
+        /// Number of requests to run per transport
+        #[arg(long, default_value_t = 64)]
+        requests: u64,
+
+        /// SQL text used for each request
+        #[arg(long, default_value = "SELECT 1 AS one")]
+        sql: String,
+
+        /// Emit the benchmark report as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1178,6 +1269,35 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let dataset_path = PathBuf::from(dataset);
             nl_eval::run_nl_eval(&dataset_path, execute, limit)
+        }
+        Commands::TransportBench {
+            http_url,
+            mysql_port,
+            quic_port,
+            quic_cert,
+            quic_server_name,
+            concurrency,
+            requests,
+            sql,
+            json,
+        } => {
+            let report = transport_bench::run(transport_bench::TransportBenchOptions {
+                http_url,
+                mysql_port,
+                quic_port,
+                quic_cert,
+                quic_server_name,
+                concurrency,
+                requests,
+                sql,
+            })
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                transport_bench::print_human(&report);
+            }
+            Ok(())
         }
     }
 }

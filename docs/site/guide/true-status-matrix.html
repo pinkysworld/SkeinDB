@@ -128,6 +128,7 @@
       <h1 id="skeindb-true-status-matrix">SkeinDB True Status Matrix<a class="headerlink" href="#skeindb-true-status-matrix" title="Permanent link">¶</a></h1>
 <p>Last updated: 2026-05-15
 Honest claims: SkeinDB does <strong>not</strong> provide and does <strong>not</strong> claim "100% MySQL compatibility." Coverage is measured against the regression corpus at <code>tests/compat/corpus.sql</code> (1658 lines / ~700+ statements) which is exercised on every commit by <a href="../crates/skeindb/tests/cluster_rpc.rs"><code>cluster_rpc::compat_corpus_statements</code></a>. The surface that <em>is</em> supported is enumerated in <a href="mysql-compat.html">docs/MYSQL_COMPAT.md</a>. Anyone reading marketing copy claiming "100% MySQL parity" should treat that as false.</p>
+<p>2026-05-15 (R09 transport benchmark): The research backlog is now <strong>84 done / 25 open</strong> after closing T294. <code>skeindb transport-bench</code> now drives concurrent <code>sql.exec</code> load over HTTP/2 prior knowledge and QUIC plus <code>COM_QUERY</code> over MySQL/TCP, reporting nanosecond p50/p95/p99/mean latencies; <code>transport_bench_reports_http2_quic_and_mysql</code> proves the comparison path against a live multi-protocol server.</p>
 <p>2026-05-15 (R13 replication causality sync): The research backlog is now <strong>83 done / 26 open</strong> after closing T066. Replicated writes now carry <code>x-skeindb-replication-causality</code>, replicas merge applied watermarks into <code>cluster.status.replication.causality</code> and <code>stats.snapshot.cluster.replication.causality</code>, and cluster coverage proves the propagated watermark reaches replicas without requiring a global total order.</p>
 <p>2026-05-15 (R10 vector dependency invalidation): The research backlog is now <strong>79 done / 30 open</strong> after closing T304. R10 now includes vector-search dependency metadata, V2 causality tokens, ETags, <code>cache.if_none_match</code> <code>not_modified</code> responses, source-table-version invalidation for ordinary data writes, and <code>vector.insert</code> prepared-query SSE notifications.</p>
 <p>2026-05-15 (R10 vector RAG example): The research backlog is now <strong>78 done / 31 open</strong> after closing T306. R10 now includes a credential-free sample app and tutorial that seed deterministic chunks, upsert embeddings with <code>vector.insert</code>, retrieve rows with <code>vector.search</code>, and assemble a grounded prompt.</p>
@@ -166,7 +167,7 @@ Honest claims: SkeinDB does <strong>not</strong> provide and does <strong>not</s
 <h2 id="1-backlog-checklist-snapshot">1) Backlog checklist snapshot<a class="headerlink" href="#1-backlog-checklist-snapshot" title="Permanent link">¶</a></h2>
 <ul>
 <li><code>docs/PROJECT_BACKLOG.md</code>: <strong>140 done / 0 open</strong> (140 top-level roadmap tasks; remaining product gaps are tracked as partial-phase hardening notes and future compatibility/research work rather than unchecked core-roadmap boxes)</li>
-<li><code>docs/RESEARCH_BACKLOG.md</code>: <strong>83 done / 26 open</strong> (109 total)</li>
+<li><code>docs/RESEARCH_BACKLOG.md</code>: <strong>84 done / 25 open</strong> (109 total)</li>
 </ul>
 <p>Why <code>RESEARCH_BACKLOG</code> mostly remains open: those checklists now represent
 publication-grade hardening/evaluation tasks; prototype runtime coverage is tracked below.</p>
@@ -364,8 +365,8 @@ publication-grade hardening/evaluation tasks; prototype runtime coverage is trac
 </tr>
 <tr>
 <td>R09 QUIC-native protocol</td>
-<td>Hardened runtime; benchmark open</td>
-<td>QUIC transport + integration tests (<code>crates/skeindb/tests/quic_rpc.rs</code>); documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed listener, prepared-query execution over QUIC streams, 0-RTT write rejection, multi-stream RPCs, and rebind verification. T294 remains open for comparative p99 benchmarking against HTTP/2 and MySQL/TCP.</td>
+<td>Hardened</td>
+<td>QUIC transport + integration tests (<code>crates/skeindb/tests/quic_rpc.rs</code>), the <code>skeindb transport-bench</code> CLI, documented SkeinQL-over-QUIC frame/stream mapping, Quinn-backed listener, prepared-query execution over QUIC streams, 0-RTT write rejection, multi-stream RPCs, rebind verification, and live comparative p99 benchmarking against HTTP/2 and MySQL/TCP via <code>crates/skeindb/tests/transport_bench.rs</code>.</td>
 </tr>
 <tr>
 <td>R10 Vector embeddings</td>

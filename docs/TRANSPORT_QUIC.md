@@ -1,6 +1,6 @@
 # SkeinQL-over-QUIC
 
-Status: Hardened runtime surface with benchmark follow-up (v0.3.16)
+Status: Hardened runtime surface with comparative benchmark evidence (2026-05-15)
 
 This document describes the current QUIC transport for SkeinQL (R09). It is
 intentionally small and focused on framing + stream mapping so the runtime can
@@ -81,5 +81,21 @@ The R09 runtime surface is covered by `crates/skeindb/tests/quic_rpc.rs`:
 - `quic_zero_rtt_rejects_write` verifies the read-only 0-RTT guard.
 - `quic_connection_migration_rebind` and `r09_quic_concurrent_multi_stream_rpcs` verify socket rebind and continued RPC success.
 
-The remaining R09 backlog item is comparative p99 benchmarking against HTTP/2
-and MySQL/TCP under concurrency.
+Comparative transport benchmarking is covered by the new CLI harness:
+
+```bash
+skeindb transport-bench \
+  --http-url http://127.0.0.1:8080 \
+  --mysql-port 3306 \
+  --quic-port 4433 \
+  --quic-cert ./cert.pem \
+  --quic-server-name localhost \
+  --concurrency 8 \
+  --requests 64 \
+  --sql "SELECT 1 AS one"
+```
+
+`skeindb transport-bench` reuses the same `sql.exec` JSON-RPC request bytes for
+HTTP/2 and QUIC, issues `COM_QUERY` for the same SQL on MySQL/TCP, and reports
+per-transport min/p50/p95/p99/max/mean latency in nanoseconds. The live
+comparison path is locked by `crates/skeindb/tests/transport_bench.rs::transport_bench_reports_http2_quic_and_mysql`.

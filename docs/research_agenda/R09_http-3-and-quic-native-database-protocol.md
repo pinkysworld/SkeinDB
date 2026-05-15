@@ -29,7 +29,7 @@ SkeinDB supports HTTP for administration but uses TCP for the MySQL protocol. Mo
 
 ## Implementation Status
 
-Status: **Hardened runtime surface in v0.3.16; comparative benchmark still open**.
+Status: **Hardened runtime surface with comparative benchmark evidence**.
 
 SkeinDB now ships SkeinQL-over-QUIC using a Quinn-backed listener configured with
 `skeindb serve --quic --quic-cert --quic-key`. The runtime uses the documented
@@ -39,8 +39,12 @@ transport-neutral and execute over fresh QUIC streams after `query.prepare`.
 
 The test suite covers ping, prepared-query execution, Wasm and vector RPC parity,
 0-RTT write rejection, client socket rebind, and multi-stream RPC reuse in
-`crates/skeindb/tests/quic_rpc.rs`. The remaining R09 task is the comparative
-p99 latency benchmark against HTTP/2 and MySQL/TCP under concurrent load.
+`crates/skeindb/tests/quic_rpc.rs`. Comparative transport benchmarking is now
+covered by `skeindb transport-bench`, which drives the same `sql.exec` request
+payload over HTTP/2 prior knowledge and QUIC, uses `COM_QUERY` for the same SQL
+on MySQL/TCP, and reports nanosecond p50/p95/p99/mean latency summaries.
+`crates/skeindb/tests/transport_bench.rs::transport_bench_reports_http2_quic_and_mysql`
+locks the end-to-end comparison path against a live multi-protocol server.
 
 ## Expected Contributions
 

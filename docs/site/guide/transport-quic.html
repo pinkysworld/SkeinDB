@@ -126,7 +126,7 @@
     </div>
     <article class="doc-article">
       <h1 id="skeinql-over-quic">SkeinQL-over-QUIC<a class="headerlink" href="#skeinql-over-quic" title="Permanent link">¶</a></h1>
-<p>Status: Hardened runtime surface with benchmark follow-up (v0.3.16)</p>
+<p>Status: Hardened runtime surface with comparative benchmark evidence (2026-05-15)</p>
 <p>This document describes the current QUIC transport for SkeinQL (R09). It is
 intentionally small and focused on framing + stream mapping so the runtime can
 evolve without breaking the core HTTP RPC.</p>
@@ -198,8 +198,22 @@ protection.</p>
 <li><code>quic_zero_rtt_rejects_write</code> verifies the read-only 0-RTT guard.</li>
 <li><code>quic_connection_migration_rebind</code> and <code>r09_quic_concurrent_multi_stream_rpcs</code> verify socket rebind and continued RPC success.</li>
 </ul>
-<p>The remaining R09 backlog item is comparative p99 benchmarking against HTTP/2
-and MySQL/TCP under concurrency.</p>
+<p>Comparative transport benchmarking is covered by the new CLI harness:</p>
+<div class="codehilite"><pre><span></span><code>skeindb<span class="w"> </span>transport-bench<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--http-url<span class="w"> </span>http://127.0.0.1:8080<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--mysql-port<span class="w"> </span><span class="m">3306</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quic-port<span class="w"> </span><span class="m">4433</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quic-cert<span class="w"> </span>./cert.pem<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quic-server-name<span class="w"> </span>localhost<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--concurrency<span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--requests<span class="w"> </span><span class="m">64</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--sql<span class="w"> </span><span class="s2">&quot;SELECT 1 AS one&quot;</span>
+</code></pre></div>
+
+<p><code>skeindb transport-bench</code> reuses the same <code>sql.exec</code> JSON-RPC request bytes for
+HTTP/2 and QUIC, issues <code>COM_QUERY</code> for the same SQL on MySQL/TCP, and reports
+per-transport min/p50/p95/p99/max/mean latency in nanoseconds. The live
+comparison path is locked by <code>crates/skeindb/tests/transport_bench.rs::transport_bench_reports_http2_quic_and_mysql</code>.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/TRANSPORT_QUIC.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

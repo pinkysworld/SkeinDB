@@ -53,7 +53,7 @@ Related: R08
 ## 6. transport.* — Protocol negotiation hints
 Related: R09
 
-- `transport.capabilities` — advertise supported transports (HTTP/1.1, HTTP/2, QUIC); the QUIC runtime has framing, prepared-query, 0-RTT write rejection, and rebind coverage, while comparative p99 benchmarking remains open
+- `transport.capabilities` — advertise supported transports (HTTP/1.1, HTTP/2, QUIC); the QUIC runtime has framing, prepared-query, 0-RTT write rejection, rebind coverage, and the companion `skeindb transport-bench` CLI for comparative p99 checks against HTTP/2 and MySQL/TCP
 
 ## 7. vector.* — Embeddings & ANN search
 Related: R10
