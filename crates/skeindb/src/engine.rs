@@ -76,7 +76,8 @@ use skeindb_skeinql::methods::{
     ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
     SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeResolution,
     SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult,
-    SchemaProposeChangeParams, SchemaProposeChangeResult, VectorBenchmarkLatencyStats,
+    SchemaProposeChangeParams, SchemaProposeChangeResult, SchemaSimulateRolloutParams,
+    SchemaSimulateRolloutResult, SchemaSimulateRolloutStage, VectorBenchmarkLatencyStats,
     VectorBenchmarkParams, VectorBenchmarkResult, VectorBenchmarkRunStats, VectorIndexStatusParams,
     VectorIndexStatusResult, VectorInsertParams, VectorInsertResult, VectorSearchMatch,
     VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams,
@@ -726,6 +727,7 @@ struct MergePolicyDisk {
 
 const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
 const MERGE_EVALUATE_FORMAT_V1: &str = "skein.merge.evaluate.v1";
+const SCHEMA_SIMULATE_ROLLOUT_FORMAT_V1: &str = "skein.schema.simulate_rollout.v1";
 const VIEW_EVALUATE_FORMAT_V1: &str = "skein.view.evaluate.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2189,6 +2191,127 @@ impl Engine {
             conflicts,
             merge_plan,
             resolution,
+        })
+    }
+
+    pub fn schema_simulate_rollout(
+        &self,
+        params: SchemaSimulateRolloutParams,
+    ) -> anyhow::Result<SchemaSimulateRolloutResult> {
+        let status = self.schema_merge_status(SchemaMergeStatusParams {
+            table: params.table.clone(),
+        })?;
+        let (_schema, tdata) = self.get_table(&params.table)?;
+        let nodes = params.nodes.unwrap_or(3).clamp(1, 32);
+        let target_version = status
+            .current_version
+            .saturating_add(status.merge_plan.len() as u64);
+        let legacy_row_count = tdata
+            .rows
+            .iter()
+            .filter(|entry| !entry.deleted && entry.schema_version < target_version)
+            .count() as u64;
+        let ready_for_rollout = status.resolution.iter().all(|entry| entry.action != "wait");
+        let requires_query_adaptation =
+            target_version > status.current_version && (legacy_row_count > 0 || nodes > 1);
+
+        let mut prepare_notes = Vec::new();
+        if status.pending.is_empty() {
+            prepare_notes.push("No pending schema changes are waiting for rollout.".to_string());
+        } else {
+            prepare_notes.push(format!(
+                "Simulate {} eligible merge-plan change(s) from schema version {} to {} across {} node(s).",
+                status.merge_plan.len(),
+                status.current_version,
+                target_version,
+                nodes
+            ));
+            if status.merge_plan.is_empty() {
+                prepare_notes.push(
+                    "No eligible merge plan exists yet; review the pending proposals before rollout."
+                        .to_string(),
+                );
+            }
+            for entry in status.resolution.iter() {
+                prepare_notes.push(format!("{}: {}", entry.change_id, entry.suggestion));
+            }
+        }
+
+        let requires_row_adaptation =
+            legacy_row_count > 0 && target_version > status.current_version;
+        let mut stages = vec![SchemaSimulateRolloutStage {
+            step: 0,
+            stage: if ready_for_rollout {
+                "prepare".to_string()
+            } else {
+                "blocked".to_string()
+            },
+            upgraded_nodes: 0,
+            legacy_nodes: nodes,
+            old_schema_version: status.current_version,
+            new_schema_version: target_version,
+            mixed_versions: false,
+            requires_query_adaptation: false,
+            requires_row_adaptation,
+            notes: prepare_notes,
+        }];
+
+        if ready_for_rollout && !status.merge_plan.is_empty() {
+            for upgraded_nodes in 1..=nodes {
+                let legacy_nodes = nodes.saturating_sub(upgraded_nodes);
+                let mixed_versions = legacy_nodes > 0;
+                let mut notes = if mixed_versions {
+                    vec![format!(
+                        "{} node(s) now serve schema version {} while {} node(s) still serve version {}.",
+                        upgraded_nodes, target_version, legacy_nodes, status.current_version
+                    )]
+                } else {
+                    vec![format!(
+                        "All nodes now serve schema version {}.",
+                        target_version
+                    )]
+                };
+                if requires_row_adaptation {
+                    notes.push(format!(
+                        "{} existing row(s) still require query-time schema adaptation until rewritten under schema version {}.",
+                        legacy_row_count, target_version
+                    ));
+                }
+
+                stages.push(SchemaSimulateRolloutStage {
+                    step: upgraded_nodes,
+                    stage: if mixed_versions {
+                        "mixed".to_string()
+                    } else {
+                        "steady_state".to_string()
+                    },
+                    upgraded_nodes,
+                    legacy_nodes,
+                    old_schema_version: status.current_version,
+                    new_schema_version: target_version,
+                    mixed_versions,
+                    requires_query_adaptation: target_version > status.current_version
+                        && (mixed_versions || requires_row_adaptation),
+                    requires_row_adaptation,
+                    notes,
+                });
+            }
+        }
+
+        Ok(SchemaSimulateRolloutResult {
+            format: SCHEMA_SIMULATE_ROLLOUT_FORMAT_V1.to_string(),
+            table: params.table,
+            current_version: status.current_version,
+            target_version,
+            nodes,
+            pending_change_count: status.pending.len() as u64,
+            ready_for_rollout,
+            legacy_row_count,
+            requires_query_adaptation,
+            merge_plan: status.merge_plan,
+            conflicts: status.conflicts,
+            resolution: status.resolution,
+            stages,
         })
     }
 
@@ -31954,6 +32077,125 @@ mod tests {
             resolution.get("sch_future"),
             Some(&("wait".to_string(), "future_base_version".to_string()))
         );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn schema_simulate_rollout_reports_mixed_version_waves() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_simulate_rollout_waves");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "email",
+                    Lit::Str {
+                        v: "ada@example.com".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let add_column = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("str"),
+                nullable: true,
+                auto_increment: false,
+                default: Some(Lit::Str {
+                    v: "eu".to_string(),
+                }),
+            }],
+            message: Some("add region".to_string()),
+        })?;
+        let add_index = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddIndex {
+                name: "region_lookup".to_string(),
+                columns: vec!["region".to_string()],
+                unique: false,
+            }],
+            message: Some("index region".to_string()),
+        })?;
+        let conflict = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddIndex {
+                name: "region_lookup".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+            }],
+            message: Some("conflicting name".to_string()),
+        })?;
+
+        let rollout = engine.schema_simulate_rollout(SchemaSimulateRolloutParams {
+            table: table.clone(),
+            nodes: Some(3),
+        })?;
+
+        assert_eq!(rollout.format, SCHEMA_SIMULATE_ROLLOUT_FORMAT_V1);
+        assert_eq!(rollout.current_version, 1);
+        assert_eq!(rollout.target_version, 3);
+        assert_eq!(rollout.nodes, 3);
+        assert_eq!(rollout.pending_change_count, 3);
+        assert!(rollout.ready_for_rollout);
+        assert_eq!(rollout.legacy_row_count, 1);
+        assert!(rollout.requires_query_adaptation);
+        assert_eq!(
+            rollout.merge_plan,
+            vec![add_column.change_id.clone(), add_index.change_id.clone()]
+        );
+        assert_eq!(rollout.conflicts.len(), 1);
+        assert_eq!(rollout.conflicts[0].change_id, conflict.change_id);
+        assert_eq!(rollout.stages.len(), 4);
+        assert_eq!(rollout.stages[0].stage, "prepare");
+        assert_eq!(rollout.stages[1].stage, "mixed");
+        assert!(rollout.stages[1].mixed_versions);
+        assert!(rollout.stages[1].requires_query_adaptation);
+        let final_stage = rollout.stages.last().expect("missing final rollout stage");
+        assert_eq!(final_stage.stage, "steady_state");
+        assert_eq!(final_stage.upgraded_nodes, 3);
+        assert_eq!(final_stage.legacy_nodes, 0);
+        assert!(final_stage.requires_row_adaptation);
+        assert!(rollout
+            .resolution
+            .iter()
+            .any(|entry| entry.change_id == conflict.change_id && entry.action == "rollback"));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

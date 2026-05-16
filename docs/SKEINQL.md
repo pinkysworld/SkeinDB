@@ -825,6 +825,43 @@ Result:
 }
 ```
 
+#### schema.simulate_rollout (experimental)
+Simulate a rolling deployment for the current merge plan without mutating the table.
+
+Params:
+
+```json
+{"table":{"db":"mydb","table":"users"},"nodes":3}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.schema.simulate_rollout.v1",
+  "table": {"db":"mydb","table":"users"},
+  "current_version": 1,
+  "target_version": 3,
+  "nodes": 3,
+  "pending_change_count": 3,
+  "ready_for_rollout": true,
+  "legacy_row_count": 42,
+  "requires_query_adaptation": true,
+  "merge_plan": ["sch_1", "sch_2"],
+  "conflicts": [{"change_id":"sch_3","reason":"index_conflict:sch_2"}],
+  "resolution": [
+    {"change_id":"sch_1","action":"roll_forward","reason":"eligible_merge_plan","suggestion":"Apply this proposal as merge step 1 in the current merge plan."},
+    {"change_id":"sch_2","action":"roll_forward","reason":"eligible_merge_plan","suggestion":"Apply this proposal as merge step 2 in the current merge plan."},
+    {"change_id":"sch_3","action":"rollback","reason":"index_conflict:sch_2","suggestion":"Rollback this proposal or rename/redefine it because `sch_2` already claims the conflicting index definition."}
+  ],
+  "stages": [
+    {"step":0,"stage":"prepare","upgraded_nodes":0,"legacy_nodes":3,"old_schema_version":1,"new_schema_version":3,"mixed_versions":false,"requires_query_adaptation":false,"requires_row_adaptation":true,"notes":["Simulate 2 eligible merge-plan change(s) from schema version 1 to 3 across 3 node(s)."]},
+    {"step":1,"stage":"mixed","upgraded_nodes":1,"legacy_nodes":2,"old_schema_version":1,"new_schema_version":3,"mixed_versions":true,"requires_query_adaptation":true,"requires_row_adaptation":true,"notes":["1 node(s) now serve schema version 3 while 2 node(s) still serve version 1."]},
+    {"step":3,"stage":"steady_state","upgraded_nodes":3,"legacy_nodes":0,"old_schema_version":1,"new_schema_version":3,"mixed_versions":false,"requires_query_adaptation":true,"requires_row_adaptation":true,"notes":["All nodes now serve schema version 3."]}
+  ]
+}
+```
+
 #### schema.apply_merge (experimental)
 Apply a merge plan (or a subset). Eligible proposals roll forward; deterministic loser proposals are returned in `rolled_back` and stop appearing in later `schema.merge_status` output.
 

@@ -46,11 +46,11 @@ use skeindb_skeinql::{
         ObliviousPolicySetParams, PlanCacheClearParams, PlanCacheStatusParams,
         QueryExecutePreparedParams, QueryPatchParams, QueryPrepareParams, SchemaApplyMergeParams,
         SchemaColumnInfo, SchemaMergeStatusParams, SchemaProposeChangeParams,
-        TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams, TelemetryMigrationHintsParams,
-        VectorBenchmarkParams, VectorIndexStatusParams, VectorInsertParams, VectorSearchParams,
-        ViewCreateParams, ViewDropParams, ViewEvaluateParams, ViewExplainDepsParams,
-        ViewRefreshParams, ViewStatusParams, WasmPlanCompileParams, WasmPlanEdgePackageParams,
-        WasmPlanInspectParams, WasmPlanRunParams,
+        SchemaSimulateRolloutParams, TelemetryCompatSummaryParams, TelemetryFeatureFlagsParams,
+        TelemetryMigrationHintsParams, VectorBenchmarkParams, VectorIndexStatusParams,
+        VectorInsertParams, VectorSearchParams, ViewCreateParams, ViewDropParams,
+        ViewEvaluateParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
+        WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, CausalityDependency, CausalityToken, Expr,
@@ -15221,6 +15221,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "schema.simulate_rollout" => {
+                    let p: SchemaSimulateRolloutParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.schema_simulate_rollout(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "schema.apply_merge" => {
                     let p: SchemaApplyMergeParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
@@ -27311,6 +27318,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "schema.list_tables"
             | "schema.describe_table"
             | "schema.merge_status"
+            | "schema.simulate_rollout"
             | "advisor.index_synthesize"
             | "advisor.history"
             | "migration.intent_report"
@@ -27470,6 +27478,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "schema.describe_table",
         "schema.propose_change",
         "schema.merge_status",
+        "schema.simulate_rollout",
         "schema.apply_merge",
         "advisor.index_synthesize",
         "advisor.apply_index",
@@ -28986,7 +28995,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 134);
+        assert_eq!(methods.len(), 135);
         assert!(methods.contains(&"migration.report_export"));
     }
 

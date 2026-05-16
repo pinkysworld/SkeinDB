@@ -97,6 +97,7 @@ Related: R15
 
 - `schema.propose_change` — propose schema evolution changeset
 - `schema.merge_status` — show divergence, merge plan, and proposed resolution guidance
+- `schema.simulate_rollout` — simulate prepare/mixed/steady-state rollout waves for the current merge plan
 - `schema.apply_merge` — apply merged schema
 - Prototype change ops: `add_column` (nullable/default support) and `add_index` (name/column list/unique flag)
 

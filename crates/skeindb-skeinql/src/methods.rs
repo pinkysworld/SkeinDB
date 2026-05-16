@@ -229,6 +229,50 @@ pub struct SchemaMergeStatusResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaSimulateRolloutParams {
+    pub table: BaseTableRef,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaSimulateRolloutStage {
+    pub step: u64,
+    pub stage: String,
+    pub upgraded_nodes: u64,
+    pub legacy_nodes: u64,
+    pub old_schema_version: u64,
+    pub new_schema_version: u64,
+    pub mixed_versions: bool,
+    pub requires_query_adaptation: bool,
+    pub requires_row_adaptation: bool,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaSimulateRolloutResult {
+    pub format: String,
+    pub table: BaseTableRef,
+    pub current_version: u64,
+    pub target_version: u64,
+    pub nodes: u64,
+    pub pending_change_count: u64,
+    pub ready_for_rollout: bool,
+    pub legacy_row_count: u64,
+    pub requires_query_adaptation: bool,
+    pub merge_plan: Vec<String>,
+    pub conflicts: Vec<SchemaChangeConflict>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolution: Vec<SchemaChangeResolution>,
+
+    pub stages: Vec<SchemaSimulateRolloutStage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaApplyMergeParams {
     pub table: BaseTableRef,
 

@@ -5444,6 +5444,52 @@ async fn r15_schema_evolution_concurrent_column_and_index_changes() -> anyhow::R
         .unwrap_or_default()
         .starts_with("index_conflict:"));
 
+    let rollout = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t325",
+            "method": "schema.simulate_rollout",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" },
+                "nodes": 3
+            }
+        }))
+        .send()
+        .await?;
+    assert!(rollout.status().is_success());
+    let rollout_body: serde_json::Value = rollout.json().await?;
+    let rollout_result = rollout_body
+        .get("result")
+        .expect("missing simulate_rollout result");
+    assert_eq!(
+        rollout_result["format"].as_str(),
+        Some("skein.schema.simulate_rollout.v1")
+    );
+    assert_eq!(rollout_result["current_version"].as_u64(), Some(1));
+    assert_eq!(rollout_result["target_version"].as_u64(), Some(3));
+    assert_eq!(rollout_result["nodes"].as_u64(), Some(3));
+    assert_eq!(rollout_result["pending_change_count"].as_u64(), Some(3));
+    assert_eq!(rollout_result["ready_for_rollout"].as_bool(), Some(true));
+    assert_eq!(rollout_result["legacy_row_count"].as_u64(), Some(1));
+    let rollout_plan = rollout_result["merge_plan"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rollout_plan.len(), 2);
+    assert_eq!(rollout_plan[0].as_str(), Some(add_column_id.as_str()));
+    assert_eq!(rollout_plan[1].as_str(), Some(add_index_id.as_str()));
+    let stages = rollout_result["stages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(stages.len(), 4);
+    assert_eq!(stages[0]["stage"].as_str(), Some("prepare"));
+    assert_eq!(stages[1]["stage"].as_str(), Some("mixed"));
+    assert_eq!(stages[1]["upgraded_nodes"].as_u64(), Some(1));
+    assert_eq!(stages[3]["stage"].as_str(), Some("steady_state"));
+    assert_eq!(stages[3]["legacy_nodes"].as_u64(), Some(0));
+    assert_eq!(stages[3]["requires_row_adaptation"].as_bool(), Some(true));
+
     let apply = client
         .post(format!("{base}/api/v1/rpc"))
         .json(&serde_json::json!({
