@@ -210,12 +210,22 @@ pub struct SchemaMergeStatusParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaChangeResolution {
+    pub change_id: String,
+    pub action: String,
+    pub reason: String,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaMergeStatusResult {
     pub table: BaseTableRef,
     pub current_version: u64,
     pub pending: Vec<SchemaChangeSummary>,
     pub conflicts: Vec<SchemaChangeConflict>,
     pub merge_plan: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolution: Vec<SchemaChangeResolution>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

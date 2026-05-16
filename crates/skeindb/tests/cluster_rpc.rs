@@ -5414,6 +5414,35 @@ async fn r15_schema_evolution_concurrent_column_and_index_changes() -> anyhow::R
         .and_then(|item| item["reason"].as_str())
         .unwrap_or_default();
     assert!(conflict_reason.starts_with("index_conflict:"));
+    let resolution = result["resolution"].as_array().cloned().unwrap_or_default();
+    assert_eq!(resolution.len(), 3);
+    let resolution_for = |change_id: &str| {
+        resolution
+            .iter()
+            .find(|item| item["change_id"].as_str() == Some(change_id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let add_column_resolution = resolution_for(&add_column_id);
+    assert_eq!(
+        add_column_resolution["action"].as_str(),
+        Some("roll_forward")
+    );
+    assert_eq!(
+        add_column_resolution["reason"].as_str(),
+        Some("eligible_merge_plan")
+    );
+    let add_index_resolution = resolution_for(&add_index_id);
+    assert_eq!(
+        add_index_resolution["action"].as_str(),
+        Some("roll_forward")
+    );
+    let conflict_resolution = resolution_for(&conflict_id);
+    assert_eq!(conflict_resolution["action"].as_str(), Some("rollback"));
+    assert!(conflict_resolution["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("index_conflict:"));
 
     let apply = client
         .post(format!("{base}/api/v1/rpc"))

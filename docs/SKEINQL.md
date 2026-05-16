@@ -796,7 +796,7 @@ Result:
 ```
 
 #### schema.merge_status (experimental)
-Show pending changes, deterministic conflicts, and the current merge plan.
+Show pending changes, deterministic conflicts, the current merge plan, and a proposed resolution plan.
 
 Params:
 
@@ -816,7 +816,12 @@ Result:
     {"change_id":"sch_3","base_version":1,"status":"pending","created_at_ms":0,"changes":[{"op":"add_index","name":"region_lookup","columns":["email"],"unique":false}]}
   ],
   "conflicts":[{"change_id":"sch_3","reason":"index_conflict:sch_2"}],
-  "merge_plan":["sch_1","sch_2"]
+  "merge_plan":["sch_1","sch_2"],
+  "resolution":[
+    {"change_id":"sch_1","action":"roll_forward","reason":"eligible_merge_plan","suggestion":"Apply this proposal as merge step 1 in the current merge plan."},
+    {"change_id":"sch_2","action":"roll_forward","reason":"eligible_merge_plan","suggestion":"Apply this proposal as merge step 2 in the current merge plan."},
+    {"change_id":"sch_3","action":"rollback","reason":"index_conflict:sch_2","suggestion":"Rollback this proposal or rename/redefine it because `sch_2` already claims the conflicting index definition."}
+  ]
 }
 ```
 

@@ -96,7 +96,7 @@ Related: R14
 Related: R15
 
 - `schema.propose_change` — propose schema evolution changeset
-- `schema.merge_status` — show divergence/merge plan
+- `schema.merge_status` — show divergence, merge plan, and proposed resolution guidance
 - `schema.apply_merge` — apply merged schema
 - Prototype change ops: `add_column` (nullable/default support) and `add_index` (name/column list/unique flag)
 

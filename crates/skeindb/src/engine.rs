@@ -74,10 +74,10 @@ use skeindb_skeinql::methods::{
     ReplayBundlePerformanceTableState, ReplayBundlePerformanceTimingProfile,
     ReplayBundlePerformanceTimingVariance, ReplayBundleRowEntry, ReplayBundleTable,
     ReplayBundleTableChecksum, ReplayBundleTableSchema, RowObject, SchemaApplyMergeParams,
-    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeSummary,
-    SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult, SchemaProposeChangeParams,
-    SchemaProposeChangeResult, VectorBenchmarkLatencyStats, VectorBenchmarkParams,
-    VectorBenchmarkResult, VectorBenchmarkRunStats, VectorIndexStatusParams,
+    SchemaApplyMergeResult, SchemaChangeConflict, SchemaChangeOp, SchemaChangeResolution,
+    SchemaChangeSummary, SchemaColumnInfo, SchemaMergeStatusParams, SchemaMergeStatusResult,
+    SchemaProposeChangeParams, SchemaProposeChangeResult, VectorBenchmarkLatencyStats,
+    VectorBenchmarkParams, VectorBenchmarkResult, VectorBenchmarkRunStats, VectorIndexStatusParams,
     VectorIndexStatusResult, VectorInsertParams, VectorInsertResult, VectorSearchMatch,
     VectorSearchParams, VectorSearchResult, ViewCreateParams, ViewCreateResult, ViewDropParams,
     ViewDropResult, ViewEvaluateParams, ViewEvaluateResult, ViewExplainDepsParams,
@@ -2047,6 +2047,7 @@ impl Engine {
 
         let mut conflicts = Vec::new();
         let mut merge_plan = Vec::new();
+        let mut resolution = Vec::new();
         let mut seen_adds: HashMap<String, (SchemaChangeOp, String)> = HashMap::new();
         let mut seen_indexes: HashMap<String, (SchemaChangeOp, String)> = HashMap::new();
         let mut simulated_schema = schema.clone();
@@ -2149,10 +2150,23 @@ impl Engine {
             if let Some(reason) = conflict {
                 conflicts.push(SchemaChangeConflict {
                     change_id: change.id.clone(),
-                    reason,
+                    reason: reason.clone(),
                 });
+                resolution.push(schema_change_resolution(
+                    change,
+                    current_version,
+                    Some(&reason),
+                    None,
+                ));
             } else {
+                let merge_index = merge_plan.len();
                 merge_plan.push(change.id.clone());
+                resolution.push(schema_change_resolution(
+                    change,
+                    current_version,
+                    None,
+                    Some(merge_index),
+                ));
             }
         }
 
@@ -2174,6 +2188,7 @@ impl Engine {
             pending: pending_summaries,
             conflicts,
             merge_plan,
+            resolution,
         })
     }
 
@@ -21674,6 +21689,85 @@ fn schema_change_conflict_is_terminal(reason: &str) -> bool {
     reason != "future_base_version"
 }
 
+fn schema_change_resolution(
+    change: &SchemaChangeEntry,
+    current_version: u64,
+    reason: Option<&str>,
+    merge_index: Option<usize>,
+) -> SchemaChangeResolution {
+    match reason {
+        None => {
+            let merge_step = merge_index.map(|idx| idx + 1).unwrap_or(1);
+            SchemaChangeResolution {
+                change_id: change.id.clone(),
+                action: "roll_forward".to_string(),
+                reason: "eligible_merge_plan".to_string(),
+                suggestion: format!(
+                    "Apply this proposal as merge step {merge_step} in the current merge plan."
+                ),
+            }
+        }
+        Some("future_base_version") => SchemaChangeResolution {
+            change_id: change.id.clone(),
+            action: "wait".to_string(),
+            reason: "future_base_version".to_string(),
+            suggestion: format!(
+                "Wait until the table reaches schema version {} or resubmit this proposal against the current version {}.",
+                change.base_version, current_version
+            ),
+        },
+        Some(reason) if schema_change_conflict_is_terminal(reason) => SchemaChangeResolution {
+            change_id: change.id.clone(),
+            action: "rollback".to_string(),
+            reason: reason.to_string(),
+            suggestion: schema_change_resolution_rollback_suggestion(reason),
+        },
+        Some(reason) => SchemaChangeResolution {
+            change_id: change.id.clone(),
+            action: "manual_review".to_string(),
+            reason: reason.to_string(),
+            suggestion: format!(
+                "Review this proposal manually because the merge assistant cannot resolve `{reason}` automatically."
+            ),
+        },
+    }
+}
+
+fn schema_change_resolution_rollback_suggestion(reason: &str) -> String {
+    if let Some(other_change) = reason.strip_prefix("column_conflict:") {
+        return format!(
+            "Rollback this proposal or replace it with a new one because it conflicts with `{other_change}`."
+        );
+    }
+    if let Some(other_change) = reason.strip_prefix("index_conflict:") {
+        return format!(
+            "Rollback this proposal or rename/redefine it because `{other_change}` already claims the conflicting index definition."
+        );
+    }
+    if let Some(column) = reason.strip_prefix("unknown_column:") {
+        return format!(
+            "Rollback this proposal or add the missing column `{column}` in an earlier merge step before reproposing it."
+        );
+    }
+    match reason {
+        "duplicate_change" => {
+            "Rollback this proposal because it duplicates an earlier pending schema change."
+                .to_string()
+        }
+        "column_exists" => {
+            "Rollback this proposal because the target column already exists in the current schema."
+                .to_string()
+        }
+        "index_exists" => {
+            "Rollback this proposal because the target index already exists in the current schema."
+                .to_string()
+        }
+        _ => format!(
+            "Rollback or replace this proposal because it cannot be merged automatically ({reason})."
+        ),
+    }
+}
+
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
     let mut root = schema
         .compat_mysql
@@ -31676,7 +31770,38 @@ mod tests {
         })?;
         assert_eq!(
             status.merge_plan,
-            vec![add_column.change_id.clone(), add_index.change_id]
+            vec![add_column.change_id.clone(), add_index.change_id.clone()]
+        );
+        let resolution = status
+            .resolution
+            .iter()
+            .map(|entry| {
+                (
+                    entry.change_id.clone(),
+                    (entry.action.clone(), entry.reason.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            resolution.get(&add_column.change_id),
+            Some(&(
+                "roll_forward".to_string(),
+                "eligible_merge_plan".to_string()
+            ))
+        );
+        assert_eq!(
+            resolution.get(&add_index.change_id),
+            Some(&(
+                "roll_forward".to_string(),
+                "eligible_merge_plan".to_string()
+            ))
+        );
+        assert_eq!(
+            resolution.get(&conflict.change_id),
+            Some(&(
+                "rollback".to_string(),
+                format!("index_conflict:{}", add_index.change_id)
+            ))
         );
         let conflict_reason = status
             .conflicts
@@ -31722,6 +31847,112 @@ mod tests {
             Some(&Lit::Str {
                 v: "eu".to_string(),
             })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn schema_merge_status_proposes_resolution_actions() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_merge_status_resolution_actions");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let winner = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("str"),
+                nullable: true,
+                auto_increment: false,
+                default: Some(Lit::Str {
+                    v: "eu".to_string(),
+                }),
+            }],
+            message: Some("winner".to_string()),
+        })?;
+        let loser = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("u64"),
+                nullable: true,
+                auto_increment: false,
+                default: None,
+            }],
+            message: Some("loser".to_string()),
+        })?;
+        engine.schema_changes.push(SchemaChangeEntry {
+            id: "sch_future".to_string(),
+            table: table.clone(),
+            base_version: 3,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "timezone".to_string(),
+                r#type: type_desc("str"),
+                nullable: true,
+                auto_increment: false,
+                default: Some(Lit::Str {
+                    v: "UTC".to_string(),
+                }),
+            }],
+            message: Some("future-base".to_string()),
+            created_at_ms: now_millis().saturating_add(1),
+            status: "pending".to_string(),
+            applied_at_ms: None,
+        });
+
+        let status = engine.schema_merge_status(SchemaMergeStatusParams {
+            table: table.clone(),
+        })?;
+        let resolution = status
+            .resolution
+            .iter()
+            .map(|entry| {
+                (
+                    entry.change_id.clone(),
+                    (entry.action.clone(), entry.reason.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            resolution.get(&winner.change_id),
+            Some(&(
+                "roll_forward".to_string(),
+                "eligible_merge_plan".to_string()
+            ))
+        );
+        assert_eq!(
+            resolution.get(&loser.change_id),
+            Some(&(
+                "rollback".to_string(),
+                format!("column_conflict:{}", winner.change_id)
+            ))
+        );
+        assert_eq!(
+            resolution.get("sch_future"),
+            Some(&("wait".to_string(), "future_base_version".to_string()))
         );
 
         fs::remove_dir_all(&dir).ok();

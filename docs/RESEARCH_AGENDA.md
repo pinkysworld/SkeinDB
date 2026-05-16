@@ -51,7 +51,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R12 | Hardened | Natural language translate/explain/execute flow with approval-gated verification and NL eval harness (`ai.nl.*`, `skeindb nl-eval`) |
 | R13 | Implemented (prototype) | ETag validators + min-causality controls (`query.select` + `If-None-Match`) |
 | R14 | Implemented (prototype) | Replay bundle/time-travel export surfaces (`docs/TIME_TRAVEL_REPLAY.md`) |
-| R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, `schema.merge_status`, `schema.apply_merge`, MVCC row schema-version tags, concurrent add column/index merge planning, deterministic merge roll-forward/rollback resolution) |
+| R15 | Implemented (prototype) | Conflict-aware schema evolution (`schema.propose_change`, `schema.merge_status`, `schema.apply_merge`, MVCC row schema-version tags, concurrent add column/index merge planning, deterministic merge roll-forward/rollback resolution, divergence/resolution migration-assistant guidance) |
 | R16 | Implemented (prototype) | Index advisor synthesis/apply/history (`advisor.*`) |
 | R17 | Hardened | Compatibility intent inference, rewrite preview, and JSON/Markdown report export (`migration.*`) |
 | R18 | Implemented (prototype) | Reproducible replay/report tooling (`docs/TIME_TRAVEL_REPLAY.md`) |
