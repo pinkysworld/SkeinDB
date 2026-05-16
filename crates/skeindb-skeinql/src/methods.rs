@@ -230,6 +230,8 @@ pub struct SchemaApplyMergeParams {
 pub struct SchemaApplyMergeResult {
     pub applied: Vec<String>,
     pub conflicts: Vec<SchemaChangeConflict>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rolled_back: Vec<SchemaChangeConflict>,
     pub new_version: u64,
 }
 

@@ -796,7 +796,7 @@ Result:
 ```
 
 #### schema.merge_status (experimental)
-Show pending changes and merge plan.
+Show pending changes, deterministic conflicts, and the current merge plan.
 
 Params:
 
@@ -821,18 +821,18 @@ Result:
 ```
 
 #### schema.apply_merge (experimental)
-Apply a merge plan (or a subset).
+Apply a merge plan (or a subset). Eligible proposals roll forward; deterministic loser proposals are returned in `rolled_back` and stop appearing in later `schema.merge_status` output.
 
 Params:
 
 ```json
-{"table":{"db":"mydb","table":"users"},"change_ids":["sch_1"]}
+{"table":{"db":"mydb","table":"users"}}
 ```
 
 Result:
 
 ```json
-{"applied":["sch_1"],"conflicts":[],"new_version":2}
+{"applied":["sch_1","sch_2"],"conflicts":[],"rolled_back":[{"change_id":"sch_3","reason":"index_conflict:sch_2"}],"new_version":3}
 ```
 
 ### 10.4 tx.*

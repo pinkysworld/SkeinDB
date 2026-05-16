@@ -518,6 +518,7 @@ Format:
 
 Compatibility notes:
 - Format v2 is current because persisted schema changes may now include `add_index` operations as well as `add_column`.
+- Persisted schema-change `status` values now include `pending`, `applied`, and `rejected`; deterministic losers are marked `rejected` during `schema.apply_merge` without changing the file shape.
 - Legacy format v1 files are still accepted on load and are rewritten to format v2 on the next persist.
 - Missing files mean there are no pending schema-change proposals.
 - Unknown `format_version` values are ignored by the current loader.

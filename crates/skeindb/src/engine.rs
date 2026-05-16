@@ -2186,6 +2186,7 @@ impl Engine {
         })?;
         let mut conflicts = Vec::new();
         let mut applied = Vec::new();
+        let mut rolled_back = Vec::new();
 
         let target_ids = params
             .change_ids
@@ -2245,15 +2246,37 @@ impl Engine {
             next_version = next_version.saturating_add(1);
         }
 
+        for conflict in status.conflicts.into_iter() {
+            if !schema_change_conflict_is_terminal(&conflict.reason) {
+                continue;
+            }
+
+            let Some(idx) = self.schema_changes.iter().position(|change| {
+                change.id == conflict.change_id
+                    && change.status == "pending"
+                    && change.table.db == params.table.db
+                    && change.table.table == params.table.table
+            }) else {
+                continue;
+            };
+
+            self.schema_changes[idx].status = "rejected".to_string();
+            rolled_back.push(conflict);
+        }
+
         if !applied.is_empty() {
             self.set_schema_version(&key, next_version);
             self.persist_schema_versions_best_effort();
+        }
+
+        if !applied.is_empty() || !rolled_back.is_empty() {
             self.persist_schema_changes_best_effort();
         }
 
         Ok(SchemaApplyMergeResult {
             applied,
             conflicts,
+            rolled_back,
             new_version: self.schema_version_for(&key),
         })
     }
@@ -21647,6 +21670,10 @@ fn schema_change_conflict_reason(err: &anyhow::Error) -> String {
     message
 }
 
+fn schema_change_conflict_is_terminal(reason: &str) -> bool {
+    reason != "future_base_version"
+}
+
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
     let mut root = schema
         .compat_mysql
@@ -31664,7 +31691,24 @@ mod tests {
             change_ids: None,
         })?;
         assert_eq!(applied.applied, status.merge_plan);
+        assert_eq!(applied.rolled_back.len(), 1);
+        assert_eq!(applied.rolled_back[0].change_id, conflict.change_id);
+        assert!(applied.rolled_back[0].reason.starts_with("index_conflict:"));
         assert_eq!(applied.new_version, 3);
+
+        let post_status = engine.schema_merge_status(SchemaMergeStatusParams {
+            table: table.clone(),
+        })?;
+        assert!(post_status.pending.is_empty());
+        assert!(post_status.conflicts.is_empty());
+        assert!(post_status.merge_plan.is_empty());
+
+        let conflict_entry = engine
+            .schema_changes
+            .iter()
+            .find(|entry| entry.id == conflict.change_id)
+            .expect("missing rejected schema change");
+        assert_eq!(conflict_entry.status, "rejected");
 
         let schema = engine.get_schema(&table.db, &table.table)?;
         assert!(schema.columns.iter().any(|column| column.name == "region"));

@@ -5429,6 +5429,50 @@ async fn r15_schema_evolution_concurrent_column_and_index_changes() -> anyhow::R
     assert!(apply.status().is_success());
     let apply_body: serde_json::Value = apply.json().await?;
     assert_eq!(apply_body["result"]["new_version"].as_u64(), Some(3));
+    let rolled_back = apply_body["result"]["rolled_back"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rolled_back.len(), 1);
+    assert_eq!(
+        rolled_back[0]["change_id"].as_str(),
+        Some(conflict_id.as_str())
+    );
+    assert!(rolled_back[0]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("index_conflict:"));
+
+    let post_status = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t323",
+            "method": "schema.merge_status",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(post_status.status().is_success());
+    let post_status_body: serde_json::Value = post_status.json().await?;
+    let post_result = post_status_body
+        .get("result")
+        .expect("missing post-merge status result");
+    assert_eq!(
+        post_result["pending"].as_array().map(|items| items.len()),
+        Some(0)
+    );
+    assert_eq!(
+        post_result["conflicts"].as_array().map(|items| items.len()),
+        Some(0)
+    );
+    assert_eq!(
+        post_result["merge_plan"]
+            .as_array()
+            .map(|items| items.len()),
+        Some(0)
+    );
 
     let describe = client
         .post(format!("{base}/api/v1/rpc"))

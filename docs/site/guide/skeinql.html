@@ -710,7 +710,7 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 </code></pre></div>
 
 <h4 id="schemamerge_status-experimental">schema.merge_status (experimental)<a class="headerlink" href="#schemamerge_status-experimental" title="Permanent link">¶</a></h4>
-<p>Show pending changes and merge plan.</p>
+<p>Show pending changes, deterministic conflicts, and the current merge plan.</p>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">}}</span>
 </code></pre></div>
@@ -730,13 +730,13 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 </code></pre></div>
 
 <h4 id="schemaapply_merge-experimental">schema.apply_merge (experimental)<a class="headerlink" href="#schemaapply_merge-experimental" title="Permanent link">¶</a></h4>
-<p>Apply a merge plan (or a subset).</p>
+<p>Apply a merge plan (or a subset). Eligible proposals roll forward; deterministic loser proposals are returned in <code>rolled_back</code> and stop appearing in later <code>schema.merge_status</code> output.</p>
 <p>Params:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;change_ids&quot;</span><span class="p">:[</span><span class="s2">&quot;sch_1&quot;</span><span class="p">]}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">}}</span>
 </code></pre></div>
 
 <p>Result:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;applied&quot;</span><span class="p">:[</span><span class="s2">&quot;sch_1&quot;</span><span class="p">],</span><span class="nt">&quot;conflicts&quot;</span><span class="p">:[],</span><span class="nt">&quot;new_version&quot;</span><span class="p">:</span><span class="mi">2</span><span class="p">}</span>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;applied&quot;</span><span class="p">:[</span><span class="s2">&quot;sch_1&quot;</span><span class="p">,</span><span class="s2">&quot;sch_2&quot;</span><span class="p">],</span><span class="nt">&quot;conflicts&quot;</span><span class="p">:[],</span><span class="nt">&quot;rolled_back&quot;</span><span class="p">:[{</span><span class="nt">&quot;change_id&quot;</span><span class="p">:</span><span class="s2">&quot;sch_3&quot;</span><span class="p">,</span><span class="nt">&quot;reason&quot;</span><span class="p">:</span><span class="s2">&quot;index_conflict:sch_2&quot;</span><span class="p">}],</span><span class="nt">&quot;new_version&quot;</span><span class="p">:</span><span class="mi">3</span><span class="p">}</span>
 </code></pre></div>
 
 <h3 id="104-tx">10.4 tx.*<a class="headerlink" href="#104-tx" title="Permanent link">¶</a></h3>

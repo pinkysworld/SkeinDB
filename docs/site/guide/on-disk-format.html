@@ -581,6 +581,7 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 
 <p>Compatibility notes:
 - Format v2 is current because persisted schema changes may now include <code>add_index</code> operations as well as <code>add_column</code>.
+- Persisted schema-change <code>status</code> values now include <code>pending</code>, <code>applied</code>, and <code>rejected</code>; deterministic losers are marked <code>rejected</code> during <code>schema.apply_merge</code> without changing the file shape.
 - Legacy format v1 files are still accepted on load and are rewritten to format v2 on the next persist.
 - Missing files mean there are no pending schema-change proposals.
 - Unknown <code>format_version</code> values are ignored by the current loader.</p>
