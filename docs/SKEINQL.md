@@ -761,6 +761,8 @@ Result: `{ "ok": true }`
 #### schema.propose_change (experimental)
 Propose a schema evolution change set (R15).
 
+Supported prototype ops: `add_column` and `add_index`.
+
 Params:
 
 ```json
@@ -771,6 +773,19 @@ Params:
     {"op":"add_column","name":"region","type":{"kind":"str"},"nullable":true,"auto_increment":false,"default":null}
   ],
   "message": "add region for rollout"
+}
+```
+
+Add-index example:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "base_version": 2,
+  "changes": [
+    {"op":"add_index","name":"region_lookup","columns":["region"],"unique":false}
+  ],
+  "message": "index region lookups"
 }
 ```
 
@@ -795,9 +810,13 @@ Result:
 {
   "table":{"db":"mydb","table":"users"},
   "current_version": 1,
-  "pending":[{"change_id":"sch_1","base_version":1,"status":"pending","created_at_ms":0,"changes":[{"op":"add_column","name":"region","type":{"kind":"str"},"nullable":true,"auto_increment":false}]}],
-  "conflicts":[],
-  "merge_plan":["sch_1"]
+  "pending":[
+    {"change_id":"sch_1","base_version":1,"status":"pending","created_at_ms":0,"changes":[{"op":"add_column","name":"region","type":{"kind":"str"},"nullable":true,"auto_increment":false}]},
+    {"change_id":"sch_2","base_version":1,"status":"pending","created_at_ms":0,"changes":[{"op":"add_index","name":"region_lookup","columns":["region"],"unique":false}]},
+    {"change_id":"sch_3","base_version":1,"status":"pending","created_at_ms":0,"changes":[{"op":"add_index","name":"region_lookup","columns":["email"],"unique":false}]}
+  ],
+  "conflicts":[{"change_id":"sch_3","reason":"index_conflict:sch_2"}],
+  "merge_plan":["sch_1","sch_2"]
 }
 ```
 

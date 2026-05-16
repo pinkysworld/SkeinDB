@@ -1,7 +1,7 @@
 # SkeinDB On-Disk Format v0.3 (v0.2 compatible)
 
 Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-03-31
+Last updated: 2026-05-15
 
 This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.
@@ -30,14 +30,14 @@ data/
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
   views.json                  (prototype materialized views, format v2)
   schema_versions.json        (prototype schema versions, format v1)
-  schema_changes.json         (prototype schema change log, format v1)
+  schema_changes.json         (prototype schema change log, format v2)
   schema_flags.json           (prototype schema flags, format v1)
   changes.json                (prototype retained CDC change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
   tables/
-    <db>/<table>.json         (prototype row store, format v2)
+    <db>/<table>.json         (prototype row store, format v3)
     <db>/<table>.rseg         (prototype row segment container, format v1)
     <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
   wal/
@@ -488,7 +488,41 @@ Compatibility notes:
 - Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and `source_rows` defaults to empty.
 - If the file is missing or has an unknown `format_version`, it is ignored.
 
-### 11.5 schema_flags.json
+### 11.5 schema_changes.json
+
+Prototype persisted schema-evolution proposals for `schema.propose_change`,
+`schema.merge_status`, and `schema.apply_merge`.
+
+Format:
+
+```json
+{
+  "format_version": 2,
+  "next_id": 3,
+  "changes": [
+    {
+      "id": "sch_1",
+      "table": {"db": "app", "table": "users"},
+      "base_version": 1,
+      "changes": [
+        {"op": "add_column", "name": "region", "type": {"kind": "str"}, "nullable": true, "auto_increment": false},
+        {"op": "add_index", "name": "region_lookup", "columns": ["region"], "unique": false}
+      ],
+      "message": "roll out region",
+      "created_at_ms": 1730000000000,
+      "status": "pending"
+    }
+  ]
+}
+```
+
+Compatibility notes:
+- Format v2 is current because persisted schema changes may now include `add_index` operations as well as `add_column`.
+- Legacy format v1 files are still accepted on load and are rewritten to format v2 on the next persist.
+- Missing files mean there are no pending schema-change proposals.
+- Unknown `format_version` values are ignored by the current loader.
+
+### 11.6 schema_flags.json
 
 Prototype schema metadata for opt-in execution hints that should survive reopen.
 
@@ -513,7 +547,7 @@ Compatibility notes:
 - Unknown `format_version` values are ignored by the current loader.
 - Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.
 
-### 11.6 wasm_catalog.json
+### 11.7 wasm_catalog.json
 
 Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
 embedded here; they live in the `ValueStore` and are referenced by `value_id`.
@@ -554,7 +588,7 @@ Compatibility notes:
   stored separately in `.vseg` data managed by `ValueStore`.
 - Unknown `format_version` values are rejected by the current core loader.
 
-### 11.6 tables/<db>/<table>.json (format v2)
+### 11.8 tables/<db>/<table>.json (format v3)
 
 Prototype row persistence for `tables/<db>/<table>.json` now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.
@@ -563,7 +597,7 @@ Format:
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "rows": [
     {
       "row": {
@@ -577,6 +611,7 @@ Format:
         }
       },
       "version": 1,
+      "schema_version": 4,
       "deleted": false
     },
     {
@@ -608,7 +643,7 @@ Rules:
 - v0.1/v0.2 legacy row arrays (`Vec<RowEntry>`) remain readable.
 - v2 table-row payloads without `schema_version` remain readable and are normalized from `schema_versions.json` when loaded.
 
-### 11.7 tables/<db>/<table>.rseg (prototype segment container v1)
+### 11.9 tables/<db>/<table>.rseg (prototype segment container v1)
 
 SkeinDB can also persist table rows in a compact framed container with extension `.rseg`.
 
@@ -634,7 +669,7 @@ Compatibility notes:
 - v2 row payloads remain readable; missing `schema_version` fields are normalized from the per-table schema-version map on load.
 - If both files are missing or unreadable, the table loads as empty.
 
-### 11.8 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
+### 11.10 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)
 
 Optional persisted cache for the engine's reusable secondary-index state.
 

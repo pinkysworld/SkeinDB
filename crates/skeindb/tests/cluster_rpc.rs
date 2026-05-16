@@ -5293,6 +5293,187 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn r15_schema_evolution_concurrent_column_and_index_changes() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r15_schema_evo_index")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS r15_docs_idx (id INT PRIMARY KEY, email TEXT)",
+        "INSERT INTO r15_docs_idx (id, email) VALUES (1, 'ada@example.com')",
+    ] {
+        let resp = client
+            .post(format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": "t321",
+                "method": "sql.exec",
+                "params": { "default_db": "test", "sql": sql }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    let add_column = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.propose_change",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" },
+                "base_version": 0,
+                "changes": [
+                    { "op": "add_column", "name": "region", "type": { "kind": "str" }, "nullable": true }
+                ],
+                "message": "add region"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(add_column.status().is_success());
+    let add_column_body: serde_json::Value = add_column.json().await?;
+    let add_column_id = add_column_body["result"]["change_id"]
+        .as_str()
+        .expect("missing add_column change id")
+        .to_string();
+
+    let add_index = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.propose_change",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" },
+                "base_version": 0,
+                "changes": [
+                    { "op": "add_index", "name": "region_lookup", "columns": ["region"], "unique": false }
+                ],
+                "message": "index region"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(add_index.status().is_success());
+    let add_index_body: serde_json::Value = add_index.json().await?;
+    let add_index_id = add_index_body["result"]["change_id"]
+        .as_str()
+        .expect("missing add_index change id")
+        .to_string();
+
+    let conflict = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.propose_change",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" },
+                "base_version": 0,
+                "changes": [
+                    { "op": "add_index", "name": "region_lookup", "columns": ["email"], "unique": false }
+                ],
+                "message": "conflicting name"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(conflict.status().is_success());
+    let conflict_body: serde_json::Value = conflict.json().await?;
+    let conflict_id = conflict_body["result"]["change_id"]
+        .as_str()
+        .expect("missing conflict change id")
+        .to_string();
+
+    let status = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.merge_status",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(status.status().is_success());
+    let status_body: serde_json::Value = status.json().await?;
+    let result = status_body
+        .get("result")
+        .expect("missing merge_status result");
+    let merge_plan = result["merge_plan"].as_array().cloned().unwrap_or_default();
+    assert_eq!(merge_plan.len(), 2);
+    assert_eq!(merge_plan[0].as_str(), Some(add_column_id.as_str()));
+    assert_eq!(merge_plan[1].as_str(), Some(add_index_id.as_str()));
+    let conflict_reason = result["conflicts"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["change_id"].as_str() == Some(conflict_id.as_str()))
+        })
+        .and_then(|item| item["reason"].as_str())
+        .unwrap_or_default();
+    assert!(conflict_reason.starts_with("index_conflict:"));
+
+    let apply = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.apply_merge",
+            "params": {
+                "table": { "db": "test", "table": "r15_docs_idx" }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(apply.status().is_success());
+    let apply_body: serde_json::Value = apply.json().await?;
+    assert_eq!(apply_body["result"]["new_version"].as_u64(), Some(3));
+
+    let describe = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t321",
+            "method": "schema.describe_table",
+            "params": { "db": "test", "table": "r15_docs_idx" }
+        }))
+        .send()
+        .await?;
+    assert!(describe.status().is_success());
+    let describe_body: serde_json::Value = describe.json().await?;
+    let result = describe_body
+        .get("result")
+        .expect("missing describe_table result");
+    let columns = result["columns"].as_array().cloned().unwrap_or_default();
+    assert!(columns
+        .iter()
+        .any(|column| column["name"].as_str() == Some("region")));
+    let indexes = result["indexes"].as_array().cloned().unwrap_or_default();
+    assert!(indexes.iter().any(|index| {
+        index["name"].as_str() == Some("region_lookup")
+            && index["unique"].as_bool() == Some(false)
+            && index["columns"]
+                .as_array()
+                .map(|cols| cols.iter().any(|col| col.as_str() == Some("region")))
+                .unwrap_or(false)
+    }));
+
+    let compat_indexes = result["compat_mysql"]["indexes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(compat_indexes.iter().any(|index| {
+        index["name"].as_str() == Some("region_lookup")
+            && index["columns"]
+                .as_array()
+                .map(|cols| cols.iter().any(|col| col.as_str() == Some("region")))
+                .unwrap_or(false)
+    }));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> {
     let _guard = cluster_test_guard().await;
     let server = HttpHarness::start("t183_replay_bundle")?;

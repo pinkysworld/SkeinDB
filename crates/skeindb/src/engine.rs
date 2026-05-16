@@ -583,7 +583,7 @@ struct ChangeLogDisk {
 // -----------------------------
 
 const SCHEMA_VERSION_FORMAT_VERSION: u32 = 1;
-const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 1;
+const SCHEMA_CHANGES_FORMAT_VERSION: u32 = 2;
 const SCHEMA_FLAGS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_PATTERNS_FORMAT_VERSION: u32 = 1;
 const ADVISOR_HISTORY_FORMAT_VERSION: u32 = 2;
@@ -1960,7 +1960,9 @@ impl Engine {
             anyhow::bail!("invalid_request: base_version is ahead of current");
         }
 
-        let mut seen = HashSet::new();
+        let mut seen_columns = HashSet::new();
+        let mut seen_indexes = HashSet::new();
+        let mut normalized_changes = Vec::with_capacity(params.changes.len());
         for change in params.changes.iter() {
             match change {
                 SchemaChangeOp::AddColumn {
@@ -1969,12 +1971,30 @@ impl Engine {
                     default,
                     ..
                 } => {
-                    if !seen.insert(name.clone()) {
+                    if !seen_columns.insert(name.to_ascii_lowercase()) {
                         anyhow::bail!("invalid_request: duplicate column change");
                     }
                     if !*nullable && default.is_none() {
                         anyhow::bail!("invalid_request: non-null column requires default");
                     }
+                    normalized_changes.push(change.clone());
+                }
+                SchemaChangeOp::AddIndex {
+                    name,
+                    columns,
+                    unique,
+                } => {
+                    let normalized_name = normalize_schema_change_index_name(name)?;
+                    if !seen_indexes.insert(normalized_name.to_ascii_lowercase()) {
+                        anyhow::bail!("invalid_request: duplicate index change");
+                    }
+                    let normalized_columns =
+                        normalize_schema_change_index_columns_for_proposal(columns)?;
+                    normalized_changes.push(SchemaChangeOp::AddIndex {
+                        name: normalized_name,
+                        columns: normalized_columns,
+                        unique: *unique,
+                    });
                 }
             }
         }
@@ -1989,7 +2009,7 @@ impl Engine {
                 r#as: None,
             },
             base_version: params.base_version,
-            changes: params.changes,
+            changes: normalized_changes,
             message: params.message,
             created_at_ms: now_millis(),
             status: "pending".to_string(),
@@ -2007,7 +2027,7 @@ impl Engine {
         &self,
         params: SchemaMergeStatusParams,
     ) -> anyhow::Result<SchemaMergeStatusResult> {
-        let schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let (schema, tdata) = self.get_table(&params.table)?;
         let key = TableKey {
             db: params.table.db.clone(),
             table: params.table.table.clone(),
@@ -2028,6 +2048,12 @@ impl Engine {
         let mut conflicts = Vec::new();
         let mut merge_plan = Vec::new();
         let mut seen_adds: HashMap<String, (SchemaChangeOp, String)> = HashMap::new();
+        let mut seen_indexes: HashMap<String, (SchemaChangeOp, String)> = HashMap::new();
+        let mut simulated_schema = schema.clone();
+        let mut simulated_tdata = TableData {
+            rows: tdata.rows.clone(),
+            ..TableData::default()
+        };
 
         for change in pending.iter() {
             let mut conflict: Option<String> = None;
@@ -2040,11 +2066,16 @@ impl Engine {
                 for op in change.changes.iter() {
                     match op {
                         SchemaChangeOp::AddColumn { name, .. } => {
-                            if schema.columns.iter().any(|c| c.name == *name) {
+                            if schema
+                                .columns
+                                .iter()
+                                .any(|column| column.name.eq_ignore_ascii_case(name))
+                            {
                                 conflict = Some("column_exists".to_string());
                                 break;
                             }
-                            if let Some((prev, prev_id)) = seen_adds.get(name) {
+                            let column_key = name.to_ascii_lowercase();
+                            if let Some((prev, prev_id)) = seen_adds.get(&column_key) {
                                 if prev == op {
                                     conflict = Some("duplicate_change".to_string());
                                 } else {
@@ -2052,7 +2083,64 @@ impl Engine {
                                 }
                                 break;
                             }
-                            seen_adds.insert(name.clone(), (op.clone(), change.id.clone()));
+                            if let Err(err) = apply_schema_change(
+                                &mut simulated_schema,
+                                &mut simulated_tdata,
+                                op,
+                                current_version.max(1),
+                            ) {
+                                conflict = Some(schema_change_conflict_reason(&err));
+                                break;
+                            }
+                            seen_adds.insert(column_key, (op.clone(), change.id.clone()));
+                        }
+                        SchemaChangeOp::AddIndex {
+                            name,
+                            columns,
+                            unique,
+                        } => {
+                            if mysql_compat_index_defs(schema)
+                                .iter()
+                                .any(|index| index.name.eq_ignore_ascii_case(name))
+                            {
+                                conflict = Some("index_exists".to_string());
+                                break;
+                            }
+
+                            let normalized_columns = match normalize_mysql_compat_index_columns(
+                                &simulated_schema,
+                                columns,
+                            ) {
+                                Ok(normalized_columns) => normalized_columns,
+                                Err(err) => {
+                                    conflict = Some(schema_change_conflict_reason(&err));
+                                    break;
+                                }
+                            };
+                            let index_key = name.to_ascii_lowercase();
+                            let normalized_op = SchemaChangeOp::AddIndex {
+                                name: name.clone(),
+                                columns: normalized_columns,
+                                unique: *unique,
+                            };
+                            if let Some((prev, prev_id)) = seen_indexes.get(&index_key) {
+                                if prev == &normalized_op {
+                                    conflict = Some("duplicate_change".to_string());
+                                } else {
+                                    conflict = Some(format!("index_conflict:{prev_id}"));
+                                }
+                                break;
+                            }
+                            if let Err(err) = apply_schema_change(
+                                &mut simulated_schema,
+                                &mut simulated_tdata,
+                                &normalized_op,
+                                current_version.max(1),
+                            ) {
+                                conflict = Some(schema_change_conflict_reason(&err));
+                                break;
+                            }
+                            seen_indexes.insert(index_key, (normalized_op, change.id.clone()));
                         }
                     }
                 }
@@ -2177,35 +2265,11 @@ impl Engine {
         columns: Vec<String>,
         unique: bool,
     ) -> anyhow::Result<()> {
-        let index_name = index_name.trim().to_string();
-        if index_name.is_empty() {
-            anyhow::bail!("invalid_request: index name must not be empty");
-        }
-        if columns.is_empty() {
-            anyhow::bail!("invalid_request: index requires at least one column");
-        }
+        let index_name = normalize_schema_change_index_name(&index_name)?;
 
         {
             let (schema, tdata) = self.get_table_mut(table)?;
-            let mut normalized_columns = Vec::new();
-            let mut seen = HashSet::new();
-            for column in columns.iter() {
-                let Some(schema_column) = schema
-                    .columns
-                    .iter()
-                    .find(|c| c.name.eq_ignore_ascii_case(column))
-                    .map(|c| c.name.clone())
-                else {
-                    anyhow::bail!("invalid_request: unknown column {column}");
-                };
-                let seen_key = schema_column.to_ascii_lowercase();
-                if seen.insert(seen_key) {
-                    normalized_columns.push(schema_column);
-                }
-            }
-            if normalized_columns.is_empty() {
-                anyhow::bail!("invalid_request: index requires at least one column");
-            }
+            let normalized_columns = normalize_mysql_compat_index_columns(schema, &columns)?;
 
             let mut unchanged = false;
             for def in mysql_compat_index_defs(schema) {
@@ -10031,9 +10095,12 @@ impl Engine {
 
     fn load_schema_changes_best_effort(&mut self) {
         if let Some(disk) = load_json::<SchemaChangesDisk>(&self.schema_changes_path()) {
-            if disk.format_version == SCHEMA_CHANGES_FORMAT_VERSION {
+            if disk.format_version == 1 || disk.format_version == SCHEMA_CHANGES_FORMAT_VERSION {
                 self.schema_changes = disk.changes;
                 self.schema_changes_next_id = disk.next_id.max(1);
+                if disk.format_version != SCHEMA_CHANGES_FORMAT_VERSION {
+                    self.persist_schema_changes_best_effort();
+                }
                 return;
             }
         }
@@ -21450,6 +21517,69 @@ fn mysql_compat_validate_unique_columns(
     Ok(())
 }
 
+fn normalize_schema_change_index_name(name: &str) -> anyhow::Result<String> {
+    let normalized = name.trim().to_string();
+    if normalized.is_empty() {
+        anyhow::bail!("invalid_request: index name must not be empty");
+    }
+    Ok(normalized)
+}
+
+fn normalize_schema_change_index_columns_for_proposal(
+    columns: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for column in columns.iter() {
+        let normalized_column = column.trim();
+        if normalized_column.is_empty() {
+            anyhow::bail!("invalid_request: index column name must not be empty");
+        }
+        let seen_key = normalized_column.to_ascii_lowercase();
+        if seen.insert(seen_key) {
+            normalized.push(normalized_column.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        anyhow::bail!("invalid_request: index requires at least one column");
+    }
+    Ok(normalized)
+}
+
+fn normalize_mysql_compat_index_columns(
+    schema: &TableSchema,
+    columns: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let proposal_columns = normalize_schema_change_index_columns_for_proposal(columns)?;
+    let mut normalized = Vec::new();
+    for column in proposal_columns.iter() {
+        let Some(schema_column) = schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(column))
+            .map(|candidate| candidate.name.clone())
+        else {
+            anyhow::bail!("invalid_request: unknown column {column}");
+        };
+        normalized.push(schema_column);
+    }
+    Ok(normalized)
+}
+
+fn schema_change_conflict_reason(err: &anyhow::Error) -> String {
+    let message = err.to_string();
+    if let Some(column) = message.strip_prefix("invalid_request: unknown column ") {
+        return format!("unknown_column:{column}");
+    }
+    if let Some(reason) = message.strip_prefix("invalid_request: ") {
+        return reason.to_string();
+    }
+    if let Some(reason) = message.strip_prefix("conflict: ") {
+        return reason.to_string();
+    }
+    message
+}
+
 fn set_mysql_compat_column_default(schema: &mut TableSchema, column: &str, default: &Lit) {
     let mut root = schema
         .compat_mysql
@@ -24292,6 +24422,27 @@ fn apply_schema_change(
                 nullable: *nullable,
                 auto_increment: *auto_increment,
             });
+        }
+        SchemaChangeOp::AddIndex {
+            name,
+            columns,
+            unique,
+        } => {
+            let index_name = normalize_schema_change_index_name(name)?;
+            let normalized_columns = normalize_mysql_compat_index_columns(schema, columns)?;
+            if let Some(existing) = mysql_compat_index_defs(schema)
+                .into_iter()
+                .find(|index| index.name.eq_ignore_ascii_case(&index_name))
+            {
+                if existing.unique == *unique && existing.columns == normalized_columns {
+                    return Ok(());
+                }
+                anyhow::bail!("conflict: index already exists: {index_name}");
+            }
+            if *unique {
+                mysql_compat_validate_unique_columns(tdata, &normalized_columns, &index_name)?;
+            }
+            set_mysql_compat_index(schema, &index_name, &normalized_columns, *unique);
         }
     }
     Ok(())
@@ -31339,6 +31490,126 @@ mod tests {
             row.get("region"),
             Some(&Lit::Str {
                 v: "eu".to_string()
+            })
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn schema_evolution_merges_concurrent_column_and_index_changes() -> anyhow::Result<()> {
+        let dir = temp_dir("schema_evolution_index_merge");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "email",
+                    Lit::Str {
+                        v: "ada@example.com".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let add_column = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddColumn {
+                name: "region".to_string(),
+                r#type: type_desc("str"),
+                nullable: true,
+                auto_increment: false,
+                default: Some(Lit::Str {
+                    v: "eu".to_string(),
+                }),
+            }],
+            message: Some("add rollout region".to_string()),
+        })?;
+        let add_index = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddIndex {
+                name: "region_lookup".to_string(),
+                columns: vec!["region".to_string()],
+                unique: false,
+            }],
+            message: Some("index the rollout column".to_string()),
+        })?;
+        let conflict = engine.schema_propose_change(SchemaProposeChangeParams {
+            table: table.clone(),
+            base_version: 1,
+            changes: vec![SchemaChangeOp::AddIndex {
+                name: "region_lookup".to_string(),
+                columns: vec!["id".to_string()],
+                unique: false,
+            }],
+            message: Some("conflicting index name".to_string()),
+        })?;
+
+        let status = engine.schema_merge_status(SchemaMergeStatusParams {
+            table: table.clone(),
+        })?;
+        assert_eq!(
+            status.merge_plan,
+            vec![add_column.change_id.clone(), add_index.change_id]
+        );
+        let conflict_reason = status
+            .conflicts
+            .iter()
+            .find(|entry| entry.change_id == conflict.change_id)
+            .map(|entry| entry.reason.clone())
+            .unwrap_or_default();
+        assert!(conflict_reason.starts_with("index_conflict:"));
+
+        let applied = engine.schema_apply_merge(SchemaApplyMergeParams {
+            table: table.clone(),
+            change_ids: None,
+        })?;
+        assert_eq!(applied.applied, status.merge_plan);
+        assert_eq!(applied.new_version, 3);
+
+        let schema = engine.get_schema(&table.db, &table.table)?;
+        assert!(schema.columns.iter().any(|column| column.name == "region"));
+        assert!(mysql_compat_index_defs(schema).iter().any(|index| {
+            index.name == "region_lookup" && index.columns == vec!["region".to_string()]
+        }));
+
+        let row = engine.data_get(&table, vec![Lit::U64 { v: 1 }])?.row;
+        assert_eq!(
+            row.get("region"),
+            Some(&Lit::Str {
+                v: "eu".to_string(),
             })
         );
 

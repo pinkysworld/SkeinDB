@@ -162,6 +162,12 @@ pub enum SchemaChangeOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Lit>,
     },
+    AddIndex {
+        name: String,
+        columns: Vec<String>,
+        #[serde(default)]
+        unique: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

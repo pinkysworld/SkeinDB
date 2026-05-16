@@ -127,7 +127,7 @@
     <article class="doc-article">
       <h1 id="skeindb-on-disk-format-v03-v02-compatible">SkeinDB On-Disk Format v0.3 (v0.2 compatible)<a class="headerlink" href="#skeindb-on-disk-format-v03-v02-compatible" title="Permanent link">¶</a></h1>
 <p>Status: Draft v0.3 (v0.2 compatible)
-Last updated: 2026-03-31</p>
+Last updated: 2026-05-15</p>
 <p>This document defines SkeinDB's on-disk storage layout and record formats.
 All formats MUST be versioned. Any breaking change requires a format version bump.</p>
 <p>Design goals:
@@ -151,14 +151,14 @@ All formats MUST be versioned. Any breaking change requires a format version bum
   merge_wasm_registry.json    (prototype merge wasm registry, format v1)
   views.json                  (prototype materialized views, format v2)
   schema_versions.json        (prototype schema versions, format v1)
-  schema_changes.json         (prototype schema change log, format v1)
+  schema_changes.json         (prototype schema change log, format v2)
   schema_flags.json           (prototype schema flags, format v1)
   changes.json                (prototype retained CDC change log, format v1)
   advisor_patterns.json       (prototype index advisor patterns, format v1)
   advisor_history.json        (prototype index advisor history, format v2)
   security_state.json         (security principals + API tokens, format v1)
   tables/
-    <db>/<table>.json         (prototype row store, format v2)
+    <db>/<table>.json         (prototype row store, format v3)
     <db>/<table>.rseg         (prototype row segment container, format v1)
     <db>/<table>.sidx.json    (prototype secondary index cache, format v1)
   wal/
@@ -555,7 +555,36 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 - v0.3.15 adds the read-only <code>view.evaluate</code> oracle/benchmark and compatibility catalogs without changing this on-disk format.
 - Older format v1 files still load; missing dependency-usage arrays are rebuilt from the stored query on load, and <code>source_rows</code> defaults to empty.
 - If the file is missing or has an unknown <code>format_version</code>, it is ignored.</p>
-<h3 id="115-schema_flagsjson">11.5 schema_flags.json<a class="headerlink" href="#115-schema_flagsjson" title="Permanent link">¶</a></h3>
+<h3 id="115-schema_changesjson">11.5 schema_changes.json<a class="headerlink" href="#115-schema_changesjson" title="Permanent link">¶</a></h3>
+<p>Prototype persisted schema-evolution proposals for <code>schema.propose_change</code>,
+<code>schema.merge_status</code>, and <code>schema.apply_merge</code>.</p>
+<p>Format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;next_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sch_1&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;base_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;add_column&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;region&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;str&quot;</span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;nullable&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;auto_increment&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;add_index&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;region_lookup&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;region&quot;</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;unique&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">}</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;roll out region&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;created_at_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1730000000000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Compatibility notes:
+- Format v2 is current because persisted schema changes may now include <code>add_index</code> operations as well as <code>add_column</code>.
+- Legacy format v1 files are still accepted on load and are rewritten to format v2 on the next persist.
+- Missing files mean there are no pending schema-change proposals.
+- Unknown <code>format_version</code> values are ignored by the current loader.</p>
+<h3 id="116-schema_flagsjson">11.6 schema_flags.json<a class="headerlink" href="#116-schema_flagsjson" title="Permanent link">¶</a></h3>
 <p>Prototype schema metadata for opt-in execution hints that should survive reopen.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -575,7 +604,7 @@ Each file includes a <code>format_version</code> field; unknown versions should 
 - Missing files mean no interned-column flags are active.
 - Unknown <code>format_version</code> values are ignored by the current loader.
 - Column names are normalized against the live catalog on load; dropped or renamed columns are pruned from the file on the next persist.</p>
-<h3 id="116-wasm_catalogjson">11.6 wasm_catalog.json<a class="headerlink" href="#116-wasm_catalogjson" title="Permanent link">¶</a></h3>
+<h3 id="117-wasm_catalogjson">11.7 wasm_catalog.json<a class="headerlink" href="#117-wasm_catalogjson" title="Permanent link">¶</a></h3>
 <p>Prototype metadata catalog for general Wasm UDF modules. Module bytes are not
 embedded here; they live in the <code>ValueStore</code> and are referenced by <code>value_id</code>.</p>
 <p>Format:</p>
@@ -611,12 +640,12 @@ embedded here; they live in the <code>ValueStore</code> and are referenced by <c
 - The catalog stores only typed metadata plus <code>value_id</code>; the Wasm bytes are
   stored separately in <code>.vseg</code> data managed by <code>ValueStore</code>.
 - Unknown <code>format_version</code> values are rejected by the current core loader.</p>
-<h3 id="116-tablesjson-format-v2">11.6 tables/<db>/<table>.json (format v2)<a class="headerlink" href="#116-tablesjson-format-v2" title="Permanent link">¶</a></h3>
+<h3 id="118-tablesjson-format-v3">11.8 tables/<db>/<table>.json (format v3)<a class="headerlink" href="#118-tablesjson-format-v3" title="Permanent link">¶</a></h3>
 <p>Prototype row persistence for <code>tables/&lt;db&gt;/&lt;table&gt;.json</code> now supports a
 ValueID-backed JSON format to reduce duplicated literal payloads in row files.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">    </span><span class="p">{</span>
 <span class="w">      </span><span class="nt">&quot;row&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
@@ -630,6 +659,7 @@ ValueID-backed JSON format to reduce duplicated literal payloads in row files.</
 <span class="w">        </span><span class="p">}</span>
 <span class="w">      </span><span class="p">},</span>
 <span class="w">      </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;deleted&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span>
 <span class="w">    </span><span class="p">},</span>
 <span class="w">    </span><span class="p">{</span>
@@ -660,7 +690,7 @@ ValueID-backed JSON format to reduce duplicated literal payloads in row files.</
 - Unknown <code>format_version</code> values are treated as unsupported and should fall back to legacy readers.
 - v0.1/v0.2 legacy row arrays (<code>Vec&lt;RowEntry&gt;</code>) remain readable.
 - v2 table-row payloads without <code>schema_version</code> remain readable and are normalized from <code>schema_versions.json</code> when loaded.</p>
-<h3 id="117-tablesrseg-prototype-segment-container-v1">11.7 tables/<db>/<table>.rseg (prototype segment container v1)<a class="headerlink" href="#117-tablesrseg-prototype-segment-container-v1" title="Permanent link">¶</a></h3>
+<h3 id="119-tablesrseg-prototype-segment-container-v1">11.9 tables/<db>/<table>.rseg (prototype segment container v1)<a class="headerlink" href="#119-tablesrseg-prototype-segment-container-v1" title="Permanent link">¶</a></h3>
 <p>SkeinDB can also persist table rows in a compact framed container with extension <code>.rseg</code>.</p>
 <p>Header:
 - <code>magic[8]</code>: <code>SKNSEGR1</code>
@@ -680,7 +710,7 @@ ValueID-backed JSON format to reduce duplicated literal payloads in row files.</
 - Unsupported segment header versions are ignored by fallback readers.
 - v2 row payloads remain readable; missing <code>schema_version</code> fields are normalized from the per-table schema-version map on load.
 - If both files are missing or unreadable, the table loads as empty.</p>
-<h3 id="118-tablessidxjson-prototype-secondary-index-cache-v1">11.8 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)<a class="headerlink" href="#118-tablessidxjson-prototype-secondary-index-cache-v1" title="Permanent link">¶</a></h3>
+<h3 id="1110-tablessidxjson-prototype-secondary-index-cache-v1">11.10 tables/<db>/<table>.sidx.json (prototype secondary index cache v1)<a class="headerlink" href="#1110-tablessidxjson-prototype-secondary-index-cache-v1" title="Permanent link">¶</a></h3>
 <p>Optional persisted cache for the engine's reusable secondary-index state.</p>
 <p>Format:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -822,11 +852,12 @@ The FileHeader format_ver remains 1; extensions use new record types and/or high
 <li><a href="#112-forensic_chainjson">11.2 forensic_chain.json</a></li>
 <li><a href="#113-merge_wasm_registryjson">11.3 merge_wasm_registry.json</a></li>
 <li><a href="#114-viewsjson">11.4 views.json</a></li>
-<li><a href="#115-schema_flagsjson">11.5 schema_flags.json</a></li>
-<li><a href="#116-wasm_catalogjson">11.6 wasm_catalog.json</a></li>
-<li><a href="#116-tablesjson-format-v2">11.6 tables//.json (format v2)</a></li>
-<li><a href="#117-tablesrseg-prototype-segment-container-v1">11.7 tables//.rseg (prototype segment container v1)</a></li>
-<li><a href="#118-tablessidxjson-prototype-secondary-index-cache-v1">11.8 tables//.sidx.json (prototype secondary index cache v1)</a></li>
+<li><a href="#115-schema_changesjson">11.5 schema_changes.json</a></li>
+<li><a href="#116-schema_flagsjson">11.6 schema_flags.json</a></li>
+<li><a href="#117-wasm_catalogjson">11.7 wasm_catalog.json</a></li>
+<li><a href="#118-tablesjson-format-v3">11.8 tables//.json (format v3)</a></li>
+<li><a href="#119-tablesrseg-prototype-segment-container-v1">11.9 tables//.rseg (prototype segment container v1)</a></li>
+<li><a href="#1110-tablessidxjson-prototype-secondary-index-cache-v1">11.10 tables//.sidx.json (prototype secondary index cache v1)</a></li>
 </ul>
 </li>
 <li><a href="#a1-delta-valueentries">A.1 Delta ValueEntries</a></li>

@@ -98,7 +98,7 @@ Related: R15
 - `schema.propose_change` — propose schema evolution changeset
 - `schema.merge_status` — show divergence/merge plan
 - `schema.apply_merge` — apply merged schema
-- Prototype change ops: `add_column` (nullable/default support)
+- Prototype change ops: `add_column` (nullable/default support) and `add_index` (name/column list/unique flag)
 
 ## 12. advisor.* (extensions) — Dependency-driven index synthesis
 Related: R16

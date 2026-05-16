@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Prototype Runtime Evidence</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md; MVCC row entries now persist <code>schema_version</code>.</span>
+    <span class="status-text"><strong>Prototype Runtime Evidence</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md; MVCC row entries now persist <code>schema_version</code>, and concurrent <code>add_column</code>/<code>add_index</code> proposals now merge with deterministic conflict detection.</span>
   </div>
 
   <div class="novelty-card">
@@ -65,7 +65,7 @@
     </div>
     <div class="phase">
       <h3>Phase 2 — Concurrent Evolution</h3>
-      <p>Protocol where nodes propose schema changes independently. Non-conflicting changes (add column, add index) apply immediately; conflicting changes (incompatible type changes) queue for resolution.</p>
+      <p>Protocol where nodes propose schema changes independently. SkeinDB's prototype now accepts both <code>add_column</code> and <code>add_index</code> proposals, simulates earlier pending changes inside <code>schema.merge_status</code>, merges non-conflicting changes in order, and reports duplicate index definitions as deterministic conflicts for manual resolution.</p>
     </div>
     <div class="phase">
       <h3>Phase 3 — Query Adaptation</h3>
