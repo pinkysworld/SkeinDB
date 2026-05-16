@@ -69,7 +69,7 @@
     </div>
     <div class="phase">
       <h3>Phase 3 — Query Adaptation</h3>
-      <p>Handle schema heterogeneity at query time: detect version mismatch between query expectation and row schema, apply automatic conversion, and fail gracefully for truly incompatible cases.</p>
+      <p>Handle schema heterogeneity at query time. SkeinDB's prototype now materializes missing legacy columns from MySQL-compatible schema defaults, falling back to <code>NULL</code> across batch/non-batch selects, keyed reads, joins, and predicate evaluation so older row shapes can satisfy current-schema queries without spurious <code>unknown column</code> failures.</p>
     </div>
     <div class="phase">
       <h3>Phase 4 — Merge Protocol</h3>

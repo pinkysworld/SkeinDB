@@ -25,13 +25,13 @@ Runtime status and checklist status intentionally differ:
   - **R12** — Natural language to SkeinQL (prompt packaging, dependency explanation, preview rows, approval-gated execution, evaluation harness)
   - **R13** — Causal vector-clock ETags (V2 clocks, dependency tracking, stale detection)
   - **R14** — Geo-distributed replay bundles (bundle request/apply/status roundtrip test)
-  - **R15** — Conflict-free schema evolution (propose/merge/apply integration test, MVCC row schema-version tags, concurrent add column/index merges)
+  - **R15** — Conflict-free schema evolution (propose/merge/apply integration test, MVCC row schema-version tags, concurrent add column/index merges, query-time adaptation for heterogeneous rows)
   - **R16** — Auto index synthesis (workload-driven advisor.recommend integration test)
   - **R17** — Query intent migration (pattern library, sequence intent detection, rewrite previews, JSON/Markdown report export)
   - **R20** — Energy-aware compaction (energy model, constrained scheduler, external signals, energy-vs-p99 harness)
 - Checklist below: remains open for further hardening, stronger benchmarks, and publication-grade evaluation.
 - This sync promotes R12 to hardened (in addition to the previous batches); 2 tracks remain at prototype level.
-- Checklist count: **86 done / 23 open** after closing the R15 concurrent schema-change merge slice. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
+- Checklist count: **87 done / 22 open** after closing the R15 query-adaptation slice. Native Wasm query-operator codegen, SIMD, standalone in-edge execution, deeper performance replay injection, and geo-routing bundle windows remain open.
 - 2026-04-26: T230 is closed with exportable `ValueStore::lookup_distribution()` histograms and `stats.snapshot.storage.value_lookup` evidence.
 - 2026-04-26: T231 is closed with `ValueStore::learned_index_report()` exposing offline-built segment metadata and fallback index sizing.
 - 2026-05-08: T232-T235 are closed with the feature-flagged hybrid learned lookup path, compaction/insert-triggered refresh policy, `ValueStore::benchmark()` probe quantiles, and distribution-shift fallback tests.
@@ -54,6 +54,7 @@ Runtime status and checklist status intentionally differ:
 - 2026-05-15 (R10 vector RAG example): T306 is closed with `samples/vector_rag_pipeline.py`, a credential-free deterministic retrieval pipeline that creates a `rag.chunks` table, inserts rows, upserts embeddings with `vector.insert`, retrieves context with `vector.search`, and assembles a grounded prompt. The new `docs/tutorials/vector-rag.md` guide and generated docs page are covered by sample/docs asset tests. Counts now 78 done / 31 open.
 - 2026-05-15 (R10 vector dependency invalidation): T304 is closed with `vector.search.cache` support, source-table dependency metadata, V2 causality tokens, vector-search ETags, `cache.if_none_match` `not_modified` responses, stale HNSW invalidation on ordinary data writes, and `vector.insert` prepared-query SSE notifications. Evidence: `vector_search_cache_metadata_tracks_source_table_changes` and `vector_search_cache_invalidates_after_vector_insert_rpc`. Counts now 79 done / 30 open.
 - 2026-05-15 (R09 transport benchmark): T294 is closed with `skeindb transport-bench`, concurrent `sql.exec` RPC load over HTTP/2 prior knowledge and QUIC plus `COM_QUERY` over MySQL/TCP, nanosecond p50/p95/p99/mean latency reports, and end-to-end coverage in `transport_bench_parses_flags`, `latency_stats_computes_percentiles`, and `transport_bench_reports_http2_quic_and_mysql`. Counts now 84 done / 25 open.
+- 2026-05-16 (R15 query adaptation): T322 is closed with schema-aware row materialization across batch and non-batch reads, keyed lookups, joins, and interned predicates so heterogeneous legacy rows now surface MySQL-compatible column defaults or `NULL` instead of spurious missing-column failures. Evidence: `query_select_adapts_legacy_rows_to_schema_defaults`. Counts now 87 done / 22 open.
 - 2026-05-15 (R15 concurrent schema change merges): T321 is closed with `schema_changes.json` format v2, `schema.propose_change` support for `add_index`, merge-plan simulation across pending `add_column` / `add_index` proposals, deterministic index-conflict reporting, and focused engine/RPC coverage in `schema_evolution_merges_concurrent_column_and_index_changes` plus `r15_schema_evolution_concurrent_column_and_index_changes`. Counts now 86 done / 23 open.
 - 2026-05-15 (R15 row schema-version tagging): T320 is closed with persisted `RowEntry.schema_version` tags in table `.json`/`.rseg` row payloads, schema-merge stamping for rewritten rows, legacy v2 row normalization from `schema_versions.json` on load, replay-bundle propagation, and focused engine coverage in `schema_version_tags_row_entries_and_normalizes_legacy_rows`. Counts now 85 done / 24 open.
 - 2026-05-15 (R13 causal validator sync): T064, T065, and T067 are closed with the documented `vector_clock_v2` causal token format, request/response propagation rules for `query.select` and `query.execute_prepared`, legacy `etag_chain_v1` request compatibility, and end-to-end cache interaction coverage. Evidence: `r13_vector_clock_causality`, `query_select_min_causality_enforced`, and `query_execute_prepared_honors_causal_cache_validators`. Counts now 82 done / 27 open.
@@ -173,7 +174,7 @@ Source of truth matrix:
 ### Phase 33 — Conflict-free schema evolution (R15)
 - [x] T320: Schema version tagging in MVCC row versions. Evidence: `RowEntry.schema_version` / `RowEntryDisk.schema_version`, v3 table-row payloads with legacy v2 normalization on load, merge/apply row stamping, and `schema_version_tags_row_entries_and_normalizes_legacy_rows`.
 - [x] T321: Concurrent schema changes protocol (add column/index) + conflict detection
-- [ ] T322: Query execution across schema heterogeneity (safe conversions)
+- [x] T322: Query execution across schema heterogeneity (safe conversions). Evidence: schema-aware row materialization now adapts heterogeneous legacy rows via MySQL-compatible column defaults or `NULL` across batch/non-batch selects, keyed reads, joins, and `query_select_adapts_legacy_rows_to_schema_defaults`.
 - [ ] T323: Schema merge algorithm + roll-forward/rollback rules
 - [ ] T324: Migration assistant: show divergence + propose resolution
 - [ ] T325: Rolling-deploy simulation harness

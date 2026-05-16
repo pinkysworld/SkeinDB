@@ -11601,6 +11601,29 @@ fn compiled_interned_predicate_matches_row(
     compiled_interned_predicate_matches_lookup(plan, &mut |column| row.get(column).cloned())
 }
 
+fn schema_row_value(schema: &TableSchema, row: &RowObject, column: &str) -> Option<Lit> {
+    let schema_column = schema
+        .columns
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(column))?;
+    Some(
+        row.get(&schema_column.name)
+            .cloned()
+            .or_else(|| mysql_compat_column_default(schema, &schema_column.name))
+            .unwrap_or(Lit::Null),
+    )
+}
+
+fn compiled_interned_predicate_matches_table_row(
+    plan: &InternedPredicatePlan,
+    schema: &TableSchema,
+    row: &RowObject,
+) -> Option<bool> {
+    compiled_interned_predicate_matches_lookup(plan, &mut |column| {
+        schema_row_value(schema, row, column)
+    })
+}
+
 fn compiled_interned_predicate_matches_lookup<F>(
     plan: &InternedPredicatePlan,
     lookup: &mut F,
@@ -11700,6 +11723,7 @@ where
 }
 
 fn scan_row_entries_batch(
+    schema: &TableSchema,
     rows: &[RowEntry],
     start_idx: usize,
     columns: &[String],
@@ -11724,7 +11748,7 @@ fn scan_row_entries_batch(
         rows_scanned = rows_scanned.saturating_add(1);
         row_count += 1;
         for column in columns.iter() {
-            let value = entry.row.get(column).cloned().unwrap_or(Lit::Null);
+            let value = schema_row_value(schema, &entry.row, column).unwrap_or(Lit::Null);
             if let Some(values) = column_values.get_mut(column) {
                 values.push(value);
             }
@@ -11836,6 +11860,7 @@ fn project_select_batch(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_select_batches(
+    schema: &TableSchema,
     tdata: &TableData,
     alias: &str,
     projection: &[SelectItem],
@@ -11851,7 +11876,7 @@ fn execute_select_batches(
     let mut rows_scanned = 0u64;
 
     while let Some((batch, next_cursor, batch_rows_scanned)) =
-        scan_row_entries_batch(&tdata.rows, cursor, batch_columns, as_of_ms)
+        scan_row_entries_batch(schema, &tdata.rows, cursor, batch_columns, as_of_ms)
     {
         cursor = next_cursor;
         rows_scanned = rows_scanned.saturating_add(batch_rows_scanned);
@@ -11984,14 +12009,17 @@ fn try_execute_select_base_table(
                             let mut ctx = None;
                             if let Some(pred) = predicate {
                                 if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
-                                    compiled_interned_predicate_matches_row(plan, &entry.row)
+                                    compiled_interned_predicate_matches_table_row(
+                                        plan, schema, &entry.row,
+                                    )
                                 }) {
                                     if !matches {
                                         continue;
                                     }
                                 } else {
-                                    let built = build_row_ctx(
+                                    let built = build_table_row_ctx(
                                         &alias,
+                                        schema,
                                         &entry.row,
                                         Some(batch_columns.as_slice()),
                                     );
@@ -12004,8 +12032,9 @@ fn try_execute_select_base_table(
                             }
 
                             let ctx = ctx.unwrap_or_else(|| {
-                                build_row_ctx(
+                                build_table_row_ctx(
                                     &alias,
+                                    schema,
                                     &entry.row,
                                     Some(materialized_ctx_columns.as_slice()),
                                 )
@@ -12053,6 +12082,7 @@ fn try_execute_select_base_table(
     let candidate_rows = index_prefilter_candidates(engine, base, predicate, args);
     if !distinct && query.limit.is_none() && order.is_empty() && candidate_rows.is_none() {
         let (rows, rows_scanned) = execute_select_batches(
+            schema,
             tdata,
             &alias,
             projection,
@@ -12077,15 +12107,15 @@ fn try_execute_select_base_table(
 
         let mut ctx = None;
         if let Some(pred) = predicate {
-            if let Some(matches) = predicate_plan
-                .as_ref()
-                .and_then(|plan| compiled_interned_predicate_matches_row(plan, &entry.row))
-            {
+            if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                compiled_interned_predicate_matches_table_row(plan, schema, &entry.row)
+            }) {
                 if !matches {
                     return Ok(());
                 }
             } else {
-                let built = build_row_ctx(&alias, &entry.row, Some(batch_columns.as_slice()));
+                let built =
+                    build_table_row_ctx(&alias, schema, &entry.row, Some(batch_columns.as_slice()));
                 if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
                     return Ok(());
                 }
@@ -12094,8 +12124,9 @@ fn try_execute_select_base_table(
         }
 
         let ctx = ctx.unwrap_or_else(|| {
-            build_row_ctx(
+            build_table_row_ctx(
                 &alias,
+                schema,
                 &entry.row,
                 Some(materialized_ctx_columns.as_slice()),
             )
@@ -12224,7 +12255,7 @@ fn execute_select(
                 index_prefilter_candidates(engine, base, r#where.as_ref(), args)
             {
                 let alias = base.r#as.clone().unwrap_or_else(|| base.table.clone());
-                let (_, tdata) = engine.get_table(base)?;
+                let (schema, tdata) = engine.get_table(base)?;
                 for idx in candidates.iter() {
                     let Some(entry) = tdata.rows.get(*idx) else {
                         continue;
@@ -12232,7 +12263,7 @@ fn execute_select(
                     if !row_visible_at(entry, as_of_ms) {
                         continue;
                     }
-                    ctxs.push(row_ctx_from_row(&alias, &entry.row));
+                    ctxs.push(table_row_ctx_from_row(&alias, schema, &entry.row));
                 }
                 rows_scanned = ctxs.len() as u64;
                 used_index = true;
@@ -12497,15 +12528,15 @@ fn execute_select_with_keys(
 
         let mut ctx = None;
         if let Some(pred) = r#where {
-            if let Some(matches) = predicate_plan
-                .as_ref()
-                .and_then(|plan| compiled_interned_predicate_matches_row(plan, &entry.row))
-            {
+            if let Some(matches) = predicate_plan.as_ref().and_then(|plan| {
+                compiled_interned_predicate_matches_table_row(plan, schema, &entry.row)
+            }) {
                 if !matches {
                     return Ok(());
                 }
             } else {
-                let built = build_row_ctx(&alias, &entry.row, query_ctx_columns.as_deref());
+                let built =
+                    build_table_row_ctx(&alias, schema, &entry.row, query_ctx_columns.as_deref());
                 if !eval_predicate(pred, &BTreeMap::new(), Some(&built), args)? {
                     return Ok(());
                 }
@@ -12514,7 +12545,12 @@ fn execute_select_with_keys(
         }
 
         let ctx = ctx.unwrap_or_else(|| {
-            build_row_ctx(&alias, &entry.row, materialized_ctx_columns.as_deref())
+            build_table_row_ctx(
+                &alias,
+                schema,
+                &entry.row,
+                materialized_ctx_columns.as_deref(),
+            )
         });
         let pk = extract_pk(schema, &entry.row)?;
 
@@ -13439,6 +13475,16 @@ fn row_ctx_from_row(alias: &str, row: &RowObject) -> RowCtx {
     ctx
 }
 
+fn table_row_ctx_from_row(alias: &str, schema: &TableSchema, row: &RowObject) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for column in schema.columns.iter() {
+        let value = schema_row_value(schema, row, &column.name).unwrap_or(Lit::Null);
+        ctx.insert(format!("{}.{}", alias, column.name), value);
+    }
+    ctx
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn row_ctx_from_row_columns(alias: &str, row: &RowObject, columns: &[String]) -> RowCtx {
     let mut ctx = RowCtx::new();
     for col in columns.iter() {
@@ -13446,6 +13492,22 @@ fn row_ctx_from_row_columns(alias: &str, row: &RowObject, columns: &[String]) ->
             continue;
         };
         ctx.insert(format!("{}.{}", alias, col), val.clone());
+    }
+    ctx
+}
+
+fn table_row_ctx_from_row_columns(
+    alias: &str,
+    schema: &TableSchema,
+    row: &RowObject,
+    columns: &[String],
+) -> RowCtx {
+    let mut ctx = RowCtx::new();
+    for column in columns.iter() {
+        let Some(value) = schema_row_value(schema, row, column) else {
+            continue;
+        };
+        ctx.insert(format!("{}.{}", alias, column), value);
     }
     ctx
 }
@@ -13462,10 +13524,15 @@ fn build_snapshot_row_ctx(
     }
 }
 
-fn build_row_ctx(alias: &str, row: &RowObject, columns: Option<&[String]>) -> RowCtx {
+fn build_table_row_ctx(
+    alias: &str,
+    schema: &TableSchema,
+    row: &RowObject,
+    columns: Option<&[String]>,
+) -> RowCtx {
     match columns {
-        Some(columns) => row_ctx_from_row_columns(alias, row, columns),
-        None => row_ctx_from_row(alias, row),
+        Some(columns) => table_row_ctx_from_row_columns(alias, schema, row, columns),
+        None => table_row_ctx_from_row(alias, schema, row),
     }
 }
 
@@ -13527,13 +13594,13 @@ fn scan_table(
         return Ok(out);
     }
 
-    let (_, tdata) = engine.get_table(base)?;
+    let (schema, tdata) = engine.get_table(base)?;
     let mut out = Vec::new();
     for entry in tdata.rows.iter() {
         if !row_visible_at(entry, as_of_ms) {
             continue;
         }
-        out.push(row_ctx_from_row(&alias, &entry.row));
+        out.push(table_row_ctx_from_row(&alias, schema, &entry.row));
     }
     if let Some(padding) = engine.oblivious_padding_for(base, out.len() as u64) {
         if padding.shuffle {
@@ -31923,6 +31990,229 @@ mod tests {
     }
 
     #[test]
+    fn query_select_adapts_legacy_rows_to_schema_defaults() -> anyhow::Result<()> {
+        let dir = temp_dir("query_select_schema_heterogeneity");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.create_table(
+            "app",
+            "posts",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "author_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let users = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.data_insert(
+            &users,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ada".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "posts".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 10 }),
+                ("author_id", Lit::U64 { v: 1 }),
+            ])],
+            None,
+        )?;
+
+        let users_key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        {
+            let (schema, tdata) = engine.get_table_mut(&users)?;
+            apply_schema_change(
+                schema,
+                tdata,
+                &SchemaChangeOp::AddColumn {
+                    name: "region".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                    default: Some(Lit::Str {
+                        v: "global".to_string(),
+                    }),
+                },
+                2,
+            )?;
+            tdata.rows[0].row.remove("region");
+            tdata.rows[0].schema_version = 1;
+        }
+        engine.set_schema_version(&users_key, 2);
+        engine.schema_set_column_interned(&users, "region", true)?;
+
+        let mut query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "region".to_string(),
+                table: None,
+            }],
+            Some(eq_expr(
+                Expr::Col {
+                    col: "region".to_string(),
+                    table: None,
+                },
+                Expr::Lit {
+                    lit: Lit::Str {
+                        v: "global".to_string(),
+                    },
+                },
+            )),
+        );
+        query.order_by = vec![OrderBy {
+            expr: Expr::Col {
+                col: "id".to_string(),
+                table: None,
+            },
+            dir: Some(OrderDir::Asc),
+        }];
+
+        let (_cols, rows) = execute_select(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![vec![Lit::Str {
+                v: "global".to_string(),
+            }]]
+        );
+
+        let (_cols, rows, keys) = execute_select_with_keys(&engine, &query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![vec![Lit::Str {
+                v: "global".to_string(),
+            }]]
+        );
+        assert_eq!(keys, vec![vec![Lit::U64 { v: 1 }]]);
+
+        let join_query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Col {
+                            col: "region".to_string(),
+                            table: Some("u".to_string()),
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Join(JoinTableRef {
+                        join: JoinRef {
+                            join_type: JoinType::Inner,
+                            left: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "posts".to_string(),
+                                r#as: Some("p".to_string()),
+                            })),
+                            right: Box::new(TableRef::Base(BaseTableRef {
+                                db: "app".to_string(),
+                                table: "users".to_string(),
+                                r#as: Some("u".to_string()),
+                            })),
+                            on: Some(eq_expr(
+                                Expr::Col {
+                                    col: "author_id".to_string(),
+                                    table: Some("p".to_string()),
+                                },
+                                Expr::Col {
+                                    col: "id".to_string(),
+                                    table: Some("u".to_string()),
+                                },
+                            )),
+                        },
+                    })]),
+                    r#where: Some(eq_expr(
+                        Expr::Col {
+                            col: "region".to_string(),
+                            table: Some("u".to_string()),
+                        },
+                        Expr::Lit {
+                            lit: Lit::Str {
+                                v: "global".to_string(),
+                            },
+                        },
+                    )),
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: vec![OrderBy {
+                expr: Expr::Col {
+                    col: "id".to_string(),
+                    table: Some("p".to_string()),
+                },
+                dir: Some(OrderDir::Asc),
+            }],
+            limit: None,
+            lock: None,
+        };
+
+        let (_cols, rows) = execute_select(&engine, &join_query, &[], None)?;
+        assert_eq!(
+            rows,
+            vec![vec![Lit::Str {
+                v: "global".to_string(),
+            }]]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
     fn query_select_treats_null_predicates_as_unknown() -> anyhow::Result<()> {
         let dir = temp_dir("null_predicate_truth");
         let mut engine = Engine::open(&dir)?;
@@ -41428,6 +41718,18 @@ mod tests {
 
     #[test]
     fn row_scan_batch_respects_fixed_batch_size() {
+        let schema = TableSchema {
+            columns: vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            primary_key: vec!["id".to_string()],
+            table_version: 1,
+            auto_inc_next: HashMap::new(),
+            compat_mysql: None,
+        };
         let rows = (0..(SELECT_BATCH_SIZE + 3))
             .map(|idx| RowEntry {
                 row: row(&[("id", Lit::U64 { v: idx as u64 })]),
@@ -41440,13 +41742,13 @@ mod tests {
         let columns = vec!["id".to_string()];
 
         let (batch, next_idx, rows_scanned) =
-            scan_row_entries_batch(&rows, 0, &columns, None).expect("first batch");
+            scan_row_entries_batch(&schema, &rows, 0, &columns, None).expect("first batch");
         assert_eq!(batch.row_count, SELECT_BATCH_SIZE);
         assert_eq!(rows_scanned, SELECT_BATCH_SIZE as u64);
         assert_eq!(next_idx, SELECT_BATCH_SIZE);
 
         let (tail, tail_next_idx, tail_rows_scanned) =
-            scan_row_entries_batch(&rows, next_idx, &columns, None).expect("tail batch");
+            scan_row_entries_batch(&schema, &rows, next_idx, &columns, None).expect("tail batch");
         assert_eq!(tail.row_count, 3);
         assert_eq!(tail_rows_scanned, 3);
         assert_eq!(tail_next_idx, rows.len());
