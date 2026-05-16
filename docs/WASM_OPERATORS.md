@@ -104,13 +104,27 @@ The portable plan artifact is JSON, base64-encoded for transport:
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
   "target": "wasm32-unknown-unknown",
-  "execution": "host_interpreted_v1",
+  "execution": "generated_filter_project_v1",
   "plan": {
     "ops": [
       {"op": "scan", "table": {"db": "app", "table": "users"}},
       {"op": "filter", "predicate": {"op":"gt","a":{"col":"score"},"b":{"param":0}}},
       {"op": "project", "projection": [{"expr":{"col":"id"}}, {"expr":{"col":"score"}}]}
     ]
+  },
+  "generated": {
+    "input_table_columns": [
+      {"name": "score", "type": {"kind": "u64", "unsigned": true}},
+      {"name": "id", "type": {"kind": "u64", "unsigned": true}}
+    ],
+    "param_columns": [
+      {"name": "$param_0", "type": {"kind": "u64", "unsigned": true}}
+    ],
+    "output_columns": [
+      {"name": "id", "type": {"kind": "u64", "unsigned": true}},
+      {"name": "score", "type": {"kind": "u64", "unsigned": true}}
+    ],
+    "module_b64": "AGFzbQE..."
   }
 }
 ```
@@ -119,7 +133,9 @@ Rules:
 - `scan` must be first and exactly once.
 - `project` must be last and exactly once.
 - `filter` is optional and must appear between scan and project.
-- `execution` is `host_interpreted_v1` in the current implementation. Native Wasm code generation remains open work.
+- `execution` is `generated_filter_project_v1` when the compiler can lower a fixed-width, non-null `u64`/`bool` filter/project plan into an embedded Wasm module.
+- `execution` falls back to `host_interpreted_v1` when the plan uses unsupported operators, nullable values, or non-fixed-width types.
+- `generated` is present only for compiled artifacts and records the generated module plus its input/output column metadata.
 
 ---
 
@@ -145,8 +161,8 @@ Result:
   "abi": "skein.wasm.batch.v1",
   "artifact_b64": "...",
   "target": "wasm32-unknown-unknown",
-  "execution": "host_interpreted_v1",
-  "artifact_bytes": 392,
+  "execution": "generated_filter_project_v1",
+  "artifact_bytes": 1488,
   "operator_count": 3,
   "operators": ["scan", "filter", "project"],
   "supports_edge_package": true,
@@ -169,8 +185,8 @@ Result:
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
   "target": "wasm32-unknown-unknown",
-  "execution": "host_interpreted_v1",
-  "artifact_bytes": 392,
+  "execution": "generated_filter_project_v1",
+  "artifact_bytes": 1488,
   "operator_count": 3,
   "operators": ["scan", "filter", "project"],
   "table": {"db":"app","table":"users"},
@@ -243,8 +259,9 @@ When `result_format: "wasm_batch_v1"` is used, `data` contains a columnar batch:
 ## 6) Prototype notes
 
 Current implementation:
-- The plan artifact is interpreted by the host (`execution: "host_interpreted_v1"`).
+- Fixed-width non-null `u64`/`bool` scan/filter/project plans compile to embedded Wasm modules and run through Wasmtime on the server (`execution: "generated_filter_project_v1"`).
+- Unsupported plans remain portable through host interpretation (`execution: "host_interpreted_v1"`).
 - Only the scan/filter/project subset is accepted.
 - `abi` and `target` are validated; `target` is recorded in the artifact for inspection and packaging.
 - `wasm.plan.inspect` exposes artifact metadata without running the query.
-- `wasm.plan.edge_package` emits a host-backed edge runner package. Native in-edge Wasm codegen and SIMD remain open T085/T086 work.
+- `wasm.plan.edge_package` emits a host-backed edge runner package; generated modules stay embedded in the artifact but still execute via `wasm.plan.run` on a SkeinDB host. SIMD and standalone in-edge execution remain open T086/T087 work.

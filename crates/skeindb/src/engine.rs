@@ -27,6 +27,9 @@ use md5::Md5;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
+use wasmtime::{
+    Engine as WasmRuntimeEngine, Instance as WasmInstance, Module as WasmModule, Store as WasmStore,
+};
 
 use skeindb_core::decode_varu;
 use skeindb_core::valuestore::{
@@ -757,6 +760,7 @@ struct MergeWasmRegistryDisk {
 const WASM_PLAN_FORMAT_V1: &str = "skein.wasm.plan.v1";
 const WASM_PLAN_ABI_V1: &str = "skein.wasm.batch.v1";
 const WASM_PLAN_EXECUTION_V1: &str = "host_interpreted_v1";
+const WASM_PLAN_EXECUTION_GENERATED_V1: &str = "generated_filter_project_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WasmPlanArtifactV1 {
@@ -770,10 +774,24 @@ struct WasmPlanArtifactV1 {
     execution: String,
 
     plan: WasmPlanV1,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generated: Option<WasmPlanGeneratedModuleV1>,
 }
 
 fn default_wasm_plan_execution() -> String {
     WASM_PLAN_EXECUTION_V1.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WasmPlanGeneratedModuleV1 {
+    input_table_columns: Vec<ColumnMeta>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    param_columns: Vec<ColumnMeta>,
+
+    output_columns: Vec<ColumnMeta>,
+    module_b64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7908,14 +7926,21 @@ impl Engine {
         }
 
         let plan = wasm_plan_from_query(&params.query)?;
+        let generated = try_build_generated_wasm_plan(self, &plan)?;
         let format = WASM_PLAN_FORMAT_V1.to_string();
         let abi = abi.to_string();
+        let execution = if generated.is_some() {
+            WASM_PLAN_EXECUTION_GENERATED_V1.to_string()
+        } else {
+            WASM_PLAN_EXECUTION_V1.to_string()
+        };
         let artifact = WasmPlanArtifactV1 {
             format: format.clone(),
             abi: abi.clone(),
             target: Some(target.clone()),
-            execution: WASM_PLAN_EXECUTION_V1.to_string(),
+            execution,
             plan,
+            generated,
         };
         let bytes = serde_json::to_vec(&artifact)?;
         let artifact_b64 = BASE64_STANDARD.encode(&bytes);
@@ -7984,7 +8009,11 @@ impl Engine {
             instructions: vec![
                 "Store artifact_b64 and manifest_json with the edge worker or browser bundle.".to_string(),
                 "Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format.".to_string(),
-                "This v1 package executes through wasm.plan.run on a SkeinDB host; native in-edge Wasm codegen remains tracked by T085/T086.".to_string(),
+                if info.execution == WASM_PLAN_EXECUTION_GENERATED_V1 {
+                    "The artifact now embeds a generated fixed-width filter/project Wasm module, but this v1 package still executes through wasm.plan.run on a SkeinDB host; standalone edge execution remains tracked by T087.".to_string()
+                } else {
+                    "This v1 package executes through wasm.plan.run on a SkeinDB host; native in-edge Wasm codegen remains tracked by T085/T086.".to_string()
+                },
             ],
         })
     }
@@ -8029,7 +8058,11 @@ impl Engine {
             }
         }
 
-        let (columns, rows) = execute_select(self, &query, args, None)?;
+        let (columns, rows) = if artifact.execution == WASM_PLAN_EXECUTION_GENERATED_V1 {
+            run_generated_wasm_plan(self, &artifact, args)?
+        } else {
+            execute_select(self, &query, args, None)?
+        };
 
         let (data_json, wire_json) = match (result_format, wire_skeinpack) {
             (ResultFormat::SkeinpackV1, true) => {
@@ -13260,8 +13293,20 @@ fn decode_wasm_plan_artifact(artifact_b64: &str) -> anyhow::Result<(WasmPlanArti
     if artifact.abi != WASM_PLAN_ABI_V1 {
         anyhow::bail!("invalid_request: unsupported wasm plan abi");
     }
-    if artifact.execution != WASM_PLAN_EXECUTION_V1 {
-        anyhow::bail!("invalid_request: unsupported wasm plan execution");
+    match artifact.execution.as_str() {
+        WASM_PLAN_EXECUTION_V1 => {}
+        WASM_PLAN_EXECUTION_GENERATED_V1 => {
+            let generated = artifact.generated.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("invalid_request: generated wasm plan missing module metadata")
+            })?;
+            let module = BASE64_STANDARD
+                .decode(generated.module_b64.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid_request: invalid generated wasm module"))?;
+            if module.is_empty() {
+                anyhow::bail!("invalid_request: generated wasm module must not be empty");
+            }
+        }
+        _ => anyhow::bail!("invalid_request: unsupported wasm plan execution"),
     }
     query_from_wasm_plan(&artifact.plan)?;
     Ok((artifact, artifact_bytes))
@@ -13308,6 +13353,888 @@ fn wasm_plan_info_from_artifact(
         supports_edge_package: true,
         supports_simd: false,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedWasmValueType {
+    Bool,
+    U64,
+}
+
+impl GeneratedWasmValueType {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::U64 => "u64",
+        }
+    }
+
+    fn width(self) -> u32 {
+        match self {
+            Self::Bool => 1,
+            Self::U64 => 8,
+        }
+    }
+
+    fn wasm_batch_tag(self) -> u32 {
+        match self {
+            Self::Bool => 1,
+            Self::U64 => 3,
+        }
+    }
+
+    fn from_type_desc(desc: &TypeDesc, nullable: bool) -> Option<Self> {
+        if nullable {
+            return None;
+        }
+        match desc.kind.as_str() {
+            "bool" => Some(Self::Bool),
+            "u64" => Some(Self::U64),
+            _ => None,
+        }
+    }
+
+    fn from_lit(lit: &Lit) -> Option<Self> {
+        match lit {
+            Lit::Bool { .. } => Some(Self::Bool),
+            Lit::U64 { .. } => Some(Self::U64),
+            _ => None,
+        }
+    }
+
+    fn type_desc(self) -> TypeDesc {
+        TypeDesc {
+            kind: self.kind().to_string(),
+            max: None,
+            precision: None,
+            scale: None,
+            charset: None,
+            collation: None,
+            unsigned: Some(matches!(self, Self::U64)),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct GeneratedWasmPlanCompileState {
+    input_columns: Vec<String>,
+    seen_columns: HashSet<String>,
+    param_types: BTreeMap<usize, GeneratedWasmValueType>,
+}
+
+fn try_build_generated_wasm_plan(
+    engine: &Engine,
+    plan: &WasmPlanV1,
+) -> anyhow::Result<Option<WasmPlanGeneratedModuleV1>> {
+    let query = query_from_wasm_plan(plan)?;
+    let Ok((table, projection, predicate)) = wasm_plan_parts(&query) else {
+        return Ok(None);
+    };
+    let Ok(schema) = engine.get_schema(&table.db, &table.table) else {
+        return Ok(None);
+    };
+
+    let mut state = GeneratedWasmPlanCompileState::default();
+    if let Some(pred) = predicate.as_ref() {
+        if analyze_generated_wasm_expr(pred, schema, &mut state, Some(GeneratedWasmValueType::Bool))
+            .is_err()
+        {
+            return Ok(None);
+        }
+    }
+
+    let mut output_columns = Vec::with_capacity(projection.len());
+    for item in projection.iter() {
+        let Ok(ty) = analyze_generated_wasm_expr(&item.expr, schema, &mut state, None) else {
+            return Ok(None);
+        };
+        output_columns.push(ColumnMeta {
+            name: item
+                .r#as
+                .clone()
+                .unwrap_or_else(|| infer_select_name(&item.expr)),
+            r#type: ty.type_desc(),
+        });
+    }
+
+    let input_table_columns = state
+        .input_columns
+        .iter()
+        .map(|name| generated_table_input_meta(schema, name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let param_types = if let Some(max) = state.param_types.keys().copied().max() {
+        let mut ordered = Vec::with_capacity(max + 1);
+        for idx in 0..=max {
+            let Some(ty) = state.param_types.get(&idx).copied() else {
+                return Ok(None);
+            };
+            ordered.push(ty);
+        }
+        ordered
+    } else {
+        Vec::new()
+    };
+
+    let param_columns = param_types
+        .iter()
+        .enumerate()
+        .map(|(idx, ty)| ColumnMeta {
+            name: format!("$param_{idx}"),
+            r#type: ty.type_desc(),
+        })
+        .collect::<Vec<_>>();
+
+    let module_bytes = build_generated_wasm_plan_module_bytes(
+        predicate.as_ref(),
+        &projection,
+        &input_table_columns,
+        &param_types,
+    )?;
+
+    Ok(Some(WasmPlanGeneratedModuleV1 {
+        input_table_columns,
+        param_columns,
+        output_columns,
+        module_b64: BASE64_STANDARD.encode(module_bytes),
+    }))
+}
+
+fn generated_table_input_meta(schema: &TableSchema, name: &str) -> anyhow::Result<ColumnMeta> {
+    let column = resolve_column(schema, name)
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown column in generated wasm plan"))?;
+    Ok(ColumnMeta {
+        name: column.name.clone(),
+        r#type: column.r#type.clone(),
+    })
+}
+
+fn analyze_generated_wasm_expr(
+    expr: &Expr,
+    schema: &TableSchema,
+    state: &mut GeneratedWasmPlanCompileState,
+    expected: Option<GeneratedWasmValueType>,
+) -> anyhow::Result<GeneratedWasmValueType> {
+    match expr {
+        Expr::Col { col, .. } => {
+            let column = resolve_column(schema, col)
+                .ok_or_else(|| anyhow::anyhow!("invalid_request: unknown generated wasm column"))?;
+            let ty = GeneratedWasmValueType::from_type_desc(&column.r#type, column.nullable)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm column type"))?;
+            if let Some(expected) = expected {
+                if ty != expected {
+                    anyhow::bail!("unsupported generated wasm type mismatch");
+                }
+            }
+            if state.seen_columns.insert(col.clone()) {
+                state.input_columns.push(col.clone());
+            }
+            Ok(ty)
+        }
+        Expr::Param { param } => {
+            let idx = usize::try_from(*param).map_err(|_| {
+                anyhow::anyhow!("invalid_request: generated wasm param index overflow")
+            })?;
+            if let Some(expected) = expected {
+                if let Some(existing) = state.param_types.get(&idx).copied() {
+                    if existing != expected {
+                        anyhow::bail!("unsupported generated wasm param type mismatch");
+                    }
+                } else {
+                    state.param_types.insert(idx, expected);
+                }
+                Ok(expected)
+            } else if let Some(existing) = state.param_types.get(&idx).copied() {
+                Ok(existing)
+            } else {
+                anyhow::bail!("unsupported generated wasm param position")
+            }
+        }
+        Expr::Lit { lit } => {
+            let ty = GeneratedWasmValueType::from_lit(lit)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm literal"))?;
+            if let Some(expected) = expected {
+                if ty != expected {
+                    anyhow::bail!("unsupported generated wasm literal type mismatch");
+                }
+            }
+            Ok(ty)
+        }
+        Expr::Op { op, a, b, .. } => {
+            let name = op.as_str();
+            match name {
+                "and" | "or" => {
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(a.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::Bool),
+                    )?;
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(b.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::Bool),
+                    )?;
+                    if let Some(expected) = expected {
+                        if expected != GeneratedWasmValueType::Bool {
+                            anyhow::bail!("unsupported generated wasm boolean context");
+                        }
+                    }
+                    Ok(GeneratedWasmValueType::Bool)
+                }
+                "not" => {
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(a.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::Bool),
+                    )?;
+                    if let Some(expected) = expected {
+                        if expected != GeneratedWasmValueType::Bool {
+                            anyhow::bail!("unsupported generated wasm boolean context");
+                        }
+                    }
+                    Ok(GeneratedWasmValueType::Bool)
+                }
+                "eq" | "ne" => {
+                    analyze_generated_wasm_eq_expr(
+                        required_generated_operand(a.as_deref())?,
+                        required_generated_operand(b.as_deref())?,
+                        schema,
+                        state,
+                    )?;
+                    if let Some(expected) = expected {
+                        if expected != GeneratedWasmValueType::Bool {
+                            anyhow::bail!("unsupported generated wasm boolean context");
+                        }
+                    }
+                    Ok(GeneratedWasmValueType::Bool)
+                }
+                "lt" | "le" | "gt" | "ge" => {
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(a.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::U64),
+                    )?;
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(b.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::U64),
+                    )?;
+                    if let Some(expected) = expected {
+                        if expected != GeneratedWasmValueType::Bool {
+                            anyhow::bail!("unsupported generated wasm boolean context");
+                        }
+                    }
+                    Ok(GeneratedWasmValueType::Bool)
+                }
+                "add" | "sub" | "mul" | "div" | "mod" => {
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(a.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::U64),
+                    )?;
+                    analyze_generated_wasm_expr(
+                        required_generated_operand(b.as_deref())?,
+                        schema,
+                        state,
+                        Some(GeneratedWasmValueType::U64),
+                    )?;
+                    if let Some(expected) = expected {
+                        if expected != GeneratedWasmValueType::U64 {
+                            anyhow::bail!("unsupported generated wasm numeric context");
+                        }
+                    }
+                    Ok(GeneratedWasmValueType::U64)
+                }
+                _ => anyhow::bail!("unsupported generated wasm op"),
+            }
+        }
+        _ => anyhow::bail!("unsupported generated wasm expression"),
+    }
+}
+
+fn analyze_generated_wasm_eq_expr(
+    left: &Expr,
+    right: &Expr,
+    schema: &TableSchema,
+    state: &mut GeneratedWasmPlanCompileState,
+) -> anyhow::Result<GeneratedWasmValueType> {
+    if matches!(left, Expr::Param { .. }) && !matches!(right, Expr::Param { .. }) {
+        let rhs = analyze_generated_wasm_expr(right, schema, state, None)?;
+        analyze_generated_wasm_expr(left, schema, state, Some(rhs))?;
+        return Ok(rhs);
+    }
+    if matches!(right, Expr::Param { .. }) && !matches!(left, Expr::Param { .. }) {
+        let lhs = analyze_generated_wasm_expr(left, schema, state, None)?;
+        analyze_generated_wasm_expr(right, schema, state, Some(lhs))?;
+        return Ok(lhs);
+    }
+    let lhs = analyze_generated_wasm_expr(left, schema, state, None)?;
+    let rhs = analyze_generated_wasm_expr(right, schema, state, Some(lhs))?;
+    if lhs != rhs {
+        anyhow::bail!("unsupported generated wasm eq type mismatch");
+    }
+    Ok(lhs)
+}
+
+fn required_generated_operand(expr: Option<&Expr>) -> anyhow::Result<&Expr> {
+    expr.ok_or_else(|| anyhow::anyhow!("unsupported generated wasm operand"))
+}
+
+fn build_generated_wasm_plan_module_bytes(
+    predicate: Option<&Expr>,
+    projection: &[SelectItem],
+    input_table_columns: &[ColumnMeta],
+    param_types: &[GeneratedWasmValueType],
+) -> anyhow::Result<Vec<u8>> {
+    let input_count = input_table_columns.len() + param_types.len();
+    let mut input_types = Vec::with_capacity(input_count);
+    let mut input_indices = HashMap::new();
+    for (idx, column) in input_table_columns.iter().enumerate() {
+        let ty = GeneratedWasmValueType::from_type_desc(&column.r#type, false)
+            .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm input type"))?;
+        input_indices.insert(column.name.clone(), idx);
+        input_types.push(ty);
+    }
+    for ty in param_types.iter().copied() {
+        input_types.push(ty);
+    }
+
+    let codegen = GeneratedWasmCodegenContext {
+        input_indices,
+        input_types,
+        input_table_len: input_table_columns.len(),
+    };
+
+    let filter_code = if let Some(predicate) = predicate {
+        let (ty, code) = compile_generated_wasm_expr_wat(predicate, &codegen)?;
+        if ty != GeneratedWasmValueType::Bool {
+            anyhow::bail!("unsupported generated wasm predicate type");
+        }
+        code
+    } else {
+        "i32.const 1".to_string()
+    };
+
+    let mut projection_exprs = Vec::with_capacity(projection.len());
+    let mut output_types = Vec::with_capacity(projection.len());
+    for item in projection.iter() {
+        let (ty, code) = compile_generated_wasm_expr_wat(&item.expr, &codegen)?;
+        output_types.push(ty);
+        projection_exprs.push(code);
+    }
+
+    let header_size = 20u32;
+    let meta_size = output_types.len() as u32 * 28u32;
+    let data_start = header_size + meta_size;
+    let total_width: u32 = output_types.iter().map(|ty| ty.width()).sum();
+
+    let mut store_sections = String::new();
+    let mut meta_sections = String::new();
+    let mut cumulative_width = 0u32;
+    for (idx, ty) in output_types.iter().enumerate() {
+        let width = ty.width();
+        let expr_code = &projection_exprs[idx];
+        let store_instr = if *ty == GeneratedWasmValueType::Bool {
+            "i32.store8"
+        } else {
+            "i64.store align=1"
+        };
+        let out_base = format!(
+            "local.get $out_ptr\nlocal.get $row_count\ni32.const {cumulative_width}\ni32.mul\ni32.const {data_start}\ni32.add\ni32.add"
+        );
+        store_sections.push_str(&format!(
+            "{out_base}\nlocal.get $out_rows\ni32.const {width}\ni32.mul\ni32.add\n{expr_code}\n{store_instr}\n"
+        ));
+
+        let meta_base = header_size + idx as u32 * 28u32;
+        meta_sections.push_str(&format!(
+            "local.get $out_ptr\ni32.const {meta_base}\ni32.add\ni32.const {}\ni32.store align=1\n",
+            ty.wasm_batch_tag()
+        ));
+        meta_sections.push_str(&format!(
+            "local.get $out_ptr\ni32.const {}\ni32.add\nlocal.get $row_count\ni32.const {cumulative_width}\ni32.mul\ni32.const {data_start}\ni32.add\ni32.store align=1\n",
+            meta_base + 4
+        ));
+        meta_sections.push_str(&format!(
+            "local.get $out_ptr\ni32.const {}\ni32.add\nlocal.get $out_rows\ni32.const {width}\ni32.mul\ni32.store align=1\n",
+            meta_base + 8
+        ));
+        for extra in [12u32, 16u32, 20u32, 24u32] {
+            meta_sections.push_str(&format!(
+                "local.get $out_ptr\ni32.const {}\ni32.add\ni32.const 0\ni32.store align=1\n",
+                meta_base + extra
+            ));
+        }
+
+        cumulative_width += width;
+    }
+
+    let wat = format!(
+        r#"(module
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 65536))
+
+  (func $ensure_capacity (param $end i32)
+    (local $bytes i32)
+    memory.size
+    i32.const 65536
+    i32.mul
+    local.set $bytes
+    block $done
+      loop $grow
+        local.get $bytes
+        local.get $end
+        i32.ge_u
+        br_if $done
+        i32.const 1
+        memory.grow
+        i32.const -1
+        i32.eq
+        if
+          unreachable
+        end
+        memory.size
+        i32.const 65536
+        i32.mul
+        local.set $bytes
+        br $grow
+      end
+    end)
+
+    (func $skein_alloc (export "skein_alloc") (param $len i32) (result i32)
+    (local $ptr i32)
+    (local $end i32)
+    global.get $heap
+    local.tee $ptr
+    local.get $len
+    i32.add
+    local.tee $end
+    call $ensure_capacity
+    local.get $end
+    global.set $heap
+    local.get $ptr)
+
+  (func $input_col_data (param $input_ptr i32) (param $col i32) (result i32)
+        local.get $input_ptr
+    local.get $input_ptr
+    i32.const 20
+    i32.add
+    local.get $col
+    i32.const 28
+    i32.mul
+    i32.add
+    i32.const 4
+    i32.add
+    i32.load align=1
+    i32.add)
+
+  (func $read_u64 (param $input_ptr i32) (param $col i32) (param $row i32) (result i64)
+    local.get $input_ptr
+    local.get $col
+    call $input_col_data
+    local.get $row
+    i32.const 8
+    i32.mul
+    i32.add
+    i64.load align=1)
+
+  (func $read_bool (param $input_ptr i32) (param $col i32) (param $row i32) (result i32)
+    local.get $input_ptr
+    local.get $col
+    call $input_col_data
+    local.get $row
+    i32.add
+    i32.load8_u)
+
+  (func (export "skein_plan_eval") (param $input_ptr i32) (param $input_len i32) (result i64)
+    (local $row_count i32)
+    (local $out_ptr i32)
+    (local $out_len i32)
+    (local $out_rows i32)
+    (local $row i32)
+
+    local.get $input_ptr
+    i32.const 8
+    i32.add
+    i32.load align=1
+    local.set $row_count
+
+    i32.const {data_start}
+    local.get $row_count
+    i32.const {total_width}
+    i32.mul
+    i32.add
+    local.tee $out_len
+    call $skein_alloc
+    local.set $out_ptr
+
+    i32.const 0
+    local.set $out_rows
+    i32.const 0
+    local.set $row
+
+    block $done
+      loop $rows
+        local.get $row
+        local.get $row_count
+        i32.ge_u
+        br_if $done
+
+        {filter_code}
+        if
+          {store_sections}
+          local.get $out_rows
+          i32.const 1
+          i32.add
+          local.set $out_rows
+        end
+
+        local.get $row
+        i32.const 1
+        i32.add
+        local.set $row
+        br $rows
+      end
+    end
+
+    local.get $out_ptr
+    i32.const 826428243
+    i32.store align=1
+    local.get $out_ptr
+    i32.const 4
+    i32.add
+    i32.const 1
+    i32.store16 align=1
+    local.get $out_ptr
+    i32.const 6
+    i32.add
+    i32.const 0
+    i32.store16 align=1
+    local.get $out_ptr
+    i32.const 8
+    i32.add
+    local.get $out_rows
+    i32.store align=1
+    local.get $out_ptr
+    i32.const 12
+    i32.add
+    i32.const {}
+    i32.store align=1
+    local.get $out_ptr
+    i32.const 16
+    i32.add
+    i32.const 20
+    i32.store align=1
+
+    {meta_sections}
+
+    local.get $out_ptr
+    i64.extend_i32_u
+    i64.const 32
+    i64.shl
+    local.get $out_len
+    i64.extend_i32_u
+    i64.or))"#,
+        output_types.len()
+    );
+
+    wat::parse_str(wat).map_err(|e| anyhow::anyhow!(e))
+}
+
+struct GeneratedWasmCodegenContext {
+    input_indices: HashMap<String, usize>,
+    input_types: Vec<GeneratedWasmValueType>,
+    input_table_len: usize,
+}
+
+fn compile_generated_wasm_expr_wat(
+    expr: &Expr,
+    ctx: &GeneratedWasmCodegenContext,
+) -> anyhow::Result<(GeneratedWasmValueType, String)> {
+    match expr {
+        Expr::Col { col, .. } => {
+            let idx = *ctx
+                .input_indices
+                .get(col)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm column"))?;
+            let ty = *ctx
+                .input_types
+                .get(idx)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm column type"))?;
+            Ok((ty, generated_wasm_read_input_wat(idx, ty)))
+        }
+        Expr::Param { param } => {
+            let idx = ctx.input_table_len
+                + usize::try_from(*param).map_err(|_| {
+                    anyhow::anyhow!("invalid_request: generated wasm param index overflow")
+                })?;
+            let ty = *ctx
+                .input_types
+                .get(idx)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm param"))?;
+            Ok((ty, generated_wasm_read_input_wat(idx, ty)))
+        }
+        Expr::Lit { lit } => {
+            let ty = GeneratedWasmValueType::from_lit(lit)
+                .ok_or_else(|| anyhow::anyhow!("unsupported generated wasm literal"))?;
+            Ok((ty, generated_wasm_literal_wat(lit)?))
+        }
+        Expr::Op { op, a, b, .. } => {
+            let op_name = op.as_str();
+            match op_name {
+                "and" => generated_wasm_binary_bool_op(a.as_deref(), b.as_deref(), ctx, "i32.and"),
+                "or" => generated_wasm_binary_bool_op(a.as_deref(), b.as_deref(), ctx, "i32.or"),
+                "not" => {
+                    let (ty, inner) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(a.as_deref())?,
+                        ctx,
+                    )?;
+                    if ty != GeneratedWasmValueType::Bool {
+                        anyhow::bail!("unsupported generated wasm not operand");
+                    }
+                    Ok((GeneratedWasmValueType::Bool, format!("{inner}\ni32.eqz")))
+                }
+                "eq" | "ne" => {
+                    let (left_ty, left) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(a.as_deref())?,
+                        ctx,
+                    )?;
+                    let (right_ty, right) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(b.as_deref())?,
+                        ctx,
+                    )?;
+                    if left_ty != right_ty {
+                        anyhow::bail!("unsupported generated wasm eq operand mismatch");
+                    }
+                    let instr = match (op_name, left_ty) {
+                        ("eq", GeneratedWasmValueType::Bool) => "i32.eq",
+                        ("ne", GeneratedWasmValueType::Bool) => "i32.ne",
+                        ("eq", GeneratedWasmValueType::U64) => "i64.eq",
+                        ("ne", GeneratedWasmValueType::U64) => "i64.ne",
+                        _ => unreachable!(),
+                    };
+                    Ok((
+                        GeneratedWasmValueType::Bool,
+                        format!("{left}\n{right}\n{instr}"),
+                    ))
+                }
+                "lt" | "le" | "gt" | "ge" => {
+                    let (left_ty, left) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(a.as_deref())?,
+                        ctx,
+                    )?;
+                    let (right_ty, right) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(b.as_deref())?,
+                        ctx,
+                    )?;
+                    if left_ty != GeneratedWasmValueType::U64
+                        || right_ty != GeneratedWasmValueType::U64
+                    {
+                        anyhow::bail!("unsupported generated wasm comparison operands");
+                    }
+                    let instr = match op_name {
+                        "lt" => "i64.lt_u",
+                        "le" => "i64.le_u",
+                        "gt" => "i64.gt_u",
+                        "ge" => "i64.ge_u",
+                        _ => unreachable!(),
+                    };
+                    Ok((
+                        GeneratedWasmValueType::Bool,
+                        format!("{left}\n{right}\n{instr}"),
+                    ))
+                }
+                "add" | "sub" | "mul" | "div" | "mod" => {
+                    let (left_ty, left) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(a.as_deref())?,
+                        ctx,
+                    )?;
+                    let (right_ty, right) = compile_generated_wasm_expr_wat(
+                        required_generated_operand(b.as_deref())?,
+                        ctx,
+                    )?;
+                    if left_ty != GeneratedWasmValueType::U64
+                        || right_ty != GeneratedWasmValueType::U64
+                    {
+                        anyhow::bail!("unsupported generated wasm arithmetic operands");
+                    }
+                    let instr = match op_name {
+                        "add" => "i64.add",
+                        "sub" => "i64.sub",
+                        "mul" => "i64.mul",
+                        "div" => "i64.div_u",
+                        "mod" => "i64.rem_u",
+                        _ => unreachable!(),
+                    };
+                    Ok((
+                        GeneratedWasmValueType::U64,
+                        format!("{left}\n{right}\n{instr}"),
+                    ))
+                }
+                _ => anyhow::bail!("unsupported generated wasm op"),
+            }
+        }
+        _ => anyhow::bail!("unsupported generated wasm expression"),
+    }
+}
+
+fn generated_wasm_binary_bool_op(
+    left: Option<&Expr>,
+    right: Option<&Expr>,
+    ctx: &GeneratedWasmCodegenContext,
+    instr: &str,
+) -> anyhow::Result<(GeneratedWasmValueType, String)> {
+    let (left_ty, left_code) =
+        compile_generated_wasm_expr_wat(required_generated_operand(left)?, ctx)?;
+    let (right_ty, right_code) =
+        compile_generated_wasm_expr_wat(required_generated_operand(right)?, ctx)?;
+    if left_ty != GeneratedWasmValueType::Bool || right_ty != GeneratedWasmValueType::Bool {
+        anyhow::bail!("unsupported generated wasm boolean operands");
+    }
+    Ok((
+        GeneratedWasmValueType::Bool,
+        format!("{left_code}\n{right_code}\n{instr}"),
+    ))
+}
+
+fn generated_wasm_read_input_wat(idx: usize, ty: GeneratedWasmValueType) -> String {
+    match ty {
+        GeneratedWasmValueType::Bool => {
+            format!("local.get $input_ptr\ni32.const {idx}\nlocal.get $row\ncall $read_bool")
+        }
+        GeneratedWasmValueType::U64 => {
+            format!("local.get $input_ptr\ni32.const {idx}\nlocal.get $row\ncall $read_u64")
+        }
+    }
+}
+
+fn generated_wasm_literal_wat(lit: &Lit) -> anyhow::Result<String> {
+    match lit {
+        Lit::Bool { v } => Ok(format!("i32.const {}", if *v { 1 } else { 0 })),
+        Lit::U64 { v } => Ok(format!("i64.const {v}")),
+        _ => anyhow::bail!("unsupported generated wasm literal"),
+    }
+}
+
+fn run_generated_wasm_plan(
+    engine: &Engine,
+    artifact: &WasmPlanArtifactV1,
+    args: &[Lit],
+) -> anyhow::Result<(Vec<ColumnMeta>, Vec<Vec<Lit>>)> {
+    let generated = artifact.generated.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("invalid_request: generated wasm plan missing module metadata")
+    })?;
+    let query = query_from_wasm_plan(&artifact.plan)?;
+    let (table, _, _) = wasm_plan_parts(&query)?;
+
+    let scan_query = Query {
+        with: Vec::new(),
+        body: Box::new(QueryBody::Select {
+            select: Box::new(SelectBody {
+                distinct: None,
+                projection: generated
+                    .input_table_columns
+                    .iter()
+                    .map(|column| SelectItem {
+                        expr: Expr::Col {
+                            col: column.name.clone(),
+                            table: None,
+                        },
+                        r#as: Some(column.name.clone()),
+                    })
+                    .collect(),
+                from: Some(vec![TableRef::Base(table)]),
+                r#where: None,
+                group_by: None,
+                having: None,
+            }),
+        }),
+        order_by: Vec::new(),
+        limit: None,
+        lock: None,
+    };
+
+    let (_scan_columns, mut rows) = execute_select(engine, &scan_query, &[], None)?;
+
+    let param_values = generated
+        .param_columns
+        .iter()
+        .enumerate()
+        .map(|(idx, column)| generated_wasm_arg_value(args, idx, &column.r#type))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for row in rows.iter_mut() {
+        row.extend(param_values.iter().cloned());
+    }
+
+    let mut input_columns = generated.input_table_columns.clone();
+    input_columns.extend(generated.param_columns.clone());
+
+    let input_batch = wasm_batch::encode_wasm_batch_v1(&input_columns, &rows)?;
+    let module_bytes = BASE64_STANDARD
+        .decode(generated.module_b64.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid_request: invalid generated wasm module"))?;
+    let output_batch = execute_generated_wasm_module(&module_bytes, &input_batch)?;
+    let (_decoded_columns, output_rows) = wasm_batch::decode_wasm_batch_v1(&output_batch)?;
+    Ok((generated.output_columns.clone(), output_rows))
+}
+
+fn generated_wasm_arg_value(args: &[Lit], idx: usize, expected: &TypeDesc) -> anyhow::Result<Lit> {
+    let arg = args
+        .get(idx)
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: missing generated wasm arg"))?;
+    match (expected.kind.as_str(), arg) {
+        ("bool", Lit::Bool { .. }) | ("u64", Lit::U64 { .. }) => Ok(arg.clone()),
+        _ => anyhow::bail!("invalid_request: generated wasm arg type mismatch"),
+    }
+}
+
+fn execute_generated_wasm_module(
+    module_bytes: &[u8],
+    input_batch: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    if input_batch.len() > u32::MAX as usize {
+        anyhow::bail!("invalid_request: wasm batch too large");
+    }
+
+    let engine = WasmRuntimeEngine::default();
+    let module =
+        WasmModule::new(&engine, module_bytes).map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let mut store = WasmStore::new(&engine, ());
+    let instance = WasmInstance::new(&mut store, &module, &[])
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .ok_or_else(|| anyhow::anyhow!("invalid_request: generated wasm module missing memory"))?;
+    let alloc = instance
+        .get_typed_func::<u32, u32>(&mut store, "skein_alloc")
+        .map_err(|_| {
+            anyhow::anyhow!("invalid_request: generated wasm module missing skein_alloc")
+        })?;
+    let eval = instance
+        .get_typed_func::<(u32, u32), u64>(&mut store, "skein_plan_eval")
+        .map_err(|_| {
+            anyhow::anyhow!("invalid_request: generated wasm module missing skein_plan_eval")
+        })?;
+
+    let input_ptr = alloc
+        .call(&mut store, input_batch.len() as u32)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    memory.write(&mut store, input_ptr as usize, input_batch)?;
+    let packed = eval
+        .call(&mut store, (input_ptr, input_batch.len() as u32))
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let output_ptr = (packed >> 32) as usize;
+    let output_len = (packed & 0xffff_ffff) as usize;
+    let mut output = vec![0u8; output_len];
+    memory.read(&mut store, output_ptr, &mut output)?;
+    Ok(output)
 }
 
 fn wasm_plan_edge_runner_js() -> String {
@@ -37064,11 +37991,15 @@ mod tests {
 
         assert_eq!(compiled.format, WASM_PLAN_FORMAT_V1);
         assert_eq!(compiled.abi, WASM_PLAN_ABI_V1);
-        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_V1);
+        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
         assert_eq!(compiled.operators, vec!["scan", "filter", "project"]);
         assert!(compiled.artifact_bytes > 0);
         assert!(compiled.supports_edge_package);
         assert!(!compiled.supports_simd);
+
+        let (artifact, _) = decode_wasm_plan_artifact(&compiled.artifact_b64)?;
+        assert_eq!(artifact.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
+        assert!(artifact.generated.is_some());
 
         let inspected = engine.wasm_plan_inspect(WasmPlanInspectParams {
             artifact_b64: compiled.artifact_b64.clone(),
@@ -37076,6 +38007,7 @@ mod tests {
         assert_eq!(inspected.operator_count, 3);
         assert_eq!(inspected.projection_count, 2);
         assert!(inspected.has_filter);
+        assert_eq!(inspected.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
 
         let edge_package = engine.wasm_plan_edge_package(WasmPlanEdgePackageParams {
             artifact_b64: compiled.artifact_b64.clone(),
@@ -37083,7 +38015,9 @@ mod tests {
         })?;
         assert_eq!(edge_package.format, "skein.wasm.edge_package.v1");
         assert_eq!(edge_package.package_name, "users-score-plan");
-        assert!(edge_package.manifest_json.contains("host_interpreted_v1"));
+        assert!(edge_package
+            .manifest_json
+            .contains(WASM_PLAN_EXECUTION_GENERATED_V1));
         assert!(edge_package.runner_js.contains("runSkeinWasmPlan"));
 
         let result = engine.wasm_plan_run(
@@ -37102,6 +38036,57 @@ mod tests {
         let rows = data.as_array().cloned().unwrap_or_default();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"]["v"].as_u64(), Some(2));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn wasm_plan_compile_falls_back_for_unsupported_types() -> anyhow::Result<()> {
+        let dir = temp_dir("wasm_plan_compile_fallback");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let query = base_query(
+            "app",
+            "users",
+            vec![Expr::Col {
+                col: "name".to_string(),
+                table: None,
+            }],
+            None,
+        );
+
+        let compiled = engine.wasm_plan_compile(WasmPlanCompileParams {
+            query,
+            abi: None,
+            target: None,
+        })?;
+        assert_eq!(compiled.execution, WASM_PLAN_EXECUTION_V1);
+
+        let (artifact, _) = decode_wasm_plan_artifact(&compiled.artifact_b64)?;
+        assert_eq!(artifact.execution, WASM_PLAN_EXECUTION_V1);
+        assert!(artifact.generated.is_none());
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

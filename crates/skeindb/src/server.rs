@@ -31246,7 +31246,7 @@ mod tests {
         let compile_result = resp.result.expect("missing result");
         assert_eq!(
             compile_result["execution"].as_str(),
-            Some("host_interpreted_v1")
+            Some("generated_filter_project_v1")
         );
         assert_eq!(compile_result["operator_count"].as_u64(), Some(3));
         assert_eq!(
@@ -31268,6 +31268,10 @@ mod tests {
         .await;
         assert!(resp.ok);
         let inspect_result = resp.result.expect("missing result");
+        assert_eq!(
+            inspect_result["execution"].as_str(),
+            Some("generated_filter_project_v1")
+        );
         assert_eq!(
             inspect_result["operators"].as_array().map(Vec::len),
             Some(3)
@@ -31383,7 +31387,12 @@ mod tests {
         )
         .await;
         assert!(resp.ok);
-        let artifact_b64 = resp.result.expect("missing result")["artifact_b64"]
+        let compile_result = resp.result.expect("missing result");
+        assert_eq!(
+            compile_result["execution"].as_str(),
+            Some("generated_filter_project_v1")
+        );
+        let artifact_b64 = compile_result["artifact_b64"]
             .as_str()
             .unwrap_or_default()
             .to_string();

@@ -31,7 +31,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 - **19. WebAssembly-Native Query Operators** → `docs/research_agenda/R19_webassembly-native-query-operators.md`
 - **20. Energy-Aware Compaction Scheduling** → `docs/research_agenda/R20_energy-aware-compaction-scheduling.md`
 
-## Implementation status snapshot (2026-05-15)
+## Implementation status snapshot (2026-05-16)
 
 All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.
 
@@ -55,7 +55,7 @@ All 20 agenda tracks now have executable prototype coverage in SkeinDB (method s
 | R16 | Implemented (prototype) | Index advisor synthesis/apply/history (`advisor.*`) |
 | R17 | Hardened | Compatibility intent inference, rewrite preview, and JSON/Markdown report export (`migration.*`) |
 | R18 | Implemented (prototype) | Reproducible replay/report tooling (`docs/TIME_TRAVEL_REPLAY.md`) |
-| R19 | Implemented (prototype) | Wasm-native plan compile/run + batch ABI (`wasm.plan.*`) |
+| R19 | Implemented (prototype) | Wasm-native plan compile/run + batch ABI with generated fixed-width filter/project artifacts, Wasmtime execution, and host fallback for unsupported plans (`wasm.plan.*`) |
 | R20 | Hardened | Energy-aware compaction policy, external signals, energy estimates, SkeinAdmin controls, and energy-vs-p99 evaluation harness (`docs/COMPACTION_SCHEDULER.md`, `eval/compaction_scheduler_dashboard.py`) |
 
 ## Priority Matrix (from agenda)

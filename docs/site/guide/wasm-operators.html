@@ -202,13 +202,27 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;generated_filter_project_v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;plan&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;ops&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;users&quot;</span><span class="p">}},</span>
 <span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;predicate&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="s2">&quot;gt&quot;</span><span class="p">,</span><span class="nt">&quot;a&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;score&quot;</span><span class="p">},</span><span class="nt">&quot;b&quot;</span><span class="p">:{</span><span class="nt">&quot;param&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">}}},</span>
 <span class="w">      </span><span class="p">{</span><span class="nt">&quot;op&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;projection&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;expr&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;id&quot;</span><span class="p">}},</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;expr&quot;</span><span class="p">:{</span><span class="nt">&quot;col&quot;</span><span class="p">:</span><span class="s2">&quot;score&quot;</span><span class="p">}}]}</span>
 <span class="w">    </span><span class="p">]</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;generated&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;input_table_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;score&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unsigned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unsigned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;param_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;$param_0&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unsigned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;output_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;id&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unsigned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;score&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unsigned&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;module_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;AGFzbQE...&quot;</span>
 <span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
@@ -217,7 +231,9 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 - <code>scan</code> must be first and exactly once.
 - <code>project</code> must be last and exactly once.
 - <code>filter</code> is optional and must appear between scan and project.
-- <code>execution</code> is <code>host_interpreted_v1</code> in the current implementation. Native Wasm code generation remains open work.</p>
+- <code>execution</code> is <code>generated_filter_project_v1</code> when the compiler can lower a fixed-width, non-null <code>u64</code>/<code>bool</code> filter/project plan into an embedded Wasm module.
+- <code>execution</code> falls back to <code>host_interpreted_v1</code> when the plan uses unsupported operators, nullable values, or non-fixed-width types.
+- <code>generated</code> is present only for compiled artifacts and records the generated module plus its input/output column metadata.</p>
 <hr />
 <h2 id="5-skeinql-methods">5) SkeinQL methods<a class="headerlink" href="#5-skeinql-methods" title="Permanent link">¶</a></h2>
 <h3 id="wasmplancompile">wasm.plan.compile<a class="headerlink" href="#wasmplancompile" title="Permanent link">¶</a></h3>
@@ -235,8 +251,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;generated_filter_project_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1488</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
 <span class="w">  </span><span class="nt">&quot;supports_edge_package&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
@@ -254,8 +270,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;abi&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.batch.v1&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;target&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wasm32-unknown-unknown&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;host_interpreted_v1&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">392</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;generated_filter_project_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;artifact_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1488</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;operator_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
 <span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
@@ -314,11 +330,12 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <hr />
 <h2 id="6-prototype-notes">6) Prototype notes<a class="headerlink" href="#6-prototype-notes" title="Permanent link">¶</a></h2>
 <p>Current implementation:
-- The plan artifact is interpreted by the host (<code>execution: "host_interpreted_v1"</code>).
+- Fixed-width non-null <code>u64</code>/<code>bool</code> scan/filter/project plans compile to embedded Wasm modules and run through Wasmtime on the server (<code>execution: "generated_filter_project_v1"</code>).
+- Unsupported plans remain portable through host interpretation (<code>execution: "host_interpreted_v1"</code>).
 - Only the scan/filter/project subset is accepted.
 - <code>abi</code> and <code>target</code> are validated; <code>target</code> is recorded in the artifact for inspection and packaging.
 - <code>wasm.plan.inspect</code> exposes artifact metadata without running the query.
-- <code>wasm.plan.edge_package</code> emits a host-backed edge runner package. Native in-edge Wasm codegen and SIMD remain open T085/T086 work.</p>
+- <code>wasm.plan.edge_package</code> emits a host-backed edge runner package; generated modules stay embedded in the artifact but still execute via <code>wasm.plan.run</code> on a SkeinDB host. SIMD and standalone in-edge execution remain open T086/T087 work.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/WASM_OPERATORS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

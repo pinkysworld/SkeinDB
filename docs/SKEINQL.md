@@ -2035,14 +2035,16 @@ Result:
   "abi": "skein.wasm.batch.v1",
   "artifact_b64": "...",
   "target": "wasm32-unknown-unknown",
-  "execution": "host_interpreted_v1",
-  "artifact_bytes": 392,
+  "execution": "generated_filter_project_v1",
+  "artifact_bytes": 1488,
   "operator_count": 3,
   "operators": ["scan", "filter", "project"],
   "supports_edge_package": true,
   "supports_simd": false
 }
 ```
+
+Fixed-width non-null `u64`/`bool` scan/filter/project plans return `generated_filter_project_v1`; other supported plans fall back to `host_interpreted_v1`.
 
 #### wasm.plan.inspect
 Params:
@@ -2058,8 +2060,8 @@ Result:
   "format": "skein.wasm.plan.v1",
   "abi": "skein.wasm.batch.v1",
   "target": "wasm32-unknown-unknown",
-  "execution": "host_interpreted_v1",
-  "artifact_bytes": 392,
+  "execution": "generated_filter_project_v1",
+  "artifact_bytes": 1488,
   "operator_count": 3,
   "operators": ["scan", "filter", "project"],
   "table": {"db":"app","table":"users"},
@@ -2091,6 +2093,8 @@ Result:
   "instructions": ["Store artifact_b64 and manifest_json with the edge worker or browser bundle."]
 }
 ```
+
+Generated artifacts keep the compiled Wasm module inside `artifact_b64`, but the packaged runner still delegates execution back to `wasm.plan.run` on a SkeinDB host.
 
 #### wasm.plan.run
 Params:

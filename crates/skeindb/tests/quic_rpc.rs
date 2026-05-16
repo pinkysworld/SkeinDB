@@ -219,7 +219,12 @@ async fn quic_wasm_plan_run_batch() -> anyhow::Result<()> {
         .rpc("wasm.plan.compile", json!({ "query": query }))
         .await?;
     assert!(resp.ok);
-    let artifact_b64 = resp.result.expect("missing result")["artifact_b64"]
+    let compile_result = resp.result.expect("missing result");
+    assert_eq!(
+        compile_result["execution"].as_str(),
+        Some("generated_filter_project_v1")
+    );
+    let artifact_b64 = compile_result["artifact_b64"]
         .as_str()
         .ok_or_else(|| anyhow!("missing artifact_b64"))?
         .to_string();

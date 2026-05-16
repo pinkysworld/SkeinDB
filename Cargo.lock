@@ -2241,6 +2241,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wasmtime",
  "wat",
 ]
 
