@@ -1,7 +1,7 @@
 # SkeinAdmin (Standalone Management Console)
 
 Status: Implemented embedded admin panel + active roadmap
-Last updated: 2026-05-13 (v0.3.17)
+Last updated: 2026-05-16
 
 SkeinAdmin is a **standalone** management console for SkeinDB.
 It is intentionally separate from the SkeinDB server binary,
@@ -39,6 +39,7 @@ shortcut. The Help Center contains:
   policy, and commercial licensing.
 
 Recent UI updates:
+- **Schema Evolution R15 page**: the Schema panel now includes a dedicated Schema Evolution card with typed `schema.propose_change`, `schema.merge_status`, `schema.simulate_rollout`, and `schema.apply_merge` controls, so operators can review divergence, rollout stages, and merge outcomes without crafting raw RPC payloads by hand.
 - **v0.3.4 polish**: live wiring for the previously-stubbed Overview cards (Top Tables / Slow Query Log / Active Sessions / Index Health) via `information_schema.tables`, `stats.slow_queries`, and `stats.snapshot`; Security panel response-shape fixes for create/list/top-queries flows; auto-refresh on Overview/Security tab switches; Active Sessions labels aligned with `stats.snapshot` (`Sessions` / `Open Txns` / `Avg Latency`).
 - **Overview dashboard** now shows comprehensive stats: runtime (uptime, CPU, RSS, QPS/TPS, open txns, connections), storage & deduplication (ratio, savings %, logical/unique bytes, interned values, total rows/tables, disk/WAL size, visual bar chart), MVCC & compaction (versions, delta chains, L0 files, stall rate), query & cache (hit %, slow queries, avg latency, ETag hits, coalesced). Auto-refresh toggle (5s).
 - **Research runtime wiring**: R01 learned ValueID lookup histograms/model reports appear in Overview via `stats.snapshot`; R14 edge bundles are now first-class Replay panel controls; R20 compaction scheduler policy/status/pause/resume are first-class Engine panel controls.
@@ -188,6 +189,7 @@ Security note:
 - Tables
 - Columns
 - Indexes
+- Schema Evolution (R15): propose changes, inspect merge status, simulate rollout waves, and apply merged plans from typed form controls
 - DDL view: "SHOW CREATE TABLE" equivalent
 
 ### 4.5 Data Browser

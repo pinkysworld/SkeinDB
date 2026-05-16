@@ -89,6 +89,54 @@ fn skeinadmin_merge_panel_exposes_r07_hardening_controls() {
 }
 
 #[test]
+fn skeinadmin_schema_panel_exposes_r15_evolution_controls() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let html_path = repo_root.join("web/skeinadmin/index.html");
+    let js_path = repo_root.join("web/skeinadmin/src/main.js");
+
+    let html = fs::read_to_string(&html_path).expect("read web/skeinadmin/index.html");
+    let js = fs::read_to_string(&js_path).expect("read web/skeinadmin/src/main.js");
+
+    for marker in [
+        "Schema Evolution (R15)",
+        "schemaEvolutionBaseVersion",
+        "schemaEvolutionMessage",
+        "schemaEvolutionNodes",
+        "schemaEvolutionChanges",
+        "schemaEvolutionChangeIds",
+        "btnSchemaEvolutionPropose",
+        "btnSchemaEvolutionStatus",
+        "btnSchemaEvolutionSimulate",
+        "btnSchemaEvolutionApply",
+        "schemaEvolutionSummary",
+        "schemaEvolutionOut",
+    ] {
+        assert!(
+            html.contains(marker),
+            "skeinadmin schema evolution html should contain {marker}"
+        );
+    }
+
+    for marker in [
+        "function readSchemaEvolutionContext()",
+        "function readSchemaEvolutionChanges()",
+        "function readSchemaEvolutionChangeIds()",
+        "function renderSchemaEvolutionSummary(result, mode)",
+        "async function schemaSimulateRollout()",
+        "schema.propose_change",
+        "schema.merge_status",
+        "schema.simulate_rollout",
+        "schema.apply_merge",
+        "wire('btnSchemaEvolutionSimulate', schemaSimulateRollout);",
+    ] {
+        assert!(
+            js.contains(marker),
+            "skeinadmin schema evolution js should contain {marker}"
+        );
+    }
+}
+
+#[test]
 fn skeinadmin_cdc_panel_exposes_subscription_controls() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let html_path = repo_root.join("web/skeinadmin/index.html");

@@ -934,7 +934,7 @@
           <div class="panel-grid">
             <div class="card full section-band">
               <div class="section-band-head">
-                <div><div class="section-kicker">Design &amp; Introspection</div><h2>Schema Command Deck</h2><p class="section-body">Move from guided table design to live table description and index management without switching tools. The active tree selection continues to seed database, table, and index actions.</p></div>
+                <div><div class="section-kicker">Design &amp; Introspection</div><h2>Schema Command Deck</h2><p class="section-body">Move from guided table design to live table description, secondary-index work, and R15 schema evolution rollouts without switching tools. The active tree selection continues to seed database, table, index, and merge-planning actions.</p></div>
                 <div class="section-links"><button class="sm" data-panel="data">Open Data Editor</button><button class="ghost sm" data-panel="views">Open Views</button><button class="ghost sm" data-panel="advisor">Open Advisor</button></div>
               </div>
               <div id="schemaSummaryBar" class="glance-grid"><div class="glance-card"><div class="glance-label">Selection</div><div class="glance-value">No active schema target</div><div class="glance-detail">Choose a table or describe one to unlock structure and index summaries.</div></div></div>
@@ -955,8 +955,18 @@
               <div class="row"><div class="field"><label>Database</label><input id="schemaDb" placeholder="demo" /></div><div class="field"><label>Table</label><input id="schemaTable" placeholder="users" /></div></div>
               <div class="field"><label>Columns (JSON)</label><textarea id="schemaColumns" placeholder='[{"name":"id","type":"i64","nullable":false,"auto_increment":true},{"name":"name","type":"string","nullable":false}]'></textarea></div>
               <div class="row"><div class="field"><label>PK (comma)</label><input id="schemaPk" placeholder="id" /></div><div class="field"><label>IF NOT EXISTS</label><select id="schemaIfNotExists"><option value="true">true</option><option value="false">false</option></select></div></div>
-              <div class="actions"><button id="btnSchemaCreateDb" class="sm">Create DB</button><button id="btnSchemaDescribe" class="sm">Describe</button><button id="btnSchemaCreateTable" class="primary sm">Create Table</button><button id="btnSchemaPropose" class="secondary sm">Propose Change</button><button id="btnSchemaMergeStatus" class="sm">Merge Status</button><button id="btnSchemaApplyMerge" class="sm">Apply Merge</button></div>
+              <div class="actions"><button id="btnSchemaCreateDb" class="sm">Create DB</button><button id="btnSchemaDescribe" class="sm">Describe</button><button id="btnSchemaCreateTable" class="primary sm">Create Table</button></div>
               <pre id="schemaOut">Waiting.</pre>
+            </div>
+            <div class="card wide"><h2>Schema Evolution (R15)</h2>
+              <details class="help" open><summary>Suggested flow</summary><div class="help-body"><div>1) Use the shared <strong>Database</strong> and <strong>Table</strong> fields above or click a table in the tree.</div><div>2) Paste a <code>changes</code> array for <code>schema.propose_change</code>.</div><div>3) Review <strong>Merge Status</strong> or <strong>Simulate Rollout</strong> before pressing <strong>Apply Merge</strong>.</div></div></details>
+              <div class="callout">This R15 surface speaks the typed schema-evolution APIs directly: <code>schema.propose_change</code>, <code>schema.merge_status</code>, <code>schema.simulate_rollout</code>, and <code>schema.apply_merge</code>.</div>
+              <div class="row"><div class="field"><label>Base version</label><input id="schemaEvolutionBaseVersion" placeholder="0" value="0" /></div><div class="field"><label>Message</label><input id="schemaEvolutionMessage" placeholder="add region rollout column" /></div><div class="field"><label>Rollout nodes</label><input id="schemaEvolutionNodes" placeholder="3" value="3" /></div></div>
+              <div class="field"><label>Change ops (JSON)</label><textarea id="schemaEvolutionChanges" placeholder='[{"op":"add_column","name":"region","type":{"kind":"str"},"nullable":true,"auto_increment":false,"default":{"t":"str","v":"eu"}}]'></textarea></div>
+              <div class="field"><label>Apply change IDs (comma, optional)</label><input id="schemaEvolutionChangeIds" placeholder="sch_1, sch_2" /></div>
+              <div class="actions"><button id="btnSchemaEvolutionPropose" class="secondary sm">Propose Change</button><button id="btnSchemaEvolutionStatus" class="sm">Merge Status</button><button id="btnSchemaEvolutionSimulate" class="sm">Simulate Rollout</button><button id="btnSchemaEvolutionApply" class="primary sm">Apply Merge</button></div>
+              <div id="schemaEvolutionSummary" class="hint" style="margin-top:8px">Review divergence, rollout stages, and merge results for the active table.</div>
+              <pre id="schemaEvolutionOut">Paste a change array to start an R15 evolution workflow.</pre>
             </div>
             <div class="card wide"><h2>Index Manager</h2>
               <div class="callout">Inspect, create, and drop secondary indexes from guided fields. The current runtime exposes index state through <code>schema.describe_table</code>, and create/drop operations are executed as supported SQL DDL so the console stays aligned with live parser behavior.</div>

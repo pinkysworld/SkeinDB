@@ -73,7 +73,7 @@
     </div>
     <div class="phase">
       <h3>Phase 4 — Merge Protocol</h3>
-      <p>Detect schema divergence across cluster nodes, compute a merged schema that preserves all non-conflicting changes, and propagate the unified schema to all nodes. SkeinDB's prototype now exposes divergence and proposed resolution guidance through <code>schema.merge_status</code>, simulates prepare/mixed/steady-state rollout waves through <code>schema.simulate_rollout</code>, then rolls forward eligible merge-plan winners and marks deterministic loser proposals as rejected during <code>schema.apply_merge</code>, so resolved divergence no longer stays pending after a merge.</p>
+      <p>Detect schema divergence across cluster nodes, compute a merged schema that preserves all non-conflicting changes, and propagate the unified schema to all nodes. SkeinDB's prototype now exposes divergence and proposed resolution guidance through <code>schema.merge_status</code>, simulates prepare/mixed/steady-state rollout waves through <code>schema.simulate_rollout</code>, then rolls forward eligible merge-plan winners and marks deterministic loser proposals as rejected during <code>schema.apply_merge</code>, so resolved divergence no longer stays pending after a merge. SkeinAdmin's Schema panel now mirrors the same flow with a dedicated Schema Evolution (R15) page for typed propose/status/simulate/apply control.</p>
     </div>
   </div>
 

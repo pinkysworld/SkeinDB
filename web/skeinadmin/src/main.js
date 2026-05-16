@@ -109,7 +109,7 @@ const RESEARCH_TRACKS = [
   { id: 'R12', title: 'NL-to-SkeinQL', desc: 'Natural language query translation with verification.', methods: ['ai.nl.translate', 'ai.nl.explain', 'ai.nl.execute'], panel: 'nl', status: 'hardened' },
   { id: 'R13', title: 'Causal Consistency', desc: 'ETag-chain causal ordering across replicas.', methods: ['query.patch', 'query.select'], panel: 'workspace', status: 'hardened' },
   { id: 'R14', title: 'Edge Bundles', desc: 'Geo-distributed replay bundles with edge caching.', methods: ['edge.bundle.request', 'edge.bundle.apply', 'edge.bundle.status'], panel: 'replay', status: 'hardened' },
-  { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with propose/merge/apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
+  { id: 'R15', title: 'Schema Evolution', desc: 'Conflict-free schema evolution with divergence guidance, rollout simulation, and controlled apply.', methods: ['schema.propose_change', 'schema.merge_status', 'schema.simulate_rollout', 'schema.apply_merge'], panel: 'schema', status: 'hardened' },
   { id: 'R16', title: 'Index Advisor', desc: 'Workload-driven index synthesis and recommendation.', methods: ['advisor.index_synthesize', 'advisor.history', 'advisor.apply_index', 'advisor.dismiss'], panel: 'advisor', status: 'hardened' },
   { id: 'R17', title: 'Migration Hints', desc: 'Compatibility telemetry and rewrite previews.', methods: ['migration.rewrite_preview', 'migration.intent_report', 'migration.report_export'], panel: 'migration', status: 'hardened' },
   { id: 'R18', title: 'Perf Replay', desc: 'Snapshot + replay for performance regression testing.', methods: ['maintenance.replay.export', 'maintenance.replay.import', 'maintenance.replay.run'], panel: 'replay', status: 'prototype' },
@@ -128,6 +128,7 @@ const FEATURE_CENTER = [
   { title: 'Transactions', desc: 'Open, commit, and roll back explicit tx handles.', panel: 'workspace' },
   { title: 'Schema Mgmt', desc: 'Create/alter DB and tables.', panel: 'schema' },
   { title: 'Secondary Indexes', desc: 'Inspect and manage index DDL from guided fields.', panel: 'schema' },
+  { title: 'Schema Evolution', desc: 'Propose changes, inspect divergence, simulate rollout, and apply merges.', panel: 'schema' },
   { title: 'Data Browse', desc: 'Guided row browser and editor.', panel: 'data' },
   { title: 'Engine Config', desc: 'Toggle dedup, MVCC, cache, security.', panel: 'engine' },
   { title: 'Cluster', desc: 'Multi-node topology and sharding.', panel: 'cluster' },
@@ -1601,26 +1602,114 @@ async function schemaDropTable() {
   await loadDbTree();
 }
 
+function readSchemaEvolutionContext() {
+  const db = validateEasyIdentifier($('schemaDb')?.value.trim(), 'Database');
+  const table = validateEasyIdentifier($('schemaTable')?.value.trim(), 'Table');
+  return { db, table };
+}
+
+function readSchemaEvolutionChanges() {
+  const parsed = parseJsonInput($('schemaEvolutionChanges')?.value || '', 'Change ops');
+  if (!Array.isArray(parsed) || !parsed.length) {
+    throw new Error('Change ops must be a non-empty JSON array');
+  }
+  return parsed;
+}
+
+function readSchemaEvolutionChangeIds() {
+  const raw = $('schemaEvolutionChangeIds')?.value.trim() || '';
+  return raw ? parseIdentifierList(raw, 'Change IDs') : undefined;
+}
+
+function setSchemaEvolutionSummary(text) {
+  const host = $('schemaEvolutionSummary');
+  if (host) host.textContent = text;
+}
+
+function renderSchemaEvolutionSummary(result, mode) {
+  if (!result) {
+    setSchemaEvolutionSummary('Review divergence, rollout stages, and merge results for the active table.');
+    return;
+  }
+  if ((mode === 'status' || mode === 'rollout') && $('schemaEvolutionBaseVersion')) {
+    $('schemaEvolutionBaseVersion').value = String(result.current_version ?? '');
+  }
+  if (mode === 'apply' && $('schemaEvolutionBaseVersion')) {
+    $('schemaEvolutionBaseVersion').value = String(result.new_version ?? '');
+  }
+  if (mode === 'propose') {
+    setSchemaEvolutionSummary('Queued ' + (result.change_id || 'pending change') + ' with status ' + (result.status || 'pending') + '.');
+    return;
+  }
+  if (mode === 'status') {
+    const pending = Array.isArray(result.pending) ? result.pending.length : 0;
+    const mergePlan = Array.isArray(result.merge_plan) ? result.merge_plan.length : 0;
+    const conflicts = Array.isArray(result.conflicts) ? result.conflicts.length : 0;
+    setSchemaEvolutionSummary('Current version ' + (result.current_version ?? '--') + '; pending ' + pending + '; merge plan ' + mergePlan + '; conflicts ' + conflicts + '.');
+    return;
+  }
+  if (mode === 'rollout') {
+    const stages = Array.isArray(result.stages) ? result.stages.length : 0;
+    const ready = result.ready_for_rollout ? 'ready' : 'blocked';
+    setSchemaEvolutionSummary('Target version ' + (result.target_version ?? '--') + ' across ' + (result.nodes ?? '--') + ' node(s); ' + ready + '; stages ' + stages + '; legacy rows ' + (result.legacy_row_count ?? 0) + '.');
+    return;
+  }
+  if (mode === 'apply') {
+    const applied = Array.isArray(result.applied) ? result.applied.length : 0;
+    const rolledBack = Array.isArray(result.rolled_back) ? result.rolled_back.length : 0;
+    const conflicts = Array.isArray(result.conflicts) ? result.conflicts.length : 0;
+    setSchemaEvolutionSummary('Applied ' + applied + ' change(s); rolled back ' + rolledBack + '; remaining conflicts ' + conflicts + '; new version ' + (result.new_version ?? '--') + '.');
+  }
+}
+
 async function schemaProposeChange() {
   try {
-    const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim(); if (!db || !table) throw new Error('DB+table required');
-    const columns = parseJsonInput($('schemaColumns').value, 'Columns');
-    await call('schema.propose_change', cleanParams({ db, table, columns }), 'schemaOut');
-  } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
+    const table = readSchemaEvolutionContext();
+    const changes = readSchemaEvolutionChanges();
+    const message = $('schemaEvolutionMessage')?.value.trim();
+    const baseVersion = parseOptionalU64Input('schemaEvolutionBaseVersion', 'Base version');
+    const res = await call('schema.propose_change', cleanParams({ table, base_version: baseVersion ?? 0, changes, message }), 'schemaEvolutionOut');
+    renderSchemaEvolutionSummary(unwrapRpcResult(res, 'schema.propose_change'), 'propose');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaEvolutionOut');
+    setSchemaEvolutionSummary(String(e));
+  }
 }
 
 async function schemaMergeStatus() {
   try {
-    const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim(); if (!db || !table) throw new Error('DB+table required');
-    await call('schema.merge_status', { db, table }, 'schemaOut');
-  } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
+    const table = readSchemaEvolutionContext();
+    const res = await call('schema.merge_status', { table }, 'schemaEvolutionOut');
+    renderSchemaEvolutionSummary(unwrapRpcResult(res, 'schema.merge_status'), 'status');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaEvolutionOut');
+    setSchemaEvolutionSummary(String(e));
+  }
+}
+
+async function schemaSimulateRollout() {
+  try {
+    const table = readSchemaEvolutionContext();
+    const nodes = parseOptionalU64Input('schemaEvolutionNodes', 'Rollout nodes');
+    const res = await call('schema.simulate_rollout', cleanParams({ table, nodes }), 'schemaEvolutionOut');
+    renderSchemaEvolutionSummary(unwrapRpcResult(res, 'schema.simulate_rollout'), 'rollout');
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaEvolutionOut');
+    setSchemaEvolutionSummary(String(e));
+  }
 }
 
 async function schemaApplyMerge() {
   try {
-    const db = $('schemaDb').value.trim(), table = $('schemaTable').value.trim(); if (!db || !table) throw new Error('DB+table required');
-    await call('schema.apply_merge', { db, table }, 'schemaOut');
-  } catch (e) { setOut({ error: String(e) }, 'schemaOut'); }
+    const table = readSchemaEvolutionContext();
+    const changeIds = readSchemaEvolutionChangeIds();
+    const res = await call('schema.apply_merge', cleanParams({ table, change_ids: changeIds }), 'schemaEvolutionOut');
+    renderSchemaEvolutionSummary(unwrapRpcResult(res, 'schema.apply_merge'), 'apply');
+    await schemaDescribe();
+  } catch (e) {
+    setOut({ error: String(e) }, 'schemaEvolutionOut');
+    setSchemaEvolutionSummary(String(e));
+  }
 }
 
 function readSchemaIndexContext() {
@@ -6106,7 +6195,7 @@ const HELP_PANEL_REFERENCE = [
   { panel: 'overview',  title: 'Overview',          purpose: 'Operator command center with live connection, selection, and session summary bands.', actions: 'Quick create DB/table, browse data, open cluster, see hardened-research counts.' },
   { panel: 'easy',      title: 'Easy Viewer',       purpose: 'Click-first inline grid editor and guided forms for daily row operations.', actions: 'Browse, insert, edit, delete rows; design schema in the WYSIWYG ALTER planner.' },
   { panel: 'workspace', title: 'SQL Workspace',     purpose: 'Run SQL/SkeinQL, prepare statements, manage explicit transaction handles.', actions: 'Execute (⌘↵), prepare/execute, begin/commit/rollback, ETag-aware patches.' },
-  { panel: 'schema',    title: 'Schema',            purpose: 'Database, table, column, and secondary-index DDL with conflict-free evolution.', actions: 'CREATE/ALTER tables, manage indexes, propose/merge/apply schema changes (R15).' },
+  { panel: 'schema',    title: 'Schema',            purpose: 'Database, table, column, secondary-index, and schema-evolution DDL with conflict-free rollout planning.', actions: 'CREATE/ALTER tables, manage indexes, propose/inspect/simulate/apply schema changes (R15).' },
   { panel: 'data',      title: 'Data Browse',       purpose: 'Row browser with filters, pagination, and inline edits.', actions: 'Filter, paginate, patch rows, cross-link to CDC and replay panels.' },
   { panel: 'cluster',   title: 'Cluster',           purpose: 'Topology, transport capabilities, shard placement, and node enrollment.', actions: 'Observe nodes, enroll members, plan shard placement, inspect QUIC/HTTP transport.' },
   { panel: 'settings',  title: 'Settings',          purpose: 'Server settings and feature flags with safe round-tripping.', actions: 'Read/update settings; toggle dedup, MVCC, cache, and research feature flags.' },
@@ -6601,9 +6690,10 @@ wire('btnSchemaCreateDb', schemaCreateDb);
 wire('btnSchemaCreateTable', schemaCreateTable);
 wire('btnSchemaDropDb', schemaDropDb);
 wire('btnSchemaDropTable', schemaDropTable);
-wire('btnSchemaPropose', schemaProposeChange);
-wire('btnSchemaMergeStatus', schemaMergeStatus);
-wire('btnSchemaApplyMerge', schemaApplyMerge);
+wire('btnSchemaEvolutionPropose', schemaProposeChange);
+wire('btnSchemaEvolutionStatus', schemaMergeStatus);
+wire('btnSchemaEvolutionSimulate', schemaSimulateRollout);
+wire('btnSchemaEvolutionApply', schemaApplyMerge);
 wire('btnSchemaBuilderSeed', schemaBuilderSeedDefaults);
 wire('btnSchemaBuilderAddCol', () => schemaBuilderAddColumn());
 wire('btnSchemaBuilderLoad', schemaBuilderLoadCurrent);
