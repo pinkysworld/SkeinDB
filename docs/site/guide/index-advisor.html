@@ -127,14 +127,19 @@
     <article class="doc-article">
       <h1 id="self-tuning-index-advisor-telemetry-driven">Self-tuning Index Advisor (Telemetry-driven)<a class="headerlink" href="#self-tuning-index-advisor-telemetry-driven" title="Permanent link">¶</a></h1>
 <p>Status: Partial implementation
-Last updated: 2026-04-16</p>
+Last updated: 2026-05-17</p>
 <p>Current runtime baseline:
 - Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
-- <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, and <code>advisor.history</code> are live.
+- <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, <code>advisor.retire_unused</code>, <code>advisor.evaluate</code>, and <code>advisor.history</code> are live.
+- <code>advisor.index_synthesize</code> suggestions now include optional dependency-capture metadata: predicate columns, equality/range columns, range shape, order-by/group-by/join-key columns, and projected covering columns.
+- Candidate key generation is dependency-driven: equality columns come first, then join keys, one range column, group-by columns, and order-by columns; projected non-key columns become covering <code>include</code> columns.
+- Suggestions also include an optional cost estimate with read benefit, write overhead, compaction overhead, write pressure, key/include width, and net score.
 - Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
+- <code>advisor.retire_unused</code> can dry-run or retire advisor-built secondary indexes when the latest dependency signal is absent or older than a caller-provided idle threshold; recent dependency signals block retirement.
+- <code>advisor.evaluate</code> replays phased dependency samples against a scratch advisor state and reports top-suggestion convergence after workload shifts without mutating live advisor telemetry.
 - <code>advisor.apply_index</code> now queues background in-memory secondary-index builds, returns <code>queued</code> or <code>exists</code>, and <code>advisor.history</code> records lifecycle state (<code>queued</code>, <code>building</code>, <code>completed</code>, <code>failed</code>, <code>cancelled</code>) with progress percentages plus optional result/rollback metadata.
 - SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
-- Measured before/after latency deltas remain open work.</p>
+- Measured before/after latency deltas for advisor-applied indexes remain open work.</p>
 <p>Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.</p>
 <p>Key idea:
@@ -165,17 +170,19 @@ Automatically suggest indexes that improve real workloads while preserving Skein
 <h2 id="2-candidate-generation-heuristics-v1">2) Candidate generation heuristics (v1)<a class="headerlink" href="#2-candidate-generation-heuristics-v1" title="Permanent link">¶</a></h2>
 <p>The advisor produces candidate indexes per table.</p>
 <h3 id="21-equality-first-composite-indexes">2.1 Equality-first composite indexes<a class="headerlink" href="#21-equality-first-composite-indexes" title="Permanent link">¶</a></h3>
-<p>If many queries filter by equality on columns (a,b) and then order by c:
-Suggest INDEX(a,b,c).</p>
+<p>If many queries filter by equality on columns (a,b), join on j, range-scan r, and then order by c:
+Suggest INDEX(a,b,j,r,c).</p>
 <p>Heuristic:
 - For each frequent query pattern, create a candidate key list:
   - all equality columns (sorted by selectivity if stats known)
+  - then join-key columns not already present
   - then one range column (at most one)
+  - then GROUP BY columns
   - then ORDER BY columns (if compatible)</p>
 <h3 id="22-covering-indexes">2.2 Covering indexes<a class="headerlink" href="#22-covering-indexes" title="Permanent link">¶</a></h3>
 <p>If queries repeatedly select the same small set of columns:
-- Suggest including them (covering) if the engine supports INCLUDE columns.
-- If not, keep as a normal index and rely on row lookup.</p>
+- Suggest including them as covering <code>include</code> columns when they are not already part of the key.
+- The current in-memory advisor API carries include columns through <code>advisor.index_synthesize</code> and <code>advisor.apply_index</code> so operators can review and apply the same candidate shape.</p>
 <h3 id="23-avoiding-pathological-suggestions">2.3 Avoiding pathological suggestions<a class="headerlink" href="#23-avoiding-pathological-suggestions" title="Permanent link">¶</a></h3>
 <p>Reject candidates that:
 - exceed max columns (e.g., &gt; 4)
@@ -197,6 +204,7 @@ Suggest INDEX(a,b,c).</p>
 - null fraction
 - min/max (for numeric)</p>
 <p>Then estimate selectivity of equality predicates.</p>
+<p>Current prototype cost output is heuristic and transparent: <code>read_benefit</code> starts from observed rows scanned, while <code>write_overhead</code> is derived from table write pressure and candidate width, and <code>compaction_overhead</code> is derived from observed scan volume and candidate width. <code>score</code> equals <code>cost.net_score</code>.</p>
 <h3 id="33-level-2-histograms">3.3 Level 2 (histograms)<a class="headerlink" href="#33-level-2-histograms" title="Permanent link">¶</a></h3>
 <p>Build simple equi-depth histograms for hot columns.</p>
 <hr />
@@ -211,7 +219,8 @@ Suggest INDEX(a,b,c).</p>
 2) Admin clicks "Apply"
 3) Engine records a queued advisor action and completes the build in the background
 4) History records queued/building/completed-or-failed state for later review
-5) Failed builds record rollback state before the suggestion can surface again</p>
+5) Failed builds record rollback state before the suggestion can surface again
+6) Optional retirement scans can dry-run first, then drop only advisor-built indexes whose latest dependency signal is stale or absent</p>
 <p>Note:
 - The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
 - Progress reporting is lifecycle-level (<code>queued</code> -&gt; <code>building</code> -&gt; terminal state), not per-row physical build accounting.</p>
@@ -224,13 +233,44 @@ Suggest INDEX(a,b,c).</p>
 <p><code>advisor.index_synthesize</code> (experimental, R16)
   Params:
   <code>json
-  { "table": {"db":"mydb","table":"users"}, "limit": 20, "min_queries": 3, "min_rows": 32 }</code></p>
+  { "table": {"db":"mydb","table":"users"}, "limit": 20, "min_queries": 3, "min_rows": 32 }</code>
+  Result suggestions include the index key, include columns, scoring telemetry, and the dependency evidence that produced the candidate:
+  <code>json
+  {
+    "id": "idxs_5a2c...",
+    "columns": ["city", "created_at"],
+    "include": ["name"],
+    "score": 128,
+    "count": 4,
+    "rows_scanned": 128,
+    "cost": {
+      "read_benefit": 128.4,
+      "write_overhead": 0.05,
+      "compaction_overhead": 0.10,
+      "net_score": 128.25,
+      "write_pressure": 1,
+      "key_columns": 2,
+      "include_columns": 1
+    },
+    "dependency": {
+      "predicate_columns": ["city"],
+      "equality_columns": ["city"],
+      "range_columns": [],
+      "range_shape": "none",
+      "order_by_columns": ["created_at"],
+      "group_by_columns": [],
+      "join_key_columns": [],
+      "projection_columns": ["name"]
+    }
+  }</code></p>
 </li>
 <li>
 <p><code>advisor.apply_index</code> (queues an in-memory secondary-index build in the prototype)</p>
 </li>
 <li>indexes rebuild lazily on first use after table changes</li>
 <li><code>advisor.dismiss</code> (suppresses the suggestion and drops any advisor-built index)</li>
+<li><code>advisor.retire_unused</code> (dry-runs or retires stale advisor-built indexes)</li>
+<li><code>advisor.evaluate</code> (replays phased workload samples and reports top-suggestion convergence)</li>
 <li>
 <p><code>advisor.history</code></p>
 </li>
@@ -249,8 +289,83 @@ Suggest INDEX(a,b,c).</p>
 <li>
 <p><code>advisor.dismiss</code></p>
 </li>
+<li><code>advisor.retire_unused</code></li>
 <li><code>advisor.history</code></li>
 </ul>
+<p><code>advisor.retire_unused</code> example:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;max_idle_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">86400000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;note&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;daily advisor retirement review&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>When <code>dry_run</code> is false, eligible retirements are written to <code>advisor.history</code> with action <code>retire</code>. Safety rules:
+- only the latest active <code>advisor.apply_index</code> action for a suggestion is considered
+- a newer <code>dismiss</code> or <code>retire</code> action removes it from retirement candidates
+- indexes with dependency signals newer than <code>max_idle_ms</code> return <code>reason: "recently_used"</code> and are not dropped
+- indexes with no dependency signal or stale dependency signal return <code>reason: "unused"</code> when retired</p>
+<p><code>advisor.evaluate</code> example:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;min_queries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;min_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;phases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;equality_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">400</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;repeats&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;equality_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;repeats&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result summary:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.advisor.evaluate.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;phase_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;initial_top&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">  </span><span class="nt">&quot;final_top&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">]},</span>
+<span class="w">  </span><span class="nt">&quot;phases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_before&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;final_top_stable_after_observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Each sample can supply <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero <code>rows_scanned</code> or zero <code>repeats</code>.</p>
 <hr />
 <p>Telemetry persistence (prototype):
 - Set <code>SKEINDB_ADVISOR_PERSIST=1</code> to persist advisor patterns/history on disk.
@@ -270,7 +385,8 @@ Suggest INDEX(a,b,c).</p>
 <li>[x] IA02: Candidate generation + duplication checks</li>
 <li>[x] IA03: Benefit estimation level 0</li>
 <li>[x] IA04: SkeinQL endpoints + SkeinAdmin UI page</li>
-<li>[ ] IA05: Measured before/after reporting for advisor-applied indexes</li>
+<li>[x] IA05: Safe advisor-built index retirement with dry-run and stale-dependency checks</li>
+<li>[ ] IA06: Measured before/after reporting for advisor-applied indexes</li>
 </ul>
 <hr />
 <h2 id="research-extension-automatic-index-synthesis-from-dependency-analysis">Research extension: Automatic index synthesis from dependency analysis<a class="headerlink" href="#research-extension-automatic-index-synthesis-from-dependency-analysis" title="Permanent link">¶</a></h2>
@@ -278,9 +394,10 @@ Suggest INDEX(a,b,c).</p>
 The research agenda proposes a stronger signal: <strong>runtime dependency tracking</strong> (which key ranges, columns, and ordering requirements were actually used).
 See: <code>docs/research_agenda/R16_automatic-index-synthesis-from-dependency-analysis.md</code>.</p>
 <p>Adaptation sketch:
-- Extend dependency recording to include predicate columns, range shapes, and sort/group requirements.
-- Generate candidate indexes (including covering indexes) from aggregated dependencies.
-- Retire indexes that no longer deliver measurable benefit, with safety checks.</p>
+- Dependency recording now surfaces predicate columns, equality/range columns, range shapes, and sort/group/join/projection requirements on each synthesized suggestion.
+- Candidate indexes, including composite keys and covering include columns, are generated from aggregated dependencies.
+- Cost scoring now subtracts explicit write and compaction overhead estimates from observed read benefit.
+- <code>advisor.retire_unused</code> retires indexes that no longer have a fresh dependency signal, with dry-run and history safety checks.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/INDEX_ADVISOR.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

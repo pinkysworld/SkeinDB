@@ -1269,6 +1269,52 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 
 <h3 id="1011-ai-experimental">10.11 ai.* (experimental)<a class="headerlink" href="#1011-ai-experimental" title="Permanent link">¶</a></h3>
 <p>LLM-assisted autoparameterization helpers (prototype).</p>
+<h4 id="aiautoparamclassifiers">ai.autoparam.classifiers<a class="headerlink" href="#aiautoparamclassifiers" title="Permanent link">¶</a></h4>
+<p>Return the supported classifier catalog.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.ai.autoparam.classifiers.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;default_classifier&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifiers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;kind&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;offline_rules&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;default&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;supports_rules&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;supports_schema&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;description&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;deterministic offline classifier using explicit rules, schema hints, and column-name heuristics&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Only advertised classifier names are accepted. Unknown names return <code>invalid_request</code> instead of silently falling back.</p>
+<h4 id="aiautoparamlabel_schema">ai.autoparam.label_schema<a class="headerlink" href="#aiautoparamlabel_schema" title="Permanent link">¶</a></h4>
+<p>Return the versioned label taxonomy used by semantic autoparameterization.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.ai.autoparam.label_schema.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;taxonomy_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;default_decision&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;parameterize&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;confidence_min&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;confidence_max&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;decisions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;decision&quot;</span><span class="p">:</span><span class="s2">&quot;parameterize&quot;</span><span class="p">,</span><span class="nt">&quot;parameterized&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;cache_key_policy&quot;</span><span class="p">:</span><span class="s2">&quot;replace literal with a positional parameter&quot;</span><span class="p">,</span><span class="nt">&quot;meaning&quot;</span><span class="p">:</span><span class="s2">&quot;the literal is request data and can vary between executions&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;decision&quot;</span><span class="p">:</span><span class="s2">&quot;semantic_constant&quot;</span><span class="p">,</span><span class="nt">&quot;parameterized&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="nt">&quot;cache_key_policy&quot;</span><span class="p">:</span><span class="s2">&quot;keep literal in the semantic cache key when policy applies&quot;</span><span class="p">,</span><span class="nt">&quot;meaning&quot;</span><span class="p">:</span><span class="s2">&quot;the literal is part of query meaning, such as an enum, state, or type tag&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;decision&quot;</span><span class="p">:</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span><span class="nt">&quot;parameterized&quot;</span><span class="p">:</span><span class="kc">false</span><span class="p">,</span><span class="nt">&quot;cache_key_policy&quot;</span><span class="p">:</span><span class="s2">&quot;defer to syntactic autoparameterization policy&quot;</span><span class="p">,</span><span class="nt">&quot;meaning&quot;</span><span class="p">:</span><span class="s2">&quot;the classifier lacks enough context for a confident decision&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The schema also includes <code>literal_fields</code> and <code>label_fields</code> entries that describe the literal context (<code>value</code>, <code>column</code>, <code>table</code>, <code>op</code>) and label output (<code>idx</code>, <code>decision</code>, <code>confidence</code>, <code>reason</code>) shapes.</p>
 <h4 id="aiautoparamclassify">ai.autoparam.classify<a class="headerlink" href="#aiautoparamclassify" title="Permanent link">¶</a></h4>
 <p>Classify literals as parameterizable vs semantic constants.</p>
 <p>Params:</p>
@@ -1282,7 +1328,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;rules&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;semantic_constant_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;users.status&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;*.state&quot;</span><span class="p">],</span>
 <span class="w">    </span><span class="nt">&quot;parameterize_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;users.id&quot;</span><span class="p">]</span>
-<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;classifier&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
@@ -1301,7 +1348,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 - <code>unknown</code></p>
 <p>Notes:
 - <code>db</code> enables schema-aware classification when literals include table names.
-- <code>rules</code> supports <code>*</code> globs (e.g., <code>*.status</code>).</p>
+- <code>rules</code> supports <code>*</code> globs (e.g., <code>*.status</code>).
+- <code>classifier</code> defaults to <code>offline_rules_v1</code>; use <code>ai.autoparam.classifiers</code> to discover supported names.</p>
 <h4 id="aiautoparamanalyze">ai.autoparam.analyze<a class="headerlink" href="#aiautoparamanalyze" title="Permanent link">¶</a></h4>
 <p>Extract literals from SQL text and classify them.</p>
 <p>Params:</p>
@@ -1311,7 +1359,8 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;rules&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="nt">&quot;semantic_constant_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;users.status&quot;</span><span class="p">],</span>
 <span class="w">    </span><span class="nt">&quot;parameterize_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;users.id&quot;</span><span class="p">]</span>
-<span class="w">  </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;classifier&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
 
@@ -1327,6 +1376,55 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">    </span><span class="p">{</span><span class="nt">&quot;idx&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;decision&quot;</span><span class="p">:</span><span class="s2">&quot;semantic_constant&quot;</span><span class="p">,</span><span class="nt">&quot;confidence&quot;</span><span class="p">:</span><span class="mf">0.95</span><span class="p">,</span><span class="nt">&quot;reason&quot;</span><span class="p">:</span><span class="s2">&quot;rule: semantic_constant&quot;</span><span class="p">},</span>
 <span class="w">    </span><span class="p">{</span><span class="nt">&quot;idx&quot;</span><span class="p">:</span><span class="mi">1</span><span class="p">,</span><span class="nt">&quot;decision&quot;</span><span class="p">:</span><span class="s2">&quot;parameterize&quot;</span><span class="p">,</span><span class="nt">&quot;confidence&quot;</span><span class="p">:</span><span class="mf">0.95</span><span class="p">,</span><span class="nt">&quot;reason&quot;</span><span class="p">:</span><span class="s2">&quot;rule: parameterize&quot;</span><span class="p">}</span>
 <span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="aiautoparamfeedback">ai.autoparam.feedback<a class="headerlink" href="#aiautoparamfeedback" title="Permanent link">¶</a></h4>
+<p>Record cache feedback and re-run the selected classifier when a plan-cache miss occurs.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;sql&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;select * from users where status = &#39;active&#39; and id = 42&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;app&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache_event&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;plan_cache_miss&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;miss_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifier&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.ai.autoparam.feedback.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;fingerprint&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;3a5b2c...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;normalized_sql&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;select * from users where status = ? and id = ?&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache_event&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;plan_cache_miss&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifier&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;offline_rules_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cached_before&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;reclassified&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache_miss_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;reclassification_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;literals&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">  </span><span class="nt">&quot;labels&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h4 id="aiautoparammetrics">ai.autoparam.metrics<a class="headerlink" href="#aiautoparammetrics" title="Permanent link">¶</a></h4>
+<p>Report plan-cache hit rate beside classifier overhead and feedback totals.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.ai.autoparam.metrics.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;plan_cache_hits&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;plan_cache_misses&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;plan_cache_hit_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.8</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifier_invocations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifier_total_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">45000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;classifier_mean_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">3750.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;feedback_cache_entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;feedback_cache_miss_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">9</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;feedback_reclassifications&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">6</span>
 <span class="p">}</span>
 </code></pre></div>
 
@@ -1754,11 +1852,39 @@ It is designed to coexist with MySQL/SQL compatibility mode:</p>
 <span class="w">  </span><span class="nt">&quot;artifact_sha256&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;manifest_json&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;{...}&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;runner_js&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;export async function runSkeinWasmPlan(...) { ... }&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Store artifact_b64 and manifest_json with the edge worker or browser bundle.&quot;</span><span class="p">]</span>
+<span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s2">&quot;Store artifact_b64 and manifest_json with the edge worker or browser bundle.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="s2">&quot;Call runSkeinWasmPlanEdge with artifact_b64, input_rows, args, and result_format to execute the embedded generated Wasm module locally.&quot;</span>
+<span class="w">  </span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 
-<p>Generated artifacts keep the compiled Wasm module inside <code>artifact_b64</code>, but the packaged runner still delegates execution back to <code>wasm.plan.run</code> on a SkeinDB host.</p>
+<p>Generated artifacts keep the compiled Wasm module inside <code>artifact_b64</code>. The packaged runner can execute <code>generated_filter_project_v1</code> artifacts locally with <code>runSkeinWasmPlanEdge(...)</code> by encoding caller-provided rows into <code>skein.wasm.batch.v1</code>, running the embedded module through <code>WebAssembly.instantiate</code>, and decoding the output batch. <code>runSkeinWasmPlanHost(...)</code> remains available for <code>host_interpreted_v1</code> artifacts or deployments that prefer server execution.</p>
+<h4 id="wasmplanperf_report">wasm.plan.perf_report<a class="headerlink" href="#wasmplanperf_report" title="Permanent link">¶</a></h4>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;warmup_iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.perf.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;generated_filter_project_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;warmup_iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;outputs_match&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;candidate&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strategy&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scalar_generated_filter_project_v1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;notes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[]},</span>
+<span class="w">  </span><span class="nt">&quot;host&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;latency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;generated&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;latency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;generated_speedup_vs_host&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.83</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>wasm.plan.perf_report</code> is a deterministic exploration harness for R19. It compares host interpretation with generated scalar Wasm when available and reports SIMD eligibility notes. It does not claim production SIMD support; <code>supports_simd</code> remains false until SIMD-lowered codegen exists.</p>
 <h4 id="wasmplanrun">wasm.plan.run<a class="headerlink" href="#wasmplanrun" title="Permanent link">¶</a></h4>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -1883,6 +2009,9 @@ unchanged.</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;applied&quot;</span><span class="p">:</span><span class="kc">true</span><span class="p">,</span><span class="nt">&quot;coverage&quot;</span><span class="p">:[{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;app&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;start_seq&quot;</span><span class="p">:</span><span class="mi">11</span><span class="p">,</span><span class="nt">&quot;end_seq&quot;</span><span class="p">:</span><span class="mi">40</span><span class="p">,</span><span class="nt">&quot;updated_at_ms&quot;</span><span class="p">:</span><span class="mi">0</span><span class="p">,</span><span class="nt">&quot;bundle_id&quot;</span><span class="p">:</span><span class="s2">&quot;edge_bundle_01&quot;</span><span class="p">,</span><span class="nt">&quot;redaction_mode&quot;</span><span class="p">:</span><span class="s2">&quot;hash_pk&quot;</span><span class="p">}]}</span>
 </code></pre></div>
 
+<p>Notes:
+- Coverage is tracked as per-table windows; applying a disjoint bundle preserves separate windows instead of collapsing the gap.
+- Overlapping or adjacent windows are merged into a single retained coverage range.</p>
 <h4 id="edgebundlestatus">edge.bundle.status<a class="headerlink" href="#edgebundlestatus" title="Permanent link">¶</a></h4>
 <p>Return current coverage and routing eligibility for a bounded-staleness query.</p>
 <p>Params:</p>
@@ -1899,6 +2028,9 @@ unchanged.</p>
 <span class="p">}</span>
 </code></pre></div>
 
+<p>Notes:
+- <code>route.reason</code> is omitted for eligible routes; ineligible verdicts currently use <code>missing_coverage</code>, <code>coverage_gap</code>, or <code>lag_exceeded</code>.
+- <code>observed_lag</code> is computed from the end of contiguous retained coverage for each referenced table, so disjoint windows do not satisfy a bounded-staleness read through missing WAL.</p>
 <h3 id="1018-udf">10.18 udf.*<a class="headerlink" href="#1018-udf" title="Permanent link">¶</a></h3>
 <p>UDF methods are defined in <code>docs/WASM_UDFS.md</code>. Implementations MAY expose:
 - <code>udf.register_wasm</code>
@@ -1915,7 +2047,7 @@ unchanged.</p>
 - <code>maintenance.compaction.resume</code>
 - <code>maintenance.replay.export</code>: export snapshot-based replay bundles. Params include optional <code>db</code>, <code>from_lsn</code>, <code>to_lsn</code>, <code>bundle_id</code>, and <code>redaction: {"mode":"none"|"hash_pk"|"drop_pk", "salt":"optional"}</code>.
 - <code>maintenance.replay.import</code>: validate and materialize a replay bundle into a hidden replay workspace.
-- <code>maintenance.replay.run</code>: reopen a replay workspace and compare canonical checksums; returns <code>performance_report</code> for performance-annotated bundles.</p>
+- <code>maintenance.replay.run</code>: reopen a replay workspace and compare canonical checksums; returns <code>performance_report</code> for performance-annotated bundles, including normalized replay-run <code>checksum_match</code> plus raw storage/cache/timing variance deltas.</p>
 <h3 id="1020-telemetry-advisor-admin-cluster">10.20 telemetry.<em> / advisor.</em> / admin.<em> / cluster.</em><a class="headerlink" href="#1020-telemetry-advisor-admin-cluster" title="Permanent link">¶</a></h3>
 <h4 id="advisorindex_synthesize-experimental">advisor.index_synthesize (experimental)<a class="headerlink" href="#advisorindex_synthesize-experimental" title="Permanent link">¶</a></h4>
 <p>Propose index candidates from observed dependency telemetry (R16).</p>
@@ -1938,12 +2070,33 @@ unchanged.</p>
 <span class="w">      </span><span class="nt">&quot;include&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span>
 <span class="w">      </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span><span class="p">,</span>
 <span class="w">      </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
-<span class="w">      </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span>
+<span class="w">      </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;cost&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;read_benefit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">128.4</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;write_overhead&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.05</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;compaction_overhead&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.10</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;net_score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">128.25</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;write_pressure&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;key_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;include_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;dependency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;predicate_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;equality_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;range_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">        </span><span class="nt">&quot;range_shape&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;none&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;order_by_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;created_at&quot;</span><span class="p">],</span>
+<span class="w">        </span><span class="nt">&quot;group_by_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">        </span><span class="nt">&quot;join_key_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">        </span><span class="nt">&quot;projection_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">]</span>
+<span class="w">      </span><span class="p">}</span>
 <span class="w">    </span><span class="p">}</span>
 <span class="w">  </span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 
+<p>The optional <code>dependency</code> object explains the captured workload signal behind the suggestion. <code>predicate_columns</code> is the union of equality and range predicates; <code>range_shape</code> is <code>none</code>, <code>single_range_after_equality_prefix</code>, or <code>multi_range_observed</code>; the order/group/join/projection arrays describe sort needs, grouping needs, equi-join keys, and covering-column candidates. Composite key generation uses equality columns first, then join keys, one range column, group-by columns, and order-by columns; projected non-key columns are emitted as covering <code>include</code> candidates.</p>
+<p>The optional <code>cost</code> object is the transparent scoring model. <code>read_benefit</code> is derived from observed scan pressure and workload features; <code>write_overhead</code> estimates maintenance pressure from table write/version activity and candidate width; <code>compaction_overhead</code> estimates storage/compaction pressure from scan volume and candidate width. <code>score</code> equals <code>cost.net_score</code>.</p>
 <h4 id="advisorapply_index-experimental">advisor.apply_index (experimental)<a class="headerlink" href="#advisorapply_index-experimental" title="Permanent link">¶</a></h4>
 <p>Queue an in-memory secondary-index build for the suggestion and record the action.</p>
 <p>Params:</p>
@@ -1961,6 +2114,102 @@ unchanged.</p>
 
 <p>Initial status values: <code>queued</code>, <code>exists</code>.</p>
 <p>Follow <code>advisor.history</code> for terminal lifecycle state and result metadata.</p>
+<h4 id="advisorretire_unused-experimental">advisor.retire_unused (experimental)<a class="headerlink" href="#advisorretire_unused-experimental" title="Permanent link">¶</a></h4>
+<p>Dry-run or retire advisor-built secondary indexes whose dependency signal is absent or older than a caller-provided idle threshold.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;max_idle_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">86400000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;note&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;daily advisor retirement review&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;evaluated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;retired&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;candidates&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;suggestion_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;idxs_5a2c...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">,</span><span class="s2">&quot;created_at&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;include&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;name&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;retired&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eligible&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;idle_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">172800000</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Safety rules: only the latest active <code>advisor.apply_index</code> action for a suggestion is considered; a newer <code>dismiss</code> or <code>retire</code> removes it from candidates; recent dependency signals return <code>reason:"recently_used"</code>; actual retirements record action <code>retire</code> in <code>advisor.history</code>.</p>
+<h4 id="advisorevaluate-experimental">advisor.evaluate (experimental)<a class="headerlink" href="#advisorevaluate-experimental" title="Permanent link">¶</a></h4>
+<p>Replay phased dependency samples through a scratch advisor state and report how quickly the top suggestion converges after a workload shift.</p>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;min_queries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;min_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;phases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;equality_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">400</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;repeats&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;samples&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;equality_columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">],</span>
+<span class="w">          </span><span class="nt">&quot;rows_scanned&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;repeats&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.advisor.evaluate.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;phase_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;min_queries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;min_rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;initial_top&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">  </span><span class="nt">&quot;final_top&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">]},</span>
+<span class="w">  </span><span class="nt">&quot;phases&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;city_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email_lookup&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;observations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_before&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;city&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;top_after&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;email&quot;</span><span class="p">]},</span>
+<span class="w">      </span><span class="nt">&quot;final_top_stable_after_observation&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;top_changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;distinct_top_suggestions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Each phase consists of one or more dependency samples. Samples may populate <code>equality_columns</code>, <code>range_columns</code>, <code>order_by_columns</code>, <code>group_by_columns</code>, <code>join_key_columns</code>, <code>projection_columns</code>, <code>rows_scanned</code>, and <code>repeats</code>. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state.</p>
 <h4 id="advisordismiss-experimental">advisor.dismiss (experimental)<a class="headerlink" href="#advisordismiss-experimental" title="Permanent link">¶</a></h4>
 <p>Dismiss an index suggestion (suppressed from future synthesize output). Drops any advisor-built in-memory index.</p>
 <p>Params:</p>
@@ -1977,7 +2226,7 @@ unchanged.</p>
 </code></pre></div>
 
 <h4 id="advisorhistory-experimental">advisor.history (experimental)<a class="headerlink" href="#advisorhistory-experimental" title="Permanent link">¶</a></h4>
-<p>List advisor actions (apply/dismiss).</p>
+<p>List advisor actions (apply/dismiss/retire).</p>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;table&quot;</span><span class="p">:{</span><span class="nt">&quot;db&quot;</span><span class="p">:</span><span class="s2">&quot;mydb&quot;</span><span class="p">,</span><span class="nt">&quot;table&quot;</span><span class="p">:</span><span class="s2">&quot;users&quot;</span><span class="p">},</span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="mi">20</span><span class="p">}</span>
 </code></pre></div>
@@ -2086,7 +2335,7 @@ unchanged.</p>
 
 <p>Control-plane method families for operations and adoption:
 - telemetry: <code>telemetry.compat_log</code>, <code>telemetry.snapshot</code>
-- advisor: <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.dismiss</code>, <code>advisor.history</code>, <code>advisor.migration_hints</code> (MySQL -&gt; SkeinQL)
+- advisor: <code>advisor.index_synthesize</code>, <code>advisor.apply_index</code>, <code>advisor.retire_unused</code>, <code>advisor.evaluate</code>, <code>advisor.dismiss</code>, <code>advisor.history</code>, <code>advisor.migration_hints</code> (MySQL -&gt; SkeinQL)
 - migration: <code>migration.intent_report</code>, <code>migration.rewrite_preview</code>, <code>migration.report_export</code>
 - admin: <code>admin.users.*</code>, <code>admin.roles.*</code>
 - cluster: <code>cluster.status</code>, <code>cluster.nodes</code>, <code>cluster.join_token.create</code>, <code>cluster.node.join</code>, <code>cluster.node.remove</code>, <code>cluster.node.leave</code>, <code>cluster.replica.promote</code>, <code>cluster.shard.create</code>, <code>cluster.shard.move</code>, <code>cluster.shard.rebalance</code></p>

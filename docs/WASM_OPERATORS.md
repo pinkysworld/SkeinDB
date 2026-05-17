@@ -197,6 +197,43 @@ Result:
 }
 ```
 
+### wasm.plan.perf_report
+
+Params:
+
+```json
+{
+  "artifact_b64": "...",
+  "args": [{"t":"u64","v":7}],
+  "iterations": 5,
+  "warmup_iterations": 1
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.plan.perf.v1",
+  "execution": "generated_filter_project_v1",
+  "iterations": 5,
+  "warmup_iterations": 1,
+  "operators": ["scan", "filter", "project"],
+  "outputs_match": true,
+  "simd": {
+    "candidate": true,
+    "enabled": false,
+    "strategy": "scalar_generated_filter_project_v1",
+    "notes": ["SIMD lane lowering is not emitted by this build"]
+  },
+  "host": {"rows": 1, "columns": 2, "latency": {"p50_ns": 1000}},
+  "generated": {"rows": 1, "columns": 2, "latency": {"p50_ns": 1200}},
+  "generated_speedup_vs_host": 0.83
+}
+```
+
+This report is intentionally an exploration/perf-test baseline. It identifies fixed-width `u64`/`bool` generated artifacts as SIMD candidates and compares scalar generated Wasm against the host interpreter, but `supports_simd` remains `false` until SkeinDB ships a production SIMD-lowered codegen path.
+
 ### wasm.plan.edge_package
 
 Params:
@@ -221,12 +258,16 @@ Result:
   "runner_js": "export async function runSkeinWasmPlan(...) { ... }",
   "instructions": [
     "Store artifact_b64 and manifest_json with the edge worker or browser bundle.",
-    "Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format."
+    "Call runSkeinWasmPlanEdge with artifact_b64, input_rows, args, and result_format to execute the embedded generated Wasm module locally."
   ]
 }
 ```
 
-The v1 edge package ships the plan artifact, a manifest, and a small JavaScript runner that calls `wasm.plan.run` on a SkeinDB host. It does not yet execute a generated Wasm module inside the edge process.
+The v1 edge package ships the plan artifact, a manifest, and a JavaScript runner with two execution paths:
+- `runSkeinWasmPlanEdge(...)` executes `generated_filter_project_v1` artifacts locally in the edge/browser process. Callers provide rows for the artifact's `input_table_columns`; the runner encodes them as `skein.wasm.batch.v1`, appends typed `args` as parameter columns, runs the embedded module with `WebAssembly.instantiate`, and decodes the output batch.
+- `runSkeinWasmPlanHost(...)` calls `wasm.plan.run` on a SkeinDB host for `host_interpreted_v1` artifacts or deployments that prefer server execution.
+
+`runSkeinWasmPlan(...)` chooses local execution when `input_rows` / `inputRows` or `input_batch_b64` / `inputBatchB64` is supplied for a generated artifact, otherwise it uses the host fallback.
 
 ### wasm.plan.run
 
@@ -264,4 +305,5 @@ Current implementation:
 - Only the scan/filter/project subset is accepted.
 - `abi` and `target` are validated; `target` is recorded in the artifact for inspection and packaging.
 - `wasm.plan.inspect` exposes artifact metadata without running the query.
-- `wasm.plan.edge_package` emits a host-backed edge runner package; generated modules stay embedded in the artifact but still execute via `wasm.plan.run` on a SkeinDB host. SIMD and standalone in-edge execution remain open T086/T087 work.
+- `wasm.plan.edge_package` emits standalone JavaScript edge execution for generated artifacts and a host-backed fallback for interpreted artifacts.
+- `wasm.plan.perf_report` compares host and generated scalar execution, verifies output parity, and records SIMD candidate notes for future SIMD-lowered codegen work.

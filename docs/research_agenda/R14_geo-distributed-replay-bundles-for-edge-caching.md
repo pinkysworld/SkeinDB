@@ -51,3 +51,6 @@ Current adaptation:
 - `maintenance.replay.export` now accepts optional primary-key redaction with `none`, `hash_pk`, and `drop_pk` modes.
 - Redacted replay bundles carry optional `redaction` metadata and compute table, bundle, and performance checksums after redaction.
 - `edge.bundle.request` continues to use the same redaction mode vocabulary for bounded change-window bundles.
+- `edge.bundle.apply` now stores multiple per-table coverage windows and merges only overlapping or adjacent ranges, so retained edge state does not claim coverage across missing WAL.
+- `edge.bundle.status` evaluates bounded-staleness routes against contiguous retained coverage and returns `coverage_gap` when disjoint bundle windows would otherwise hide missing history.
+- Focused implementation coverage lives in `edge_bundle_status_detects_coverage_gap`, `edge_bundle_status_reports_coverage_gap`, and `r14_edge_bundle_gap_blocks_bounded_staleness_route`.

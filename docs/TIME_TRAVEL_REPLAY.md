@@ -212,7 +212,7 @@ Current R18 implementation:
 - `maintenance.replay.export` includes an optional `performance` profile in each bundle.
 - The profile uses format `skein.replay.performance.v1` and captures `lsm_state` (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), `cache_warm` (select/patch cache entry counts plus hot-table hints), and `timing` (change count, commit-span, and p50/p95/p99 inter-event deltas).
 - The performance profile has its own checksum and is validated by `maintenance.replay.import` and `maintenance.replay.run` without changing the correctness checksum for older data-only bundles.
-- `maintenance.replay.run` returns `performance_report` when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.
+- `maintenance.replay.run` returns `performance_report` when the bundle contains a performance profile. The runner rehydrates captured select/patch cache counts inside the replay workspace before recomputing the observed profile, compares a normalized checksum over reconstructable snapshot state, and reports raw storage/cache/timing deltas separately.
 - `skeindb replay run --json --out <report.json>` writes the full replay run result for CI artifacts, and `skeindb replay compare --baseline <base.json> --candidate <head.json>` fails when candidate p95/p99/span/storage/cache-hot-table deltas exceed configured thresholds.
 
 Current R14/T185 redaction implementation:
@@ -222,13 +222,22 @@ Current R14/T185 redaction implementation:
 - Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.
 - SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes `--redaction` plus `--redaction-salt`.
 
+Current R14/T186 bounded-staleness routing implementation:
+
+- `edge.bundle.request` emits explicit coverage windows per table, including redaction metadata when requested.
+- `edge.bundle.apply` now preserves multiple disjoint coverage windows per table and merges only overlapping or adjacent ranges.
+- `edge.bundle.status` computes bounded-staleness eligibility from contiguous retained coverage; when retained windows leave a hole before the origin watermark, routing stays on origin with reason `coverage_gap`.
+- Focused coverage lives in `edge_bundle_status_detects_coverage_gap`, `edge_bundle_status_reports_coverage_gap`, and `r14_edge_bundle_gap_blocks_bounded_staleness_route`.
+
 Current R18/T189 CI harness behavior:
 
 - The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.
 - Threshold flags cover `--max-p95-delta-ms`, `--max-p99-delta-ms`, `--max-span-delta-ms`, `--max-disk-bytes-delta`, and `--max-missing-hot-tables-delta`.
 - The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.
 
-Remaining R18 work:
+Current R18/T188 replay-runner implementation:
 
-- Timing injection and cache/LSM reconstruction fidelity are still open.
-- CI regression gates that compare latency distributions across commits are still open.
+- Replay bundles remain snapshot-based, so the runner does not attempt impossible row-by-row WAL mutation re-execution.
+- `maintenance.replay.run` deterministically rehydrates in-memory select/patch cache counts from the captured `cache_warm` hints before collecting the observed performance profile.
+- `performance_report.checksum_match` compares a replay-run checksum over reconstructable snapshot state (table/MVCC/cache/timing), while `disk_bytes_delta` and `wal_bytes_delta` remain as explicit variance fields instead of checksum gates.
+- Focused coverage lives in `replay_bundle_run_rehydrates_cache_hints`, `maintenance_replay_run_rehydrates_cache_hints`, and `t188_replay_run_rehydrates_cache_hints`.

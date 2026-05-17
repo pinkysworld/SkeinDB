@@ -154,7 +154,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <li><strong>19. WebAssembly-Native Query Operators</strong> → <code>docs/research_agenda/R19_webassembly-native-query-operators.md</code></li>
 <li><strong>20. Energy-Aware Compaction Scheduling</strong> → <code>docs/research_agenda/R20_energy-aware-compaction-scheduling.md</code></li>
 </ul>
-<h2 id="implementation-status-snapshot-2026-05-16">Implementation status snapshot (2026-05-16)<a class="headerlink" href="#implementation-status-snapshot-2026-05-16" title="Permanent link">¶</a></h2>
+<h2 id="implementation-status-snapshot-2026-05-17">Implementation status snapshot (2026-05-17)<a class="headerlink" href="#implementation-status-snapshot-2026-05-17" title="Permanent link">¶</a></h2>
 <p>All 20 agenda tracks now have executable prototype coverage in SkeinDB (method surfaces, runtime features, tests, or benchmark scaffolds). The matrix below points to the primary implementation entry points.</p>
 <table>
 <thead>
@@ -173,7 +173,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <tr>
 <td>R02</td>
 <td>Implemented (prototype)</td>
-<td>Hybrid row+column snapshot surfaces (<code>docs/COLUMN_SNAPSHOTS.md</code>, engine snapshot paths)</td>
+<td>Hybrid row+column snapshot surfaces plus live-row-count build-vs-benefit pricing, bounded hot-projection tracking, dependency-driven refresh/invalidation, and online controller-driven replacement decisions (<code>docs/COLUMN_SNAPSHOTS.md</code>, engine snapshot paths)</td>
 </tr>
 <tr>
 <td>R03</td>
@@ -218,7 +218,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <tr>
 <td>R11</td>
 <td>Implemented (prototype)</td>
-<td>Autoparameterization analysis/classification (<code>ai.autoparam.*</code>)</td>
+<td>Autoparameterization classifier catalog, label schema, analysis, classification, feedback, and metrics (<code>ai.autoparam.*</code>)</td>
 </tr>
 <tr>
 <td>R12</td>
@@ -233,7 +233,7 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <tr>
 <td>R14</td>
 <td>Implemented (prototype)</td>
-<td>Replay bundle/time-travel export surfaces (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
+<td>Replay bundle/time-travel export surfaces plus bounded-staleness edge bundle routing windows (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
 </tr>
 <tr>
 <td>R15</td>
@@ -242,8 +242,8 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 </tr>
 <tr>
 <td>R16</td>
-<td>Implemented (prototype)</td>
-<td>Index advisor synthesis/apply/history (<code>advisor.*</code>)</td>
+<td>Hardened</td>
+<td>Index advisor synthesis/apply/retire/evaluate/history (<code>advisor.*</code>) with dependency metadata, composite/covering generation, overhead-aware scoring, workload-shift convergence reporting, and stale-dependency retirement safety</td>
 </tr>
 <tr>
 <td>R17</td>
@@ -253,12 +253,12 @@ Priority recommendations are based on novelty, feasibility, alignment with Skein
 <tr>
 <td>R18</td>
 <td>Implemented (prototype)</td>
-<td>Reproducible replay/report tooling (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
+<td>Reproducible replay/report tooling with deterministic replay cache-hint reconstruction and normalized variance checks (<code>docs/TIME_TRAVEL_REPLAY.md</code>)</td>
 </tr>
 <tr>
 <td>R19</td>
 <td>Implemented (prototype)</td>
-<td>Wasm-native plan compile/run + batch ABI with generated fixed-width filter/project artifacts, Wasmtime execution, and host fallback for unsupported plans (<code>wasm.plan.*</code>)</td>
+<td>Wasm-native plan compile/run + batch ABI with generated fixed-width filter/project artifacts, Wasmtime execution, standalone JavaScript edge packages for generated artifacts, SIMD eligibility/perf reporting, and host fallback for unsupported plans (<code>wasm.plan.*</code>)</td>
 </tr>
 <tr>
 <td>R20</td>
@@ -434,7 +434,7 @@ Each proposal is designed to produce publishable research contributions while ad
 <ul>
 <li><a href="#executive-summary">Executive Summary</a></li>
 <li><a href="#proposals-20">Proposals (20)</a></li>
-<li><a href="#implementation-status-snapshot-2026-05-16">Implementation status snapshot (2026-05-16)</a></li>
+<li><a href="#implementation-status-snapshot-2026-05-17">Implementation status snapshot (2026-05-17)</a></li>
 <li><a href="#priority-matrix-from-agenda">Priority Matrix (from agenda)</a></li>
 <li><a href="#dependency-tracking-as-infrastructure">Dependency Tracking as Infrastructure</a></li>
 <li><a href="#webassembly-as-universal-sandbox">WebAssembly as Universal Sandbox</a></li>

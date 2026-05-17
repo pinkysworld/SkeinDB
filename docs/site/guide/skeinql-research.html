@@ -211,8 +211,8 @@
 <li><code>edge.bundle.request</code> — request bounded WAL slice / replay bundle</li>
 <li>windows: table + seq bounds + max events</li>
 <li>redaction: <code>none</code> | <code>hash_pk</code> | <code>drop_pk</code></li>
-<li><code>edge.bundle.apply</code> — apply bundle coverage to the edge node</li>
-<li><code>edge.bundle.status</code> — coverage + bounded-staleness routing verdict</li>
+<li><code>edge.bundle.apply</code> — apply bundle coverage windows to the edge node</li>
+<li><code>edge.bundle.status</code> — coverage + bounded-staleness routing verdict, including gap detection for disjoint windows</li>
 </ul>
 <h2 id="11-schema-extensions-conflict-free-schema-evolution">11. schema.* (extensions) — Conflict-free schema evolution<a class="headerlink" href="#11-schema-extensions-conflict-free-schema-evolution" title="Permanent link">¶</a></h2>
 <p>Related: R15</p>
@@ -261,7 +261,7 @@
 <ul>
 <li><code>maintenance.replay.export</code> — exports data bundles with optional <code>performance</code> profile metadata (<code>lsm_state</code>, <code>cache_warm</code>, and <code>timing</code>).</li>
 <li><code>maintenance.replay.import</code> — validates both correctness checksums and performance-profile checksums when present.</li>
-<li><code>maintenance.replay.run</code> — returns <code>performance_report</code> variance deltas for performance-annotated bundles.</li>
+<li><code>maintenance.replay.run</code> — returns <code>performance_report</code> variance deltas for performance-annotated bundles, with replay-run checksum parity over reconstructable snapshot state.</li>
 </ul>
 <h2 id="15-wasm-extensions-wasm-native-operators">15. wasm.* (extensions) — Wasm-native operators<a class="headerlink" href="#15-wasm-extensions-wasm-native-operators" title="Permanent link">¶</a></h2>
 <p>Related: R19</p>

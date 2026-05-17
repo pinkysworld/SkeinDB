@@ -41,6 +41,13 @@ SkeinDB mentions 'optional column snapshots for analytics' but doesn't formalize
 
 This section is an *adaptation* of the research direction into SkeinDB’s architecture and backlog.
 
+Current prototype status:
+- Phase 1's build-vs-benefit pricing is implemented for single-table SELECTs.
+- Candidate snapshot build cost is evaluated against the live table row count so selective probes do not underestimate full materialization cost.
+- Phase 2's hot projection detector is implemented as a bounded per-table set of normalized column patterns ranked by frequency, scan volume, and recency.
+- Phase 3's dependency-driven maintenance preserves unaffected snapshots across schema-version changes and invalidates only snapshots/patterns that depend on dropped columns.
+- Phase 4's online controller can replace a broader active covering snapshot with a narrower hot projection when the additional build cost is repaid by lower snapshot scan cost.
+
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.

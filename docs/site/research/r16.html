@@ -44,7 +44,7 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Hardened Runtime Slice</strong> — Dependency capture, candidate generation, overhead-aware scoring, stale-index retirement, and workload-shift evaluation via <code>advisor.evaluate</code> are live; measured before/after latency deltas remain backlog work</span>
   </div>
 
   <div class="novelty-card">
@@ -102,6 +102,7 @@
       <div class="int-chip">Index Advisor</div>
       <div class="int-chip">Web Admin</div>
     </div>
+    <p>The current advisor runtime exposes dependency evidence directly on synthesized suggestions: predicate columns, equality and range columns, range shape, order-by and group-by needs, join keys, and projection columns for covering-index review. Candidate generation uses those dependencies to build composite keys and covering include columns, each suggestion reports read benefit, write overhead, compaction overhead, and net score, stale advisor-built indexes can be retired with recent-use safety checks, and <code>advisor.evaluate</code> replays phased workload samples to report how quickly recommendations converge after a workload shift.</p>
   </div>
 
   <div class="section">

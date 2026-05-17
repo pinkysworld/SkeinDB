@@ -202,8 +202,12 @@ See: <code>docs/research_agenda/R11_llm-assisted-query-autoparameterization.md</
 - Cache classification results by query fingerprint and schema version.
 - Add feedback: frequent plan-cache misses or regressions trigger reclassification.</p>
 <p>Prototype RPC:
-- <code>ai.autoparam.classify</code> accepts a list of literal contexts + optional rules and returns labels (see <code>docs/SKEINQL.md</code>).
-- <code>ai.autoparam.analyze</code> accepts SQL text and returns normalized SQL, fingerprint, literals, and labels.</p>
+- <code>ai.autoparam.classifiers</code> returns the supported classifier catalog. The first implementation is <code>offline_rules_v1</code>, a deterministic offline classifier using explicit rules, schema hints, and column-name heuristics.
+- <code>ai.autoparam.label_schema</code> returns the versioned label schema, confidence bounds, and cache-key policy for each decision.
+- <code>ai.autoparam.classify</code> accepts a list of literal contexts + optional rules/classifier selection and returns labels (see <code>docs/SKEINQL.md</code>).
+- <code>ai.autoparam.analyze</code> accepts SQL text and returns normalized SQL, fingerprint, literals, and labels, with the same optional classifier selection.
+- <code>ai.autoparam.feedback</code> records plan-cache-miss feedback, re-runs the selected classifier, and accumulates per-fingerprint miss/reclassification counts.
+- <code>ai.autoparam.metrics</code> reports plan-cache hit rate beside classifier invocation/latency counters and feedback totals.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/AUTOPARAMETERIZATION.md" target="_blank" rel="noopener">Edit this page on GitHub</a>

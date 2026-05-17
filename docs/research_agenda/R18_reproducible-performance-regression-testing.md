@@ -49,5 +49,6 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 Current adaptation:
 
 - Replay bundles now carry optional `skein.replay.performance.v1` metadata with storage/LSM counters, cache warm hints, and timing summaries.
-- `maintenance.replay.run` emits a variance report for annotated bundles.
-- Full timing injection, cache reconstruction, and CI latency-distribution comparison remain open research tasks.
+- `maintenance.replay.run` emits a variance report for annotated bundles, rehydrates captured select/patch cache counts in the replay workspace, and compares a normalized replay-run checksum over reconstructable snapshot state.
+- Snapshot bundles still rely on retained change-event metadata plus table snapshots rather than impossible row-by-row WAL mutation replay.
+- The raw `disk_bytes` / `wal_bytes` fields remain part of the variance report instead of the replay-run checksum so workspace-local artifact files do not cause false mismatches.

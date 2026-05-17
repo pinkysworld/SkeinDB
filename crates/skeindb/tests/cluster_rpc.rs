@@ -4893,6 +4893,74 @@ async fn r16_index_advisor_apply_failure_rolls_back_and_resurfaces_suggestion() 
 }
 
 #[tokio::test]
+async fn r16_index_advisor_evaluate_reports_shift_convergence() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r16_index_advisor_evaluate")?;
+    let client = RpcHttpClient::new(server.base_url());
+
+    let resp = client
+        .sql_exec(json!({
+            "default_db": "test",
+            "sql": "CREATE TABLE IF NOT EXISTS r16_eval_test (id INT PRIMARY KEY, city VARCHAR(50), email VARCHAR(100))"
+        }))
+        .await?;
+    assert!(resp.ok);
+
+    let eval = client
+        .rpc(
+            "advisor.evaluate",
+            json!({
+                "table": { "db": "test", "table": "r16_eval_test" },
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "city_lookup",
+                        "samples": [
+                            {
+                                "equality_columns": ["city"],
+                                "rows_scanned": 400,
+                                "repeats": 3
+                            }
+                        ]
+                    },
+                    {
+                        "label": "email_lookup",
+                        "samples": [
+                            {
+                                "equality_columns": ["email"],
+                                "rows_scanned": 500,
+                                "repeats": 3
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await?;
+    assert!(eval.ok, "{eval:?}");
+    let result = eval.result.expect("missing advisor evaluate result");
+    assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+    assert_eq!(result["phase_count"].as_u64(), Some(2));
+    assert_eq!(result["total_observations"].as_u64(), Some(6));
+    assert_eq!(result["phases"][0]["top_after"]["columns"], json!(["city"]));
+    assert_eq!(
+        result["phases"][1]["top_before"]["columns"],
+        json!(["city"])
+    );
+    assert_eq!(
+        result["phases"][1]["top_after"]["columns"],
+        json!(["email"])
+    );
+    assert_eq!(
+        result["phases"][1]["final_top_stable_after_observation"].as_u64(),
+        Some(3)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn r02_adaptive_storage_format_selection() -> anyhow::Result<()> {
     // R02: Delta-Chained Values — verify format selection and snapshot management
     let _guard = cluster_test_guard().await;
@@ -5216,7 +5284,6 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
     let server = HttpHarness::start("r15_schema_evo")?;
     let client = reqwest::Client::new();
     let base = server.base_url();
-
     // Create a table
     let resp = client
         .post(format!("{base}/api/v1/rpc"))
@@ -5288,6 +5355,105 @@ async fn r15_schema_evolution_propose_merge_apply() -> anyhow::Result<()> {
         .send()
         .await?;
     assert!(resp.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn r14_edge_bundle_gap_blocks_bounded_staleness_route() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("r14_bundle_gap")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t1",
+            "method": "sql.exec",
+            "params": { "default_db": "test", "sql": "CREATE TABLE IF NOT EXISTS r14_gap_events (id INT PRIMARY KEY, payload TEXT)" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    for i in 1..=3 {
+        let resp = client
+            .post(format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": format!("ins{i}"),
+                "method": "sql.exec",
+                "params": { "default_db": "test", "sql": format!("INSERT INTO r14_gap_events (id, payload) VALUES ({i}, 'event_{i}')") }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "bundle1",
+            "method": "edge.bundle.request",
+            "params": {
+                "windows": [
+                    { "table": { "db": "test", "table": "r14_gap_events" }, "from_seq": 0, "to_seq": 1 }
+                ]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let first_bundle = body["result"]["bundle"].clone();
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "bundle2",
+            "method": "edge.bundle.request",
+            "params": {
+                "windows": [
+                    { "table": { "db": "test", "table": "r14_gap_events" }, "from_seq": 2, "to_seq": 3 }
+                ]
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let second_bundle = body["result"]["bundle"].clone();
+
+    for (req_id, bundle) in [("apply1", first_bundle), ("apply2", second_bundle)] {
+        let resp = client
+            .post(format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": req_id,
+                "method": "edge.bundle.apply",
+                "params": { "bundle": bundle }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success());
+    }
+
+    let query = select_query("test", "r14_gap_events", &["id"]);
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "status1",
+            "method": "edge.bundle.status",
+            "params": { "query": query, "max_lag": 0 }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let result = body["result"].clone();
+    assert_eq!(result["coverage"].as_array().map(Vec::len), Some(2));
+    assert_eq!(result["route"]["eligible"].as_bool(), Some(false));
+    assert_eq!(result["route"]["reason"].as_str(), Some("coverage_gap"));
+    assert_eq!(result["route"]["observed_lag"].as_u64(), Some(2));
 
     Ok(())
 }
@@ -5761,6 +5927,141 @@ async fn t183_replay_bundle_export_import_run_roundtrip() -> anyhow::Result<()> 
         .get("result")
         .expect("redacted run should return result");
     assert_eq!(redacted_run["ok"].as_bool(), Some(true));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn t188_replay_run_rehydrates_cache_hints() -> anyhow::Result<()> {
+    let _guard = cluster_test_guard().await;
+    let server = HttpHarness::start("t188_replay_cache_hints")?;
+    let client = reqwest::Client::new();
+    let base = server.base_url();
+
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS replay_cache_users (id INT PRIMARY KEY, name TEXT)",
+        "INSERT INTO replay_cache_users (id, name) VALUES (1, 'Ada')",
+    ] {
+        let resp = client
+            .post(format!("{base}/api/v1/rpc"))
+            .json(&serde_json::json!({
+                "skeinql": "1.0", "id": "t188",
+                "method": "sql.exec",
+                "params": { "default_db": "test", "sql": sql }
+            }))
+            .send()
+            .await?;
+        assert!(resp.status().is_success(), "sql should succeed: {sql}");
+    }
+
+    let query = select_query("test", "replay_cache_users", &["id", "name"]);
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_select",
+            "method": "query.select",
+            "params": {
+                "query": query.clone(),
+                "cache": { "want_etag": true }
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let etag = body["result"]["etag"]
+        .as_str()
+        .expect("query.select should return etag")
+        .to_string();
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_update",
+            "method": "sql.exec",
+            "params": {
+                "default_db": "test",
+                "sql": "UPDATE replay_cache_users SET name = 'Ada Lovelace' WHERE id = 1"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_patch",
+            "method": "query.patch",
+            "params": {
+                "query": query,
+                "base_etag": etag,
+                "include_full": false
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_export",
+            "method": "maintenance.replay.export",
+            "params": { "db": "test", "bundle_id": "cache_hints_bundle" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let bundle = body["result"]["bundle"].clone();
+    assert_eq!(
+        bundle["performance"]["cache_warm"]["cached_select_entries"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        bundle["performance"]["cache_warm"]["cached_patch_entries"].as_u64(),
+        Some(1)
+    );
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_import",
+            "method": "maintenance.replay.import",
+            "params": {
+                "bundle": bundle,
+                "workspace_id": "rpc_cache_hints"
+            }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    let resp = client
+        .post(format!("{base}/api/v1/rpc"))
+        .json(&serde_json::json!({
+            "skeinql": "1.0", "id": "t188_run",
+            "method": "maintenance.replay.run",
+            "params": { "workspace_id": "rpc_cache_hints" }
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await?;
+    let run_result = body["result"].clone();
+    assert_eq!(
+        run_result["performance_report"]["checksum_match"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        run_result["performance_report"]["cache_warm"]["cached_select_entries_delta"].as_i64(),
+        Some(0)
+    );
+    assert_eq!(
+        run_result["performance_report"]["cache_warm"]["cached_patch_entries_delta"].as_i64(),
+        Some(0)
+    );
 
     Ok(())
 }

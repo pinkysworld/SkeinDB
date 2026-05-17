@@ -1499,6 +1499,64 @@ Result:
 
 LLM-assisted autoparameterization helpers (prototype).
 
+#### ai.autoparam.classifiers
+Return the supported classifier catalog.
+
+Params:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.ai.autoparam.classifiers.v1",
+  "default_classifier": "offline_rules_v1",
+  "classifiers": [
+    {
+      "name": "offline_rules_v1",
+      "kind": "offline_rules",
+      "default": true,
+      "supports_rules": true,
+      "supports_schema": true,
+      "description": "deterministic offline classifier using explicit rules, schema hints, and column-name heuristics"
+    }
+  ]
+}
+```
+
+Only advertised classifier names are accepted. Unknown names return `invalid_request` instead of silently falling back.
+
+#### ai.autoparam.label_schema
+Return the versioned label taxonomy used by semantic autoparameterization.
+
+Params:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.ai.autoparam.label_schema.v1",
+  "taxonomy_version": 1,
+  "default_decision": "parameterize",
+  "confidence_min": 0.0,
+  "confidence_max": 1.0,
+  "decisions": [
+    {"decision":"parameterize","parameterized":true,"cache_key_policy":"replace literal with a positional parameter","meaning":"the literal is request data and can vary between executions"},
+    {"decision":"semantic_constant","parameterized":false,"cache_key_policy":"keep literal in the semantic cache key when policy applies","meaning":"the literal is part of query meaning, such as an enum, state, or type tag"},
+    {"decision":"unknown","parameterized":false,"cache_key_policy":"defer to syntactic autoparameterization policy","meaning":"the classifier lacks enough context for a confident decision"}
+  ]
+}
+```
+
+The schema also includes `literal_fields` and `label_fields` entries that describe the literal context (`value`, `column`, `table`, `op`) and label output (`idx`, `decision`, `confidence`, `reason`) shapes.
+
 #### ai.autoparam.classify
 Classify literals as parameterizable vs semantic constants.
 
@@ -1515,7 +1573,8 @@ Params:
   "rules": {
     "semantic_constant_columns": ["users.status", "*.state"],
     "parameterize_columns": ["users.id"]
-  }
+  },
+  "classifier": {"name":"offline_rules_v1"}
 }
 ```
 
@@ -1538,6 +1597,7 @@ Decisions:
 Notes:
 - `db` enables schema-aware classification when literals include table names.
 - `rules` supports `*` globs (e.g., `*.status`).
+- `classifier` defaults to `offline_rules_v1`; use `ai.autoparam.classifiers` to discover supported names.
 
 #### ai.autoparam.analyze
 Extract literals from SQL text and classify them.
@@ -1551,7 +1611,8 @@ Params:
   "rules": {
     "semantic_constant_columns": ["users.status"],
     "parameterize_columns": ["users.id"]
-  }
+  },
+  "classifier": {"name":"offline_rules_v1"}
 }
 ```
 
@@ -1569,6 +1630,65 @@ Result:
     {"idx":0,"decision":"semantic_constant","confidence":0.95,"reason":"rule: semantic_constant"},
     {"idx":1,"decision":"parameterize","confidence":0.95,"reason":"rule: parameterize"}
   ]
+}
+```
+
+#### ai.autoparam.feedback
+Record cache feedback and re-run the selected classifier when a plan-cache miss occurs.
+
+Params:
+
+```json
+{
+  "sql": "select * from users where status = 'active' and id = 42",
+  "db": "app",
+  "cache_event": "plan_cache_miss",
+  "miss_count": 1,
+  "classifier": {"name":"offline_rules_v1"}
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.ai.autoparam.feedback.v1",
+  "fingerprint": "3a5b2c...",
+  "normalized_sql": "select * from users where status = ? and id = ?",
+  "cache_event": "plan_cache_miss",
+  "classifier": "offline_rules_v1",
+  "cached_before": false,
+  "reclassified": true,
+  "cache_miss_count": 1,
+  "reclassification_count": 1,
+  "literals": [],
+  "labels": []
+}
+```
+
+#### ai.autoparam.metrics
+Report plan-cache hit rate beside classifier overhead and feedback totals.
+
+Params:
+
+```json
+{}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.ai.autoparam.metrics.v1",
+  "plan_cache_hits": 100,
+  "plan_cache_misses": 25,
+  "plan_cache_hit_rate": 0.8,
+  "classifier_invocations": 12,
+  "classifier_total_ns": 45000,
+  "classifier_mean_ns": 3750.0,
+  "feedback_cache_entries": 4,
+  "feedback_cache_miss_count": 9,
+  "feedback_reclassifications": 6
 }
 ```
 
@@ -2090,11 +2210,44 @@ Result:
   "artifact_sha256": "...",
   "manifest_json": "{...}",
   "runner_js": "export async function runSkeinWasmPlan(...) { ... }",
-  "instructions": ["Store artifact_b64 and manifest_json with the edge worker or browser bundle."]
+  "instructions": [
+    "Store artifact_b64 and manifest_json with the edge worker or browser bundle.",
+    "Call runSkeinWasmPlanEdge with artifact_b64, input_rows, args, and result_format to execute the embedded generated Wasm module locally."
+  ]
 }
 ```
 
-Generated artifacts keep the compiled Wasm module inside `artifact_b64`, but the packaged runner still delegates execution back to `wasm.plan.run` on a SkeinDB host.
+Generated artifacts keep the compiled Wasm module inside `artifact_b64`. The packaged runner can execute `generated_filter_project_v1` artifacts locally with `runSkeinWasmPlanEdge(...)` by encoding caller-provided rows into `skein.wasm.batch.v1`, running the embedded module through `WebAssembly.instantiate`, and decoding the output batch. `runSkeinWasmPlanHost(...)` remains available for `host_interpreted_v1` artifacts or deployments that prefer server execution.
+
+#### wasm.plan.perf_report
+Params:
+
+```json
+{
+  "artifact_b64": "...",
+  "args": [{"t":"u64","v":7}],
+  "iterations": 5,
+  "warmup_iterations": 1
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.wasm.plan.perf.v1",
+  "execution": "generated_filter_project_v1",
+  "iterations": 5,
+  "warmup_iterations": 1,
+  "outputs_match": true,
+  "simd": {"candidate": true, "enabled": false, "strategy": "scalar_generated_filter_project_v1", "notes": []},
+  "host": {"rows": 1, "columns": 2, "latency": {"p50_ns": 1000}},
+  "generated": {"rows": 1, "columns": 2, "latency": {"p50_ns": 1200}},
+  "generated_speedup_vs_host": 0.83
+}
+```
+
+`wasm.plan.perf_report` is a deterministic exploration harness for R19. It compares host interpretation with generated scalar Wasm when available and reports SIMD eligibility notes. It does not claim production SIMD support; `supports_simd` remains false until SIMD-lowered codegen exists.
 
 #### wasm.plan.run
 Params:
@@ -2265,6 +2418,10 @@ Result:
 {"applied":true,"coverage":[{"table":{"db":"app","table":"users"},"start_seq":11,"end_seq":40,"updated_at_ms":0,"bundle_id":"edge_bundle_01","redaction_mode":"hash_pk"}]}
 ```
 
+Notes:
+- Coverage is tracked as per-table windows; applying a disjoint bundle preserves separate windows instead of collapsing the gap.
+- Overlapping or adjacent windows are merged into a single retained coverage range.
+
 #### edge.bundle.status
 Return current coverage and routing eligibility for a bounded-staleness query.
 
@@ -2286,6 +2443,10 @@ Result:
 }
 ```
 
+Notes:
+- `route.reason` is omitted for eligible routes; ineligible verdicts currently use `missing_coverage`, `coverage_gap`, or `lag_exceeded`.
+- `observed_lag` is computed from the end of contiguous retained coverage for each referenced table, so disjoint windows do not satisfy a bounded-staleness read through missing WAL.
+
 ### 10.18 udf.*
 
 UDF methods are defined in `docs/WASM_UDFS.md`. Implementations MAY expose:
@@ -2305,7 +2466,7 @@ Maintenance methods are defined in `docs/PROJECT_BACKLOG.md`. Current runtime su
 - `maintenance.compaction.resume`
 - `maintenance.replay.export`: export snapshot-based replay bundles. Params include optional `db`, `from_lsn`, `to_lsn`, `bundle_id`, and `redaction: {"mode":"none"|"hash_pk"|"drop_pk", "salt":"optional"}`.
 - `maintenance.replay.import`: validate and materialize a replay bundle into a hidden replay workspace.
-- `maintenance.replay.run`: reopen a replay workspace and compare canonical checksums; returns `performance_report` for performance-annotated bundles.
+- `maintenance.replay.run`: reopen a replay workspace and compare canonical checksums; returns `performance_report` for performance-annotated bundles, including normalized replay-run `checksum_match` plus raw storage/cache/timing variance deltas.
 
 ### 10.20 telemetry.* / advisor.* / admin.* / cluster.*
 
@@ -2335,11 +2496,34 @@ Result:
       "include": ["name"],
       "score": 128,
       "count": 4,
-      "rows_scanned": 128
+      "rows_scanned": 128,
+      "cost": {
+        "read_benefit": 128.4,
+        "write_overhead": 0.05,
+        "compaction_overhead": 0.10,
+        "net_score": 128.25,
+        "write_pressure": 1,
+        "key_columns": 2,
+        "include_columns": 1
+      },
+      "dependency": {
+        "predicate_columns": ["city"],
+        "equality_columns": ["city"],
+        "range_columns": [],
+        "range_shape": "none",
+        "order_by_columns": ["created_at"],
+        "group_by_columns": [],
+        "join_key_columns": [],
+        "projection_columns": ["name"]
+      }
     }
   ]
 }
 ```
+
+The optional `dependency` object explains the captured workload signal behind the suggestion. `predicate_columns` is the union of equality and range predicates; `range_shape` is `none`, `single_range_after_equality_prefix`, or `multi_range_observed`; the order/group/join/projection arrays describe sort needs, grouping needs, equi-join keys, and covering-column candidates. Composite key generation uses equality columns first, then join keys, one range column, group-by columns, and order-by columns; projected non-key columns are emitted as covering `include` candidates.
+
+The optional `cost` object is the transparent scoring model. `read_benefit` is derived from observed scan pressure and workload features; `write_overhead` estimates maintenance pressure from table write/version activity and candidate width; `compaction_overhead` estimates storage/compaction pressure from scan volume and candidate width. `score` equals `cost.net_score`.
 
 #### advisor.apply_index (experimental)
 Queue an in-memory secondary-index build for the suggestion and record the action.
@@ -2365,6 +2549,114 @@ Initial status values: `queued`, `exists`.
 
 Follow `advisor.history` for terminal lifecycle state and result metadata.
 
+#### advisor.retire_unused (experimental)
+Dry-run or retire advisor-built secondary indexes whose dependency signal is absent or older than a caller-provided idle threshold.
+
+Params:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "max_idle_ms": 86400000,
+  "dry_run": true,
+  "limit": 20,
+  "note": "daily advisor retirement review"
+}
+```
+
+Result:
+
+```json
+{
+  "dry_run": true,
+  "evaluated": 1,
+  "retired": 0,
+  "candidates": [
+    {
+      "suggestion_id": "idxs_5a2c...",
+      "table": {"db":"mydb","table":"users"},
+      "columns": ["city","created_at"],
+      "include": ["name"],
+      "retired": false,
+      "reason": "eligible",
+      "idle_ms": 172800000
+    }
+  ]
+}
+```
+
+Safety rules: only the latest active `advisor.apply_index` action for a suggestion is considered; a newer `dismiss` or `retire` removes it from candidates; recent dependency signals return `reason:"recently_used"`; actual retirements record action `retire` in `advisor.history`.
+
+#### advisor.evaluate (experimental)
+Replay phased dependency samples through a scratch advisor state and report how quickly the top suggestion converges after a workload shift.
+
+Params:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "min_queries": 1,
+  "min_rows": 1,
+  "phases": [
+    {
+      "label": "city_lookup",
+      "samples": [
+        {
+          "equality_columns": ["city"],
+          "rows_scanned": 400,
+          "repeats": 3
+        }
+      ]
+    },
+    {
+      "label": "email_lookup",
+      "samples": [
+        {
+          "equality_columns": ["email"],
+          "rows_scanned": 500,
+          "repeats": 3
+        }
+      ]
+    }
+  ]
+}
+```
+
+Result:
+
+```json
+{
+  "format": "skein.advisor.evaluate.v1",
+  "table": {"db":"mydb","table":"users"},
+  "phase_count": 2,
+  "total_observations": 6,
+  "min_queries": 1,
+  "min_rows": 1,
+  "initial_top": {"columns": ["city"]},
+  "final_top": {"columns": ["email"]},
+  "phases": [
+    {
+      "label": "city_lookup",
+      "observations": 3,
+      "top_after": {"columns": ["city"]},
+      "top_changes": 1,
+      "distinct_top_suggestions": 1
+    },
+    {
+      "label": "email_lookup",
+      "observations": 3,
+      "top_before": {"columns": ["city"]},
+      "top_after": {"columns": ["email"]},
+      "final_top_stable_after_observation": 3,
+      "top_changes": 1,
+      "distinct_top_suggestions": 2
+    }
+  ]
+}
+```
+
+Each phase consists of one or more dependency samples. Samples may populate `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The engine validates sample columns against the live schema, requires at least one dependency column per sample, and replays the observations without mutating the persisted advisor state.
+
 #### advisor.dismiss (experimental)
 Dismiss an index suggestion (suppressed from future synthesize output). Drops any advisor-built in-memory index.
 
@@ -2386,7 +2678,7 @@ Result:
 ```
 
 #### advisor.history (experimental)
-List advisor actions (apply/dismiss).
+List advisor actions (apply/dismiss/retire).
 
 Params:
 
@@ -2515,7 +2807,7 @@ Result:
 
 Control-plane method families for operations and adoption:
 - telemetry: `telemetry.compat_log`, `telemetry.snapshot`
-- advisor: `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, `advisor.history`, `advisor.migration_hints` (MySQL -> SkeinQL)
+- advisor: `advisor.index_synthesize`, `advisor.apply_index`, `advisor.retire_unused`, `advisor.evaluate`, `advisor.dismiss`, `advisor.history`, `advisor.migration_hints` (MySQL -> SkeinQL)
 - migration: `migration.intent_report`, `migration.rewrite_preview`, `migration.report_export`
 - admin: `admin.users.*`, `admin.roles.*`
 - cluster: `cluster.status`, `cluster.nodes`, `cluster.join_token.create`, `cluster.node.join`, `cluster.node.remove`, `cluster.node.leave`, `cluster.replica.promote`, `cluster.shard.create`, `cluster.shard.move`, `cluster.shard.rebalance`

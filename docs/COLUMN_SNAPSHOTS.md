@@ -135,6 +135,7 @@ Policies:
 Current prototype:
 - Incremental refresh applies inserts/updates/deletes to in-memory snapshots.
 - Refresh also rewrites the snapshot `manifest.json` and `.cseg` sidecars.
+- Schema-version bumps now preserve unaffected snapshots, rename dependent snapshot metadata when a covered column is renamed, and invalidate only snapshots whose covered columns are dropped.
 - Snapshots are invalidated if primary key data is missing.
 
 ---
@@ -157,13 +158,17 @@ See: `docs/research_agenda/R02_adaptive-row-column-hybrid-execution.md`.
 
 Key adaptation points:
 - Add a cost model: snapshot build cost vs projected query savings.
-- Observe hot projections (frequently used column subsets) via query fingerprints.
+- Observe hot projections (frequently used column subsets) via normalized per-table query column patterns.
 - Extend dependency tracking to column granularity so snapshots can be incrementally refreshed or invalidated.
 - Implement an online controller that decides **when** to create/refresh snapshots within configured resource budgets.
 
 Prototype (scaffold status):
 - Cost model, pattern tracking, and online controller are implemented for single-table SELECTs.
+- Build-vs-benefit pricing now uses the live table row count when evaluating candidate snapshots, which prevents selective probes from underestimating full snapshot build cost.
+- The hot projection detector now keeps a bounded per-table set of normalized column patterns ranked by frequency, scan volume, and recency.
+- Dependency-driven refresh now preserves unaffected snapshots across schema-version bumps and only invalidates the snapshots/patterns that depend on changed columns.
+- The online controller now compares new candidates against the best active covering snapshot, so narrower hot projections can replace broader materializations when workload patterns shift.
 - Snapshots persist in `snapshots.json`, emit sidecar `.cseg` artifacts, and are loaded best-effort on startup when `table_version` still matches.
 - Snapshot reader + column scan execution are in place for simple single-table SELECTs.
 - A basic optimizer rule now routes covered current-time single-table SELECTs into snapshot scans when the snapshot cost model beats a row scan and no selective row-side path wins first.
-- Broader hybrid merge planning remains follow-up work beyond T102.
+- Broader hybrid merge planning remains follow-up work beyond T106.

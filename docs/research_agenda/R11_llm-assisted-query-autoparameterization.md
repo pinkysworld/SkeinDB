@@ -45,3 +45,12 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
+
+Current implementation notes:
+
+- `ai.autoparam.label_schema` exposes the versioned `parameterize`, `semantic_constant`, and `unknown` taxonomy with literal/label field schemas and cache-key policy notes.
+- `ai.autoparam.classifiers` exposes `offline_rules_v1` as the current deterministic offline classifier.
+- `ai.autoparam.classify` applies the selected offline rule/schema-aware classifier to supplied literal contexts.
+- `ai.autoparam.analyze` extracts literals from SQL, normalizes the SQL text, fingerprints it, and returns labels for the extracted contexts using the same optional classifier selection.
+- `ai.autoparam.feedback` records plan-cache-miss feedback, re-runs the selected classifier, and accumulates miss/reclassification counts per fingerprint.
+- `ai.autoparam.metrics` reports plan-cache hit rate alongside classifier invocation/latency counters and feedback totals.

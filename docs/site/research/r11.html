@@ -95,6 +95,9 @@
 
   <div class="section">
     <h2><span class="icon">🔗</span> SkeinDB Integration</h2>
+    <p><code>ai.autoparam.label_schema</code> exposes the versioned label taxonomy for <code>parameterize</code>, <code>semantic_constant</code>, and <code>unknown</code>, including literal context fields, label fields, confidence bounds, and cache-key policy notes.</p>
+    <p><code>ai.autoparam.classifiers</code> advertises <code>offline_rules_v1</code> as the current deterministic offline classifier. <code>ai.autoparam.classify</code> and <code>ai.autoparam.analyze</code> accept that explicit classifier selection to label extracted SQL literals and return normalized SQL fingerprints.</p>
+    <p><code>ai.autoparam.feedback</code> records plan-cache-miss feedback and reclassifies per fingerprint, while <code>ai.autoparam.metrics</code> reports plan-cache hit rate beside classifier overhead and feedback totals.</p>
     <div class="integration">
       <div class="int-chip">MySQL Compat Layer</div>
       <div class="int-chip">Query Plan Cache</div>

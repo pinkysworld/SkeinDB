@@ -78,7 +78,7 @@ Cache-aware query methods can return `etag`, `deps`, `causality`, and `not_modif
 | `view.*` | create, drop, refresh, evaluate, status, explain deps | Experimental | Incremental/full/auto materialized views plus an incremental-vs-full oracle/benchmark report. |
 | `vector.*` | insert, search, benchmark, index status | Experimental | Embedding storage, ANN search, and exact-vs-indexed recall/latency measurement. |
 | `ai.*` | autoparam classification/analysis, NL translate/explain/execute | Experimental | Verification-gated natural-language workflows. |
-| `advisor.*` | synthesize, apply, dismiss, history | Experimental | Dependency-driven index suggestions and lifecycle. |
+| `advisor.*` | synthesize, apply, retire_unused, evaluate, dismiss, history | Experimental | Dependency-driven index suggestions, workload-shift convergence evaluation, and lifecycle controls. |
 | `migration.*` | intent report, rewrite preview, report export | Experimental | Migration intent detection and reporting. |
 | `maintenance.*` | audit, compaction, history GC, replay export/import/run | Core + experimental | Operational maintenance and replay bundles; replay export supports optional primary-key redaction. |
 | `edge.*` | bundle request/apply/status | Experimental | Bounded replay bundles for edge replication. |
@@ -120,7 +120,7 @@ edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.evaluate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
 wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.evaluate, view.status, view.explain_deps,
-advisor.index_synthesize, advisor.apply_index, advisor.dismiss, advisor.history,
+advisor.index_synthesize, advisor.apply_index, advisor.retire_unused, advisor.evaluate, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,
 telemetry.feature_flags, telemetry.compat_summary, telemetry.migration_hints, telemetry.workload_features,
 plan_cache.status, plan_cache.clear,

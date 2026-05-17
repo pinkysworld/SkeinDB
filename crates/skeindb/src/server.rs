@@ -27,8 +27,10 @@ use sysinfo::{Pid, System};
 
 use skeindb_skeinql::{
     methods::{
-        AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
-        AdvisorIndexSynthesizeParams, AiAutoparamAnalyzeParams, AiAutoparamClassifyParams,
+        AdvisorEvaluateParams, AdvisorHistoryParams, AdvisorIndexApplyParams,
+        AdvisorIndexDismissParams, AdvisorIndexRetireUnusedParams, AdvisorIndexSynthesizeParams,
+        AiAutoparamAnalyzeParams, AiAutoparamClassifiersParams, AiAutoparamClassifyParams,
+        AiAutoparamFeedbackParams, AiAutoparamLabelSchemaParams, AiAutoparamMetricsParams,
         AiNlExecuteParams, AiNlExplainParams, AiNlTranslateParams, CdcAckParams, CdcCloseParams,
         CdcPollParams, CdcSubscribeQueryParams, CdcSubscribeTableParams,
         ClusterJoinTokenCreateParams, ClusterNodeJoinParams, ClusterNodeLeaveParams,
@@ -50,7 +52,8 @@ use skeindb_skeinql::{
         TelemetryMigrationHintsParams, VectorBenchmarkParams, VectorIndexStatusParams,
         VectorInsertParams, VectorSearchParams, ViewCreateParams, ViewDropParams,
         ViewEvaluateParams, ViewExplainDepsParams, ViewRefreshParams, ViewStatusParams,
-        WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams, WasmPlanRunParams,
+        WasmPlanCompileParams, WasmPlanEdgePackageParams, WasmPlanInspectParams,
+        WasmPlanPerfReportParams, WasmPlanRunParams,
     },
     types::{
         BaseTableRef, CaseExpr, CaseWhen, CastExpr, CausalityDependency, CausalityToken, Expr,
@@ -15242,6 +15245,13 @@ pub(crate) async fn handle_rpc(
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
+                "advisor.evaluate" => {
+                    let p: AdvisorEvaluateParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.advisor_evaluate(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "advisor.apply_index" => {
                     let p: AdvisorIndexApplyParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
@@ -15272,6 +15282,13 @@ pub(crate) async fn handle_rpc(
                     let p: AdvisorIndexDismissParams = parse_params(params.clone())?;
                     let mut eng = state.engine.write().await;
                     let r = eng.advisor_index_dismiss(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "advisor.retire_unused" => {
+                    let p: AdvisorIndexRetireUnusedParams = parse_params(params.clone())?;
+                    let mut eng = state.engine.write().await;
+                    let r = eng.advisor_index_retire_unused(p).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -15888,6 +15905,20 @@ pub(crate) async fn handle_rpc(
                 // --------------------
                 // ai.* (research)
                 // --------------------
+                "ai.autoparam.classifiers" => {
+                    let p: AiAutoparamClassifiersParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_classifiers(p);
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.autoparam.label_schema" => {
+                    let p: AiAutoparamLabelSchemaParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_label_schema(p);
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
                 "ai.autoparam.classify" => {
                     let p: AiAutoparamClassifyParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
@@ -15899,6 +15930,24 @@ pub(crate) async fn handle_rpc(
                     let p: AiAutoparamAnalyzeParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
                     let r = eng.ai_autoparam_analyze(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.autoparam.feedback" => {
+                    let p: AiAutoparamFeedbackParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_feedback(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "ai.autoparam.metrics" => {
+                    let p: AiAutoparamMetricsParams = parse_params(params.clone())?;
+                    let (plan_cache_hits, plan_cache_misses) = {
+                        let counters = state.counters.lock().unwrap();
+                        (counters.plan_cache_hits, counters.plan_cache_misses)
+                    };
+                    let eng = state.engine.read().await;
+                    let r = eng.ai_autoparam_metrics(p, plan_cache_hits, plan_cache_misses);
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -16614,6 +16663,13 @@ pub(crate) async fn handle_rpc(
                     let p: WasmPlanInspectParams = parse_params(params.clone())?;
                     let eng = state.engine.read().await;
                     let r = eng.wasm_plan_inspect(p).map_err(to_rpc_error)?;
+                    Ok(serde_json::to_value(r)
+                        .map_err(|e| RpcError::new("internal", e.to_string()))?)
+                }
+                "wasm.plan.perf_report" => {
+                    let p: WasmPlanPerfReportParams = parse_params(params.clone())?;
+                    let eng = state.engine.read().await;
+                    let r = eng.wasm_plan_perf_report(p).map_err(to_rpc_error)?;
                     Ok(serde_json::to_value(r)
                         .map_err(|e| RpcError::new("internal", e.to_string()))?)
                 }
@@ -27320,6 +27376,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "schema.merge_status"
             | "schema.simulate_rollout"
             | "advisor.index_synthesize"
+            | "advisor.evaluate"
             | "advisor.history"
             | "migration.intent_report"
             | "migration.rewrite_preview"
@@ -27328,8 +27385,12 @@ fn is_read_only_method(method: &str) -> bool {
             | "vector.search"
             | "vector.benchmark"
             | "vector.index.status"
+            | "ai.autoparam.classifiers"
+            | "ai.autoparam.label_schema"
             | "ai.autoparam.classify"
             | "ai.autoparam.analyze"
+            | "ai.autoparam.feedback"
+            | "ai.autoparam.metrics"
             | "ai.nl.translate"
             | "ai.nl.explain"
             | "ai.nl.execute"
@@ -27357,6 +27418,7 @@ fn is_read_only_method(method: &str) -> bool {
             | "view.evaluate"
             | "wasm.plan.compile"
             | "wasm.plan.inspect"
+            | "wasm.plan.perf_report"
             | "wasm.plan.edge_package"
             | "wasm.plan.run"
             | "view.status"
@@ -27481,8 +27543,10 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "schema.simulate_rollout",
         "schema.apply_merge",
         "advisor.index_synthesize",
+        "advisor.evaluate",
         "advisor.apply_index",
         "advisor.dismiss",
+        "advisor.retire_unused",
         "advisor.history",
         "migration.intent_report",
         "migration.rewrite_preview",
@@ -27503,8 +27567,12 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "vector.search",
         "vector.benchmark",
         "vector.index.status",
+        "ai.autoparam.classifiers",
+        "ai.autoparam.label_schema",
         "ai.autoparam.classify",
         "ai.autoparam.analyze",
+        "ai.autoparam.feedback",
+        "ai.autoparam.metrics",
         "ai.nl.translate",
         "ai.nl.explain",
         "ai.nl.execute",
@@ -27554,6 +27622,7 @@ fn skeinql_capability_methods() -> Vec<&'static str> {
         "merge.wasm.drop",
         "wasm.plan.compile",
         "wasm.plan.inspect",
+        "wasm.plan.perf_report",
         "wasm.plan.edge_package",
         "wasm.plan.run",
         "view.create",
@@ -28995,7 +29064,7 @@ mod tests {
         let unique: BTreeSet<_> = methods.iter().copied().collect();
 
         assert_eq!(methods.len(), unique.len());
-        assert_eq!(methods.len(), 135);
+        assert_eq!(methods.len(), 142);
         assert!(methods.contains(&"migration.report_export"));
     }
 
@@ -30267,6 +30336,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_autoparam_classifiers_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_autoparam_classifiers");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "ai.autoparam.classifiers", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap_or_default();
+        assert_eq!(result["format"], "skein.ai.autoparam.classifiers.v1");
+        assert_eq!(result["default_classifier"], "offline_rules_v1");
+        let classifiers = result
+            .get("classifiers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(classifiers.len(), 1);
+        assert_eq!(classifiers[0]["name"], "offline_rules_v1");
+        assert_eq!(classifiers[0]["kind"], "offline_rules");
+        assert_eq!(classifiers[0]["supports_rules"], true);
+        assert_eq!(classifiers[0]["supports_schema"], true);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ai_autoparam_label_schema_roundtrip() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_autoparam_label_schema");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+
+        let resp = call_rpc(&state, "ai.autoparam.label_schema", json!({})).await;
+        assert!(resp.ok);
+        let result = resp.result.unwrap_or_default();
+        assert_eq!(result["format"], "skein.ai.autoparam.label_schema.v1");
+        assert_eq!(result["taxonomy_version"], 1);
+        assert_eq!(result["default_decision"], "parameterize");
+        assert_eq!(result["confidence_min"], 0.0);
+        assert_eq!(result["confidence_max"], 1.0);
+        let decisions = result
+            .get("decisions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(decisions.len(), 3);
+        assert!(decisions
+            .iter()
+            .any(|decision| decision["decision"] == "semantic_constant"
+                && decision["parameterized"] == false));
+        assert!(decisions
+            .iter()
+            .any(|decision| decision["decision"] == "parameterize"
+                && decision["parameterized"] == true));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ai_autoparam_classify_roundtrip() -> anyhow::Result<()> {
         let dir = temp_dir("ai_autoparam");
         let engine = Engine::open(&dir)?;
@@ -30280,7 +30408,8 @@ mod tests {
                 "literals": [
                     {"value": {"t":"str","v":"active"}, "column":"status", "table":"users", "op":"eq"},
                     {"value": {"t":"u64","v":42}, "column":"id", "table":"users", "op":"eq"}
-                ]
+                ],
+                "classifier": {"name":"offline_rules_v1"}
             }),
         )
         .await;
@@ -30295,6 +30424,19 @@ mod tests {
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0]["decision"], "semantic_constant");
         assert_eq!(labels[1]["decision"], "parameterize");
+
+        let rejected = call_rpc(
+            &state,
+            "ai.autoparam.classify",
+            json!({
+                "literals": [
+                    {"value": {"t":"str","v":"active"}, "column":"status", "table":"users", "op":"eq"}
+                ],
+                "classifier": {"name":"remote_llm_v1"}
+            }),
+        )
+        .await;
+        assert!(!rejected.ok);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -30350,6 +30492,143 @@ mod tests {
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0]["decision"], "semantic_constant");
         assert_eq!(labels[1]["decision"], "parameterize");
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ai_autoparam_feedback_reclassifies_on_cache_miss() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_autoparam_feedback");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let first = call_rpc(
+            &state,
+            "ai.autoparam.feedback",
+            json!({
+                "db": "app",
+                "sql": "select * from users where status = 'active' and id = 42",
+                "cache_event": "plan_cache_miss",
+                "miss_count": 1,
+                "classifier": {"name":"offline_rules_v1"}
+            }),
+        )
+        .await;
+        assert!(first.ok);
+        let first_result = first.result.unwrap_or_default();
+        assert_eq!(first_result["format"], "skein.ai.autoparam.feedback.v1");
+        assert_eq!(first_result["cached_before"], false);
+        assert_eq!(first_result["reclassified"], true);
+        assert_eq!(first_result["cache_miss_count"], 1);
+        assert_eq!(first_result["reclassification_count"], 1);
+        assert_eq!(first_result["classifier"], "offline_rules_v1");
+        let labels = first_result
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(labels[0]["decision"], "semantic_constant");
+        assert_eq!(labels[1]["decision"], "parameterize");
+
+        let second = call_rpc(
+            &state,
+            "ai.autoparam.feedback",
+            json!({
+                "db": "app",
+                "sql": "select * from users where status = 'active' and id = 42",
+                "cache_event": "plan_cache_miss",
+                "miss_count": 2,
+                "classifier": {"name":"offline_rules_v1"}
+            }),
+        )
+        .await;
+        assert!(second.ok);
+        let second_result = second.result.unwrap_or_default();
+        assert_eq!(second_result["cached_before"], true);
+        assert_eq!(second_result["reclassified"], true);
+        assert_eq!(second_result["cache_miss_count"], 3);
+        assert_eq!(second_result["reclassification_count"], 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ai_autoparam_metrics_reports_feedback_and_classifier_overhead() -> anyhow::Result<()> {
+        let dir = temp_dir("ai_autoparam_metrics");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "status".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        let state = build_state(dir.clone(), engine);
+
+        let feedback = call_rpc(
+            &state,
+            "ai.autoparam.feedback",
+            json!({
+                "db": "app",
+                "sql": "select * from users where status = 'active' and id = 42",
+                "cache_event": "plan_cache_miss",
+                "miss_count": 2,
+                "classifier": {"name":"offline_rules_v1"}
+            }),
+        )
+        .await;
+        assert!(feedback.ok);
+
+        let metrics = call_rpc(&state, "ai.autoparam.metrics", json!({})).await;
+        assert!(metrics.ok);
+        let result = metrics.result.unwrap_or_default();
+        assert_eq!(result["format"], "skein.ai.autoparam.metrics.v1");
+        assert_eq!(result["plan_cache_hits"], 0);
+        assert_eq!(result["plan_cache_misses"], 0);
+        assert_eq!(result["plan_cache_hit_rate"], 0.0);
+        assert_eq!(result["classifier_invocations"], 1);
+        assert!(result["classifier_total_ns"].as_u64().is_some());
+        assert!(result["classifier_mean_ns"].as_f64().is_some());
+        assert_eq!(result["feedback_cache_entries"], 1);
+        assert_eq!(result["feedback_cache_miss_count"], 2);
+        assert_eq!(result["feedback_reclassifications"], 1);
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -31305,6 +31584,28 @@ mod tests {
 
         let resp = call_rpc(
             &state,
+            "wasm.plan.perf_report",
+            json!({
+                "artifact_b64": artifact_b64.clone(),
+                "args": [{"t":"u64","v":7}],
+                "iterations": 2,
+                "warmup_iterations": 1
+            }),
+        )
+        .await;
+        assert!(resp.ok);
+        let perf_result = resp.result.expect("missing perf result");
+        assert_eq!(
+            perf_result["format"].as_str(),
+            Some("skein.wasm.plan.perf.v1")
+        );
+        assert_eq!(perf_result["outputs_match"].as_bool(), Some(true));
+        assert_eq!(perf_result["simd"]["candidate"].as_bool(), Some(true));
+        assert_eq!(perf_result["simd"]["enabled"].as_bool(), Some(false));
+        assert_eq!(perf_result["generated"]["rows"].as_u64(), Some(1));
+
+        let resp = call_rpc(
+            &state,
             "wasm.plan.run",
             json!({
                 "artifact_b64": artifact_b64,
@@ -31523,6 +31824,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_replay_run_rehydrates_cache_hints() -> anyhow::Result<()> {
+        let dir = temp_dir("replay_cache_hints_rpc");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ada".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let state = build_state(dir.clone(), engine);
+        let query = select_query("app", "users", vec!["id", "name"], None);
+
+        let selected = call_rpc(
+            &state,
+            "query.select",
+            json!({
+                "query": query.clone(),
+                "cache": { "want_etag": true }
+            }),
+        )
+        .await;
+        assert!(selected.ok, "{selected:?}");
+        let etag = selected
+            .result
+            .as_ref()
+            .and_then(|result| result["etag"].as_str())
+            .expect("missing etag")
+            .to_string();
+
+        let users = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        {
+            let mut engine = state.engine.write().await;
+            let predicate = Expr::Op {
+                op: "eq".to_string(),
+                a: Some(Box::new(Expr::Col {
+                    col: "id".to_string(),
+                    table: None,
+                })),
+                b: Some(Box::new(Expr::Lit {
+                    lit: Lit::U64 { v: 1 },
+                })),
+                args: None,
+                list: None,
+                lo: None,
+                hi: None,
+            };
+            let set = row(&[(
+                "name",
+                Lit::Str {
+                    v: "Ada Lovelace".to_string(),
+                },
+            )]);
+            engine.data_update(&users, &predicate, &set, None, None, &[])?;
+        }
+
+        let patched = call_rpc(
+            &state,
+            "query.patch",
+            json!({
+                "query": query,
+                "base_etag": etag,
+                "include_full": false
+            }),
+        )
+        .await;
+        assert!(patched.ok, "{patched:?}");
+
+        let exported = call_rpc(
+            &state,
+            "maintenance.replay.export",
+            json!({ "db": "app", "bundle_id": "rpc_cache_hints" }),
+        )
+        .await;
+        assert!(exported.ok, "{exported:?}");
+        let bundle = exported
+            .result
+            .as_ref()
+            .and_then(|result| result.get("bundle"))
+            .cloned()
+            .expect("missing replay bundle");
+        assert_eq!(
+            bundle["performance"]["cache_warm"]["cached_select_entries"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            bundle["performance"]["cache_warm"]["cached_patch_entries"].as_u64(),
+            Some(1)
+        );
+
+        let imported = call_rpc(
+            &state,
+            "maintenance.replay.import",
+            json!({
+                "bundle": bundle,
+                "workspace_id": "rpc_cache_hints"
+            }),
+        )
+        .await;
+        assert!(imported.ok, "{imported:?}");
+
+        let replayed = call_rpc(
+            &state,
+            "maintenance.replay.run",
+            json!({ "workspace_id": "rpc_cache_hints" }),
+        )
+        .await;
+        assert!(replayed.ok, "{replayed:?}");
+        let result = replayed.result.expect("missing replay run result");
+        assert_eq!(
+            result["performance_report"]["checksum_match"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            result["performance_report"]["cache_warm"]["cached_select_entries_delta"].as_i64(),
+            Some(0)
+        );
+        assert_eq!(
+            result["performance_report"]["cache_warm"]["cached_patch_entries_delta"].as_i64(),
+            Some(0)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn edge_bundle_roundtrip_and_routing() -> anyhow::Result<()> {
         let dir = temp_dir("edge_bundle_roundtrip");
         let mut engine = Engine::open(&dir)?;
@@ -31599,6 +32063,90 @@ mod tests {
         let route = resp.result.expect("missing result")["route"].clone();
         assert_eq!(route["eligible"].as_bool(), Some(false));
         assert_eq!(route["reason"].as_str(), Some("stale"));
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn edge_bundle_status_reports_coverage_gap() -> anyhow::Result<()> {
+        let dir = temp_dir("edge_bundle_gap");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        for id in 1..=3u64 {
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: id })])], None)?;
+        }
+
+        let state = build_state(dir.clone(), engine);
+
+        let first = call_rpc(
+            &state,
+            "edge.bundle.request",
+            json!({
+                "windows": [{"table": {"db":"app","table":"users"}, "from_seq": 0, "to_seq": 1}]
+            }),
+        )
+        .await;
+        assert!(first.ok, "{first:?}");
+
+        let second = call_rpc(
+            &state,
+            "edge.bundle.request",
+            json!({
+                "windows": [{"table": {"db":"app","table":"users"}, "from_seq": 2, "to_seq": 3}]
+            }),
+        )
+        .await;
+        assert!(second.ok, "{second:?}");
+
+        let resp = call_rpc(
+            &state,
+            "edge.bundle.apply",
+            json!({ "bundle": first.result.expect("missing first bundle")["bundle"].clone() }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+
+        let resp = call_rpc(
+            &state,
+            "edge.bundle.apply",
+            json!({ "bundle": second.result.expect("missing second bundle")["bundle"].clone() }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+
+        let query = select_query("app", "users", vec!["id"], None);
+        let resp = call_rpc(
+            &state,
+            "edge.bundle.status",
+            json!({ "query": query, "max_lag": 0 }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing edge bundle status");
+        assert_eq!(result["coverage"].as_array().map(Vec::len), Some(2));
+        let route = result["route"].clone();
+        assert_eq!(route["eligible"].as_bool(), Some(false));
+        assert_eq!(route["reason"].as_str(), Some("coverage_gap"));
+        assert_eq!(route["observed_lag"].as_u64(), Some(2));
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -32046,6 +32594,98 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(rows.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisor_evaluate_roundtrip_reports_shift_convergence() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_roundtrip");
+        let engine = Engine::open(&dir)?;
+        let state = build_state(dir.clone(), engine);
+        {
+            let mut eng = state.engine.write().await;
+            eng.create_table(
+                "app",
+                "users",
+                vec![
+                    ColumnSchema {
+                        name: "id".to_string(),
+                        r#type: type_desc("u64"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "city".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                    ColumnSchema {
+                        name: "email".to_string(),
+                        r#type: type_desc("string"),
+                        nullable: false,
+                        auto_increment: false,
+                    },
+                ],
+                vec!["id".to_string()],
+                false,
+                None,
+            )
+            .expect("create advisor evaluation table");
+        }
+
+        let resp = call_rpc(
+            &state,
+            "advisor.evaluate",
+            json!({
+                "table": {"db":"app","table":"users"},
+                "min_queries": 1,
+                "min_rows": 1,
+                "phases": [
+                    {
+                        "label": "city_lookup",
+                        "samples": [
+                            {
+                                "equality_columns": ["city"],
+                                "rows_scanned": 400,
+                                "repeats": 3
+                            }
+                        ]
+                    },
+                    {
+                        "label": "email_lookup",
+                        "samples": [
+                            {
+                                "equality_columns": ["email"],
+                                "rows_scanned": 500,
+                                "repeats": 3
+                            }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .await;
+        assert!(resp.ok, "{resp:?}");
+        let result = resp.result.expect("missing advisor evaluation result");
+        assert_eq!(result["format"].as_str(), Some("skein.advisor.evaluate.v1"));
+        assert_eq!(result["phase_count"].as_u64(), Some(2));
+        assert_eq!(result["total_observations"].as_u64(), Some(6));
+        assert_eq!(result["phases"][0]["top_after"]["columns"], json!(["city"]));
+        assert_eq!(
+            result["phases"][1]["top_before"]["columns"],
+            json!(["city"])
+        );
+        assert_eq!(
+            result["phases"][1]["top_after"]["columns"],
+            json!(["email"])
+        );
+        assert_eq!(
+            result["phases"][1]["final_top_stable_after_observation"].as_u64(),
+            Some(3)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         Ok(())

@@ -282,6 +282,37 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <span class="p">}</span>
 </code></pre></div>
 
+<h3 id="wasmplanperf_report">wasm.plan.perf_report<a class="headerlink" href="#wasmplanperf_report" title="Permanent link">¶</a></h3>
+<p>Params:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;artifact_b64&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;args&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">&quot;t&quot;</span><span class="p">:</span><span class="s2">&quot;u64&quot;</span><span class="p">,</span><span class="nt">&quot;v&quot;</span><span class="p">:</span><span class="mi">7</span><span class="p">}],</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;warmup_iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Result:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;skein.wasm.plan.perf.v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;execution&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;generated_filter_project_v1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;warmup_iterations&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operators&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;scan&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;filter&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;project&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;outputs_match&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;simd&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;candidate&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;strategy&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;scalar_generated_filter_project_v1&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;notes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;SIMD lane lowering is not emitted by this build&quot;</span><span class="p">]</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;host&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;latency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;generated&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;latency&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p50_ns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;generated_speedup_vs_host&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.83</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>This report is intentionally an exploration/perf-test baseline. It identifies fixed-width <code>u64</code>/<code>bool</code> generated artifacts as SIMD candidates and compares scalar generated Wasm against the host interpreter, but <code>supports_simd</code> remains <code>false</code> until SkeinDB ships a production SIMD-lowered codegen path.</p>
 <h3 id="wasmplanedge_package">wasm.plan.edge_package<a class="headerlink" href="#wasmplanedge_package" title="Permanent link">¶</a></h3>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -301,12 +332,15 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <span class="w">  </span><span class="nt">&quot;runner_js&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;export async function runSkeinWasmPlan(...) { ... }&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;instructions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
 <span class="w">    </span><span class="s2">&quot;Store artifact_b64 and manifest_json with the edge worker or browser bundle.&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="s2">&quot;Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format.&quot;</span>
+<span class="w">    </span><span class="s2">&quot;Call runSkeinWasmPlanEdge with artifact_b64, input_rows, args, and result_format to execute the embedded generated Wasm module locally.&quot;</span>
 <span class="w">  </span><span class="p">]</span>
 <span class="p">}</span>
 </code></pre></div>
 
-<p>The v1 edge package ships the plan artifact, a manifest, and a small JavaScript runner that calls <code>wasm.plan.run</code> on a SkeinDB host. It does not yet execute a generated Wasm module inside the edge process.</p>
+<p>The v1 edge package ships the plan artifact, a manifest, and a JavaScript runner with two execution paths:
+- <code>runSkeinWasmPlanEdge(...)</code> executes <code>generated_filter_project_v1</code> artifacts locally in the edge/browser process. Callers provide rows for the artifact's <code>input_table_columns</code>; the runner encodes them as <code>skein.wasm.batch.v1</code>, appends typed <code>args</code> as parameter columns, runs the embedded module with <code>WebAssembly.instantiate</code>, and decodes the output batch.
+- <code>runSkeinWasmPlanHost(...)</code> calls <code>wasm.plan.run</code> on a SkeinDB host for <code>host_interpreted_v1</code> artifacts or deployments that prefer server execution.</p>
+<p><code>runSkeinWasmPlan(...)</code> chooses local execution when <code>input_rows</code> / <code>inputRows</code> or <code>input_batch_b64</code> / <code>inputBatchB64</code> is supplied for a generated artifact, otherwise it uses the host fallback.</p>
 <h3 id="wasmplanrun">wasm.plan.run<a class="headerlink" href="#wasmplanrun" title="Permanent link">¶</a></h3>
 <p>Params:</p>
 <div class="codehilite"><pre><span></span><code><span class="p">{</span>
@@ -335,7 +369,8 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 - Only the scan/filter/project subset is accepted.
 - <code>abi</code> and <code>target</code> are validated; <code>target</code> is recorded in the artifact for inspection and packaging.
 - <code>wasm.plan.inspect</code> exposes artifact metadata without running the query.
-- <code>wasm.plan.edge_package</code> emits a host-backed edge runner package; generated modules stay embedded in the artifact but still execute via <code>wasm.plan.run</code> on a SkeinDB host. SIMD and standalone in-edge execution remain open T086/T087 work.</p>
+- <code>wasm.plan.edge_package</code> emits standalone JavaScript edge execution for generated artifacts and a host-backed fallback for interpreted artifacts.
+- <code>wasm.plan.perf_report</code> compares host and generated scalar execution, verifies output parity, and records SIMD candidate notes for future SIMD-lowered codegen work.</p>
       <hr>
       <p class="edit-link">
         <a href="https://github.com/pinkysworld/SkeinDB/edit/main/docs/WASM_OPERATORS.md" target="_blank" rel="noopener">Edit this page on GitHub</a>
@@ -366,6 +401,7 @@ export fn skein_plan_eval(ptr: u32, len: u32) -&gt; u64
 <li><a href="#5-skeinql-methods">5) SkeinQL methods</a><ul>
 <li><a href="#wasmplancompile">wasm.plan.compile</a></li>
 <li><a href="#wasmplaninspect">wasm.plan.inspect</a></li>
+<li><a href="#wasmplanperf_report">wasm.plan.perf_report</a></li>
 <li><a href="#wasmplanedge_package">wasm.plan.edge_package</a></li>
 <li><a href="#wasmplanrun">wasm.plan.run</a></li>
 </ul>

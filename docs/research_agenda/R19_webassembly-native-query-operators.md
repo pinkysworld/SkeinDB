@@ -45,3 +45,10 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
+
+## Current implementation status (2026-05-16)
+
+- `wasm.plan.compile` emits `generated_filter_project_v1` artifacts for fixed-width non-null `u64`/`bool` scan/filter/project plans and falls back to `host_interpreted_v1` for unsupported plans.
+- `wasm.plan.run` executes generated artifacts on the SkeinDB host through Wasmtime.
+- `wasm.plan.edge_package` now ships a standalone JavaScript runner for generated artifacts: `runSkeinWasmPlanEdge` accepts caller-provided edge rows, encodes them as `skein.wasm.batch.v1`, runs the embedded module with `WebAssembly.instantiate`, and decodes local results. `runSkeinWasmPlanHost` remains the fallback for interpreted artifacts.
+- `wasm.plan.perf_report` compares host interpretation with generated scalar Wasm, reports latency percentiles, verifies output parity, and records SIMD candidate notes while keeping production SIMD support explicitly disabled.

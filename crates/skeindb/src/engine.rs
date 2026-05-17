@@ -44,33 +44,40 @@ use skeindb_core::wasm_udf::{
 };
 use skeindb_core::{audit_hash256, encode_varu, value_id, ValueKind};
 use skeindb_skeinql::methods::{
-    AdvisorHistoryEntry, AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams,
-    AdvisorIndexApplyResult, AdvisorIndexDismissParams, AdvisorIndexDismissResult,
-    AdvisorIndexSuggestion, AdvisorIndexSynthesizeParams, AdvisorIndexSynthesizeResult,
-    AiAutoparamAnalyzeParams, AiAutoparamAnalyzeResult, AiAutoparamClassifyParams,
-    AiAutoparamClassifyResult, AiAutoparamLabel, AiAutoparamLiteral, AiAutoparamRules,
-    AiNlExecuteParams, AiNlExecuteResult, AiNlExplainParams, AiNlExplainResult, AiNlPromptPackage,
-    AiNlPromptTable, AiNlTranslateParams, AiNlTranslateResult, ClientStateSummary,
-    DpAggregateParams, DpAggregateResult, DpAggregateSpec, DpAuditLogParams, DpAuditLogResult,
-    DpBounds, DpBudgetGetParams, DpBudgetGetResult, DpBudgetSetParams, DpEvaluateParams,
-    DpEvaluatePoint, DpEvaluateResult, EdgeBundle, EdgeBundleApplyParams, EdgeBundleApplyResult,
-    EdgeBundleCoverage, EdgeBundleRecord, EdgeBundleRedaction, EdgeBundleRequestParams,
-    EdgeBundleRequestResult, EdgeBundleRoute, EdgeBundleStatusParams, EdgeBundleStatusResult,
-    ForensicExportParams, ForensicExportResult, ForensicQueryParams, ForensicQueryResult,
-    ForensicVerifyParams, ForensicVerifyResult, MaintenanceReplayExportParams,
-    MaintenanceReplayExportResult, MaintenanceReplayImportParams, MaintenanceReplayImportResult,
-    MaintenanceReplayRunParams, MaintenanceReplayRunResult, MergeApplyParams, MergeApplyResult,
-    MergeEvaluateCaseResult, MergeEvaluateParams, MergeEvaluateResult, MergeFunctionRef,
-    MergePolicySpec, MergeRegisterParams, MergeRegisterResult, MergeSimulateParams,
-    MergeSimulateResult, MergeWasmCapabilities, MergeWasmDropParams, MergeWasmDropResult,
-    MergeWasmListResult, MergeWasmModuleInfo, MergeWasmRegisterParams, MergeWasmRegisterResult,
-    MigrationIntentEvidence, MigrationIntentReportParams, MigrationIntentReportResult,
-    MigrationIntentSample, MigrationIntentSuggestion, MigrationReportExportParams,
-    MigrationReportExportResult, MigrationRewritePreview, MigrationRewritePreviewParams,
-    MigrationRewritePreviewResult, ObliviousEvaluateParams, ObliviousEvaluateResult,
-    ObliviousExplainParams, ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams,
-    ObliviousPolicyGetResult, ObliviousPolicySetParams, ObliviousTracePoint, ReplayBundle,
-    ReplayBundleChangeEvent, ReplayBundleManifest, ReplayBundlePerformanceCacheVariance,
+    AdvisorEvaluateParams, AdvisorEvaluatePhaseResult, AdvisorEvaluateResult, AdvisorHistoryEntry,
+    AdvisorHistoryParams, AdvisorHistoryResult, AdvisorIndexApplyParams, AdvisorIndexApplyResult,
+    AdvisorIndexCostEstimate, AdvisorIndexDependencyCapture, AdvisorIndexDismissParams,
+    AdvisorIndexDismissResult, AdvisorIndexRetireUnusedParams, AdvisorIndexRetireUnusedResult,
+    AdvisorIndexRetirementEntry, AdvisorIndexSuggestion, AdvisorIndexSynthesizeParams,
+    AdvisorIndexSynthesizeResult, AiAutoparamAnalyzeParams, AiAutoparamAnalyzeResult,
+    AiAutoparamClassifierInfo, AiAutoparamClassifierSpec, AiAutoparamClassifiersParams,
+    AiAutoparamClassifiersResult, AiAutoparamClassifyParams, AiAutoparamClassifyResult,
+    AiAutoparamDecisionSchema, AiAutoparamFeedbackParams, AiAutoparamFeedbackResult,
+    AiAutoparamLabel, AiAutoparamLabelFieldSchema, AiAutoparamLabelSchemaParams,
+    AiAutoparamLabelSchemaResult, AiAutoparamLiteral, AiAutoparamMetricsParams,
+    AiAutoparamMetricsResult, AiAutoparamRules, AiNlExecuteParams, AiNlExecuteResult,
+    AiNlExplainParams, AiNlExplainResult, AiNlPromptPackage, AiNlPromptTable, AiNlTranslateParams,
+    AiNlTranslateResult, ClientStateSummary, DpAggregateParams, DpAggregateResult, DpAggregateSpec,
+    DpAuditLogParams, DpAuditLogResult, DpBounds, DpBudgetGetParams, DpBudgetGetResult,
+    DpBudgetSetParams, DpEvaluateParams, DpEvaluatePoint, DpEvaluateResult, EdgeBundle,
+    EdgeBundleApplyParams, EdgeBundleApplyResult, EdgeBundleCoverage, EdgeBundleRecord,
+    EdgeBundleRedaction, EdgeBundleRequestParams, EdgeBundleRequestResult, EdgeBundleRoute,
+    EdgeBundleStatusParams, EdgeBundleStatusResult, ForensicExportParams, ForensicExportResult,
+    ForensicQueryParams, ForensicQueryResult, ForensicVerifyParams, ForensicVerifyResult,
+    MaintenanceReplayExportParams, MaintenanceReplayExportResult, MaintenanceReplayImportParams,
+    MaintenanceReplayImportResult, MaintenanceReplayRunParams, MaintenanceReplayRunResult,
+    MergeApplyParams, MergeApplyResult, MergeEvaluateCaseResult, MergeEvaluateParams,
+    MergeEvaluateResult, MergeFunctionRef, MergePolicySpec, MergeRegisterParams,
+    MergeRegisterResult, MergeSimulateParams, MergeSimulateResult, MergeWasmCapabilities,
+    MergeWasmDropParams, MergeWasmDropResult, MergeWasmListResult, MergeWasmModuleInfo,
+    MergeWasmRegisterParams, MergeWasmRegisterResult, MigrationIntentEvidence,
+    MigrationIntentReportParams, MigrationIntentReportResult, MigrationIntentSample,
+    MigrationIntentSuggestion, MigrationReportExportParams, MigrationReportExportResult,
+    MigrationRewritePreview, MigrationRewritePreviewParams, MigrationRewritePreviewResult,
+    ObliviousEvaluateParams, ObliviousEvaluateResult, ObliviousExplainParams,
+    ObliviousExplainResult, ObliviousPolicy, ObliviousPolicyGetParams, ObliviousPolicyGetResult,
+    ObliviousPolicySetParams, ObliviousTracePoint, ReplayBundle, ReplayBundleChangeEvent,
+    ReplayBundleManifest, ReplayBundlePerformanceCacheVariance,
     ReplayBundlePerformanceCacheWarmHints, ReplayBundlePerformanceHotTable,
     ReplayBundlePerformanceLsmState, ReplayBundlePerformanceProfile,
     ReplayBundlePerformanceRunReport, ReplayBundlePerformanceStorageVariance,
@@ -88,6 +95,8 @@ use skeindb_skeinql::methods::{
     ViewExplainDepsResult, ViewRefreshParams, ViewRefreshResult, ViewStatusParams,
     ViewStatusResult, WasmPlanCompileParams, WasmPlanCompileResult, WasmPlanEdgePackageParams,
     WasmPlanEdgePackageResult, WasmPlanInspectParams, WasmPlanInspectResult,
+    WasmPlanPerfLatencyStats, WasmPlanPerfReportParams, WasmPlanPerfReportResult,
+    WasmPlanPerfRunStats, WasmPlanSimdExploration,
 };
 use skeindb_skeinql::types::{
     BaseTableRef, CausalityDependency, CausalityToken, ExistsExpr, Expr, JoinRef, JoinType,
@@ -319,6 +328,10 @@ pub struct Engine {
     /// Research: query intent inference (R17).
     intent_history: Mutex<Vec<IntentQuerySample>>,
 
+    /// Research: semantic autoparameterization feedback loop (R11).
+    autoparam_feedback: Mutex<HashMap<String, AutoparamFeedbackEntry>>,
+    autoparam_metrics: Mutex<AutoparamMetrics>,
+
     /// Research: DP budget manager + audit log.
     dp_budgets: HashMap<String, DpBudget>,
     dp_audit: Vec<DpAuditEvent>,
@@ -344,7 +357,7 @@ pub struct Engine {
     views: HashMap<TableKey, ViewState>,
 
     /// Research: edge bundle coverage tracking (R14).
-    edge_coverage: HashMap<TableKey, EdgeCoverage>,
+    edge_coverage: HashMap<TableKey, Vec<EdgeCoverage>>,
 
     /// Research: HNSW vector indexes for approximate nearest neighbor (R10).
     hnsw_indexes: HashMap<HnswIndexKey, HnswIndex>,
@@ -484,7 +497,7 @@ pub struct ChangeEvent {
     pub lsn: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EdgeCoverage {
     table: TableKey,
     start_seq: u64,
@@ -730,6 +743,7 @@ struct MergePolicyDisk {
 
 const MERGE_WASM_REGISTRY_FORMAT_VERSION: u32 = 1;
 const MERGE_EVALUATE_FORMAT_V1: &str = "skein.merge.evaluate.v1";
+const ADVISOR_EVALUATE_FORMAT_V1: &str = "skein.advisor.evaluate.v1";
 const SCHEMA_SIMULATE_ROLLOUT_FORMAT_V1: &str = "skein.schema.simulate_rollout.v1";
 const VIEW_EVALUATE_FORMAT_V1: &str = "skein.view.evaluate.v1";
 
@@ -1057,9 +1071,10 @@ struct SnapshotManager {
     controller: AdaptiveSnapshotController,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct QueryPatternTracker {
     by_table: HashMap<TableKey, HashMap<String, ProjectionStats>>,
+    max_patterns_per_table: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1121,6 +1136,7 @@ const INDEX_ADVISOR_MIN_ROWS: u64 = 32;
 const INDEX_ADVISOR_MAX_COLUMNS: usize = 4;
 const INDEX_ADVISOR_MAX_INCLUDE: usize = 4;
 const INTENT_HISTORY_MAX: usize = 256;
+const SNAPSHOT_QUERY_PATTERN_MAX_PATTERNS: usize = 64;
 
 #[derive(Debug, Clone)]
 struct SnapshotCostModel {
@@ -1239,6 +1255,15 @@ impl Default for SnapshotCostModel {
             row_scan_cost_per_cell: 1.0,
             snapshot_scan_cost_per_cell: 0.4,
             min_benefit: 50.0,
+        }
+    }
+}
+
+impl Default for QueryPatternTracker {
+    fn default() -> Self {
+        Self {
+            by_table: HashMap::new(),
+            max_patterns_per_table: SNAPSHOT_QUERY_PATTERN_MAX_PATTERNS,
         }
     }
 }
@@ -1470,6 +1495,8 @@ impl Engine {
             index_advisor_history_next_id: 1,
             index_advisor_metrics: Mutex::new(AdvisorMetrics::default()),
             intent_history: Mutex::new(Vec::new()),
+            autoparam_feedback: Mutex::new(HashMap::new()),
+            autoparam_metrics: Mutex::new(AutoparamMetrics::default()),
             dp_budgets: HashMap::new(),
             dp_audit: Vec::new(),
             dp_audit_next_id: 1,
@@ -1857,7 +1884,9 @@ impl Engine {
             self.merge_policies.insert(target_key.clone(), policy);
         }
         if let Some(mut coverage) = self.edge_coverage.remove(&source_key) {
-            coverage.table = target_key.clone();
+            for window in coverage.iter_mut() {
+                window.table = target_key.clone();
+            }
             self.edge_coverage.insert(target_key.clone(), coverage);
         }
         if let Ok(mut snapshots) = self.snapshots.lock() {
@@ -2395,6 +2424,9 @@ impl Engine {
             bump_table_version(schema);
             self.persist_table(&params.table.db, &params.table.table)?;
             self.persist_catalog()?;
+            if self.apply_snapshot_schema_version(&params.table) {
+                self.persist_snapshots_best_effort();
+            }
 
             self.schema_changes[idx].status = "applied".to_string();
             self.schema_changes[idx].applied_at_ms = Some(now_millis());
@@ -2475,6 +2507,9 @@ impl Engine {
         };
         let next_version = self.schema_version_for(&key).saturating_add(1);
         self.set_schema_version(&key, next_version);
+        if self.apply_snapshot_schema_version(table) {
+            self.persist_snapshots_best_effort();
+        }
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
         self.persist_schema_versions_best_effort();
@@ -2617,6 +2652,12 @@ impl Engine {
             bump_table_version(schema);
         }
 
+        let snapshot_changed = if let Some((old_name, new_name)) = renamed_flag.as_ref() {
+            self.apply_snapshot_column_rename(table, old_name, new_name)
+        } else {
+            self.apply_snapshot_schema_version(table)
+        };
+
         if let Some((old_name, new_name)) = renamed_flag.as_ref() {
             self.rename_schema_flag_column(
                 &TableKey {
@@ -2629,6 +2670,9 @@ impl Engine {
         }
 
         self.set_schema_version(&key, next_version);
+        if snapshot_changed {
+            self.persist_snapshots_best_effort();
+        }
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
         self.persist_schema_flags_best_effort();
@@ -2732,6 +2776,9 @@ impl Engine {
         );
 
         self.set_schema_version(&key, next_version);
+        if self.apply_snapshot_column_drop(table, &removed_flag_column) {
+            self.persist_snapshots_best_effort();
+        }
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
         self.persist_schema_flags_best_effort();
@@ -2767,6 +2814,9 @@ impl Engine {
         };
         let next_version = self.schema_version_for(&key).saturating_add(1);
         self.set_schema_version(&key, next_version);
+        if self.apply_snapshot_schema_version(table) {
+            self.persist_snapshots_best_effort();
+        }
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
         self.persist_schema_flags_best_effort();
@@ -2815,6 +2865,9 @@ impl Engine {
         };
         let next_version = self.schema_version_for(&key).saturating_add(1);
         self.set_schema_version(&key, next_version);
+        if self.apply_snapshot_schema_version(table) {
+            self.persist_snapshots_best_effort();
+        }
         self.persist_table(&table.db, &table.table)?;
         self.persist_catalog()?;
         self.persist_schema_versions_best_effort();
@@ -3344,21 +3397,7 @@ impl Engine {
         let min_queries = params.min_queries.unwrap_or(INDEX_ADVISOR_MIN_QUERIES);
         let min_rows = params.min_rows.unwrap_or(INDEX_ADVISOR_MIN_ROWS);
 
-        let suppressed: HashSet<String> = self
-            .index_advisor_history
-            .iter()
-            .filter(|entry| {
-                if entry.table.db != key.db || entry.table.table != key.table {
-                    return false;
-                }
-                if entry.action == "dismiss" {
-                    return true;
-                }
-                entry.action == "apply"
-                    && !matches!(entry.status.as_deref(), Some("failed" | "cancelled"))
-            })
-            .map(|entry| entry.suggestion_id.clone())
-            .collect();
+        let suppressed = self.advisor_suppressed_suggestions(&params.table);
 
         let mut suggestions = if let Ok(advisor) = self.index_advisor.lock() {
             advisor.synthesize(&key, schema, limit, min_queries, min_rows)
@@ -3609,6 +3648,224 @@ impl Engine {
         })
     }
 
+    pub fn advisor_index_retire_unused(
+        &mut self,
+        params: AdvisorIndexRetireUnusedParams,
+    ) -> anyhow::Result<AdvisorIndexRetireUnusedResult> {
+        let dry_run = params.dry_run.unwrap_or(true);
+        let max_idle_ms = params.max_idle_ms.unwrap_or(24 * 60 * 60 * 1_000);
+        let max_idle_micros = max_idle_ms.saturating_mul(1_000);
+        let limit = params.limit.unwrap_or(50).clamp(1, 500) as usize;
+        let now = now_micros();
+        let mut latest = self
+            .advisor_latest_actions(params.table.as_ref())
+            .into_values()
+            .filter(is_active_advisor_apply)
+            .collect::<Vec<_>>();
+        latest.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        if latest.len() > limit {
+            latest.truncate(limit);
+        }
+
+        let mut candidates = Vec::new();
+        let mut retired = 0u64;
+        for entry in latest.into_iter() {
+            let table_key = TableKey {
+                db: entry.table.db.clone(),
+                table: entry.table.table.clone(),
+            };
+            let last_seen_micros = self
+                .get_schema(&entry.table.db, &entry.table.table)
+                .ok()
+                .and_then(|schema| {
+                    self.index_advisor.lock().ok().and_then(|advisor| {
+                        advisor.candidate_last_seen(
+                            &table_key,
+                            schema,
+                            &entry.columns,
+                            &entry.include,
+                        )
+                    })
+                });
+            let idle_micros = last_seen_micros.map(|seen| now.saturating_sub(seen));
+            let idle_ms = idle_micros.map(|idle| idle / 1_000);
+            let unused = idle_micros
+                .map(|idle| idle >= max_idle_micros)
+                .unwrap_or(true);
+            if !unused {
+                candidates.push(AdvisorIndexRetirementEntry {
+                    suggestion_id: entry.suggestion_id,
+                    table: entry.table,
+                    columns: entry.columns,
+                    include: entry.include,
+                    retired: false,
+                    reason: "recently_used".to_string(),
+                    action_id: None,
+                    last_seen_micros,
+                    idle_ms,
+                    result_status: None,
+                });
+                continue;
+            }
+
+            if dry_run {
+                candidates.push(AdvisorIndexRetirementEntry {
+                    suggestion_id: entry.suggestion_id,
+                    table: entry.table,
+                    columns: entry.columns,
+                    include: entry.include,
+                    retired: false,
+                    reason: "eligible".to_string(),
+                    action_id: None,
+                    last_seen_micros,
+                    idle_ms,
+                    result_status: None,
+                });
+                continue;
+            }
+
+            let result_status = {
+                let (schema, tdata) = self.get_table(&entry.table)?;
+                validate_columns(schema, &entry.columns)?;
+                validate_columns(schema, &entry.include)?;
+                if drop_secondary_index(tdata, &entry.columns, &entry.include)? {
+                    "dropped".to_string()
+                } else {
+                    "not_found".to_string()
+                }
+            };
+            let action_id = self.record_advisor_retirement(&entry, &params.note, &result_status);
+            retired = retired.saturating_add(1);
+            candidates.push(AdvisorIndexRetirementEntry {
+                suggestion_id: entry.suggestion_id,
+                table: entry.table,
+                columns: entry.columns,
+                include: entry.include,
+                retired: true,
+                reason: "unused".to_string(),
+                action_id: Some(action_id),
+                last_seen_micros,
+                idle_ms,
+                result_status: Some(result_status),
+            });
+        }
+
+        Ok(AdvisorIndexRetireUnusedResult {
+            dry_run,
+            evaluated: candidates.len() as u64,
+            retired,
+            candidates,
+        })
+    }
+
+    pub fn advisor_evaluate(
+        &self,
+        params: AdvisorEvaluateParams,
+    ) -> anyhow::Result<AdvisorEvaluateResult> {
+        if params.phases.is_empty() {
+            anyhow::bail!("invalid_request: phases must not be empty");
+        }
+
+        let schema = self.get_schema(&params.table.db, &params.table.table)?;
+        let table = TableKey {
+            db: params.table.db.clone(),
+            table: params.table.table.clone(),
+        };
+        let limit = params.limit.unwrap_or(20).clamp(1, 100) as usize;
+        let min_queries = params.min_queries.unwrap_or(INDEX_ADVISOR_MIN_QUERIES);
+        let min_rows = params.min_rows.unwrap_or(INDEX_ADVISOR_MIN_ROWS);
+        let mut advisor = IndexAdvisor::default();
+        let mut now = 1_u64;
+        let initial_top = advisor
+            .synthesize(&table, schema, limit, min_queries, min_rows)
+            .into_iter()
+            .next();
+        let mut current_top = initial_top.clone();
+        let mut total_observations = 0_u64;
+        let mut phases = Vec::with_capacity(params.phases.len());
+
+        for (idx, phase) in params.phases.iter().enumerate() {
+            if phase.samples.is_empty() {
+                anyhow::bail!("invalid_request: phase {} must contain samples", idx + 1);
+            }
+
+            let top_before = current_top.clone();
+            let mut previous_top_id = top_before.as_ref().and_then(|s| s.id.clone());
+            let mut top_history = Vec::new();
+            let mut top_changes = 0_u64;
+            let mut distinct_top_suggestions = HashSet::new();
+            let mut observations = 0_u64;
+
+            for sample in phase.samples.iter() {
+                advisor_validate_evaluate_sample(schema, sample)?;
+                let repeats = sample.repeats.unwrap_or(1).clamp(1, 10_000);
+                let rows_scanned = sample.rows_scanned.unwrap_or(128);
+                let info = IndexQueryInfo {
+                    base: params.table.clone(),
+                    eq_cols: sample.equality_columns.clone(),
+                    range_cols: sample.range_columns.clone(),
+                    order_cols: sample.order_by_columns.clone(),
+                    group_cols: sample.group_by_columns.clone(),
+                    join_cols: sample.join_key_columns.clone(),
+                    projection_cols: sample.projection_columns.clone(),
+                };
+
+                for _ in 0..repeats {
+                    advisor.record_query(&table, &info, rows_scanned, now);
+                    now = now.saturating_add(1);
+                    observations = observations.saturating_add(1);
+                    total_observations = total_observations.saturating_add(1);
+
+                    let top = advisor
+                        .synthesize(&table, schema, limit, min_queries, min_rows)
+                        .into_iter()
+                        .next();
+                    let top_id = top.as_ref().and_then(|s| s.id.clone());
+                    if top_id != previous_top_id {
+                        top_changes = top_changes.saturating_add(1);
+                        previous_top_id = top_id.clone();
+                    }
+                    if let Some(id) = top_id.clone() {
+                        distinct_top_suggestions.insert(id);
+                    }
+                    top_history.push(top_id);
+                    current_top = top;
+                }
+            }
+
+            let top_after = current_top.clone();
+            let final_top_stable_after_observation = top_after
+                .as_ref()
+                .and_then(|suggestion| suggestion.id.as_deref())
+                .and_then(|target| advisor_top_stable_after_observation(&top_history, target));
+
+            phases.push(AdvisorEvaluatePhaseResult {
+                label: phase
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("phase_{}", idx + 1)),
+                observations,
+                top_before,
+                top_after,
+                final_top_stable_after_observation,
+                top_changes,
+                distinct_top_suggestions: distinct_top_suggestions.len() as u64,
+            });
+        }
+
+        Ok(AdvisorEvaluateResult {
+            format: ADVISOR_EVALUATE_FORMAT_V1.to_string(),
+            table: params.table,
+            phase_count: phases.len() as u64,
+            total_observations,
+            min_queries,
+            min_rows,
+            initial_top,
+            final_top: current_top,
+            phases,
+        })
+    }
+
     pub fn advisor_history(
         &self,
         params: AdvisorHistoryParams,
@@ -3654,6 +3911,69 @@ impl Engine {
             status: latest.status.clone(),
             progress_pct: latest.progress_pct,
         })
+    }
+
+    fn advisor_latest_actions(
+        &self,
+        table: Option<&BaseTableRef>,
+    ) -> HashMap<(TableKey, String), AdvisorHistoryEntry> {
+        let mut latest = HashMap::new();
+        for entry in self.index_advisor_history.iter() {
+            if let Some(table) = table {
+                if entry.table.db != table.db || entry.table.table != table.table {
+                    continue;
+                }
+            }
+            let key = (
+                TableKey {
+                    db: entry.table.db.clone(),
+                    table: entry.table.table.clone(),
+                },
+                entry.suggestion_id.clone(),
+            );
+            latest.insert(key, entry.clone());
+        }
+        latest
+    }
+
+    fn advisor_suppressed_suggestions(&self, table: &BaseTableRef) -> HashSet<String> {
+        self.advisor_latest_actions(Some(table))
+            .into_values()
+            .filter_map(|entry| match entry.action.as_str() {
+                "dismiss" => Some(entry.suggestion_id),
+                "apply" if is_active_advisor_apply(&entry) => Some(entry.suggestion_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn record_advisor_retirement(
+        &mut self,
+        entry: &AdvisorHistoryEntry,
+        note: &Option<String>,
+        result_status: &str,
+    ) -> String {
+        let action_id = format!("adv_{:016x}", self.index_advisor_history_next_id);
+        self.index_advisor_history_next_id += 1;
+        let created_at_ms = now_millis();
+        self.index_advisor_history.push(AdvisorHistoryEntry {
+            id: action_id.clone(),
+            suggestion_id: entry.suggestion_id.clone(),
+            table: entry.table.clone(),
+            columns: entry.columns.clone(),
+            include: entry.include.clone(),
+            action: "retire".to_string(),
+            created_at_ms,
+            note: note.clone(),
+            status: Some("completed".to_string()),
+            progress_pct: Some(100),
+            result_status: Some(result_status.to_string()),
+            rollback_status: None,
+            updated_at_ms: Some(created_at_ms),
+            error: None,
+        });
+        self.persist_advisor_history_best_effort();
+        action_id
     }
 
     fn update_advisor_history_state(
@@ -5456,6 +5776,100 @@ impl Engine {
     // ai.* (research)
     // -----------------------------
 
+    pub fn ai_autoparam_label_schema(
+        &self,
+        _params: AiAutoparamLabelSchemaParams,
+    ) -> AiAutoparamLabelSchemaResult {
+        AiAutoparamLabelSchemaResult {
+            format: "skein.ai.autoparam.label_schema.v1".to_string(),
+            taxonomy_version: 1,
+            default_decision: "parameterize".to_string(),
+            confidence_min: 0.0,
+            confidence_max: 1.0,
+            literal_fields: vec![
+                AiAutoparamLabelFieldSchema {
+                    field: "value".to_string(),
+                    required: true,
+                    meaning: "typed literal value extracted from SQL".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "column".to_string(),
+                    required: false,
+                    meaning: "column or qualified column associated with the literal".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "table".to_string(),
+                    required: false,
+                    meaning: "base table hint used for schema-aware classification".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "op".to_string(),
+                    required: false,
+                    meaning: "comparison operator context such as eq, in, like, or between"
+                        .to_string(),
+                },
+            ],
+            label_fields: vec![
+                AiAutoparamLabelFieldSchema {
+                    field: "idx".to_string(),
+                    required: true,
+                    meaning: "zero-based literal index in extraction order".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "decision".to_string(),
+                    required: true,
+                    meaning: "one of parameterize, semantic_constant, or unknown".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "confidence".to_string(),
+                    required: true,
+                    meaning: "classifier confidence from 0.0 to 1.0".to_string(),
+                },
+                AiAutoparamLabelFieldSchema {
+                    field: "reason".to_string(),
+                    required: false,
+                    meaning: "human-readable rule or heuristic explanation".to_string(),
+                },
+            ],
+            decisions: vec![
+                AiAutoparamDecisionSchema {
+                    decision: "parameterize".to_string(),
+                    parameterized: true,
+                    cache_key_policy: "replace literal with a positional parameter".to_string(),
+                    meaning: "the literal is request data and can vary between executions"
+                        .to_string(),
+                },
+                AiAutoparamDecisionSchema {
+                    decision: "semantic_constant".to_string(),
+                    parameterized: false,
+                    cache_key_policy: "keep literal in the semantic cache key when policy applies"
+                        .to_string(),
+                    meaning:
+                        "the literal is part of query meaning, such as an enum, state, or type tag"
+                            .to_string(),
+                },
+                AiAutoparamDecisionSchema {
+                    decision: "unknown".to_string(),
+                    parameterized: false,
+                    cache_key_policy: "defer to syntactic autoparameterization policy".to_string(),
+                    meaning: "the classifier lacks enough context for a confident decision"
+                        .to_string(),
+                },
+            ],
+        }
+    }
+
+    pub fn ai_autoparam_classifiers(
+        &self,
+        _params: AiAutoparamClassifiersParams,
+    ) -> AiAutoparamClassifiersResult {
+        AiAutoparamClassifiersResult {
+            format: "skein.ai.autoparam.classifiers.v1".to_string(),
+            default_classifier: "offline_rules_v1".to_string(),
+            classifiers: autoparam_classifier_catalog(),
+        }
+    }
+
     pub fn ai_autoparam_classify(
         &self,
         params: AiAutoparamClassifyParams,
@@ -5463,6 +5877,8 @@ impl Engine {
         if params.literals.is_empty() {
             anyhow::bail!("invalid_request: literals is required");
         }
+        let classifier = resolve_autoparam_classifier(params.classifier.as_ref())?;
+        let started = Instant::now();
 
         let mut labels = Vec::with_capacity(params.literals.len());
         for (idx, lit) in params.literals.iter().enumerate() {
@@ -5472,8 +5888,11 @@ impl Engine {
                 lit,
                 params.db.as_deref(),
                 params.rules.as_ref(),
+                classifier,
             ));
         }
+
+        self.record_autoparam_classifier_latency(started.elapsed());
 
         Ok(AiAutoparamClassifyResult { labels })
     }
@@ -5493,6 +5912,7 @@ impl Engine {
                 db: params.db.clone(),
                 literals: extract.literals.clone(),
                 rules: params.rules.clone(),
+                classifier: params.classifier.clone(),
             })?
             .labels;
 
@@ -5506,6 +5926,120 @@ impl Engine {
             literals: extract.literals,
             labels,
         })
+    }
+
+    pub fn ai_autoparam_feedback(
+        &self,
+        params: AiAutoparamFeedbackParams,
+    ) -> anyhow::Result<AiAutoparamFeedbackResult> {
+        let classifier = resolve_autoparam_classifier(params.classifier.as_ref())?.to_string();
+        let cache_event = params
+            .cache_event
+            .as_deref()
+            .map(str::trim)
+            .filter(|event| !event.is_empty())
+            .unwrap_or("plan_cache_miss")
+            .to_string();
+        let miss_increment = if cache_event == "plan_cache_miss" {
+            params.miss_count.unwrap_or(1).max(1)
+        } else {
+            0
+        };
+
+        let analysis = self.ai_autoparam_analyze(AiAutoparamAnalyzeParams {
+            sql: params.sql,
+            db: params.db,
+            rules: params.rules,
+            classifier: params.classifier,
+        })?;
+
+        let mut feedback = self.autoparam_feedback.lock().unwrap();
+        let cached_before = feedback.contains_key(&analysis.fingerprint);
+        let reclassified = cache_event == "plan_cache_miss" || !cached_before;
+        let entry = feedback
+            .entry(analysis.fingerprint.clone())
+            .or_insert_with(|| AutoparamFeedbackEntry {
+                normalized_sql: analysis.normalized_sql.clone(),
+                classifier: classifier.clone(),
+                cache_event: cache_event.clone(),
+                cache_miss_count: 0,
+                reclassification_count: 0,
+                literals: analysis.literals.clone(),
+                labels: analysis.labels.clone(),
+            });
+
+        entry.cache_event = cache_event.clone();
+        entry.cache_miss_count = entry.cache_miss_count.saturating_add(miss_increment);
+        if reclassified {
+            entry.reclassification_count = entry.reclassification_count.saturating_add(1);
+            entry.normalized_sql = analysis.normalized_sql.clone();
+            entry.classifier = classifier.clone();
+            entry.literals = analysis.literals.clone();
+            entry.labels = analysis.labels.clone();
+        }
+
+        Ok(AiAutoparamFeedbackResult {
+            format: "skein.ai.autoparam.feedback.v1".to_string(),
+            fingerprint: analysis.fingerprint,
+            normalized_sql: entry.normalized_sql.clone(),
+            cache_event,
+            classifier,
+            cached_before,
+            reclassified,
+            cache_miss_count: entry.cache_miss_count,
+            reclassification_count: entry.reclassification_count,
+            literals: entry.literals.clone(),
+            labels: entry.labels.clone(),
+        })
+    }
+
+    pub fn ai_autoparam_metrics(
+        &self,
+        _params: AiAutoparamMetricsParams,
+        plan_cache_hits: u64,
+        plan_cache_misses: u64,
+    ) -> AiAutoparamMetricsResult {
+        let metrics = self.autoparam_metrics.lock().unwrap().clone();
+        let feedback = self.autoparam_feedback.lock().unwrap();
+        let feedback_cache_miss_count = feedback
+            .values()
+            .map(|entry| entry.cache_miss_count)
+            .sum::<u64>();
+        let feedback_reclassifications = feedback
+            .values()
+            .map(|entry| entry.reclassification_count)
+            .sum::<u64>();
+        let plan_cache_total = plan_cache_hits.saturating_add(plan_cache_misses);
+        let plan_cache_hit_rate = if plan_cache_total == 0 {
+            0.0
+        } else {
+            plan_cache_hits as f64 / plan_cache_total as f64
+        };
+        let classifier_mean_ns = if metrics.classifier_invocations == 0 {
+            0.0
+        } else {
+            metrics.classifier_total_ns as f64 / metrics.classifier_invocations as f64
+        };
+
+        AiAutoparamMetricsResult {
+            format: "skein.ai.autoparam.metrics.v1".to_string(),
+            plan_cache_hits,
+            plan_cache_misses,
+            plan_cache_hit_rate,
+            classifier_invocations: metrics.classifier_invocations,
+            classifier_total_ns: metrics.classifier_total_ns,
+            classifier_mean_ns,
+            feedback_cache_entries: feedback.len() as u64,
+            feedback_cache_miss_count,
+            feedback_reclassifications,
+        }
+    }
+
+    fn record_autoparam_classifier_latency(&self, elapsed: Duration) {
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        let mut metrics = self.autoparam_metrics.lock().unwrap();
+        metrics.classifier_invocations = metrics.classifier_invocations.saturating_add(1);
+        metrics.classifier_total_ns = metrics.classifier_total_ns.saturating_add(elapsed_ns);
     }
 
     pub fn ai_nl_translate(
@@ -7049,7 +7583,7 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("not_found: replay bundle metadata missing"))?;
         replay_bundle_verify(&bundle)?;
 
-        let replay =
+        let mut replay =
             Self::open_with_storage_mode_name(&workspace_dir, &bundle.manifest.storage_mode)?;
         let mut observed_tables = Vec::new();
         for table in bundle.tables.iter() {
@@ -7108,10 +7642,12 @@ impl Engine {
             .sum::<u64>();
         let performance_report = match bundle.performance.as_ref() {
             Some(baseline) => {
-                let observed_profile = replay_bundle_performance_profile(
+                replay.restore_replay_performance_hints(baseline, &observed_tables);
+                let observed_profile = replay_bundle_performance_profile_for_workspace(
                     &replay,
                     &observed_tables,
                     &observed_changes,
+                    Some(&bundle_path),
                 )?;
                 Some(replay_bundle_performance_report(
                     baseline,
@@ -7134,6 +7670,77 @@ impl Engine {
             replayed_changes: observed_changes.len() as u64,
             performance_report,
         })
+    }
+
+    fn restore_replay_performance_hints(
+        &mut self,
+        profile: &ReplayBundlePerformanceProfile,
+        tables: &[ReplayBundleTable],
+    ) {
+        let mut seed_tables = profile
+            .cache_warm
+            .hot_tables
+            .iter()
+            .filter_map(|hot_table| {
+                tables.iter().find(|table| {
+                    table.table.db == hot_table.table.db
+                        && table.table.table == hot_table.table.table
+                })
+            })
+            .collect::<Vec<_>>();
+        if seed_tables.is_empty() {
+            seed_tables = tables.iter().collect();
+        }
+
+        self.restore_replay_select_cache(profile.cache_warm.cached_select_entries, &seed_tables);
+        self.restore_replay_patch_cache(profile.cache_warm.cached_patch_entries, &seed_tables);
+    }
+
+    fn restore_replay_select_cache(
+        &mut self,
+        target_count: u64,
+        seed_tables: &[&ReplayBundleTable],
+    ) {
+        let fallback_table = seed_tables.first().copied();
+        let mut cache = self.cached_select.lock().unwrap();
+        cache.clear();
+
+        for idx in 0..target_count {
+            let table = if seed_tables.is_empty() {
+                fallback_table
+            } else {
+                seed_tables.get((idx as usize) % seed_tables.len()).copied()
+            };
+            cache.insert(
+                format!("replay_select_cache_{idx}"),
+                replay_seed_cached_select(table, idx),
+            );
+        }
+    }
+
+    fn restore_replay_patch_cache(
+        &mut self,
+        target_count: u64,
+        seed_tables: &[&ReplayBundleTable],
+    ) {
+        let fallback_table = seed_tables.first().copied();
+        let mut cache = self.cached_patch.lock().unwrap();
+        cache.clear();
+
+        for idx in 0..target_count {
+            let table = if seed_tables.is_empty() {
+                fallback_table
+            } else {
+                seed_tables.get((idx as usize) % seed_tables.len()).copied()
+            };
+            cache.insert(
+                PatchCacheKey {
+                    base: format!("replay_patch_base_{idx}"),
+                    cur: format!("replay_patch_cur_{idx}"),
+                },
+                replay_seed_patch_delta(table),
+            );
+        }
     }
 
     fn materialize_replay_bundle_workspace(
@@ -7348,24 +7955,18 @@ impl Engine {
                 db: cover.table.db.clone(),
                 table: cover.table.table.clone(),
             };
-            let entry = self
-                .edge_coverage
-                .entry(key.clone())
-                .or_insert_with(|| EdgeCoverage {
-                    table: key,
-                    start_seq: cover.start_seq,
-                    end_seq: cover.end_seq,
-                    bundle_id: cover.bundle_id.clone(),
-                    redaction_mode: cover.redaction_mode.clone(),
-                    updated_at_ms: now_ms,
-                });
-
-            if cover.end_seq >= entry.end_seq {
-                entry.start_seq = entry.start_seq.min(cover.start_seq);
-                entry.end_seq = cover.end_seq;
-                entry.bundle_id = cover.bundle_id.clone();
-                entry.redaction_mode = cover.redaction_mode.clone();
-                entry.updated_at_ms = now_ms;
+            let entry = self.edge_coverage.entry(key.clone()).or_default();
+            let before = entry.clone();
+            entry.push(EdgeCoverage {
+                table: key,
+                start_seq: cover.start_seq,
+                end_seq: cover.end_seq,
+                bundle_id: cover.bundle_id.clone(),
+                redaction_mode: cover.redaction_mode.clone(),
+                updated_at_ms: now_ms,
+            });
+            Self::merge_edge_coverage_windows(entry);
+            if *entry != before {
                 updated = true;
             }
         }
@@ -7393,6 +7994,7 @@ impl Engine {
         collect_tables(&query, &mut tables);
         let mut table_names = Vec::new();
         let mut missing = Vec::new();
+        let mut has_gap = false;
         let mut observed_lag = 0u64;
 
         for (db, table) in tables {
@@ -7403,12 +8005,17 @@ impl Engine {
             let name = format!("{db}.{table}");
             table_names.push(name.clone());
 
-            let Some(cover) = self.edge_coverage.get(&key) else {
+            let Some(covers) = self.edge_coverage.get(&key) else {
                 missing.push(name);
                 continue;
             };
             let origin_seq = self.last_change_seq_for_table(&key);
-            let lag = origin_seq.saturating_sub(cover.end_seq);
+            let required_start = self.first_change_seq_for_table(&key).unwrap_or(origin_seq);
+            let (covered_through, gap) = Self::edge_contiguous_coverage_end(covers, required_start);
+            if gap {
+                has_gap = true;
+            }
+            let lag = origin_seq.saturating_sub(covered_through);
             if lag > observed_lag {
                 observed_lag = lag;
             }
@@ -7417,6 +8024,8 @@ impl Engine {
         let max_lag = params.max_lag.unwrap_or(u64::MAX);
         let (eligible, reason) = if !missing.is_empty() {
             (false, Some("missing_coverage".to_string()))
+        } else if has_gap {
+            (false, Some("coverage_gap".to_string()))
         } else if observed_lag > max_lag {
             (false, Some("stale".to_string()))
         } else {
@@ -7968,6 +8577,95 @@ impl Engine {
         wasm_plan_info_from_artifact(&artifact, artifact_bytes)
     }
 
+    pub fn wasm_plan_perf_report(
+        &self,
+        params: WasmPlanPerfReportParams,
+    ) -> anyhow::Result<WasmPlanPerfReportResult> {
+        let (artifact, artifact_bytes) = decode_wasm_plan_artifact(&params.artifact_b64)?;
+        let info = wasm_plan_info_from_artifact(&artifact, artifact_bytes)?;
+        let query = query_from_wasm_plan(&artifact.plan)?;
+        let iterations = params.iterations.unwrap_or(5).clamp(1, 100);
+        let warmup_iterations = params.warmup_iterations.unwrap_or(1).clamp(0, 10);
+
+        for _ in 0..warmup_iterations {
+            let _ = execute_select(self, &query, &params.args, None)?;
+            if artifact.execution == WASM_PLAN_EXECUTION_GENERATED_V1 {
+                let _ = run_generated_wasm_plan(self, &artifact, &params.args)?;
+            }
+        }
+
+        let mut host_latencies = Vec::with_capacity(iterations as usize);
+        let mut host_columns = Vec::new();
+        let mut host_rows = Vec::new();
+        for _ in 0..iterations {
+            let started = Instant::now();
+            let (columns, rows) = execute_select(self, &query, &params.args, None)?;
+            host_latencies.push(elapsed_ns(started));
+            host_columns = columns;
+            host_rows = rows;
+        }
+
+        let mut generated = None;
+        let mut outputs_match = true;
+        if artifact.execution == WASM_PLAN_EXECUTION_GENERATED_V1 {
+            let mut generated_latencies = Vec::with_capacity(iterations as usize);
+            let mut generated_columns = Vec::new();
+            let mut generated_rows = Vec::new();
+            for _ in 0..iterations {
+                let started = Instant::now();
+                let (columns, rows) = run_generated_wasm_plan(self, &artifact, &params.args)?;
+                generated_latencies.push(elapsed_ns(started));
+                generated_columns = columns;
+                generated_rows = rows;
+            }
+            let host_column_names = host_columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>();
+            let generated_column_names = generated_columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>();
+            outputs_match =
+                host_column_names == generated_column_names && host_rows == generated_rows;
+            if !outputs_match {
+                anyhow::bail!("internal: generated wasm plan output mismatch");
+            }
+            generated = Some(WasmPlanPerfRunStats {
+                rows: generated_rows.len(),
+                columns: generated_columns.len(),
+                latency: wasm_plan_perf_latency_stats(generated_latencies),
+            });
+        }
+
+        let host = WasmPlanPerfRunStats {
+            rows: host_rows.len(),
+            columns: host_columns.len(),
+            latency: wasm_plan_perf_latency_stats(host_latencies),
+        };
+        let generated_speedup_vs_host = generated.as_ref().and_then(|stats| {
+            if stats.latency.mean_ns > 0.0 {
+                Some(host.latency.mean_ns / stats.latency.mean_ns)
+            } else {
+                None
+            }
+        });
+
+        Ok(WasmPlanPerfReportResult {
+            format: "skein.wasm.plan.perf.v1".to_string(),
+            execution: info.execution.clone(),
+            iterations,
+            warmup_iterations,
+            operator_count: info.operator_count,
+            operators: info.operators,
+            outputs_match,
+            simd: wasm_plan_simd_exploration(&artifact),
+            host,
+            generated,
+            generated_speedup_vs_host,
+        })
+    }
+
     pub fn wasm_plan_edge_package(
         &self,
         params: WasmPlanEdgePackageParams,
@@ -7996,6 +8694,8 @@ impl Engine {
             "has_filter": info.has_filter,
             "projection_count": info.projection_count,
             "supports_simd": info.supports_simd,
+            "standalone_execution": info.execution == WASM_PLAN_EXECUTION_GENERATED_V1,
+            "runner_exports": ["runSkeinWasmPlan", "runSkeinWasmPlanEdge", "runSkeinWasmPlanHost"],
         }))?;
 
         Ok(WasmPlanEdgePackageResult {
@@ -8008,12 +8708,12 @@ impl Engine {
             runner_js: wasm_plan_edge_runner_js(),
             instructions: vec![
                 "Store artifact_b64 and manifest_json with the edge worker or browser bundle.".to_string(),
-                "Call runSkeinWasmPlan with the SkeinDB RPC URL, artifact_b64, args, and desired result_format.".to_string(),
                 if info.execution == WASM_PLAN_EXECUTION_GENERATED_V1 {
-                    "The artifact now embeds a generated fixed-width filter/project Wasm module, but this v1 package still executes through wasm.plan.run on a SkeinDB host; standalone edge execution remains tracked by T087.".to_string()
+                    "Call runSkeinWasmPlanEdge with artifact_b64, input_rows, args, and result_format to execute the embedded generated Wasm module locally.".to_string()
                 } else {
-                    "This v1 package executes through wasm.plan.run on a SkeinDB host; native in-edge Wasm codegen remains tracked by T085/T086.".to_string()
+                    "This artifact uses host_interpreted_v1, so call runSkeinWasmPlanHost with a SkeinDB RPC URL for execution.".to_string()
                 },
+                "runSkeinWasmPlan chooses local execution when input_rows are provided for generated artifacts and otherwise falls back to the host runner.".to_string(),
             ],
         })
     }
@@ -10471,27 +11171,90 @@ impl Engine {
             .unwrap_or(0)
     }
 
+    fn first_change_seq_for_table(&self, key: &TableKey) -> Option<u64> {
+        self.changes
+            .iter()
+            .filter(|ev| ev.db == key.db && ev.table == key.table)
+            .map(|ev| ev.seq)
+            .min()
+    }
+
     fn edge_coverage_list(&self) -> Vec<EdgeBundleCoverage> {
         let mut out = Vec::new();
-        for cover in self.edge_coverage.values() {
-            out.push(EdgeBundleCoverage {
-                table: BaseTableRef {
-                    db: cover.table.db.clone(),
-                    table: cover.table.table.clone(),
-                    r#as: None,
-                },
-                start_seq: cover.start_seq,
-                end_seq: cover.end_seq,
-                updated_at_ms: cover.updated_at_ms,
-                bundle_id: cover.bundle_id.clone(),
-                redaction_mode: cover.redaction_mode.clone(),
-            });
+        for covers in self.edge_coverage.values() {
+            for cover in covers.iter() {
+                out.push(EdgeBundleCoverage {
+                    table: BaseTableRef {
+                        db: cover.table.db.clone(),
+                        table: cover.table.table.clone(),
+                        r#as: None,
+                    },
+                    start_seq: cover.start_seq,
+                    end_seq: cover.end_seq,
+                    updated_at_ms: cover.updated_at_ms,
+                    bundle_id: cover.bundle_id.clone(),
+                    redaction_mode: cover.redaction_mode.clone(),
+                });
+            }
         }
         out.sort_by(|a, b| {
-            (a.table.db.clone(), a.table.table.clone())
-                .cmp(&(b.table.db.clone(), b.table.table.clone()))
+            (
+                a.table.db.clone(),
+                a.table.table.clone(),
+                a.start_seq,
+                a.end_seq,
+            )
+                .cmp(&(
+                    b.table.db.clone(),
+                    b.table.table.clone(),
+                    b.start_seq,
+                    b.end_seq,
+                ))
         });
         out
+    }
+
+    fn merge_edge_coverage_windows(windows: &mut Vec<EdgeCoverage>) {
+        windows.sort_by(|a, b| (a.start_seq, a.end_seq).cmp(&(b.start_seq, b.end_seq)));
+        let mut merged: Vec<EdgeCoverage> = Vec::with_capacity(windows.len());
+        for current in windows.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if current.start_seq <= last.end_seq.saturating_add(1) {
+                    let take_metadata = current.updated_at_ms >= last.updated_at_ms
+                        || current.end_seq >= last.end_seq;
+                    last.start_seq = last.start_seq.min(current.start_seq);
+                    last.end_seq = last.end_seq.max(current.end_seq);
+                    if take_metadata {
+                        last.bundle_id = current.bundle_id;
+                        last.redaction_mode = current.redaction_mode;
+                        last.updated_at_ms = current.updated_at_ms;
+                    }
+                    continue;
+                }
+            }
+            merged.push(current);
+        }
+        *windows = merged;
+    }
+
+    fn edge_contiguous_coverage_end(windows: &[EdgeCoverage], required_start: u64) -> (u64, bool) {
+        let mut merged = windows.to_vec();
+        Self::merge_edge_coverage_windows(&mut merged);
+        let mut covered_through = if required_start == 0 {
+            0
+        } else {
+            required_start.saturating_sub(1)
+        };
+        for window in merged.into_iter() {
+            if window.end_seq <= covered_through {
+                continue;
+            }
+            if window.start_seq > covered_through.saturating_add(1) {
+                return (covered_through, true);
+            }
+            covered_through = covered_through.max(window.end_seq);
+        }
+        (covered_through, false)
     }
 
     fn schema_version_for(&self, key: &TableKey) -> u64 {
@@ -10693,14 +11456,63 @@ impl Engine {
         false
     }
 
+    fn apply_snapshot_schema_version(&self, table: &BaseTableRef) -> bool {
+        let schema = match self.get_schema(&table.db, &table.table) {
+            Ok(schema) => schema,
+            Err(_) => return false,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = self.snapshots.lock() {
+            return manager.apply_schema_version(&key, schema.table_version);
+        }
+        false
+    }
+
+    fn apply_snapshot_column_drop(&self, table: &BaseTableRef, column: &str) -> bool {
+        let schema = match self.get_schema(&table.db, &table.table) {
+            Ok(schema) => schema,
+            Err(_) => return false,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = self.snapshots.lock() {
+            return manager.apply_schema_drop_column(&key, column, schema.table_version);
+        }
+        false
+    }
+
+    fn apply_snapshot_column_rename(&self, table: &BaseTableRef, old: &str, new: &str) -> bool {
+        let schema = match self.get_schema(&table.db, &table.table) {
+            Ok(schema) => schema,
+            Err(_) => return false,
+        };
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = self.snapshots.lock() {
+            return manager.apply_schema_rename_column(&key, old, new, schema.table_version);
+        }
+        false
+    }
+
     fn observe_and_plan_snapshot(&self, info: &QuerySnapshotInfo, rows_scanned: u64) {
         if rows_scanned == 0 {
             return;
         }
-        let schema = match self.get_schema(&info.base.db, &info.base.table) {
-            Ok(schema) => schema,
+        let (schema, tdata) = match self.get_table(&info.base) {
+            Ok(parts) => parts,
             Err(_) => return,
         };
+        let table_rows = tdata.pk_index.len() as u64;
+        if table_rows == 0 {
+            return;
+        }
         let key = TableKey {
             db: info.base.db.clone(),
             table: info.base.table.clone(),
@@ -10711,7 +11523,7 @@ impl Engine {
             manager.next_plan(
                 &key,
                 &schema.primary_key,
-                rows_scanned,
+                table_rows,
                 schema.columns.len(),
                 schema.table_version,
                 now,
@@ -11092,6 +11904,104 @@ impl SnapshotManager {
             .record_query(table, columns, rows_scanned, now);
     }
 
+    fn apply_schema_version(&mut self, table: &TableKey, table_version: u64) -> bool {
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return false;
+        };
+
+        let mut changed = false;
+        for snap in list.iter_mut() {
+            if !snap.valid {
+                continue;
+            }
+            if snap.table_version != table_version {
+                snap.table_version = table_version;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn apply_schema_drop_column(
+        &mut self,
+        table: &TableKey,
+        column: &str,
+        table_version: u64,
+    ) -> bool {
+        let mut changed = self.patterns.drop_column(table, column);
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return changed;
+        };
+
+        for snap in list.iter_mut() {
+            if !snap.valid {
+                continue;
+            }
+            if snapshot_depends_on_column(snap, column) {
+                snap.valid = false;
+                changed = true;
+                continue;
+            }
+            if snap.table_version != table_version {
+                snap.table_version = table_version;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn apply_schema_rename_column(
+        &mut self,
+        table: &TableKey,
+        old: &str,
+        new: &str,
+        table_version: u64,
+    ) -> bool {
+        let mut changed = self.patterns.rename_column(table, old, new);
+        let Some(list) = self.snapshots.get_mut(table) else {
+            return changed;
+        };
+
+        for snap in list.iter_mut() {
+            if !snap.valid {
+                continue;
+            }
+            let renamed_columns = rename_snapshot_dependency_columns(&mut snap.columns, old, new);
+            let renamed_pk = rename_snapshot_dependency_columns(&mut snap.pk_columns, old, new);
+            if renamed_columns || renamed_pk {
+                snap.refresh_column_index();
+                changed = true;
+            }
+            if snap.table_version != table_version {
+                snap.table_version = table_version;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn best_covering_snapshot(
+        &self,
+        table: &TableKey,
+        columns: &[String],
+        table_version: u64,
+    ) -> Option<&ColumnSnapshot> {
+        let list = self.snapshots.get(table)?;
+        let required: HashSet<String> = columns.iter().cloned().collect();
+        let mut best: Option<&ColumnSnapshot> = None;
+        let mut best_cols = usize::MAX;
+        for snap in list.iter() {
+            if !snap.valid || snap.table_version != table_version || !snap.covers(&required) {
+                continue;
+            }
+            if snap.columns.len() < best_cols {
+                best_cols = snap.columns.len();
+                best = Some(snap);
+            }
+        }
+        best
+    }
+
     fn next_plan(
         &self,
         table: &TableKey,
@@ -11116,9 +12026,6 @@ impl SnapshotManager {
                 continue;
             }
             let candidate_cols = stats.columns.clone();
-            if self.has_covering_snapshot(table, &candidate_cols, table_version) {
-                continue;
-            }
 
             let stored_cols = candidate_cols.len() + pk_cols.len();
             let build_cost =
@@ -11129,7 +12036,20 @@ impl SnapshotManager {
             let snapshot_scan_cost = self.cost_model.snapshot_scan_cost_per_cell
                 * (candidate_cols.len() as f64)
                 * (stats.rows_scanned as f64);
-            let benefit = row_scan_cost - snapshot_scan_cost - build_cost;
+
+            let benefit = if let Some(existing) =
+                self.best_covering_snapshot(table, &candidate_cols, table_version)
+            {
+                if existing.columns == candidate_cols {
+                    continue;
+                }
+                let existing_snapshot_scan_cost = self.cost_model.snapshot_scan_cost_per_cell
+                    * (existing.columns.len() as f64)
+                    * (stats.rows_scanned as f64);
+                existing_snapshot_scan_cost - snapshot_scan_cost - build_cost
+            } else {
+                row_scan_cost - snapshot_scan_cost - build_cost
+            };
 
             if benefit < self.cost_model.min_benefit {
                 continue;
@@ -11239,20 +12159,6 @@ impl SnapshotManager {
 
         changed
     }
-
-    fn has_covering_snapshot(
-        &self,
-        table: &TableKey,
-        columns: &[String],
-        table_version: u64,
-    ) -> bool {
-        let Some(list) = self.snapshots.get(table) else {
-            return false;
-        };
-        let required: HashSet<String> = columns.iter().cloned().collect();
-        list.iter()
-            .any(|snap| snap.valid && snap.table_version == table_version && snap.covers(&required))
-    }
 }
 
 impl ColumnSnapshot {
@@ -11329,6 +12235,13 @@ impl ColumnSnapshot {
         }
     }
 
+    fn refresh_column_index(&mut self) {
+        self.column_index.clear();
+        for (idx, col) in self.columns.iter().enumerate() {
+            self.column_index.insert(col.clone(), idx);
+        }
+    }
+
     fn covers(&self, required: &HashSet<String>) -> bool {
         required.iter().all(|col| {
             self.column_index.contains_key(col) || self.pk_columns.iter().any(|pk| pk == col)
@@ -11347,17 +12260,125 @@ impl QueryPatternTracker {
         let normalized = normalize_columns(&columns);
         let key = projection_key(&normalized);
         let per_table = self.by_table.entry(table.clone()).or_default();
-        let entry = per_table.entry(key).or_insert_with(|| ProjectionStats {
+        if let Some(entry) = per_table.get_mut(&key) {
+            entry.columns = normalized;
+            entry.count = entry.count.saturating_add(1);
+            entry.rows_scanned = entry.rows_scanned.saturating_add(rows_scanned);
+            entry.last_seen_micros = now;
+            return;
+        }
+
+        let candidate = ProjectionStats {
             columns: normalized.clone(),
-            count: 0,
-            rows_scanned: 0,
+            count: 1,
+            rows_scanned,
             last_seen_micros: now,
-        });
-        entry.columns = normalized;
-        entry.count = entry.count.saturating_add(1);
-        entry.rows_scanned = entry.rows_scanned.saturating_add(rows_scanned);
-        entry.last_seen_micros = now;
+        };
+
+        if per_table.len() >= self.max_patterns_per_table {
+            let Some((coldest_key, coldest_stats)) = per_table.iter().min_by(|a, b| {
+                projection_pattern_hotness(a.1).cmp(&projection_pattern_hotness(b.1))
+            }) else {
+                return;
+            };
+            if projection_pattern_hotness(&candidate) <= projection_pattern_hotness(coldest_stats) {
+                return;
+            }
+            let coldest_key = coldest_key.clone();
+            per_table.remove(&coldest_key);
+        }
+
+        per_table.insert(key, candidate);
     }
+
+    fn drop_column(&mut self, table: &TableKey, column: &str) -> bool {
+        let Some(per_table) = self.by_table.remove(table) else {
+            return false;
+        };
+
+        let mut changed = false;
+        let mut rebuilt = HashMap::<String, ProjectionStats>::new();
+        for (_, mut stats) in per_table.into_iter() {
+            if stats
+                .columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            {
+                changed = true;
+                continue;
+            }
+            stats.columns = normalize_columns(&stats.columns);
+            let key = projection_key(&stats.columns);
+            if let Some(existing) = rebuilt.get_mut(&key) {
+                existing.count = existing.count.saturating_add(stats.count);
+                existing.rows_scanned = existing.rows_scanned.saturating_add(stats.rows_scanned);
+                existing.last_seen_micros = existing.last_seen_micros.max(stats.last_seen_micros);
+                changed = true;
+            } else {
+                rebuilt.insert(key, stats);
+            }
+        }
+
+        if !rebuilt.is_empty() {
+            self.by_table.insert(table.clone(), rebuilt);
+        }
+        changed
+    }
+
+    fn rename_column(&mut self, table: &TableKey, old: &str, new: &str) -> bool {
+        let Some(per_table) = self.by_table.remove(table) else {
+            return false;
+        };
+
+        let mut changed = false;
+        let mut rebuilt = HashMap::<String, ProjectionStats>::new();
+        for (_, mut stats) in per_table.into_iter() {
+            if rename_snapshot_dependency_columns(&mut stats.columns, old, new) {
+                changed = true;
+            }
+            stats.columns = normalize_columns(&stats.columns);
+            let key = projection_key(&stats.columns);
+            if let Some(existing) = rebuilt.get_mut(&key) {
+                existing.count = existing.count.saturating_add(stats.count);
+                existing.rows_scanned = existing.rows_scanned.saturating_add(stats.rows_scanned);
+                existing.last_seen_micros = existing.last_seen_micros.max(stats.last_seen_micros);
+                changed = true;
+            } else {
+                rebuilt.insert(key, stats);
+            }
+        }
+
+        if !rebuilt.is_empty() {
+            self.by_table.insert(table.clone(), rebuilt);
+        }
+        changed
+    }
+}
+
+fn projection_pattern_hotness(stats: &ProjectionStats) -> (u64, u64, u64) {
+    (stats.count, stats.rows_scanned, stats.last_seen_micros)
+}
+
+fn rename_snapshot_dependency_columns(columns: &mut [String], old: &str, new: &str) -> bool {
+    let mut changed = false;
+    for column in columns.iter_mut() {
+        if column.eq_ignore_ascii_case(old) {
+            *column = new.to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn snapshot_depends_on_column(snapshot: &ColumnSnapshot, column: &str) -> bool {
+    snapshot
+        .columns
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(column))
+        || snapshot
+            .pk_columns
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(column))
 }
 
 impl IndexAdvisor {
@@ -11429,17 +12450,7 @@ impl IndexAdvisor {
             if stats.count < min_queries || stats.rows_scanned < min_rows {
                 continue;
             }
-            let mut key_cols = stats.eq_cols.clone();
-            if let Some(range) = stats.range_cols.first() {
-                if !key_cols.contains(range) {
-                    key_cols.push(range.clone());
-                }
-            }
-            for col in stats.group_cols.iter().chain(stats.order_cols.iter()) {
-                if !key_cols.contains(col) {
-                    key_cols.push(col.clone());
-                }
-            }
+            let key_cols = advisor_candidate_columns_from_dependency(stats);
 
             if key_cols.is_empty() {
                 continue;
@@ -11456,29 +12467,20 @@ impl IndexAdvisor {
                 continue;
             }
 
-            let include = stats
-                .projection_cols
-                .iter()
-                .filter(|col| !key_cols.contains(*col))
-                .take(INDEX_ADVISOR_MAX_INCLUDE)
-                .cloned()
-                .collect::<Vec<_>>();
+            let include = advisor_covering_include_from_dependency(stats, &key_cols);
 
-            let mut score = stats.rows_scanned as f64;
-            if !stats.group_cols.is_empty() {
-                score *= 1.05;
-            }
-            score *= join_selectivity_factor(schema, &stats.join_cols);
-            score += stats.count as f64 * 0.1;
+            let cost = advisor_cost_estimate(schema, stats, &key_cols, &include);
 
             let id = advisor_suggestion_id(table, &key_cols, &include);
             out.push(AdvisorIndexSuggestion {
                 id: Some(id),
                 columns: key_cols,
                 include,
-                score,
+                score: cost.net_score,
                 count: stats.count,
                 rows_scanned: stats.rows_scanned,
+                dependency: Some(advisor_dependency_capture(stats)),
+                cost: Some(cost),
             });
         }
 
@@ -11491,6 +12493,32 @@ impl IndexAdvisor {
             out.truncate(limit);
         }
         out
+    }
+
+    fn candidate_last_seen(
+        &self,
+        table: &TableKey,
+        schema: &TableSchema,
+        columns: &[String],
+        include: &[String],
+    ) -> Option<u64> {
+        let patterns = self.by_table.get(table)?;
+        patterns
+            .values()
+            .filter_map(|stats| {
+                let candidate_columns = advisor_candidate_columns_from_dependency(stats);
+                if candidate_columns.is_empty()
+                    || candidate_columns.len() > INDEX_ADVISOR_MAX_COLUMNS
+                    || advisor_candidate_matches_existing_prefix(schema, &candidate_columns)
+                {
+                    return None;
+                }
+                let candidate_include =
+                    advisor_covering_include_from_dependency(stats, &candidate_columns);
+                (candidate_columns == columns && candidate_include == include)
+                    .then_some(stats.last_seen_micros)
+            })
+            .max()
     }
 
     fn to_disk(&self) -> AdvisorPatternsDisk {
@@ -13355,6 +14383,63 @@ fn wasm_plan_info_from_artifact(
     })
 }
 
+fn wasm_plan_simd_exploration(artifact: &WasmPlanArtifactV1) -> WasmPlanSimdExploration {
+    if let Some(generated) = artifact.generated.as_ref() {
+        let fixed_columns = generated
+            .input_table_columns
+            .iter()
+            .chain(generated.param_columns.iter())
+            .chain(generated.output_columns.iter())
+            .all(|column| matches!(column.r#type.kind.as_str(), "bool" | "u64"));
+        return WasmPlanSimdExploration {
+            candidate: fixed_columns,
+            enabled: false,
+            strategy: "scalar_generated_filter_project_v1".to_string(),
+            notes: vec![
+                "generated artifact uses fixed-width bool/u64 column batches".to_string(),
+                "SIMD lane lowering is not emitted by this build; report captures the scalar baseline for future SIMD comparison".to_string(),
+            ],
+        };
+    }
+
+    WasmPlanSimdExploration {
+        candidate: false,
+        enabled: false,
+        strategy: "host_interpreted_v1".to_string(),
+        notes: vec![
+            "artifact falls back to host interpretation, so there is no generated Wasm module to SIMD-lower".to_string(),
+        ],
+    }
+}
+
+fn wasm_plan_perf_latency_stats(mut latencies: Vec<u64>) -> WasmPlanPerfLatencyStats {
+    if latencies.is_empty() {
+        return WasmPlanPerfLatencyStats {
+            min_ns: 0,
+            p50_ns: 0,
+            p95_ns: 0,
+            p99_ns: 0,
+            max_ns: 0,
+            mean_ns: 0.0,
+        };
+    }
+    latencies.sort_unstable();
+    let len = latencies.len();
+    let percentile = |pct: usize| -> u64 {
+        let idx = ((len * pct).div_ceil(100)).saturating_sub(1).min(len - 1);
+        latencies[idx]
+    };
+    let sum: u128 = latencies.iter().map(|value| *value as u128).sum();
+    WasmPlanPerfLatencyStats {
+        min_ns: latencies[0],
+        p50_ns: percentile(50),
+        p95_ns: percentile(95),
+        p99_ns: percentile(99),
+        max_ns: latencies[len - 1],
+        mean_ns: sum as f64 / len as f64,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GeneratedWasmValueType {
     Bool,
@@ -14238,7 +15323,24 @@ fn execute_generated_wasm_module(
 }
 
 fn wasm_plan_edge_runner_js() -> String {
-    r#"export async function runSkeinWasmPlan({ rpcUrl, artifactB64, args = [], resultFormat = 'objects_json', token = null, cache = null }) {
+    r#"const SKEIN_WASM_PLAN_FORMAT_V1 = 'skein.wasm.plan.v1';
+const SKEIN_WASM_BATCH_ABI_V1 = 'skein.wasm.batch.v1';
+const SKEIN_WASM_GENERATED_EXECUTION_V1 = 'generated_filter_project_v1';
+const SKEIN_WASM_BATCH_MAGIC_V1 = 0x31424b53;
+const SKEIN_WASM_BATCH_HEADER_SIZE = 20;
+const SKEIN_WASM_BATCH_COLUMN_META_SIZE = 28;
+
+export async function runSkeinWasmPlan(options) {
+    const artifact = decodeSkeinWasmPlanArtifact(options.artifactB64);
+    const inputRows = options.input_rows ?? options.inputRows ?? null;
+    const inputBatchB64 = options.input_batch_b64 ?? options.inputBatchB64 ?? null;
+    if (artifact.execution === SKEIN_WASM_GENERATED_EXECUTION_V1 && (inputRows || inputBatchB64)) {
+        return runSkeinWasmPlanEdge({ ...options, artifact });
+    }
+    return runSkeinWasmPlanHost(options);
+}
+
+export async function runSkeinWasmPlanHost({ rpcUrl, artifactB64, args = [], resultFormat = 'objects_json', token = null, cache = null }) {
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
   const body = {
@@ -14263,8 +15365,234 @@ fn wasm_plan_edge_runner_js() -> String {
   return payload.result;
 }
 
+export async function runSkeinWasmPlanEdge({ artifactB64, artifact = null, input_rows = null, inputRows = null, input_batch_b64 = null, inputBatchB64 = null, args = [], result_format = null, resultFormat = 'objects_json' }) {
+    artifact = artifact || decodeSkeinWasmPlanArtifact(artifactB64);
+    validateGeneratedSkeinWasmPlanArtifact(artifact);
+
+    const generated = artifact.generated;
+    const tableRows = input_rows ?? inputRows;
+    const batchB64 = input_batch_b64 ?? inputBatchB64;
+    const inputBatch = batchB64
+        ? decodeBase64(batchB64)
+        : encodeSkeinWasmBatchV1(
+                [...generated.input_table_columns, ...generated.param_columns],
+                normalizeSkeinWasmInputRows(generated.input_table_columns, generated.param_columns, tableRows || [], args)
+            );
+
+    const moduleBytes = decodeBase64(generated.module_b64);
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {});
+    const { memory, skein_alloc: alloc, skein_plan_eval: evalPlan } = instance.exports;
+    if (!(memory instanceof WebAssembly.Memory) || typeof alloc !== 'function' || typeof evalPlan !== 'function') {
+        throw new Error('generated SkeinDB Wasm plan is missing required exports');
+    }
+
+    const inputPtr = alloc(inputBatch.length);
+    new Uint8Array(memory.buffer).set(inputBatch, inputPtr);
+    const packed = BigInt(evalPlan(inputPtr, inputBatch.length));
+    const outputPtr = Number(packed >> 32n);
+    const outputLen = Number(packed & 0xffff_ffffn);
+    const outputBatch = new Uint8Array(memory.buffer.slice(outputPtr, outputPtr + outputLen));
+    const outputRows = decodeSkeinWasmBatchV1(generated.output_columns, outputBatch);
+    const format = result_format || resultFormat;
+
+    return {
+        not_modified: false,
+        data: formatSkeinWasmPlanRows(generated.output_columns, outputRows, outputBatch, format),
+        deps: { tables: artifact.plan.ops.filter((op) => op.op === 'scan').map((op) => op.table) },
+        edge: {
+            execution: artifact.execution,
+            row_count: outputRows.length,
+            standalone: true
+        }
+    };
+}
+
 export function parseSkeinWasmPlanManifest(manifestJson) {
   return typeof manifestJson === 'string' ? JSON.parse(manifestJson) : manifestJson;
+}
+
+export function decodeSkeinWasmPlanArtifact(artifactB64) {
+    const artifact = JSON.parse(new TextDecoder().decode(decodeBase64(artifactB64)));
+    if (artifact.format !== SKEIN_WASM_PLAN_FORMAT_V1) throw new Error('unsupported SkeinDB Wasm plan format');
+    if (artifact.abi !== SKEIN_WASM_BATCH_ABI_V1) throw new Error('unsupported SkeinDB Wasm batch ABI');
+    return artifact;
+}
+
+function validateGeneratedSkeinWasmPlanArtifact(artifact) {
+    if (artifact.execution !== SKEIN_WASM_GENERATED_EXECUTION_V1 || !artifact.generated?.module_b64) {
+        throw new Error('standalone edge execution requires generated_filter_project_v1');
+    }
+}
+
+function normalizeSkeinWasmInputRows(inputColumns, paramColumns, inputRows, args) {
+    const paramValues = paramColumns.map((column, idx) => normalizeSkeinLit(args[idx], column.type));
+    return inputRows.map((row) => {
+        const tableValues = inputColumns.map((column, idx) => {
+            const value = Array.isArray(row) ? row[idx] : row?.[column.name];
+            return normalizeSkeinLit(value, column.type);
+        });
+        return [...tableValues, ...paramValues];
+    });
+}
+
+function normalizeSkeinLit(value, typeDesc) {
+    if (value && typeof value === 'object' && typeof value.t === 'string') {
+        if (typeDesc.kind === 'bool' && value.t === 'bool') return { t: 'bool', v: Boolean(value.v) };
+        if (typeDesc.kind === 'u64' && value.t === 'u64') return { t: 'u64', v: value.v };
+    }
+    if (value === null || value === undefined) throw new Error(`missing non-null ${typeDesc.kind} value`);
+    if (typeDesc.kind === 'bool') return { t: 'bool', v: Boolean(value) };
+    if (typeDesc.kind === 'u64') return { t: 'u64', v: value };
+    throw new Error(`unsupported generated Wasm edge type: ${typeDesc.kind}`);
+}
+
+function encodeSkeinWasmBatchV1(columns, rows) {
+    const payloads = columns.map((column, colIdx) => buildColumnPayload(column, rows, colIdx));
+    let cursor = SKEIN_WASM_BATCH_HEADER_SIZE + columns.length * SKEIN_WASM_BATCH_COLUMN_META_SIZE;
+    for (const payload of payloads) cursor += payload.data.length;
+
+    const out = new Uint8Array(cursor);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, SKEIN_WASM_BATCH_MAGIC_V1, true);
+    view.setUint16(4, 1, true);
+    view.setUint16(6, 0, true);
+    view.setUint32(8, rows.length, true);
+    view.setUint32(12, columns.length, true);
+    view.setUint32(16, SKEIN_WASM_BATCH_HEADER_SIZE, true);
+
+    cursor = SKEIN_WASM_BATCH_HEADER_SIZE + columns.length * SKEIN_WASM_BATCH_COLUMN_META_SIZE;
+    payloads.forEach((payload, idx) => {
+        const base = SKEIN_WASM_BATCH_HEADER_SIZE + idx * SKEIN_WASM_BATCH_COLUMN_META_SIZE;
+        view.setUint32(base, payload.tag, true);
+        view.setUint32(base + 4, cursor, true);
+        view.setUint32(base + 8, payload.data.length, true);
+        view.setUint32(base + 12, 0, true);
+        view.setUint32(base + 16, 0, true);
+        view.setUint32(base + 20, 0, true);
+        view.setUint32(base + 24, 0, true);
+        out.set(payload.data, cursor);
+        cursor += payload.data.length;
+    });
+    return out;
+}
+
+function buildColumnPayload(column, rows, colIdx) {
+    const kind = column.type?.kind;
+    if (kind === 'bool') {
+        const data = new Uint8Array(rows.length);
+        rows.forEach((row, rowIdx) => {
+            const lit = normalizeSkeinLit(row[colIdx], column.type);
+            data[rowIdx] = lit.v ? 1 : 0;
+        });
+        return { tag: 1, data };
+    }
+    if (kind === 'u64') {
+        const data = new Uint8Array(rows.length * 8);
+        const view = new DataView(data.buffer);
+        rows.forEach((row, rowIdx) => {
+            const lit = normalizeSkeinLit(row[colIdx], column.type);
+            view.setBigUint64(rowIdx * 8, litU64ToBigInt(lit), true);
+        });
+        return { tag: 3, data };
+    }
+    throw new Error(`unsupported generated Wasm edge column type: ${kind}`);
+}
+
+function decodeSkeinWasmBatchV1(columns, bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes.length < SKEIN_WASM_BATCH_HEADER_SIZE || view.getUint32(0, true) !== SKEIN_WASM_BATCH_MAGIC_V1) {
+        throw new Error('invalid SkeinDB Wasm batch');
+    }
+    const version = view.getUint16(4, true);
+    if (version !== 1) throw new Error('unsupported SkeinDB Wasm batch version');
+    const rowCount = view.getUint32(8, true);
+    const colCount = view.getUint32(12, true);
+    const columnsOffset = view.getUint32(16, true);
+    if (colCount !== columns.length) throw new Error('Wasm batch column count mismatch');
+
+    const columnValues = [];
+    for (let idx = 0; idx < colCount; idx += 1) {
+        const base = columnsOffset + idx * SKEIN_WASM_BATCH_COLUMN_META_SIZE;
+        const tag = view.getUint32(base, true);
+        const dataOffset = view.getUint32(base + 4, true);
+        const dataLen = view.getUint32(base + 8, true);
+        const nullsOffset = view.getUint32(base + 12, true);
+        const nullsLen = view.getUint32(base + 16, true);
+        if (dataOffset + dataLen > bytes.length) throw new Error('Wasm batch data out of bounds');
+        const values = [];
+        for (let rowIdx = 0; rowIdx < rowCount; rowIdx += 1) {
+            if (!wasmBatchIsNonNull(bytes, nullsOffset, nullsLen, rowIdx)) {
+                values.push({ t: 'null' });
+            } else if (tag === 1) {
+                values.push({ t: 'bool', v: bytes[dataOffset + rowIdx] !== 0 });
+            } else if (tag === 3) {
+                const value = view.getBigUint64(dataOffset + rowIdx * 8, true);
+                values.push({ t: 'u64', v: bigintToJsonNumber(value) });
+            } else {
+                throw new Error(`unsupported generated Wasm output type tag: ${tag}`);
+            }
+        }
+        columnValues.push(values);
+    }
+
+    const rows = [];
+    for (let rowIdx = 0; rowIdx < rowCount; rowIdx += 1) {
+        rows.push(columnValues.map((column) => column[rowIdx]));
+    }
+    return rows;
+}
+
+function wasmBatchIsNonNull(bytes, nullsOffset, nullsLen, rowIdx) {
+    if (!nullsOffset || !nullsLen) return true;
+    const byte = bytes[nullsOffset + Math.floor(rowIdx / 8)] || 0;
+    return (byte & (1 << (rowIdx % 8))) !== 0;
+}
+
+function formatSkeinWasmPlanRows(columns, rows, outputBatch, resultFormat) {
+    if (resultFormat === 'wasm_batch_v1') {
+        return {
+            format: SKEIN_WASM_BATCH_ABI_V1,
+            columns,
+            batch_b64: encodeBase64(outputBatch)
+        };
+    }
+    if (resultFormat === 'rows_json') return { columns, rows };
+    return rows.map((row) => Object.fromEntries(columns.map((column, idx) => [column.name, row[idx]])));
+}
+
+function litU64ToBigInt(lit) {
+    if (typeof lit.v === 'bigint') return lit.v;
+    if (typeof lit.v === 'number') {
+        if (!Number.isInteger(lit.v) || lit.v < 0) throw new Error('u64 value must be a non-negative integer');
+        return BigInt(lit.v);
+    }
+    if (typeof lit.v === 'string') return BigInt(lit.v);
+    throw new Error('u64 value must be a number, bigint, or decimal string');
+}
+
+function bigintToJsonNumber(value) {
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value.toString();
+}
+
+function decodeBase64(value) {
+    if (typeof atob === 'function') {
+        const binary = atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let idx = 0; idx < binary.length; idx += 1) bytes[idx] = binary.charCodeAt(idx);
+        return bytes;
+    }
+    if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(value, 'base64'));
+    throw new Error('base64 decoding is unavailable in this JavaScript runtime');
+}
+
+function encodeBase64(bytes) {
+    if (typeof btoa === 'function') {
+        let binary = '';
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return btoa(binary);
+    }
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+    throw new Error('base64 encoding is unavailable in this JavaScript runtime');
 }
 "#
     .to_string()
@@ -22183,6 +23511,23 @@ fn replay_bundle_performance_profile(
     Ok(profile)
 }
 
+fn replay_bundle_performance_profile_for_workspace(
+    engine: &Engine,
+    tables: &[ReplayBundleTable],
+    changes: &[ReplayBundleChangeEvent],
+    replay_bundle_path: Option<&Path>,
+) -> anyhow::Result<ReplayBundlePerformanceProfile> {
+    let mut profile = replay_bundle_performance_profile(engine, tables, changes)?;
+    if let Some(path) = replay_bundle_path {
+        if let Ok(metadata) = fs::metadata(path) {
+            profile.lsm_state.disk_bytes =
+                profile.lsm_state.disk_bytes.saturating_sub(metadata.len());
+            profile.checksum = replay_bundle_performance_checksum(&profile)?;
+        }
+    }
+    Ok(profile)
+}
+
 fn replay_bundle_timing_profile(
     changes: &[ReplayBundleChangeEvent],
 ) -> ReplayBundlePerformanceTimingProfile {
@@ -22238,6 +23583,8 @@ fn replay_bundle_performance_report(
     baseline: &ReplayBundlePerformanceProfile,
     observed: &ReplayBundlePerformanceProfile,
 ) -> ReplayBundlePerformanceRunReport {
+    let baseline_checksum = replay_bundle_performance_run_checksum(baseline);
+    let observed_checksum = replay_bundle_performance_run_checksum(observed);
     let baseline_hot_tables = replay_hot_table_set(&baseline.cache_warm.hot_tables);
     let observed_hot_tables = replay_hot_table_set(&observed.cache_warm.hot_tables);
     let hot_table_match_count = baseline_hot_tables
@@ -22249,9 +23596,9 @@ fn replay_bundle_performance_report(
 
     ReplayBundlePerformanceRunReport {
         format: "skein.replay.performance_report.v1".to_string(),
-        baseline_checksum: baseline.checksum.clone(),
-        observed_checksum: observed.checksum.clone(),
-        checksum_match: baseline.checksum == observed.checksum,
+        baseline_checksum: baseline_checksum.clone(),
+        observed_checksum: observed_checksum.clone(),
+        checksum_match: baseline_checksum == observed_checksum,
         storage: ReplayBundlePerformanceStorageVariance {
             disk_bytes_delta: signed_u64_delta(
                 observed.lsm_state.disk_bytes,
@@ -22318,6 +23665,118 @@ fn replay_hot_table_set(tables: &[ReplayBundlePerformanceHotTable]) -> HashSet<S
         .iter()
         .map(|hot_table| format!("{}.{}", hot_table.table.db, hot_table.table.table))
         .collect()
+}
+
+fn replay_bundle_performance_run_checksum(profile: &ReplayBundlePerformanceProfile) -> String {
+    let checksum_value = canonicalize_json_value(&serde_json::json!({
+        "format": &profile.format,
+        "lsm_state": {
+            "storage_mode": &profile.lsm_state.storage_mode,
+            "total_tables": profile.lsm_state.total_tables,
+            "total_rows": profile.lsm_state.total_rows,
+            "mvcc_versions": profile.lsm_state.mvcc_versions,
+            "delta_chains": profile.lsm_state.delta_chains,
+            "tables": &profile.lsm_state.tables,
+        },
+        "cache_warm": &profile.cache_warm,
+        "timing": &profile.timing,
+    }));
+    fingerprint_json(&checksum_value)
+}
+
+fn replay_seed_cached_select(table: Option<&ReplayBundleTable>, idx: u64) -> CachedSelect {
+    let columns = table
+        .map(|table| {
+            table
+                .schema
+                .columns
+                .iter()
+                .map(|column| ColumnMeta {
+                    name: column.name.clone(),
+                    r#type: column.r#type.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let sample_row = table.and_then(|table| {
+        table
+            .rows
+            .iter()
+            .find(|row| !row.deleted)
+            .or_else(|| table.rows.first())
+    });
+    let rows = match (table, sample_row) {
+        (Some(table), Some(row)) => vec![table
+            .schema
+            .columns
+            .iter()
+            .map(|column| row.row.get(&column.name).cloned().unwrap_or(Lit::Null))
+            .collect::<Vec<_>>()],
+        _ => Vec::new(),
+    };
+    let keys = match (table, sample_row) {
+        (Some(table), Some(row)) if !table.schema.primary_key.is_empty() => {
+            let pk = table
+                .schema
+                .primary_key
+                .iter()
+                .filter_map(|column| row.row.get(column).cloned())
+                .collect::<Vec<_>>();
+            if pk.len() == table.schema.primary_key.len() {
+                Some(vec![pk])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let query = table.map(|table| {
+        format!(
+            "replay.seed.select.{}.{}.{}",
+            table.table.db, table.table.table, idx
+        )
+    });
+
+    CachedSelect {
+        columns,
+        rows,
+        keys,
+        query,
+        hits: 0,
+        created_ms: 0,
+        last_hit_ms: 0,
+        schema_version: 0,
+    }
+}
+
+fn replay_seed_patch_delta(table: Option<&ReplayBundleTable>) -> PatchDelta {
+    let columns = table
+        .map(|table| {
+            table
+                .schema
+                .columns
+                .iter()
+                .map(|column| ColumnMeta {
+                    name: column.name.clone(),
+                    r#type: column.r#type.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    PatchDelta {
+        columns,
+        window: None,
+        added: Vec::new(),
+        updated: Vec::new(),
+        removed: Vec::new(),
+        moved: Vec::new(),
+        reorder: None,
+        partial: false,
+        removed_unknown: false,
+        updated_unknown: false,
+        reset_reason: None,
+    }
 }
 
 fn signed_u64_delta(observed: u64, baseline: u64) -> i64 {
@@ -24050,6 +25509,23 @@ struct SqlAutoparamExtract {
 }
 
 #[derive(Debug, Clone)]
+struct AutoparamFeedbackEntry {
+    normalized_sql: String,
+    classifier: String,
+    cache_event: String,
+    cache_miss_count: u64,
+    reclassification_count: u64,
+    literals: Vec<AiAutoparamLiteral>,
+    labels: Vec<AiAutoparamLabel>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct AutoparamMetrics {
+    classifier_invocations: u64,
+    classifier_total_ns: u64,
+}
+
+#[derive(Debug, Clone)]
 enum SqlTokenKind {
     Ident(String),
     Keyword(String),
@@ -24610,13 +26086,40 @@ fn base_table_name(name: &str) -> String {
     name.rsplit('.').next().unwrap_or(name).to_string()
 }
 
+fn autoparam_classifier_catalog() -> Vec<AiAutoparamClassifierInfo> {
+    vec![AiAutoparamClassifierInfo {
+        name: "offline_rules_v1".to_string(),
+        kind: "offline_rules".to_string(),
+        default: true,
+        supports_rules: true,
+        supports_schema: true,
+        description: "deterministic offline classifier using explicit rules, schema hints, and column-name heuristics".to_string(),
+    }]
+}
+
+fn resolve_autoparam_classifier(
+    classifier: Option<&AiAutoparamClassifierSpec>,
+) -> anyhow::Result<&'static str> {
+    let name = classifier
+        .map(|classifier| classifier.name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("offline_rules_v1");
+    match name {
+        "default" | "offline_rules_v1" => Ok("offline_rules_v1"),
+        other => anyhow::bail!("invalid_request: unsupported autoparam classifier '{other}'"),
+    }
+}
+
 fn classify_autoparam_literal(
     engine: &Engine,
     idx: u64,
     lit: &AiAutoparamLiteral,
     db: Option<&str>,
     rules: Option<&AiAutoparamRules>,
+    classifier: &str,
 ) -> AiAutoparamLabel {
+    debug_assert_eq!(classifier, "offline_rules_v1");
+
     let mut decision = "parameterize";
     let mut confidence = 0.55;
     let mut reason = Some("default parameterizable".to_string());
@@ -25781,6 +27284,154 @@ fn index_pattern_key(
         join_cols.join(","),
         projection_cols.join(",")
     )
+}
+
+fn push_unique_columns(out: &mut Vec<String>, columns: &[String]) {
+    for column in columns.iter() {
+        if !out.contains(column) {
+            out.push(column.clone());
+        }
+    }
+}
+
+fn advisor_candidate_columns_from_dependency(stats: &IndexPatternStats) -> Vec<String> {
+    let mut key_cols = Vec::new();
+    push_unique_columns(&mut key_cols, &stats.eq_cols);
+    push_unique_columns(&mut key_cols, &stats.join_cols);
+    if let Some(range_column) = stats.range_cols.first() {
+        push_unique_columns(&mut key_cols, std::slice::from_ref(range_column));
+    }
+    push_unique_columns(&mut key_cols, &stats.group_cols);
+    push_unique_columns(&mut key_cols, &stats.order_cols);
+    key_cols
+}
+
+fn advisor_covering_include_from_dependency(
+    stats: &IndexPatternStats,
+    key_cols: &[String],
+) -> Vec<String> {
+    stats
+        .projection_cols
+        .iter()
+        .filter(|column| !key_cols.contains(*column))
+        .take(INDEX_ADVISOR_MAX_INCLUDE)
+        .cloned()
+        .collect()
+}
+
+fn advisor_read_benefit(schema: &TableSchema, stats: &IndexPatternStats) -> f64 {
+    let mut read_benefit = stats.rows_scanned as f64;
+    if !stats.group_cols.is_empty() {
+        read_benefit *= 1.05;
+    }
+    read_benefit *= join_selectivity_factor(schema, &stats.join_cols);
+    read_benefit + stats.count as f64 * 0.1
+}
+
+fn advisor_cost_estimate(
+    schema: &TableSchema,
+    stats: &IndexPatternStats,
+    key_cols: &[String],
+    include: &[String],
+) -> AdvisorIndexCostEstimate {
+    let key_columns = key_cols.len() as u64;
+    let include_columns = include.len() as u64;
+    let width = key_columns as f64 + include_columns as f64 * 0.5;
+    let write_pressure = schema.table_version.max(1);
+    let write_overhead = (write_pressure as f64).ln_1p() * width * 0.02;
+    let compaction_overhead = (stats.rows_scanned.max(1) as f64).ln_1p()
+        * (key_columns + include_columns).max(1) as f64
+        * 0.01;
+    let read_benefit = advisor_read_benefit(schema, stats);
+    let net_score = (read_benefit - write_overhead - compaction_overhead).max(0.0);
+    AdvisorIndexCostEstimate {
+        read_benefit,
+        write_overhead,
+        compaction_overhead,
+        net_score,
+        write_pressure,
+        key_columns,
+        include_columns,
+    }
+}
+
+fn advisor_validate_evaluate_sample(
+    schema: &TableSchema,
+    sample: &skeindb_skeinql::methods::AdvisorEvaluateSample,
+) -> anyhow::Result<()> {
+    validate_columns(schema, &sample.equality_columns)?;
+    validate_columns(schema, &sample.range_columns)?;
+    validate_columns(schema, &sample.order_by_columns)?;
+    validate_columns(schema, &sample.group_by_columns)?;
+    validate_columns(schema, &sample.join_key_columns)?;
+    validate_columns(schema, &sample.projection_columns)?;
+
+    if sample.equality_columns.is_empty()
+        && sample.range_columns.is_empty()
+        && sample.order_by_columns.is_empty()
+        && sample.group_by_columns.is_empty()
+        && sample.join_key_columns.is_empty()
+    {
+        anyhow::bail!(
+            "invalid_request: advisor evaluation samples must include at least one dependency column"
+        );
+    }
+    if sample.rows_scanned == Some(0) {
+        anyhow::bail!("invalid_request: rows_scanned must be > 0");
+    }
+    if sample.repeats == Some(0) {
+        anyhow::bail!("invalid_request: repeats must be > 0");
+    }
+    Ok(())
+}
+
+fn advisor_top_stable_after_observation(
+    top_history: &[Option<String>],
+    target: &str,
+) -> Option<u64> {
+    for idx in 0..top_history.len() {
+        if top_history[idx].as_deref() != Some(target) {
+            continue;
+        }
+        if top_history[idx..]
+            .iter()
+            .all(|entry| entry.as_deref() == Some(target))
+        {
+            return Some(idx as u64 + 1);
+        }
+    }
+    None
+}
+
+fn is_active_advisor_apply(entry: &AdvisorHistoryEntry) -> bool {
+    entry.action == "apply" && !matches!(entry.status.as_deref(), Some("failed" | "cancelled"))
+}
+
+fn advisor_dependency_capture(stats: &IndexPatternStats) -> AdvisorIndexDependencyCapture {
+    let predicate_columns = stats
+        .eq_cols
+        .iter()
+        .chain(stats.range_cols.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    AdvisorIndexDependencyCapture {
+        predicate_columns: dedup_in_order(&predicate_columns),
+        equality_columns: stats.eq_cols.clone(),
+        range_columns: stats.range_cols.clone(),
+        range_shape: advisor_range_shape(&stats.range_cols),
+        order_by_columns: stats.order_cols.clone(),
+        group_by_columns: stats.group_cols.clone(),
+        join_key_columns: stats.join_cols.clone(),
+        projection_columns: stats.projection_cols.clone(),
+    }
+}
+
+fn advisor_range_shape(range_cols: &[String]) -> String {
+    match range_cols.len() {
+        0 => "none".to_string(),
+        1 => "single_range_after_equality_prefix".to_string(),
+        _ => "multi_range_observed".to_string(),
+    }
 }
 
 fn pk_prefix_match(pk: &[String], candidate: &[String]) -> bool {
@@ -29259,9 +30910,9 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use skeindb_skeinql::methods::{
         AdvisorHistoryParams, AdvisorIndexApplyParams, AdvisorIndexDismissParams,
-        AdvisorIndexSynthesizeParams, EdgeBundleWindow, MigrationIntentReportParams,
-        MigrationIntentSample, WasmPlanCompileParams, WasmPlanEdgePackageParams,
-        WasmPlanInspectParams,
+        AdvisorIndexRetireUnusedParams, AdvisorIndexSynthesizeParams, EdgeBundleWindow,
+        MigrationIntentReportParams, MigrationIntentSample, WasmPlanCompileParams,
+        WasmPlanEdgePackageParams, WasmPlanInspectParams,
     };
     use skeindb_skeinql::types::{
         Cte, ExistsExpr, JoinRef, JoinTableRef, JoinType, LimitClause, SelectItem, SetOp, SetOpKind,
@@ -30720,6 +32371,13 @@ mod tests {
             vec!["city".to_string(), "created_at".to_string()]
         );
         assert!(suggestion.include.contains(&"name".to_string()));
+        let dependency = suggestion.dependency.as_ref().expect("dependency capture");
+        assert_eq!(dependency.predicate_columns, vec!["city".to_string()]);
+        assert_eq!(dependency.equality_columns, vec!["city".to_string()]);
+        assert!(dependency.range_columns.is_empty());
+        assert_eq!(dependency.range_shape, "none");
+        assert_eq!(dependency.order_by_columns, vec!["created_at".to_string()]);
+        assert!(dependency.projection_columns.contains(&"name".to_string()));
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -31121,6 +32779,233 @@ mod tests {
         let info = &infos[0];
         assert!(info.group_cols.contains(&"city".to_string()));
         assert!(info.range_cols.contains(&"name".to_string()));
+
+        let capture = advisor_dependency_capture(&IndexPatternStats {
+            eq_cols: vec!["city".to_string()],
+            range_cols: vec!["name".to_string()],
+            order_cols: vec!["created_at".to_string()],
+            projection_cols: vec!["city".to_string()],
+            ..IndexPatternStats::default()
+        });
+        assert_eq!(
+            capture.predicate_columns,
+            vec!["city".to_string(), "name".to_string()]
+        );
+        assert_eq!(capture.range_shape, "single_range_after_equality_prefix");
+        assert_eq!(capture.order_by_columns, vec!["created_at".to_string()]);
+    }
+
+    #[test]
+    fn index_advisor_generates_composite_and_covering_from_dependencies() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_dependency_candidates");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "sessions",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "account_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "last_seen".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "display_name".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = TableKey {
+            db: "app".to_string(),
+            table: "sessions".to_string(),
+        };
+        let query_info = IndexQueryInfo {
+            base: BaseTableRef {
+                db: "app".to_string(),
+                table: "sessions".to_string(),
+                r#as: None,
+            },
+            eq_cols: vec!["tenant_id".to_string()],
+            range_cols: vec!["created_at".to_string()],
+            order_cols: vec!["last_seen".to_string()],
+            group_cols: Vec::new(),
+            join_cols: vec!["account_id".to_string()],
+            projection_cols: vec![
+                "tenant_id".to_string(),
+                "email".to_string(),
+                "display_name".to_string(),
+            ],
+        };
+        engine
+            .index_advisor
+            .lock()
+            .unwrap()
+            .record_query(&table, &query_info, 512, now_micros());
+
+        let result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "sessions".to_string(),
+                r#as: None,
+            },
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        let suggestion = result
+            .suggestions
+            .first()
+            .expect("missing dependency-derived suggestion");
+        assert_eq!(
+            suggestion.columns,
+            vec![
+                "tenant_id".to_string(),
+                "account_id".to_string(),
+                "created_at".to_string(),
+                "last_seen".to_string(),
+            ]
+        );
+        assert_eq!(
+            suggestion.include,
+            vec!["display_name".to_string(), "email".to_string()]
+        );
+        let dependency = suggestion
+            .dependency
+            .as_ref()
+            .expect("missing dependency capture");
+        assert_eq!(dependency.join_key_columns, vec!["account_id".to_string()]);
+        assert_eq!(
+            dependency.projection_columns,
+            vec![
+                "display_name".to_string(),
+                "email".to_string(),
+                "tenant_id".to_string(),
+            ]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn index_advisor_cost_model_includes_write_and_compaction_overhead() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_cost_model");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "events",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "tenant_id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "created_at".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "payload".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        let query_info = IndexQueryInfo {
+            base: BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            eq_cols: vec!["tenant_id".to_string()],
+            range_cols: vec!["created_at".to_string()],
+            order_cols: Vec::new(),
+            group_cols: Vec::new(),
+            join_cols: Vec::new(),
+            projection_cols: vec!["payload".to_string()],
+        };
+        engine
+            .index_advisor
+            .lock()
+            .unwrap()
+            .record_query(&table, &query_info, 1_024, now_micros());
+
+        let result = engine.advisor_index_synthesize(AdvisorIndexSynthesizeParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "events".to_string(),
+                r#as: None,
+            },
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+        let suggestion = result.suggestions.first().expect("missing suggestion");
+        let cost = suggestion.cost.as_ref().expect("missing cost estimate");
+        assert!(cost.read_benefit > 0.0);
+        assert!(cost.write_overhead > 0.0);
+        assert!(cost.compaction_overhead > 0.0);
+        assert!(cost.net_score < cost.read_benefit);
+        assert!((suggestion.score - cost.net_score).abs() < f64::EPSILON);
+        assert_eq!(cost.key_columns, 2);
+        assert_eq!(cost.include_columns, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]
@@ -31202,6 +33087,280 @@ mod tests {
         let metrics = engine.advisor_metrics_snapshot();
         assert_eq!(metrics.applied_total, 1);
         assert_eq!(metrics.rejected_total, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_index_retire_unused_drops_inactive_advisor_index() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_retire_unused");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: table.clone(),
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: None,
+        })?;
+        engine.advisor_complete_index_apply(&apply.action_id, None)?;
+
+        let retire = engine.advisor_index_retire_unused(AdvisorIndexRetireUnusedParams {
+            table: Some(table.clone()),
+            max_idle_ms: Some(0),
+            dry_run: Some(false),
+            limit: Some(10),
+            note: Some("retire unused".to_string()),
+        })?;
+        assert!(!retire.dry_run);
+        assert_eq!(retire.evaluated, 1);
+        assert_eq!(retire.retired, 1);
+        let retired = retire
+            .candidates
+            .first()
+            .expect("missing retired candidate");
+        assert!(retired.retired);
+        assert_eq!(retired.reason, "unused");
+        assert_eq!(retired.result_status.as_deref(), Some("dropped"));
+        assert!(retired.action_id.is_some());
+
+        let history = engine.advisor_history(AdvisorHistoryParams {
+            table: Some(table.clone()),
+            limit: Some(10),
+        })?;
+        assert!(history.entries.iter().any(|entry| entry.action == "retire"));
+
+        let reapply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table,
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: None,
+        })?;
+        assert_eq!(reapply.status.as_deref(), Some("queued"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_index_retire_unused_keeps_recent_dependency_signal() -> anyhow::Result<()> {
+        let dir = temp_dir("index_advisor_retire_recent");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table_ref = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        let table_key = TableKey {
+            db: "app".to_string(),
+            table: "users".to_string(),
+        };
+        let query_info = IndexQueryInfo {
+            base: table_ref.clone(),
+            eq_cols: vec!["city".to_string()],
+            range_cols: Vec::new(),
+            order_cols: Vec::new(),
+            group_cols: Vec::new(),
+            join_cols: Vec::new(),
+            projection_cols: Vec::new(),
+        };
+        engine.index_advisor.lock().unwrap().record_query(
+            &table_key,
+            &query_info,
+            128,
+            now_micros(),
+        );
+        let apply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: table_ref.clone(),
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: None,
+        })?;
+        engine.advisor_complete_index_apply(&apply.action_id, None)?;
+
+        let retire = engine.advisor_index_retire_unused(AdvisorIndexRetireUnusedParams {
+            table: Some(table_ref.clone()),
+            max_idle_ms: Some(60_000),
+            dry_run: Some(false),
+            limit: Some(10),
+            note: None,
+        })?;
+        assert_eq!(retire.evaluated, 1);
+        assert_eq!(retire.retired, 0);
+        let candidate = retire.candidates.first().expect("missing candidate");
+        assert!(!candidate.retired);
+        assert_eq!(candidate.reason, "recently_used");
+        assert!(candidate.last_seen_micros.is_some());
+
+        let reapply = engine.advisor_index_apply(AdvisorIndexApplyParams {
+            table: table_ref,
+            columns: vec!["city".to_string()],
+            include: Vec::new(),
+            note: None,
+        })?;
+        assert_eq!(reapply.status.as_deref(), Some("exists"));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn advisor_evaluate_reports_shift_convergence() -> anyhow::Result<()> {
+        let dir = temp_dir("advisor_evaluate_shift");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "email".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let report = engine.advisor_evaluate(AdvisorEvaluateParams {
+            table: BaseTableRef {
+                db: "app".to_string(),
+                table: "users".to_string(),
+                r#as: None,
+            },
+            phases: vec![
+                skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                    label: Some("city_lookup".to_string()),
+                    samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                        equality_columns: vec!["city".to_string()],
+                        range_columns: Vec::new(),
+                        order_by_columns: Vec::new(),
+                        group_by_columns: Vec::new(),
+                        join_key_columns: Vec::new(),
+                        projection_columns: Vec::new(),
+                        rows_scanned: Some(400),
+                        repeats: Some(3),
+                    }],
+                },
+                skeindb_skeinql::methods::AdvisorEvaluatePhase {
+                    label: Some("email_lookup".to_string()),
+                    samples: vec![skeindb_skeinql::methods::AdvisorEvaluateSample {
+                        equality_columns: vec!["email".to_string()],
+                        range_columns: Vec::new(),
+                        order_by_columns: Vec::new(),
+                        group_by_columns: Vec::new(),
+                        join_key_columns: Vec::new(),
+                        projection_columns: Vec::new(),
+                        rows_scanned: Some(500),
+                        repeats: Some(3),
+                    }],
+                },
+            ],
+            limit: Some(5),
+            min_queries: Some(1),
+            min_rows: Some(1),
+        })?;
+
+        assert_eq!(report.format, ADVISOR_EVALUATE_FORMAT_V1);
+        assert_eq!(report.phase_count, 2);
+        assert_eq!(report.total_observations, 6);
+        assert!(report.initial_top.is_none());
+        assert_eq!(report.phases[0].label, "city_lookup");
+        assert!(report.phases[0].top_before.is_none());
+        assert_eq!(
+            report.phases[0]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["city".to_string()])
+        );
+        assert_eq!(report.phases[1].label, "email_lookup");
+        assert_eq!(
+            report.phases[1]
+                .top_before
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["city".to_string()])
+        );
+        assert_eq!(
+            report.phases[1]
+                .top_after
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["email".to_string()])
+        );
+        assert_eq!(report.phases[1].final_top_stable_after_observation, Some(3));
+        assert_eq!(report.phases[1].top_changes, 1);
+        assert_eq!(report.phases[1].distinct_top_suggestions, 2);
+        assert_eq!(
+            report
+                .final_top
+                .as_ref()
+                .map(|suggestion| suggestion.columns.clone()),
+            Some(vec!["email".to_string()])
+        );
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -32615,6 +34774,98 @@ mod tests {
         assert!(rec.pk.is_none());
         assert!(rec.pk_hash.is_some());
         assert_eq!(result.bundle.coverage[0].redaction_mode, "hash_pk");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn edge_bundle_status_detects_coverage_gap() -> anyhow::Result<()> {
+        let dir = temp_dir("edge_bundle_gap");
+        let mut engine = Engine::open(&dir)?;
+        engine.create_table(
+            "app",
+            "users",
+            vec![ColumnSchema {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+                nullable: false,
+                auto_increment: false,
+            }],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        for id in 1..=3u64 {
+            engine.data_insert(&table, vec![row(&[("id", Lit::U64 { v: id })])], None)?;
+        }
+
+        let query = Query {
+            with: Vec::new(),
+            body: Box::new(QueryBody::Select {
+                select: Box::new(SelectBody {
+                    distinct: None,
+                    projection: vec![SelectItem {
+                        expr: Expr::Col {
+                            col: "id".to_string(),
+                            table: None,
+                        },
+                        r#as: None,
+                    }],
+                    from: Some(vec![TableRef::Base(table.clone())]),
+                    r#where: None,
+                    group_by: None,
+                    having: None,
+                }),
+            }),
+            order_by: Vec::new(),
+            limit: None,
+            lock: None,
+        };
+
+        let first = engine.edge_bundle_request(EdgeBundleRequestParams {
+            windows: vec![EdgeBundleWindow {
+                table: table.clone(),
+                from_seq: Some(0),
+                to_seq: Some(1),
+                max_events: None,
+            }],
+            redaction: None,
+            bundle_id: Some("gap_1".to_string()),
+        })?;
+        let second = engine.edge_bundle_request(EdgeBundleRequestParams {
+            windows: vec![EdgeBundleWindow {
+                table: table.clone(),
+                from_seq: Some(2),
+                to_seq: Some(3),
+                max_events: None,
+            }],
+            redaction: None,
+            bundle_id: Some("gap_2".to_string()),
+        })?;
+
+        engine.edge_bundle_apply(EdgeBundleApplyParams {
+            bundle: first.bundle,
+        })?;
+        engine.edge_bundle_apply(EdgeBundleApplyParams {
+            bundle: second.bundle,
+        })?;
+
+        let status = engine.edge_bundle_status(EdgeBundleStatusParams {
+            query: Some(query),
+            max_lag: Some(0),
+        })?;
+        assert_eq!(status.coverage.len(), 2);
+        let route = status.route.expect("missing edge route");
+        assert!(!route.eligible);
+        assert_eq!(route.reason.as_deref(), Some("coverage_gap"));
+        assert_eq!(route.observed_lag, 2);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -36316,6 +38567,274 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_cost_model_uses_live_table_rows_for_selective_queries() -> anyhow::Result<()> {
+        let dir = temp_dir("snapshot_cost_model_table_rows");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+
+        let rows = (1..=100u64)
+            .map(|id| {
+                row(&[
+                    ("id", Lit::U64 { v: id }),
+                    (
+                        "city",
+                        Lit::Str {
+                            v: format!("City{id}"),
+                        },
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        engine.data_insert(&table, rows, None)?;
+
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.cost_model.build_cost_per_cell = 0.2;
+            manager.cost_model.row_scan_cost_per_cell = 1.0;
+            manager.cost_model.snapshot_scan_cost_per_cell = 0.1;
+            manager.cost_model.min_benefit = 0.0;
+            manager.controller.min_queries = 2;
+            manager.controller.min_rows = 1;
+            manager.controller.recency_window_micros = u64::MAX;
+        }
+
+        let info = QuerySnapshotInfo {
+            base: table.clone(),
+            alias: table.table.clone(),
+            required_cols: vec!["city".to_string()],
+        };
+        engine.observe_and_plan_snapshot(&info, 1);
+        engine.observe_and_plan_snapshot(&info, 1);
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        let snapshots = engine.snapshots.lock().unwrap();
+        assert!(!snapshots.snapshots.contains_key(&key));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn query_pattern_tracker_retains_hot_projections() {
+        let mut tracker = QueryPatternTracker {
+            by_table: HashMap::new(),
+            max_patterns_per_table: 2,
+        };
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+
+        tracker.record_query(&key, vec!["city".to_string()], 100, 10);
+        tracker.record_query(&key, vec!["state".to_string()], 50, 20);
+        tracker.record_query(&key, vec!["state".to_string()], 50, 30);
+        tracker.record_query(&key, vec!["zip".to_string()], 150, 40);
+
+        let patterns = tracker.by_table.get(&key).expect("patterns missing");
+        assert_eq!(patterns.len(), 2);
+        assert!(patterns.values().any(|stats| {
+            stats.columns == vec!["state".to_string()]
+                && stats.count == 2
+                && stats.rows_scanned == 100
+        }));
+        assert!(patterns
+            .values()
+            .any(|stats| stats.columns == vec!["zip".to_string()]));
+        assert!(!patterns
+            .values()
+            .any(|stats| stats.columns == vec!["city".to_string()]));
+    }
+
+    #[test]
+    fn snapshot_dependencies_preserve_unrelated_snapshot_on_drop_column() -> anyhow::Result<()> {
+        let dir = temp_dir("snapshot_dependency_drop_column");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "events".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "city".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "region".to_string(),
+                    r#type: type_desc("string"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "city",
+                    Lit::Str {
+                        v: "Paris".to_string(),
+                    },
+                ),
+                (
+                    "region",
+                    Lit::Str {
+                        v: "Ile-de-France".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let snapshot_ts = now_micros();
+        engine.build_column_snapshot(
+            &table.db,
+            &table.table,
+            Some(vec!["city".to_string()]),
+            snapshot_ts,
+        )?;
+        engine.build_column_snapshot(
+            &table.db,
+            &table.table,
+            Some(vec!["region".to_string()]),
+            snapshot_ts,
+        )?;
+
+        let key = TableKey {
+            db: table.db.clone(),
+            table: table.table.clone(),
+        };
+        if let Ok(mut manager) = engine.snapshots.lock() {
+            manager.record_query(&key, vec!["city".to_string()], 32, 10);
+            manager.record_query(&key, vec!["region".to_string()], 32, 20);
+        }
+
+        engine.schema_drop_mysql_compat_column(&table, "region")?;
+
+        let schema = engine.get_schema(&table.db, &table.table)?;
+        let city_required = ["city".to_string()].into_iter().collect::<HashSet<_>>();
+        let region_required = ["region".to_string()].into_iter().collect::<HashSet<_>>();
+        let manager = engine.snapshots.lock().unwrap();
+        assert!(manager
+            .snapshot_candidate_for_query(&key, &city_required, schema.table_version)
+            .is_some());
+        assert!(manager
+            .snapshot_candidate_for_query(&key, &region_required, schema.table_version)
+            .is_none());
+        let patterns = manager
+            .patterns
+            .by_table
+            .get(&key)
+            .expect("pattern table missing");
+        assert!(patterns
+            .values()
+            .any(|stats| stats.columns == vec!["city".to_string()]));
+        assert!(!patterns.values().any(|stats| {
+            stats
+                .columns
+                .iter()
+                .any(|column| column.eq_ignore_ascii_case("region"))
+        }));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn adaptive_snapshot_controller_replaces_broad_covering_snapshot_when_shifted() {
+        let mut manager = SnapshotManager {
+            cost_model: SnapshotCostModel {
+                build_cost_per_cell: 0.1,
+                row_scan_cost_per_cell: 1.0,
+                snapshot_scan_cost_per_cell: 0.1,
+                min_benefit: 0.0,
+            },
+            controller: AdaptiveSnapshotController {
+                min_queries: 2,
+                min_rows: 1,
+                recency_window_micros: u64::MAX,
+                max_snapshots_per_table: 4,
+            },
+            ..SnapshotManager::default()
+        };
+
+        let key = TableKey {
+            db: "app".to_string(),
+            table: "events".to_string(),
+        };
+        manager.insert_snapshot(ColumnSnapshot {
+            id: "broad".to_string(),
+            db: key.db.clone(),
+            table: key.table.clone(),
+            columns: vec!["city".to_string(), "state".to_string()],
+            pk_columns: vec!["id".to_string()],
+            snapshot_ts: 1,
+            table_version: 1,
+            rows: Vec::new(),
+            pk_index: HashMap::new(),
+            column_index: HashMap::from([("city".to_string(), 0), ("state".to_string(), 1)]),
+            stats: SnapshotStats {
+                hits: 1,
+                last_used_micros: 10,
+                build_cost: 0.0,
+                benefit_score: 0.0,
+            },
+            valid: true,
+        });
+
+        manager.record_query(&key, vec!["city".to_string()], 200, 20);
+        manager.record_query(&key, vec!["city".to_string()], 200, 30);
+
+        let plan = manager.next_plan(&key, &["id".to_string()], 50, 4, 1, 40);
+        assert!(plan.is_some());
+        let plan = plan.unwrap();
+        assert_eq!(plan.columns, vec!["city".to_string()]);
+        assert!(plan.benefit > 0.0);
+    }
+
+    #[test]
     fn dp_budget_consumption_and_exhaustion() -> anyhow::Result<()> {
         let dir = temp_dir("dp_budget");
         let mut engine = Engine::open(&dir)?;
@@ -38019,6 +40538,18 @@ mod tests {
             .manifest_json
             .contains(WASM_PLAN_EXECUTION_GENERATED_V1));
         assert!(edge_package.runner_js.contains("runSkeinWasmPlan"));
+        assert!(edge_package.runner_js.contains("runSkeinWasmPlanEdge"));
+        assert!(edge_package.runner_js.contains("WebAssembly.instantiate"));
+        let edge_manifest: serde_json::Value = serde_json::from_str(&edge_package.manifest_json)?;
+        assert_eq!(edge_manifest["standalone_execution"].as_bool(), Some(true));
+        assert!(edge_package
+            .instructions
+            .iter()
+            .any(|line| line.contains("runSkeinWasmPlanEdge")));
+        assert!(!edge_package
+            .instructions
+            .iter()
+            .any(|line| line.contains("standalone edge execution remains tracked")));
 
         let result = engine.wasm_plan_run(
             &compiled.artifact_b64,
@@ -38036,6 +40567,22 @@ mod tests {
         let rows = data.as_array().cloned().unwrap_or_default();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"]["v"].as_u64(), Some(2));
+
+        let perf = engine.wasm_plan_perf_report(WasmPlanPerfReportParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+            args: vec![Lit::U64 { v: 7 }],
+            iterations: Some(2),
+            warmup_iterations: Some(1),
+        })?;
+        assert_eq!(perf.format, "skein.wasm.plan.perf.v1");
+        assert_eq!(perf.execution, WASM_PLAN_EXECUTION_GENERATED_V1);
+        assert_eq!(perf.iterations, 2);
+        assert!(perf.outputs_match);
+        assert!(perf.simd.candidate);
+        assert!(!perf.simd.enabled);
+        assert_eq!(perf.host.rows, 1);
+        let generated = perf.generated.expect("generated perf stats");
+        assert_eq!(generated.rows, 1);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -38087,6 +40634,27 @@ mod tests {
         let (artifact, _) = decode_wasm_plan_artifact(&compiled.artifact_b64)?;
         assert_eq!(artifact.execution, WASM_PLAN_EXECUTION_V1);
         assert!(artifact.generated.is_none());
+
+        let edge_package = engine.wasm_plan_edge_package(WasmPlanEdgePackageParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+            package_name: Some("users-name-plan".to_string()),
+        })?;
+        let edge_manifest: serde_json::Value = serde_json::from_str(&edge_package.manifest_json)?;
+        assert_eq!(edge_manifest["standalone_execution"].as_bool(), Some(false));
+        assert!(edge_package
+            .instructions
+            .iter()
+            .any(|line| line.contains("runSkeinWasmPlanHost")));
+
+        let perf = engine.wasm_plan_perf_report(WasmPlanPerfReportParams {
+            artifact_b64: compiled.artifact_b64.clone(),
+            args: Vec::new(),
+            iterations: Some(1),
+            warmup_iterations: Some(0),
+        })?;
+        assert_eq!(perf.execution, WASM_PLAN_EXECUTION_V1);
+        assert!(!perf.simd.candidate);
+        assert!(perf.generated.is_none());
 
         fs::remove_dir_all(&dir).ok();
         Ok(())
@@ -43693,6 +46261,148 @@ mod tests {
             workspace_id: "drop_pk".to_string(),
         })?;
         assert!(dropped_replay.ok);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn replay_bundle_run_rehydrates_cache_hints() -> anyhow::Result<()> {
+        let dir = temp_dir("replay_bundle_cache_hints");
+        let mut engine = Engine::open(&dir)?;
+        let table = BaseTableRef {
+            db: "app".to_string(),
+            table: "users".to_string(),
+            r#as: None,
+        };
+        engine.create_table(
+            &table.db,
+            &table.table,
+            vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    r#type: type_desc("u64"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    r#type: type_desc("str"),
+                    nullable: false,
+                    auto_increment: false,
+                },
+            ],
+            vec!["id".to_string()],
+            false,
+            None,
+        )?;
+        engine.data_insert(
+            &table,
+            vec![row(&[
+                ("id", Lit::U64 { v: 1 }),
+                (
+                    "name",
+                    Lit::Str {
+                        v: "Ada".to_string(),
+                    },
+                ),
+            ])],
+            None,
+        )?;
+
+        let columns = vec![
+            ColumnMeta {
+                name: "id".to_string(),
+                r#type: type_desc("u64"),
+            },
+            ColumnMeta {
+                name: "name".to_string(),
+                r#type: type_desc("str"),
+            },
+        ];
+        let rows = vec![vec![
+            Lit::U64 { v: 1 },
+            Lit::Str {
+                v: "Ada".to_string(),
+            },
+        ]];
+        let keys = Some(vec![vec![Lit::U64 { v: 1 }]]);
+        engine.cached_select.lock().unwrap().insert(
+            "source_cache_0".to_string(),
+            CachedSelect {
+                columns: columns.clone(),
+                rows: rows.clone(),
+                keys: keys.clone(),
+                query: Some("replay.cache.seed.0".to_string()),
+                hits: 0,
+                created_ms: 0,
+                last_hit_ms: 0,
+                schema_version: 0,
+            },
+        );
+        engine.cached_select.lock().unwrap().insert(
+            "source_cache_1".to_string(),
+            CachedSelect {
+                columns: columns.clone(),
+                rows,
+                keys,
+                query: Some("replay.cache.seed.1".to_string()),
+                hits: 0,
+                created_ms: 0,
+                last_hit_ms: 0,
+                schema_version: 0,
+            },
+        );
+        engine.cached_patch.lock().unwrap().insert(
+            PatchCacheKey {
+                base: "source_base".to_string(),
+                cur: "source_cur".to_string(),
+            },
+            PatchDelta {
+                columns,
+                window: None,
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                moved: Vec::new(),
+                reorder: None,
+                partial: false,
+                removed_unknown: false,
+                updated_unknown: false,
+                reset_reason: None,
+            },
+        );
+
+        let exported = engine.maintenance_replay_export(MaintenanceReplayExportParams {
+            db: Some("app".to_string()),
+            from_lsn: None,
+            to_lsn: None,
+            bundle_id: Some("cache_hints_bundle".to_string()),
+            redaction: None,
+        })?;
+        let performance = exported
+            .bundle
+            .performance
+            .as_ref()
+            .expect("performance profile should be captured");
+        assert_eq!(performance.cache_warm.cached_select_entries, 2);
+        assert_eq!(performance.cache_warm.cached_patch_entries, 1);
+
+        engine.maintenance_replay_import(MaintenanceReplayImportParams {
+            bundle: exported.bundle,
+            workspace_id: Some("cache_hints".to_string()),
+        })?;
+        let replayed = engine.maintenance_replay_run(MaintenanceReplayRunParams {
+            workspace_id: "cache_hints".to_string(),
+        })?;
+        let report = replayed
+            .performance_report
+            .as_ref()
+            .expect("performance report should be returned");
+        assert!(report.checksum_match);
+        assert_eq!(report.cache_warm.cached_select_entries_delta, 0);
+        assert_eq!(report.cache_warm.cached_patch_entries_delta, 0);
+        assert_eq!(report.cache_warm.hot_table_match_count, 1);
 
         fs::remove_dir_all(&dir).ok();
         Ok(())

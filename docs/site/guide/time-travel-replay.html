@@ -331,7 +331,7 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li><code>maintenance.replay.export</code> includes an optional <code>performance</code> profile in each bundle.</li>
 <li>The profile uses format <code>skein.replay.performance.v1</code> and captures <code>lsm_state</code> (storage mode, disk/WAL bytes, row/table counts, MVCC versions, delta chains, per-table counts), <code>cache_warm</code> (select/patch cache entry counts plus hot-table hints), and <code>timing</code> (change count, commit-span, and p50/p95/p99 inter-event deltas).</li>
 <li>The performance profile has its own checksum and is validated by <code>maintenance.replay.import</code> and <code>maintenance.replay.run</code> without changing the correctness checksum for older data-only bundles.</li>
-<li><code>maintenance.replay.run</code> returns <code>performance_report</code> when the bundle contains a performance profile. The report compares baseline vs observed profile checksums and reports storage/cache/timing deltas.</li>
+<li><code>maintenance.replay.run</code> returns <code>performance_report</code> when the bundle contains a performance profile. The runner rehydrates captured select/patch cache counts inside the replay workspace before recomputing the observed profile, compares a normalized checksum over reconstructable snapshot state, and reports raw storage/cache/timing deltas separately.</li>
 <li><code>skeindb replay run --json --out &lt;report.json&gt;</code> writes the full replay run result for CI artifacts, and <code>skeindb replay compare --baseline &lt;base.json&gt; --candidate &lt;head.json&gt;</code> fails when candidate p95/p99/span/storage/cache-hot-table deltas exceed configured thresholds.</li>
 </ul>
 <p>Current R14/T185 redaction implementation:</p>
@@ -341,16 +341,25 @@ See: <code>docs/research_agenda/R18_reproducible-performance-regression-testing.
 <li>Correctness checksums, table checksums, and performance profiles are computed after redaction, so import/run verifies the exact redacted artifact rather than the source table values.</li>
 <li>SkeinAdmin exposes redaction mode and salt controls in the replay export panel, and the CLI exposes <code>--redaction</code> plus <code>--redaction-salt</code>.</li>
 </ul>
+<p>Current R14/T186 bounded-staleness routing implementation:</p>
+<ul>
+<li><code>edge.bundle.request</code> emits explicit coverage windows per table, including redaction metadata when requested.</li>
+<li><code>edge.bundle.apply</code> now preserves multiple disjoint coverage windows per table and merges only overlapping or adjacent ranges.</li>
+<li><code>edge.bundle.status</code> computes bounded-staleness eligibility from contiguous retained coverage; when retained windows leave a hole before the origin watermark, routing stays on origin with reason <code>coverage_gap</code>.</li>
+<li>Focused coverage lives in <code>edge_bundle_status_detects_coverage_gap</code>, <code>edge_bundle_status_reports_coverage_gap</code>, and <code>r14_edge_bundle_gap_blocks_bounded_staleness_route</code>.</li>
+</ul>
 <p>Current R18/T189 CI harness behavior:</p>
 <ul>
 <li>The comparison is deterministic and file-based: run the same replay bundle on the base commit and the candidate commit, save each JSON report, then compare those reports in CI.</li>
 <li>Threshold flags cover <code>--max-p95-delta-ms</code>, <code>--max-p99-delta-ms</code>, <code>--max-span-delta-ms</code>, <code>--max-disk-bytes-delta</code>, and <code>--max-missing-hot-tables-delta</code>.</li>
 <li>The comparison fails if either replay run failed correctness verification, if either performance checksum mismatches, or if any candidate delta regresses beyond the configured threshold.</li>
 </ul>
-<p>Remaining R18 work:</p>
+<p>Current R18/T188 replay-runner implementation:</p>
 <ul>
-<li>Timing injection and cache/LSM reconstruction fidelity are still open.</li>
-<li>CI regression gates that compare latency distributions across commits are still open.</li>
+<li>Replay bundles remain snapshot-based, so the runner does not attempt impossible row-by-row WAL mutation re-execution.</li>
+<li><code>maintenance.replay.run</code> deterministically rehydrates in-memory select/patch cache counts from the captured <code>cache_warm</code> hints before collecting the observed performance profile.</li>
+<li><code>performance_report.checksum_match</code> compares a replay-run checksum over reconstructable snapshot state (table/MVCC/cache/timing), while <code>disk_bytes_delta</code> and <code>wal_bytes_delta</code> remain as explicit variance fields instead of checksum gates.</li>
+<li>Focused coverage lives in <code>replay_bundle_run_rehydrates_cache_hints</code>, <code>maintenance_replay_run_rehydrates_cache_hints</code>, and <code>t188_replay_run_rehydrates_cache_hints</code>.</li>
 </ul>
       <hr>
       <p class="edit-link">

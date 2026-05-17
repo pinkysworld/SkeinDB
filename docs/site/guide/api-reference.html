@@ -363,9 +363,9 @@ Runtime baseline: v0.3.17 plus current main, SkeinQL 1.0, 134 advertised RPC met
 </tr>
 <tr>
 <td><code>advisor.*</code></td>
-<td>synthesize, apply, dismiss, history</td>
+<td>synthesize, apply, retire_unused, evaluate, dismiss, history</td>
 <td>Experimental</td>
-<td>Dependency-driven index suggestions and lifecycle.</td>
+<td>Dependency-driven index suggestions, workload-shift convergence evaluation, and lifecycle controls.</td>
 </tr>
 <tr>
 <td><code>migration.*</code></td>
@@ -436,7 +436,7 @@ edge.bundle.request, edge.bundle.apply, edge.bundle.status,
 merge.register, merge.apply, merge.simulate, merge.evaluate, merge.wasm.register, merge.wasm.list, merge.wasm.drop,
 wasm.plan.compile, wasm.plan.inspect, wasm.plan.edge_package, wasm.plan.run,
 view.create, view.drop, view.refresh, view.evaluate, view.status, view.explain_deps,
-advisor.index_synthesize, advisor.apply_index, advisor.dismiss, advisor.history,
+advisor.index_synthesize, advisor.apply_index, advisor.retire_unused, advisor.evaluate, advisor.dismiss, advisor.history,
 migration.intent_report, migration.rewrite_preview, migration.report_export,
 telemetry.feature_flags, telemetry.compat_summary, telemetry.migration_hints, telemetry.workload_features,
 plan_cache.status, plan_cache.clear,

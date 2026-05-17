@@ -89,8 +89,8 @@ Related: R14
 - `edge.bundle.request` — request bounded WAL slice / replay bundle
   - windows: table + seq bounds + max events
   - redaction: `none` | `hash_pk` | `drop_pk`
-- `edge.bundle.apply` — apply bundle coverage to the edge node
-- `edge.bundle.status` — coverage + bounded-staleness routing verdict
+- `edge.bundle.apply` — apply bundle coverage windows to the edge node
+- `edge.bundle.status` — coverage + bounded-staleness routing verdict, including gap detection for disjoint windows
 
 ## 11. schema.* (extensions) — Conflict-free schema evolution
 Related: R15
@@ -141,7 +141,7 @@ Related: R18
 
 - `maintenance.replay.export` — exports data bundles with optional `performance` profile metadata (`lsm_state`, `cache_warm`, and `timing`).
 - `maintenance.replay.import` — validates both correctness checksums and performance-profile checksums when present.
-- `maintenance.replay.run` — returns `performance_report` variance deltas for performance-annotated bundles.
+- `maintenance.replay.run` — returns `performance_report` variance deltas for performance-annotated bundles, with replay-run checksum parity over reconstructable snapshot state.
 
 ## 15. wasm.* (extensions) — Wasm-native operators
 Related: R19

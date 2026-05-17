@@ -1,15 +1,20 @@
 # Self-tuning Index Advisor (Telemetry-driven)
 
 Status: Partial implementation
-Last updated: 2026-04-16
+Last updated: 2026-05-17
 
 Current runtime baseline:
 - Query fingerprint telemetry, candidate generation, and Level 0 scoring are implemented in the engine.
-- `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, and `advisor.history` are live.
+- `advisor.index_synthesize`, `advisor.apply_index`, `advisor.dismiss`, `advisor.retire_unused`, `advisor.evaluate`, and `advisor.history` are live.
+- `advisor.index_synthesize` suggestions now include optional dependency-capture metadata: predicate columns, equality/range columns, range shape, order-by/group-by/join-key columns, and projected covering columns.
+- Candidate key generation is dependency-driven: equality columns come first, then join keys, one range column, group-by columns, and order-by columns; projected non-key columns become covering `include` columns.
+- Suggestions also include an optional cost estimate with read benefit, write overhead, compaction overhead, write pressure, key/include width, and net score.
 - Candidate synthesis suppresses exact duplicates, primary-key prefixes, prefixes already covered by existing MySQL-compatible indexes, and suggestion IDs that were previously applied or dismissed.
+- `advisor.retire_unused` can dry-run or retire advisor-built secondary indexes when the latest dependency signal is absent or older than a caller-provided idle threshold; recent dependency signals block retirement.
+- `advisor.evaluate` replays phased dependency samples against a scratch advisor state and reports top-suggestion convergence after workload shifts without mutating live advisor telemetry.
 - `advisor.apply_index` now queues background in-memory secondary-index builds, returns `queued` or `exists`, and `advisor.history` records lifecycle state (`queued`, `building`, `completed`, `failed`, `cancelled`) with progress percentages plus optional result/rollback metadata.
 - SkeinAdmin has a working Index Advisor page that renders ranked suggestions, action history, and an observed-before / expected-after scan report for each suggestion.
-- Measured before/after latency deltas remain open work.
+- Measured before/after latency deltas for advisor-applied indexes remain open work.
 
 Goal:
 Automatically suggest indexes that improve real workloads while preserving SkeinDB's drop-in MySQL compatibility.
@@ -52,20 +57,22 @@ The advisor produces candidate indexes per table.
 
 ### 2.1 Equality-first composite indexes
 
-If many queries filter by equality on columns (a,b) and then order by c:
-Suggest INDEX(a,b,c).
+If many queries filter by equality on columns (a,b), join on j, range-scan r, and then order by c:
+Suggest INDEX(a,b,j,r,c).
 
 Heuristic:
 - For each frequent query pattern, create a candidate key list:
   - all equality columns (sorted by selectivity if stats known)
+  - then join-key columns not already present
   - then one range column (at most one)
+  - then GROUP BY columns
   - then ORDER BY columns (if compatible)
 
 ### 2.2 Covering indexes
 
 If queries repeatedly select the same small set of columns:
-- Suggest including them (covering) if the engine supports INCLUDE columns.
-- If not, keep as a normal index and rely on row lookup.
+- Suggest including them as covering `include` columns when they are not already part of the key.
+- The current in-memory advisor API carries include columns through `advisor.index_synthesize` and `advisor.apply_index` so operators can review and apply the same candidate shape.
 
 ### 2.3 Avoiding pathological suggestions
 
@@ -94,6 +101,8 @@ Maintain per-column:
 
 Then estimate selectivity of equality predicates.
 
+Current prototype cost output is heuristic and transparent: `read_benefit` starts from observed rows scanned, while `write_overhead` is derived from table write pressure and candidate width, and `compaction_overhead` is derived from observed scan volume and candidate width. `score` equals `cost.net_score`.
+
 ### 3.3 Level 2 (histograms)
 Build simple equi-depth histograms for hot columns.
 
@@ -113,6 +122,7 @@ Workflow:
 3) Engine records a queued advisor action and completes the build in the background
 4) History records queued/building/completed-or-failed state for later review
 5) Failed builds record rollback state before the suggestion can surface again
+6) Optional retirement scans can dry-run first, then drop only advisor-built indexes whose latest dependency signal is stale or absent
 
 Note:
 - The current "before/after" report is workload-derived and expected-after, not a measured latency benchmark yet.
@@ -131,10 +141,42 @@ Recommended methods:
   ```json
   { "table": {"db":"mydb","table":"users"}, "limit": 20, "min_queries": 3, "min_rows": 32 }
   ```
+  Result suggestions include the index key, include columns, scoring telemetry, and the dependency evidence that produced the candidate:
+  ```json
+  {
+    "id": "idxs_5a2c...",
+    "columns": ["city", "created_at"],
+    "include": ["name"],
+    "score": 128,
+    "count": 4,
+    "rows_scanned": 128,
+    "cost": {
+      "read_benefit": 128.4,
+      "write_overhead": 0.05,
+      "compaction_overhead": 0.10,
+      "net_score": 128.25,
+      "write_pressure": 1,
+      "key_columns": 2,
+      "include_columns": 1
+    },
+    "dependency": {
+      "predicate_columns": ["city"],
+      "equality_columns": ["city"],
+      "range_columns": [],
+      "range_shape": "none",
+      "order_by_columns": ["created_at"],
+      "group_by_columns": [],
+      "join_key_columns": [],
+      "projection_columns": ["name"]
+    }
+  }
+  ```
 
 - `advisor.apply_index` (queues an in-memory secondary-index build in the prototype)
   - indexes rebuild lazily on first use after table changes
 - `advisor.dismiss` (suppresses the suggestion and drops any advisor-built index)
+- `advisor.retire_unused` (dry-runs or retires stale advisor-built indexes)
+- `advisor.evaluate` (replays phased workload samples and reports top-suggestion convergence)
 - `advisor.history`
 
 - `advisor.index_suggestions`
@@ -150,7 +192,90 @@ Recommended methods:
   ```
 
 - `advisor.dismiss`
+- `advisor.retire_unused`
 - `advisor.history`
+
+`advisor.retire_unused` example:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "max_idle_ms": 86400000,
+  "dry_run": true,
+  "limit": 20,
+  "note": "daily advisor retirement review"
+}
+```
+
+When `dry_run` is false, eligible retirements are written to `advisor.history` with action `retire`. Safety rules:
+- only the latest active `advisor.apply_index` action for a suggestion is considered
+- a newer `dismiss` or `retire` action removes it from retirement candidates
+- indexes with dependency signals newer than `max_idle_ms` return `reason: "recently_used"` and are not dropped
+- indexes with no dependency signal or stale dependency signal return `reason: "unused"` when retired
+
+`advisor.evaluate` example:
+
+```json
+{
+  "table": {"db":"mydb","table":"users"},
+  "min_queries": 1,
+  "min_rows": 1,
+  "phases": [
+    {
+      "label": "city_lookup",
+      "samples": [
+        {
+          "equality_columns": ["city"],
+          "rows_scanned": 400,
+          "repeats": 3
+        }
+      ]
+    },
+    {
+      "label": "email_lookup",
+      "samples": [
+        {
+          "equality_columns": ["email"],
+          "rows_scanned": 500,
+          "repeats": 3
+        }
+      ]
+    }
+  ]
+}
+```
+
+Result summary:
+
+```json
+{
+  "format": "skein.advisor.evaluate.v1",
+  "phase_count": 2,
+  "total_observations": 6,
+  "initial_top": {"columns": ["city"]},
+  "final_top": {"columns": ["email"]},
+  "phases": [
+    {
+      "label": "city_lookup",
+      "observations": 3,
+      "top_after": {"columns": ["city"]},
+      "top_changes": 1,
+      "distinct_top_suggestions": 1
+    },
+    {
+      "label": "email_lookup",
+      "observations": 3,
+      "top_before": {"columns": ["city"]},
+      "top_after": {"columns": ["email"]},
+      "final_top_stable_after_observation": 3,
+      "top_changes": 1,
+      "distinct_top_suggestions": 2
+    }
+  ]
+}
+```
+
+Each sample can supply `equality_columns`, `range_columns`, `order_by_columns`, `group_by_columns`, `join_key_columns`, `projection_columns`, `rows_scanned`, and `repeats`. The harness validates every referenced column against the live schema, requires at least one dependency column per sample, and rejects zero `rows_scanned` or zero `repeats`.
 
 ---
 
@@ -177,7 +302,8 @@ Note: `advisor_estimated_saved_ms_total` is a placeholder in the prototype.
 - [x] IA02: Candidate generation + duplication checks
 - [x] IA03: Benefit estimation level 0
 - [x] IA04: SkeinQL endpoints + SkeinAdmin UI page
-- [ ] IA05: Measured before/after reporting for advisor-applied indexes
+- [x] IA05: Safe advisor-built index retirement with dry-run and stale-dependency checks
+- [ ] IA06: Measured before/after reporting for advisor-applied indexes
 
 ---
 
@@ -188,6 +314,7 @@ The research agenda proposes a stronger signal: **runtime dependency tracking** 
 See: `docs/research_agenda/R16_automatic-index-synthesis-from-dependency-analysis.md`.
 
 Adaptation sketch:
-- Extend dependency recording to include predicate columns, range shapes, and sort/group requirements.
-- Generate candidate indexes (including covering indexes) from aggregated dependencies.
-- Retire indexes that no longer deliver measurable benefit, with safety checks.
+- Dependency recording now surfaces predicate columns, equality/range columns, range shapes, and sort/group/join/projection requirements on each synthesized suggestion.
+- Candidate indexes, including composite keys and covering include columns, are generated from aggregated dependencies.
+- Cost scoring now subtracts explicit write and compaction overhead estimates from observed read benefit.
+- `advisor.retire_unused` retires indexes that no longer have a fresh dependency signal, with dry-run and history safety checks.

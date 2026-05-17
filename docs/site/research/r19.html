@@ -42,7 +42,14 @@
 
   <div class="status-bar">
     <span class="status-dot proposal"></span>
-    <span class="status-text"><strong>Research Proposal</strong> — Mapped to backlog in docs/RESEARCH_BACKLOG.md</span>
+    <span class="status-text"><strong>Prototype implemented</strong> — Generated filter/project artifacts now run on the host and in standalone edge packages</span>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">⚙️</span> Current Runtime Slice</h2>
+    <p><code>wasm.plan.compile</code> emits <code>generated_filter_project_v1</code> artifacts for fixed-width non-null <code>u64</code>/<code>bool</code> scan/filter/project plans and falls back to <code>host_interpreted_v1</code> for unsupported plans. <code>wasm.plan.run</code> executes generated artifacts on the SkeinDB host through Wasmtime.</p>
+    <p><code>wasm.plan.edge_package</code> ships the same artifact with a JavaScript runner. <code>runSkeinWasmPlanEdge</code> accepts caller-provided edge rows, encodes them as <code>skein.wasm.batch.v1</code>, runs the embedded module with native <code>WebAssembly.instantiate</code>, and decodes local results. <code>runSkeinWasmPlanHost</code> remains the fallback for interpreted artifacts.</p>
+    <p><code>wasm.plan.perf_report</code> compares host interpretation with generated scalar Wasm, reports latency percentiles, verifies output parity, and records SIMD candidate notes. Production SIMD-lowered codegen is not claimed.</p>
   </div>
 
   <div class="novelty-card">

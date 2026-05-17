@@ -45,3 +45,13 @@ This section is an *adaptation* of the research direction into SkeinDB’s archi
 - **Primary building blocks used:** ValueID store, SkeinQL, dependency tracking, hash-chained WAL, Wasm runtime, LSM/compaction.
 - **Spec touchpoints:** add or extend a doc under `docs/` and add corresponding SkeinQL methods under `docs/SKEINQL.md` (experimental).
 - **Backlog hook:** see `docs/RESEARCH_BACKLOG.md` for tasks mapped to this proposal.
+
+## Current Implementation Notes
+
+- `advisor.index_synthesize` now returns dependency-capture metadata on each suggestion: predicate columns, equality columns, range columns, range shape, order-by columns, group-by columns, join-key columns, and projection columns.
+- Range shape is currently classified as `none`, `single_range_after_equality_prefix`, or `multi_range_observed` so candidate reviewers can distinguish simple equality-prefix suggestions from range-heavy workload signals.
+- Candidate synthesis now builds composite key columns directly from dependencies: equality columns, join keys, one range column, group-by columns, and order-by columns. Projection columns not already in the key become covering `include` columns.
+- Each suggestion also carries a heuristic `cost` estimate with read benefit, write overhead, compaction overhead, write pressure, key/include width, and net score.
+- `advisor.retire_unused` supports dry-run and active retirement of advisor-built indexes when dependency evidence is stale or absent; recent dependency signals block retirement and actual retirements are recorded in `advisor.history`.
+- `advisor.evaluate` replays phased workload samples through a scratch advisor state and reports per-phase top suggestions, top-suggestion churn, and the observation where the phase-final recommendation became stable after a workload shift.
+- The E3 workload-shift question now has an executable harness; measured before/after latency deltas for advisor-applied indexes remain a separate follow-up.

@@ -784,6 +784,61 @@ pub struct AiAutoparamRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamLabelSchemaParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamLabelFieldSchema {
+    pub field: String,
+    pub required: bool,
+    pub meaning: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamDecisionSchema {
+    pub decision: String,
+    pub parameterized: bool,
+    pub cache_key_policy: String,
+    pub meaning: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamLabelSchemaResult {
+    pub format: String,
+    pub taxonomy_version: u64,
+    pub default_decision: String,
+    pub confidence_min: f64,
+    pub confidence_max: f64,
+    pub literal_fields: Vec<AiAutoparamLabelFieldSchema>,
+    pub label_fields: Vec<AiAutoparamLabelFieldSchema>,
+    pub decisions: Vec<AiAutoparamDecisionSchema>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifierSpec {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifiersParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifierInfo {
+    pub name: String,
+    pub kind: String,
+    pub default: bool,
+    pub supports_rules: bool,
+    pub supports_schema: bool,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamClassifiersResult {
+    pub format: String,
+    pub default_classifier: String,
+    pub classifiers: Vec<AiAutoparamClassifierInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiAutoparamClassifyParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sql: Option<String>,
@@ -795,6 +850,9 @@ pub struct AiAutoparamClassifyParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<AiAutoparamRules>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier: Option<AiAutoparamClassifierSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -821,6 +879,9 @@ pub struct AiAutoparamAnalyzeParams {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<AiAutoparamRules>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier: Option<AiAutoparamClassifierSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,6 +890,58 @@ pub struct AiAutoparamAnalyzeResult {
     pub fingerprint: String,
     pub literals: Vec<AiAutoparamLiteral>,
     pub labels: Vec<AiAutoparamLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamFeedbackParams {
+    pub sql: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<AiAutoparamRules>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classifier: Option<AiAutoparamClassifierSpec>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_event: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miss_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamFeedbackResult {
+    pub format: String,
+    pub fingerprint: String,
+    pub normalized_sql: String,
+    pub cache_event: String,
+    pub classifier: String,
+    pub cached_before: bool,
+    pub reclassified: bool,
+    pub cache_miss_count: u64,
+    pub reclassification_count: u64,
+    pub literals: Vec<AiAutoparamLiteral>,
+    pub labels: Vec<AiAutoparamLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamMetricsParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAutoparamMetricsResult {
+    pub format: String,
+    pub plan_cache_hits: u64,
+    pub plan_cache_misses: u64,
+    pub plan_cache_hit_rate: f64,
+    pub classifier_invocations: u64,
+    pub classifier_total_ns: u64,
+    pub classifier_mean_ns: f64,
+    pub feedback_cache_entries: u64,
+    pub feedback_cache_miss_count: u64,
+    pub feedback_reclassifications: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,6 +1267,35 @@ pub struct AdvisorIndexSuggestion {
     pub score: f64,
     pub count: u64,
     pub rows_scanned: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency: Option<AdvisorIndexDependencyCapture>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<AdvisorIndexCostEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexDependencyCapture {
+    pub predicate_columns: Vec<String>,
+    pub equality_columns: Vec<String>,
+    pub range_columns: Vec<String>,
+    pub range_shape: String,
+    pub order_by_columns: Vec<String>,
+    pub group_by_columns: Vec<String>,
+    pub join_key_columns: Vec<String>,
+    pub projection_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexCostEstimate {
+    pub read_benefit: f64,
+    pub write_overhead: f64,
+    pub compaction_overhead: f64,
+    pub net_score: f64,
+    pub write_pressure: u64,
+    pub key_columns: u64,
+    pub include_columns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1202,6 +1344,143 @@ pub struct AdvisorIndexDismissParams {
 pub struct AdvisorIndexDismissResult {
     pub dismissed: bool,
     pub action_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexRetireUnusedParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<BaseTableRef>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_idle_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexRetirementEntry {
+    pub suggestion_id: String,
+    pub table: BaseTableRef,
+    pub columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+
+    pub retired: bool,
+    pub reason: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_micros: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorIndexRetireUnusedResult {
+    pub dry_run: bool,
+    pub evaluated: u64,
+    pub retired: u64,
+    pub candidates: Vec<AdvisorIndexRetirementEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluateParams {
+    pub table: BaseTableRef,
+    pub phases: Vec<AdvisorEvaluatePhase>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_queries: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_rows: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluatePhase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    pub samples: Vec<AdvisorEvaluateSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluateSample {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equality_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub range_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_by_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join_key_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projection_columns: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_scanned: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeats: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluatePhaseResult {
+    pub label: String,
+    pub observations: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_before: Option<AdvisorIndexSuggestion>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_after: Option<AdvisorIndexSuggestion>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_top_stable_after_observation: Option<u64>,
+
+    pub top_changes: u64,
+    pub distinct_top_suggestions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisorEvaluateResult {
+    pub format: String,
+    pub table: BaseTableRef,
+    pub phase_count: u64,
+    pub total_observations: u64,
+    pub min_queries: u64,
+    pub min_rows: u64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_top: Option<AdvisorIndexSuggestion>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_top: Option<AdvisorIndexSuggestion>,
+
+    pub phases: Vec<AdvisorEvaluatePhaseResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2290,6 +2569,64 @@ pub struct WasmPlanInspectResult {
     pub projection_count: usize,
     pub supports_edge_package: bool,
     pub supports_simd: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanPerfReportParams {
+    pub artifact_b64: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<Lit>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup_iterations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanPerfLatencyStats {
+    pub min_ns: u64,
+    pub p50_ns: u64,
+    pub p95_ns: u64,
+    pub p99_ns: u64,
+    pub max_ns: u64,
+    pub mean_ns: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanPerfRunStats {
+    pub rows: usize,
+    pub columns: usize,
+    pub latency: WasmPlanPerfLatencyStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanSimdExploration {
+    pub candidate: bool,
+    pub enabled: bool,
+    pub strategy: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPlanPerfReportResult {
+    pub format: String,
+    pub execution: String,
+    pub iterations: u32,
+    pub warmup_iterations: u32,
+    pub operator_count: usize,
+    pub operators: Vec<String>,
+    pub outputs_match: bool,
+    pub simd: WasmPlanSimdExploration,
+    pub host: WasmPlanPerfRunStats,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<WasmPlanPerfRunStats>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_speedup_vs_host: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

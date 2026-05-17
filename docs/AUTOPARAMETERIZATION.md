@@ -96,5 +96,9 @@ Adaptation sketch:
 - Add feedback: frequent plan-cache misses or regressions trigger reclassification.
 
 Prototype RPC:
-- `ai.autoparam.classify` accepts a list of literal contexts + optional rules and returns labels (see `docs/SKEINQL.md`).
-- `ai.autoparam.analyze` accepts SQL text and returns normalized SQL, fingerprint, literals, and labels.
+- `ai.autoparam.classifiers` returns the supported classifier catalog. The first implementation is `offline_rules_v1`, a deterministic offline classifier using explicit rules, schema hints, and column-name heuristics.
+- `ai.autoparam.label_schema` returns the versioned label schema, confidence bounds, and cache-key policy for each decision.
+- `ai.autoparam.classify` accepts a list of literal contexts + optional rules/classifier selection and returns labels (see `docs/SKEINQL.md`).
+- `ai.autoparam.analyze` accepts SQL text and returns normalized SQL, fingerprint, literals, and labels, with the same optional classifier selection.
+- `ai.autoparam.feedback` records plan-cache-miss feedback, re-runs the selected classifier, and accumulates per-fingerprint miss/reclassification counts.
+- `ai.autoparam.metrics` reports plan-cache hit rate beside classifier invocation/latency counters and feedback totals.
